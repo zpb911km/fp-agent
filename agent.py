@@ -693,10 +693,33 @@ class Agent:
             print("对话历史较短，无需压缩")
             return
 
-        # 保留最后 2 条消息（最近的交互），其余拿去压缩
-        keep_last = 2
-        to_compact = history_msgs[:-keep_last]
-        recent = history_msgs[-keep_last:]
+        # 从后往前找安全的截断点：确保 tool 消息不孤立
+        recent_rev = []
+        unmatched = set()  # 等待匹配 assistant 的 tool_call_id
+        for m in reversed(history_msgs):
+            recent_rev.append(m)
+
+            if m["role"] == "tool":
+                tid = m.get("tool_call_id")
+                if tid:
+                    unmatched.add(tid)
+
+            if m["role"] == "assistant" and m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    tid = tc.get("id")
+                    if tid and tid in unmatched:
+                        unmatched.discard(tid)
+
+            # 所有 tool 都配对上，且至少保留了 2 条消息
+            if not unmatched and len(recent_rev) >= 2:
+                break
+
+        recent = list(reversed(recent_rev))
+        to_compact = history_msgs[:-len(recent)] if recent else history_msgs
+        # 如果到最后都没配对完（坏数据），就全保留
+        if unmatched:
+            recent = history_msgs
+            to_compact = []
 
         # 把要压缩的消息格式化成文本
         compact_text = ""
@@ -737,6 +760,50 @@ class Agent:
         self._save_context(context)
         print(f" ✅\n📦 已压缩 {len(to_compact)} 条消息为摘要，保留 {len(recent)} 条最近消息")
 
+    @staticmethod
+    def _repair_tool_ordering(messages: list[dict]) -> list[dict]:
+        """修复 tool 消息顺序：确保每个 tool 紧跟在它的 assistant 之后。
+        
+        处理旧文件损坏：user 等消息侵入 assistant 和 tool 之间 →
+        将 tool 挪回 assistant 后面，侵入消息推到所有 tool 之后。
+        """
+        result = []
+        buffer: list[dict] = []  # 暂存侵入消息
+        active_tool_ids: set[str] = set()
+        dropped = 0
+
+        for m in messages:
+            if m["role"] == "assistant" and m.get("tool_calls"):
+                # 上一个 assistant 的残留 → 丢弃
+                if buffer:
+                    result.extend(buffer)
+                    buffer = []
+                active_tool_ids = {tc["id"] for tc in m["tool_calls"] if tc.get("id")}
+                result.append(m)
+
+            elif m["role"] == "tool":
+                tid = m.get("tool_call_id")
+                if active_tool_ids and tid and tid in active_tool_ids:
+                    active_tool_ids.discard(tid)
+                    result.append(m)  # tool 紧跟在 assistant 后面
+                    # 所有 tool 收齐后才 flush buffer
+                    if not active_tool_ids and buffer:
+                        result.extend(buffer)
+                        buffer = []
+                else:
+                    dropped += 1
+
+            else:
+                buffer.append(m)
+
+        if buffer:
+            result.extend(buffer)
+
+        if dropped:
+            print(f"  ⚠️ 已丢弃 {dropped} 条无法配对的 tool 消息")
+
+        return result
+
     def _build_context(self) -> list[dict]:
         system = self._load_system_prompt()
         mem_context = self.memory.load_context()
@@ -753,17 +820,22 @@ class Agent:
         history_file = self._session_history_path()
         if os.path.exists(history_file):
             try:
+                file_msgs = []
                 with open(history_file, "r", encoding="utf-8") as f:
                     for line in f:
                         msg = json.loads(line)
-                        context.append(msg)
+                        file_msgs.append(msg)
+                # 新文件已是 chronological 顺序（旧→新），直接读取
+                # 旧文件是 newest-first，需要反转后修复 tool 顺序
+                # 反转（文件 newest-first → chronological），再修复 tool 顺序
+                context.extend(self._repair_tool_ordering(list(reversed(file_msgs))))
             except Exception:
                 pass
 
         return context
 
     def _save_context(self, context: list[dict]):
-        """将当前上下文持久化到当前会话文件，同时更新会话元信息。"""
+        """将当前上下文持久化到会话文件。文件头部是新消息，尾部是老消息。"""
         history_file = self._session_history_path()
         msg_count = 0
         try:
@@ -806,7 +878,7 @@ class Agent:
         return len(text) // 3
 
     def _trim_context(self, context: list[dict]):
-        """超出 token 限制时丢弃最旧的对话对，保留 system。"""
+        """超出 token 限制时丢弃最旧的完整交互轮次，保留 system。"""
         if len(context) <= 1:
             return context
         system = context[0]
@@ -817,12 +889,49 @@ class Agent:
             removed = rest.pop(0)
             total -= self._estimate_tokens(removed.get("content", ""))
             if rest and rest[0].get("role") == "assistant":
-                removed2 = rest.pop(0)
-                total -= self._estimate_tokens(removed2.get("content", ""))
+                assistant = rest.pop(0)
+                total -= self._estimate_tokens(assistant.get("content", ""))
+                # 如果 assistant 有 tool_calls，顺带删除对应的 tool 结果
+                if assistant.get("tool_calls"):
+                    tool_ids = {tc["id"] for tc in assistant["tool_calls"] if tc.get("id")}
+                    while rest and rest[0].get("role") == "tool" and rest[0].get("tool_call_id") in tool_ids:
+                        removed_tool = rest.pop(0)
+                        total -= self._estimate_tokens(removed_tool.get("content", ""))
+                        tool_ids.discard(removed_tool.get("tool_call_id"))
 
         return [system] + rest
 
     # ── 流式 LLM 调用 ─────────────────────────────
+
+    @staticmethod
+    def _render_markdown(text: str) -> str:
+        """将 Markdown 语法转换为 ANSI 终端颜色代码。
+        
+        支持：**粗体**、*斜体*、`行内代码`、代码块、列表标记。
+        不依赖第三方库，纯正则实现。
+        """
+        import re
+        
+        # 1. 代码块（```...```）→ 使用青色背景效果
+        text = re.sub(
+            r'```(\w*)\n(.*?)```',
+            lambda m: f'\033[36m```{m.group(1)}\n{m.group(2)}```\033[0m',
+            text, flags=re.DOTALL
+        )
+        
+        # 2. 行内代码（`code`）→ 青色
+        text = re.sub(r'`([^`]+)`', r'\033[36m`\1`\033[0m', text)
+        
+        # 3. **粗体** → 高亮加粗（先处理避免与 * 冲突）
+        text = re.sub(r'\*\*(.+?)\*\*', r'\033[1m\1\033[0m', text)
+        
+        # 4. *斜体* → 暗淡模式
+        text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'\033[3m\1\033[0m', text)
+        
+        # 5. 列表标记 - 和 `>` 引用 - 添加颜色
+        text = re.sub(r'^(- |> |>)(.*)', r'\033[33m\1\033[0m\2', text, flags=re.MULTILINE)
+        
+        return text
 
     def _stream_chat(self, context: list[dict], silent: bool = False) -> dict:
         """发起流式聊天请求，返回完整 assistant 消息（含 tool_calls 时）。
@@ -866,9 +975,9 @@ class Agent:
                 content += delta.content
                 if not silent:
                     if reasoning_shown:
-                        print("\033[0m] ", end="", flush=True)
+                        print("\033[0m\n", end="", flush=True)
                         reasoning_shown = False
-                    print(delta.content, end="", flush=True)
+                    print(self._render_markdown(delta.content), end="", flush=True)
 
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
@@ -885,7 +994,7 @@ class Agent:
 
         if not silent:
             if reasoning_shown:
-                print("\033[0m]")
+                print("\033[0m")
             else:
                 print()  # 流式输出结束换行
 
