@@ -49,10 +49,10 @@ def execute(params: dict) -> str:
     Returns:
         保存结果
     """
-    name = params.get("name")
+    name = params.get("name", "")
     mem_type = params.get("type")
     description = params.get("description")
-    content = params.get("content")
+    content = params.get("content", "")
     
     # 验证参数
     required = ["name", "type", "description", "content"]
