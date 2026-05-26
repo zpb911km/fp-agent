@@ -21,7 +21,6 @@ class Agent:
         self.client = openai.Client(api_key=config.OPENAI_API_KEY, base_url=config.OPENAI_API_BASE_URL)
         self.model = config.MODEL_NAME
         self.memory = Memory()
-        tools.init_tasks(config.TASKS_FILE)
         self._input_session: Any = None  # PromptSession or None/False
         
         # 技能系统初始化
@@ -192,7 +191,6 @@ class Agent:
         "/clear": "清空当前会话历史",
         "/resume": "管理/切换历史会话",
         "/session": "显示当前会话信息",
-        "/tasks": "显示待办任务列表",
         "/memory": "管理持久化记忆",
         "/model": "显示当前模型配置",
         "/fork": "基于当前上下文新建会话，关闭旧会话但不退出",
@@ -234,8 +232,6 @@ class Agent:
             self._cmd_resume(arg, context)
         elif cmd == "/session":
             self._cmd_session()
-        elif cmd == "/tasks":
-            print(tools.dispatch("task_list"))
         elif cmd == "/memory":
             self._cmd_memory(arg)
         elif cmd == "/model":
@@ -1155,31 +1151,6 @@ class Agent:
 
         return last_text, had_error
 
-    def _auto_drive(self, context: list[dict]):
-        """自动推进：有 pending 任务时持续驱动 agent 执行，直到全部完成或达到上限。"""
-        max_auto = 10
-        for _ in range(max_auto):
-            pending = tools.get_pending_tasks()
-            if not pending:
-                return
-
-            task = pending[0]
-            prompt = f"#{task['id']}: {task['subject']} 这个任务没有被标记为完成,请检查"
-            if task.get("description"):
-                prompt += f"\n\n任务详情:\n{task['description']}"
-
-            print(f"\n🔄 [自动] 任务 #{task['id']}: {task['subject']}")
-            _, had_error = self._process_turn(context, prompt)
-            tools.save_tasks()
-
-            if had_error:
-                print(f"⏹️  任务 #{task['id']} 执行异常，停止自动推进")
-                break
-
-        remaining = len(tools.get_pending_tasks())
-        if remaining:
-            print(f"⏸️  自动推进暂停，剩余 {remaining} 个待办任务需手动处理")
-
     # ── 退出处理 ──────────────────────────────
 
     # ── 会话关闭 ──────────────────────────────
@@ -1292,8 +1263,6 @@ class Agent:
                         continue
 
                     self._process_turn(context, user_input)
-                    # bug FIXME: 
-                    # self._auto_drive(context)
                     self._save_context(context)
                 except KeyboardInterrupt:
                     print("已中断!\n如需退出可使用 '/exit' 命令退出")
@@ -1304,14 +1273,11 @@ class Agent:
                 self._shutdown(context)
             except Exception:
                 pass
-            tools.save_tasks()
 
     def run_once(self, user_input: str) -> str:
         """单次查询模式：处理一条输入就退出，返回最终回复文本。"""
         context = self._build_context()
         result, _ = self._process_turn(context, user_input)
-        # bug FIXME:
-        # self._auto_drive(context)
         self._save_context(context)
         return result
     
