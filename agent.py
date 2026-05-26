@@ -1292,7 +1292,8 @@ class Agent:
                         continue
 
                     self._process_turn(context, user_input)
-                    self._auto_drive(context)
+                    # bug FIXME: 
+                    # self._auto_drive(context)
                     self._save_context(context)
                 except KeyboardInterrupt:
                     print("已中断!\n如需退出可使用 '/exit' 命令退出")
@@ -1309,7 +1310,8 @@ class Agent:
         """单次查询模式：处理一条输入就退出，返回最终回复文本。"""
         context = self._build_context()
         result, _ = self._process_turn(context, user_input)
-        self._auto_drive(context)
+        # bug FIXME:
+        # self._auto_drive(context)
         self._save_context(context)
         return result
     
