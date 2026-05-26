@@ -835,33 +835,35 @@ class Agent:
         return context
 
     def _save_context(self, context: list[dict]):
-        """将当前上下文持久化到会话文件。文件头部是新消息，尾部是老消息。"""
+        """持久化所有上下文到会话文件。文件头部是新消息，尾部是老消息。
+        从不截断。原子写入：先写.tmp再rename。
+        """
         history_file = self._session_history_path()
-        msg_count = 0
+
+        lines, msg_count = [], 0
+        for msg in reversed(context):
+            if msg["role"] == "system":
+                continue
+            msg_count += 1
+            save_msg = {"role": msg["role"], "content": msg.get("content", "")}
+            for k in ("tool_calls", "tool_call_id", "reasoning_content"):
+                if msg.get(k):
+                    save_msg[k] = msg[k]
+            lines.append(json.dumps(save_msg, ensure_ascii=False))
+
+        tmp = history_file + ".tmp"
         try:
-            with open(history_file, "w", encoding="utf-8") as f:
-                limit = config.MAX_CONTEXT_TOKENS * 3
-                current = 0
-                for msg in reversed(context):
-                    if msg["role"] == "system":
-                        continue
-                    msg_count += 1
-                    save_msg = {"role": msg["role"], "content": msg.get("content", "")}
-                    if msg.get("tool_calls"):
-                        save_msg["tool_calls"] = msg["tool_calls"]
-                    if msg.get("tool_call_id"):
-                        save_msg["tool_call_id"] = msg["tool_call_id"]
-                    if msg.get("reasoning_content"):
-                        save_msg["reasoning_content"] = msg["reasoning_content"]
-                    line = json.dumps(save_msg, ensure_ascii=False)
-                    current += len(line)
-                    if current > limit:
-                        break
+            with open(tmp, "w", encoding="utf-8") as f:
+                for line in lines:
                     f.write(line + "\n")
+            os.replace(tmp, history_file)
         except Exception:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
             return
 
-        # 更新会话元信息
         try:
             meta = self._load_meta()
             if self._session_id in meta.get("sessions", {}):
@@ -1093,9 +1095,25 @@ class Agent:
             try:
                 assistant_msg = self._stream_chat(context)
             except openai.APIError as e:
+                err_str = str(e)
                 print(f"API 错误: {e}")
-                had_error = True
-                break
+                if "'tool'" in err_str and "preceding" in err_str:
+                    print("  🔧 检测到 tool 顺序错误，自动修复上下文...")
+                    sys_msg = context[0]
+                    repaired = self._repair_tool_ordering(context[1:])
+                    context.clear()
+                    context.append(sys_msg)
+                    context.extend(repaired)
+                    try:
+                        assistant_msg = self._stream_chat(context)
+                        print("  ✅ 修复成功，继续对话")
+                    except Exception as e2:
+                        print(f"  ❌ 修复后仍失败: {e2}")
+                        had_error = True
+                        break
+                else:
+                    had_error = True
+                    break
             except Exception as e:
                 print(f"未知错误: {e}")
                 had_error = True
@@ -1128,7 +1146,6 @@ class Agent:
                         "tool_call_id": tc["id"],
                         "content": result,
                     })
-                context = self._trim_context(context)
                 continue
 
             break
@@ -1147,7 +1164,7 @@ class Agent:
                 return
 
             task = pending[0]
-            prompt = f"请继续执行待办任务 #{task['id']}: {task['subject']}"
+            prompt = f"#{task['id']}: {task['subject']} 这个任务没有被标记为完成,请检查"
             if task.get("description"):
                 prompt += f"\n\n任务详情:\n{task['description']}"
 
@@ -1295,6 +1312,44 @@ class Agent:
         self._auto_drive(context)
         self._save_context(context)
         return result
+    
+
+
+def print_logo():
+    print('''
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+:::::::::::::::::::::::::,,,,,,,,,,:::::::::::::::::::::::::
+::::::::::::::::::::::,,,,         ,,,::::::::::::::::::::::
+::::::::::::::::::::,,  ;)XYYYYYYUn+   ,::::::::::::::::::::
+::::::::::::::::::, ,[uzccvvvvvvvvvcczf> ,::::::::::::::::::
+:::::::::::,  ,:: ,?rcXXv]        l/XXzv\\i ,::,  ,::::::::::
+:::::::::,,~|}I ,_/vX1,               irXx1! ,<|{I,:::::::::
+:::::::::, |oLi  rMXI                   ]bp_  )hO< ,::::::::
+:::::::::, |oL>i1uL\\:                   ~cJt?;1aO< ,::::::::
+:::::::::, |oCi/oY!                      ,}dZ~{hO< ,::::::::
+:::::::::, |ow|XMYl                       [bktn*0< ,::::::::
+:::::::::, |oWdo8Yl                       [b&bh80< ,::::::::
+:::::::::, |o0?x#Yl  l<~<I        ,i~~>:  [bp}\\o0< ,::::::::
+:::::::::, |oC>t*Yl :ja#kt,       <J##Z?  [bw+{hO< ,::::::::
+:::::::::, |oL>t*Yl ;v%$&x:       +Z$$b}  [bw_1hO< ,::::::::
+:::::::::, \\oL>t*Yl ;u8$&r:       ~Z$$b}  [bw+1aO< ,::::::::
+:::::::::, (kC+r#Yl ;nM%*j:       ~Q88q]  [bq])bL< ,::::::::
+:::::::::,,!]jQhWXi ,>[}]i        :+}}-I ,}dMpY(+;,:::::::::
+:::::::::::, >{()nL\\:                   ~cJt)(?; ,::::::::::
+:::::::::::::,   r#Xl                   ]bp_   ,::::::::::::
+:::::::::::::::,,_/vX1,               >rXx1!,,::::::::::::::
+::::::::::::::::: ,?rcXYv]        l/XXzv\\! ,::::::::::::::::
+::::::::::::::::::, ,[ucccvcvvvvvcccccf> ,::::::::::::::::::
+::::::::::::::::::::,,  :)zYYYYYYYn+   ,::::::::::::::::::::
+::::::::::::::::::::::::,,         ,:,::::::::::::::::::::::
+:::::::::::::::::::::::::,,,,,,,,,,:::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::Five Pebbels::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+''')
 
 
 def main():
@@ -1324,4 +1379,5 @@ def main():
 
 
 if __name__ == "__main__":
+    print_logo()
     main()
