@@ -2,7 +2,7 @@ import os
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE_URL = os.getenv("OPENAI_API_BASE_URL")
-MODEL_NAME = os.getenv("MODEL_NAME", "qwen3.5-flash")
+MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-v4-flash")
 
 if not OPENAI_API_KEY or not OPENAI_API_BASE_URL:
     raise ValueError("OPENAI_API_KEY and OPENAI_API_BASE_URL must be set")

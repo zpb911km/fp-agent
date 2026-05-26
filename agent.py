@@ -70,6 +70,7 @@ class Agent:
 
         # 创建新会话
         new_sid = self._init_session()
+        meta = self._load_meta()  # 重新加载元数据，确保包含新会话
         new_info = meta["sessions"][new_sid]
         new_filename = new_info.get("file", f"{new_sid}.jsonl")
         new_path = os.path.join(config.SESSIONS_DIR, new_filename)
@@ -187,6 +188,7 @@ class Agent:
 
     COMMANDS = {
         "/help": "显示此帮助",
+        "/compact": "压缩对话历史为摘要，释放上下文空间",
         "/clear": "清空当前会话历史",
         "/resume": "管理/切换历史会话",
         "/session": "显示当前会话信息",
@@ -219,6 +221,8 @@ class Agent:
 
         if cmd in ("/help", "/?"):
             self._show_help()
+        elif cmd == "/compact":
+            self._cmd_compact(context)
         elif cmd == "/clear":
             context.clear()
             context.append({"role": "system", "content": self._load_system_prompt()})
@@ -603,6 +607,8 @@ class Agent:
                     save_msg["tool_calls"] = m["tool_calls"]
                 if m.get("tool_call_id"):
                     save_msg["tool_call_id"] = m["tool_call_id"]
+                if m.get("reasoning_content"):
+                    save_msg["reasoning_content"] = m["reasoning_content"]
                 f.write(json.dumps(save_msg, ensure_ascii=False) + "\n")
         
         # 5. 重建 context
@@ -677,11 +683,70 @@ class Agent:
         
         print(f"⏪ 已回退到第 {choice} 条消息位置（删除了 {len(history_msgs) - keep_in_context} 条后续消息）")
 
+    # ── 上下文压缩 ─────────────────────────────
+
+    def _cmd_compact(self, context: list[dict]):
+        """压缩对话历史：用 LLM 总结早期对话，只保留最近几轮 + 摘要"""
+        history_msgs = [m for m in context if m["role"] != "system"]
+
+        if len(history_msgs) <= 4:
+            print("对话历史较短，无需压缩")
+            return
+
+        # 保留最后 2 条消息（最近的交互），其余拿去压缩
+        keep_last = 2
+        to_compact = history_msgs[:-keep_last]
+        recent = history_msgs[-keep_last:]
+
+        # 把要压缩的消息格式化成文本
+        compact_text = ""
+        for m in to_compact:
+            role = "用户" if m["role"] == "user" else "AI" if m["role"] == "assistant" else f"工具({m.get('tool_call_id','?')})"
+            content = m.get("content", "")[:300]
+            compact_text += f"[{role}]: {content}\n\n"
+
+        # 请求 LLM 压缩
+        compact_prompt = (
+            "请将以下对话历史压缩为一段连贯的摘要，保留关键信息（用户需求、已做的操作、重要结论）。"
+            "用中文，200字以内。只输出摘要，不要多余文字。\n\n"
+            f"{compact_text}"
+        )
+
+        print("🔄 正在压缩对话历史...", end="", flush=True)
+        try:
+            compact_context = [
+                {"role": "system", "content": "你是一个对话压缩助手，擅长提炼关键信息。"},
+                {"role": "user", "content": compact_prompt}
+            ]
+            assistant_msg = self._stream_chat(compact_context, silent=True)
+            summary = assistant_msg.get("content", "").strip()
+            if not summary:
+                raise ValueError("LLM 返回空")
+        except Exception as e:
+            print(f" 压缩失败: {e}")
+            return
+
+        # 重建 context：system + 压缩摘要 + 最近消息
+        system = context[0]
+        del context[:]
+        context.append(system)
+        context.append({"role": "system", "content": f"以下是压缩后的对话历史摘要（省略了 {len(to_compact)} 条早期消息）：\n{summary}"})
+        context.extend(recent)
+
+        # 写回文件
+        self._save_context(context)
+        print(f" ✅\n📦 已压缩 {len(to_compact)} 条消息为摘要，保留 {len(recent)} 条最近消息")
+
     def _build_context(self) -> list[dict]:
         system = self._load_system_prompt()
         mem_context = self.memory.load_context()
         if mem_context:
             system += f"\n\n## 跨会话记忆\n{mem_context}"
+
+        # 加入当前时间,路径等状态信息
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        current_path = os.getcwd()
+        system += f"\n\n## 当前时间,路径等状态信息\n当前时间: {current_time}\n当前路径: {current_path}\n当前用户: {os.getlogin()}"
         context = [{"role": "system", "content": system}]
 
         # 从当前会话的历史文件恢复
@@ -714,6 +779,8 @@ class Agent:
                         save_msg["tool_calls"] = msg["tool_calls"]
                     if msg.get("tool_call_id"):
                         save_msg["tool_call_id"] = msg["tool_call_id"]
+                    if msg.get("reasoning_content"):
+                        save_msg["reasoning_content"] = msg["reasoning_content"]
                     line = json.dumps(save_msg, ensure_ascii=False)
                     current += len(line)
                     if current > limit:
@@ -757,8 +824,13 @@ class Agent:
 
     # ── 流式 LLM 调用 ─────────────────────────────
 
-    def _stream_chat(self, context: list[dict]) -> dict:
-        """发起流式聊天请求，返回完整 assistant 消息（含 tool_calls 时）。"""
+    def _stream_chat(self, context: list[dict], silent: bool = False) -> dict:
+        """发起流式聊天请求，返回完整 assistant 消息（含 tool_calls 时）。
+        
+        Args:
+            context: 对话上下文
+            silent: 为 True 时不打印输出（用于背景操作如压缩）
+        """
         response = self.client.chat.completions.create(  # type: ignore[arg-type]
             model=self.model,
             messages=context,  # type: ignore[arg-type]
@@ -770,17 +842,33 @@ class Agent:
         )
 
         content = ""
+        reasoning_content = ""
         tool_calls: dict[int, dict] = {}
-        print("AI -> ", end="", flush=True)
+        reasoning_shown = False
+        if not silent:
+            print("AI -> ", end="", flush=True)
 
         for chunk in response:
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
 
+            # 捕获 reasoning_content（思考模式），API 后续请求要求回传
+            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                reasoning_content += delta.reasoning_content
+                if not silent:
+                    if not reasoning_shown:
+                        print("\033[2m[思考]", end="", flush=True)
+                        reasoning_shown = True
+                    print(delta.reasoning_content, end="", flush=True)
+
             if delta.content:
                 content += delta.content
-                print(delta.content, end="", flush=True)
+                if not silent:
+                    if reasoning_shown:
+                        print("\033[0m] ", end="", flush=True)
+                        reasoning_shown = False
+                    print(delta.content, end="", flush=True)
 
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
@@ -795,9 +883,15 @@ class Agent:
                         if tc_delta.function.arguments:
                             tool_calls[idx]["function"]["arguments"] += tc_delta.function.arguments
 
-        print()  # 流式输出结束换行
+        if not silent:
+            if reasoning_shown:
+                print("\033[0m]")
+            else:
+                print()  # 流式输出结束换行
 
         msg: dict = {"role": "assistant", "content": content}
+        if reasoning_content:
+            msg["reasoning_content"] = reasoning_content
         if tool_calls:
             msg["tool_calls"] = [v for _, v in sorted(tool_calls.items())]
         return msg
