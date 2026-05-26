@@ -1,0 +1,10 @@
+CLAUDE.md
+legacy/
+__pycache__/**
+data/**
+*.mmd
+*.pyc
+legacy.zip
+tools_backup_for_ref.py
+skills/*.md
+test_fp.sh
