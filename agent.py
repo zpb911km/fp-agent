@@ -278,6 +278,22 @@ class Agent:
         meta = self._load_meta()
         sessions = meta.get("sessions", {})
 
+        # 合法性检查：删除 meta 中无对应文件的孤立记录
+        cleaned_count = 0
+        for sid in list(sessions.keys()):
+            info = sessions[sid]
+            filename = info.get("file", f"{sid}.jsonl")
+            filepath = os.path.join(config.SESSIONS_DIR, filename)
+            if not os.path.exists(filepath):
+                display.info(f"🧹 清理孤立记录: {filename} (文件不存在)")
+                del sessions[sid]
+                cleaned_count += 1
+        if cleaned_count > 0:
+            if meta.get("current") not in sessions:
+                meta["current"] = max(sessions.keys()) if sessions else None
+            self._save_meta(meta)
+            display.info(f"✅ 已清理 {cleaned_count} 条孤立记录并保存 meta")
+
         if not arg or arg == "list":
             if not sessions:
                 display.info("暂无历史会话")

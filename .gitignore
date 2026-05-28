@@ -1,4 +1,5 @@
 CLAUDE.md
+config.json
 legacy/
 __pycache__/**
 data/**

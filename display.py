@@ -24,7 +24,7 @@ _GREEN = "\033[32m"
 _YELLOW = "\033[33m"
 _CYAN = "\033[36m"
 _WHITE = "\033[37m"
-_BRIGHT_BLACK = "\033[90m"   # 灰色
+_BRIGHT_BLACK = "\033[35m"
 _BRIGHT_RED = "\033[91m"
 
 
