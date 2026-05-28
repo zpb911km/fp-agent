@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import openai
+import llm_client as llm
 
 import config
 import tools
@@ -17,8 +17,11 @@ from skills_loader import skill_loader
 
 
 class Agent:
-    def __init__(self, resume_mode: bool = False):
-        self.client = openai.Client(api_key=config.OPENAI_API_KEY, base_url=config.OPENAI_API_BASE_URL)
+    def __init__(self):
+        if not config.OPENAI_API_KEY or not config.OPENAI_API_BASE_URL:
+            print("❌ 请设置 OPENAI_API_KEY 和 OPENAI_API_BASE_URL")
+            sys.exit(1)
+        self.client = llm.Client(api_key=config.OPENAI_API_KEY, base_url=config.OPENAI_API_BASE_URL)
         self.model = config.MODEL_NAME
         self.memory = Memory()
         self._input_session: Any = None  # PromptSession or None/False
@@ -30,67 +33,62 @@ class Agent:
 
         # 会话管理
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
-        if resume_mode:
-            # 恢复模式：接着最近结束的 session 继续开启对话
-            self._session_id = self._init_resume_session()
-            print(f"🔄 已接着最近会话继续：{self._session_id}")
-        else:
-            self._session_id = self._init_session()
-            print(f"📂 新会话：{self._session_id}")
-            print(f"💡 输入 /help 查看命令，/resume 可回到历史会话")
+        self._session_id = self._init_session()
+        print(f"📂 新会话：{self._session_id}")
+        print(f"💡 输入 /help 查看命令，/resume 可回到历史会话")
     # ── 会话管理 ──────────────────────────────
 
-    def _init_resume_session(self) -> str:
-        """接着最近结束的 session 继续开启对话。"""
+    def _find_most_recent_session(self) -> str | None:
+        """找到最近的有消息的会话 ID，如果没有则返回 None。"""
         meta = self._load_meta()
         sessions = meta.get("sessions", {})
-
         if not sessions:
-            print("⚠️ 没有找到历史会话，将创建新会话")
-            return self._init_session()
+            return None
 
         # 按创建时间降序排列，找到第一个有消息的会话
-        sorted_sids = sorted(sessions.keys(), reverse=True)
-        recent_sid = None
-        for sid in sorted_sids:
+        for sid in sorted(sessions.keys(), reverse=True):
             info = sessions[sid]
             if info.get("message_count", 0) > 0:
-                recent_sid = sid
-                break
-
-        if recent_sid is None:
-            print("⚠️ 没有找到有效会话，将创建新会话")
-            return self._init_session()
-
-        # 读取最近会话的历史记录
-        recent_info = sessions[recent_sid]
-        recent_filename = recent_info.get("file", f"{recent_sid}.jsonl")
-        recent_path = os.path.join(config.SESSIONS_DIR, recent_filename)
-
-        # 创建新会话
-        new_sid = self._init_session()
-        meta = self._load_meta()  # 重新加载元数据，确保包含新会话
-        new_info = meta["sessions"][new_sid]
-        new_filename = new_info.get("file", f"{new_sid}.jsonl")
-        new_path = os.path.join(config.SESSIONS_DIR, new_filename)
-
-        # 复制历史记录到新会话
-        if os.path.exists(recent_path):
-            import shutil
-            shutil.copy2(recent_path, new_path)
-
-        # 更新元数据
-        meta["current"] = new_sid
-        self._save_meta(meta)
-
-        return new_sid
+                return sid
+        return None
 
     def _session_history_path(self) -> str:
-        """返回当前会话的历史文件路径（优先使用 meta 中记录的实际文件名）。"""
+        """返回当前会话的历史文件路径（优先使用 meta 中记录的实际文件名）。
+        如果 meta 记录的文件不存在，自动搜索磁盘上的真实文件。
+        作为最后手段，返回默认路径（met a可能后续被修复）。
+        """
+        path = self._resolve_session_path()
+        if path:
+            return path
+        # 最后手段：返回默认路径（即使不存在）
+        return os.path.join(config.SESSIONS_DIR, f"{self._session_id}.jsonl")
+
+    def _resolve_session_path(self, sid: str | None = None) -> str | None:
+        """解析会话文件路径。优先使用 meta 中的记录，如果文件不存在则搜索磁盘。
+        
+        Args:
+            sid: 会话 ID，默认使用当前会话
+        Returns:
+            文件路径，如果找不到则返回 None
+        """
+        sid = sid or self._session_id
         meta = self._load_meta()
-        info = meta.get("sessions", {}).get(self._session_id, {})
-        filename = info.get("file", f"{self._session_id}.jsonl")
-        return os.path.join(config.SESSIONS_DIR, filename)
+        info = meta.get("sessions", {}).get(sid, {})
+        filename = info.get("file", f"{sid}.jsonl")
+        path = os.path.join(config.SESSIONS_DIR, filename)
+        
+        if os.path.exists(path):
+            return path
+        
+        # Fallback: 搜索磁盘上以 session_id 开头的 .jsonl 文件
+        if os.path.isdir(config.SESSIONS_DIR):
+            for f in os.listdir(config.SESSIONS_DIR):
+                if f == "_meta.json":
+                    continue
+                if f.startswith(sid) and f.endswith(".jsonl"):
+                    return os.path.join(config.SESSIONS_DIR, f)
+        
+        return None
 
     @staticmethod
     def _meta_path() -> str:
@@ -594,10 +592,10 @@ class Agent:
         new_sid = self._init_session()
         self._session_id = new_sid
         
-        # 4. 将旧消息写入新会话文件
+        # 4. 将旧消息写入新会话文件（reversed 以匹配 _save_context 的 newest-first 格式）
         new_path = self._session_history_path()
         with open(new_path, "w", encoding="utf-8") as f:
-            for m in old_messages:
+            for m in reversed(old_messages):
                 save_msg = {"role": m["role"], "content": m.get("content", "")}
                 if m.get("tool_calls"):
                     save_msg["tool_calls"] = m["tool_calls"]
@@ -1090,7 +1088,7 @@ class Agent:
 
             try:
                 assistant_msg = self._stream_chat(context)
-            except openai.APIError as e:
+            except llm.APIError as e:
                 err_str = str(e)
                 print(f"API 错误: {e}")
                 if "'tool'" in err_str and "preceding" in err_str:
@@ -1327,12 +1325,19 @@ def main():
                         help="继续最近结束的会话")
     args = parser.parse_args()
 
+    agent = Agent()
+    
     if args.resume:
-        # 恢复模式：不创建新会话，直接切换到最近的会话
-        agent = Agent(resume_mode=True)
-        agent._cmd_resume("", [])
-    else:
-        agent = Agent()
+        # 恢复模式：切换到最近的有消息的会话（不创建新的中间会话）
+        recent_sid = agent._find_most_recent_session()
+        if recent_sid:
+            agent._session_id = recent_sid
+            meta = agent._load_meta()
+            meta["current"] = recent_sid
+            agent._save_meta(meta)
+            print(f"🔄 已切换到最近会话：{recent_sid}")
+        else:
+            print("⚠️ 没有找到历史会话，使用新会话")
     
     if args.query:
         agent.run_once(args.query)
