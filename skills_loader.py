@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import config
+import display
 
 
 class SkillLoader:
@@ -20,7 +21,7 @@ class SkillLoader:
         self.skills.clear()
         
         if not self.skills_dir.exists():
-            print(f"⚠️ 技能目录不存在：{self.skills_dir}")
+            display.debug(f"⚠️ 技能目录不存在：{self.skills_dir}")
             return []
         
         for md_file in sorted(self.skills_dir.glob("*.md")):
@@ -28,9 +29,9 @@ class SkillLoader:
                 skill = self._load_single(md_file)
                 if skill:
                     self.skills[skill['name']] = skill
-                    print(f"✅ 已加载技能：{skill['title']}")
+                    display.debug(f"✅ 已加载技能：{skill['title']}")
             except Exception as e:
-                print(f"❌ 加载技能 {md_file.name} 失败：{e}")
+                display.debug(f"❌ 加载技能 {md_file.name} 失败：{e}")
         
         return list(self.skills.values())
     
@@ -91,7 +92,7 @@ class SkillLoader:
     
     def reload(self) -> List[dict]:
         """热重载所有技能"""
-        print("🔄 正在重新加载技能...")
+        display.debug("🔄 正在重新加载技能...")
         return self.load_all()
 
 

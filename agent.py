@@ -12,6 +12,7 @@ import llm_client as llm
 
 import config
 import tools
+import display
 from memory import Memory
 from skills_loader import skill_loader
 
@@ -19,7 +20,7 @@ from skills_loader import skill_loader
 class Agent:
     def __init__(self):
         if not config.OPENAI_API_KEY or not config.OPENAI_API_BASE_URL:
-            print("❌ 请设置 OPENAI_API_KEY 和 OPENAI_API_BASE_URL")
+            display.error("❌ 请设置 OPENAI_API_KEY 和 OPENAI_API_BASE_URL")
             sys.exit(1)
         self.client = llm.Client(api_key=config.OPENAI_API_KEY, base_url=config.OPENAI_API_BASE_URL)
         self.model = config.MODEL_NAME
@@ -34,8 +35,8 @@ class Agent:
         # 会话管理
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
         self._session_id = self._init_session()
-        print(f"📂 新会话：{self._session_id}")
-        print(f"💡 输入 /help 查看命令，/resume 可回到历史会话")
+        display.info(f"📂 新会话：{self._session_id}")
+        display.hint(f"💡 输入 /help 查看命令，/resume 可回到历史会话")
     # ── 会话管理 ──────────────────────────────
 
     def _find_most_recent_session(self) -> str | None:
@@ -135,8 +136,8 @@ class Agent:
                 sid = m.group(1)
 
         if sid not in sessions:
-            print(f"未找到会话: {sid}")
-            print(f"使用 /resume list 查看可用会话")
+            display.info(f"未找到会话: {sid}")
+            display.hint(f"使用 /resume list 查看可用会话")
             return False
         self._session_id = sid
         meta["current"] = sid
@@ -144,7 +145,7 @@ class Agent:
         context.clear()
         context.extend(self._build_context())
         info = meta["sessions"][sid]
-        print(f"📂 已切换到会话: {sid}  ({info.get('message_count', 0)}条消息)")
+        display.info(f"📂 已切换到会话: {sid}  ({info.get('message_count', 0)}条消息)")
         return True
 
     # ── 输入处理 ──────────────────────────────
@@ -202,9 +203,9 @@ class Agent:
     }
 
     def _show_help(self):
-        print("可用命令:")
+        display.info("可用命令:")
         for cmd, desc in sorted(self.COMMANDS.items()):
-            print(f"  {cmd:12s}  {desc}")
+            display.item(f"  {cmd:12s}  {desc}")
 
     def _handle_command(self, cmd_line: str, context: list[dict]) -> bool:
         """处理斜杠命令。返回 True 表示已处理，调用方跳过 LLM。"""
@@ -225,7 +226,7 @@ class Agent:
             hist = self._session_history_path()
             if os.path.exists(hist):
                 os.remove(hist)
-            print("🧹 当前会话历史已清空")
+            display.info("🧹 当前会话历史已清空")
         elif cmd == "/resume":
             self._cmd_resume(arg, context)
         elif cmd == "/session":
@@ -233,10 +234,10 @@ class Agent:
         elif cmd == "/memory":
             self._cmd_memory(arg)
         elif cmd == "/model":
-            print(f"模型:   {self.model}")
-            print(f"温度:   {config.TEMPERATURE}")
-            print(f"最大 Token: {config.MAX_TOKENS}")
-            print(f"会话目录: {config.SESSIONS_DIR}")
+            display.info(f"模型:   {self.model}")
+            display.info(f"温度:   {config.TEMPERATURE}")
+            display.info(f"最大 Token: {config.MAX_TOKENS}")
+            display.info(f"会话目录: {config.SESSIONS_DIR}")
         elif cmd == "/fork":
             self._cmd_fork(context)
         elif cmd == "/back":
@@ -244,15 +245,15 @@ class Agent:
         elif cmd == "/reset":
             context.clear()
             context.extend(self._build_context())
-            print("🔄 上下文已重置")
+            display.info("🔄 上下文已重置")
         elif cmd == "/skills":
-            print(self.list_skills())
+            display.info(self.list_skills())
         elif cmd == "/reload_skills":
             if self.reload_skills():
                 # 重新构建上下文以应用新技能
                 context.clear()
                 context.extend(self._build_context())
-                print("✅ 系统提示词已更新，新技能立即可用！")
+                display.hint("✅ 系统提示词已更新，新技能立即可用！")
         elif cmd == "/add_skill":
             self._cmd_add_skill(arg, context)
         elif cmd == "/remove_skill":
@@ -260,7 +261,7 @@ class Agent:
         elif cmd in ("/exit", "/quit"):
             raise SystemExit()
         else:
-            print(f"❓ 未知命令: {cmd} ")
+            display.info(f"❓ 未知命令: {cmd} ")
             self._show_help()
         return True
 
@@ -268,10 +269,10 @@ class Agent:
         meta = self._load_meta()
         info = meta.get("sessions", {}).get(self._session_id, {})
         filename = info.get("file", f"{self._session_id}.jsonl")
-        print(f"📂 当前会话: {self._session_id}")
-        print(f"   文件: {filename}")
-        print(f"   创建: {info.get('created', '?')}")
-        print(f"   消息: {info.get('message_count', 0)} 条")
+        display.info(f"📂 当前会话: {self._session_id}")
+        display.item(f"   文件: {filename}")
+        display.item(f"   创建: {info.get('created', '?')}")
+        display.item(f"   消息: {info.get('message_count', 0)} 条")
 
     def _cmd_resume(self, arg: str, context: list[dict]):
         meta = self._load_meta()
@@ -279,7 +280,7 @@ class Agent:
 
         if not arg or arg == "list":
             if not sessions:
-                print("暂无历史会话")
+                display.info("暂无历史会话")
                 return
             current = meta.get("current", "")
             
@@ -298,11 +299,11 @@ class Agent:
                     # 如果没有非空会话，使用最新的会话
                     recent_sid = sorted_sids[0]
                 
-                print(f"🔄 继续最近会话：{recent_sid}")
+                display.info(f"🔄 继续最近会话：{recent_sid}")
                 self._switch_session(recent_sid, context)
                 return
             
-            print("📋 历史会话:")
+            display.info("📋 历史会话:")
             for sid in sorted(sessions, reverse=True):
                 info = sessions[sid]
                 marker = " ← 当前" if sid == current else ""
@@ -311,7 +312,7 @@ class Agent:
                 filename = info.get("file", f"{sid}.jsonl")
                 summary = info.get("summary", "")
                 tag = f" — {summary}" if summary else ""
-                print(f"  {filename}{marker}{tag}  ({cnt}条, {created})")
+                display.item(f"  {filename}{marker}{tag}  ({cnt}条, {created})")
             return
 
         if arg.startswith("delete "):
@@ -321,7 +322,7 @@ class Agent:
                 if m and m.group(1) in sessions:
                     sid = m.group(1)
             if sid not in sessions:
-                print(f"未找到会话: {sid}")
+                display.info(f"未找到会话: {sid}")
                 return
             info = sessions[sid]
             filename = info.get("file", f"{sid}.jsonl")
@@ -333,7 +334,7 @@ class Agent:
             hist = os.path.join(config.SESSIONS_DIR, filename)
             if os.path.exists(hist):
                 os.remove(hist)
-            print(f"🗑️  已删除会话: {filename}")
+            display.info(f"🗑️  已删除会话: {filename}")
             return
 
         # 切换到指定会话
@@ -343,38 +344,38 @@ class Agent:
         if not arg or arg == "list":
             mems = self.memory.list_memories()
             if not mems:
-                print("暂无记忆")
+                display.info("暂无记忆")
                 return
-            print("📋 记忆列表:")
+            display.info("📋 记忆列表:")
             for m in mems:
-                print(f"  [{m['type']}] {m['name']} — {m['description']}")
+                display.item(f"  [{m['type']}] {m['name']} — {m['description']}")
         elif arg.startswith("save "):
             content = arg[5:].strip()
             if not content:
-                print("用法: /memory save <记忆内容>")
+                display.hint("用法: /memory save <记忆内容>")
                 return
             name = f"manual_{len(self.memory.list_memories()) + 1}"
             self.memory.save(name, "reference", f"手动保存 ({config.MODEL_NAME})", content)
-            print(f"✅ 记忆已保存: {name}")
+            display.info(f"✅ 记忆已保存: {name}")
         elif arg.startswith("search "):
             kw = arg[7:].strip()
             results = self.memory.search(kw)
             if not results:
-                print(f"未找到匹配「{kw}」的记忆")
+                display.info(f"未找到匹配「{kw}」的记忆")
                 return
-            print(f"🔍 匹配「{kw}」的记忆:")
+            display.info(f"🔍 匹配「{kw}」的记忆:")
             for r in results:
-                print(f"  [{r['type']}] {r['name']} — {r['description']}")
+                display.item(f"  [{r['type']}] {r['name']} — {r['description']}")
         elif arg.startswith("delete "):
             name = arg[7:].strip()
             path = os.path.join(config.MEMORY_DIR, f"{name}.md")
             if os.path.exists(path):
                 os.remove(path)
-                print(f"🗑️  已删除记忆: {name}")
+                display.info(f"🗑️  已删除记忆: {name}")
             else:
-                print(f"未找到记忆: {name}")
+                display.info(f"未找到记忆: {name}")
         else:
-            print("子命令: list（默认）, save <内容>, search <关键字>, delete <名称>")
+            display.hint("子命令: list（默认）, save <内容>, search <关键字>, delete <名称>")
 
     # ── 上下文管理 ──────────────────────────────
 
@@ -410,7 +411,7 @@ class Agent:
             bool: 是否成功重载
         """
         try:
-            print("🔄 正在重新加载技能...")
+            display.info("🔄 正在重新加载技能...")
             skill_loader.reload()
             
             # 更新系统提示词
@@ -418,21 +419,21 @@ class Agent:
             
             # 显示加载结果
             loaded_count = len(skill_loader.skills)
-            print(f"✅ 技能重载完成！当前可用技能数：{loaded_count}")
+            display.info(f"✅ 技能重载完成！当前可用技能数：{loaded_count}")
             
             # 列出所有技能
             if loaded_count > 0:
-                print("\n📚 当前可用技能:")
+                display.info("\n📚 当前可用技能:")
                 for name, skill in sorted(skill_loader.skills.items()):
                     title = skill.get('title', 'Unknown')
                     version = skill.get('version', '1.0')
                     category = skill.get('category', 'general')
-                    print(f"   • {title} ({name}) - v{version} [{category}]")
+                    display.item(f"   • {title} ({name}) - v{version} [{category}]")
             
             return True
             
         except Exception as e:
-            print(f"❌ 技能重载失败：{e}")
+            display.error(f"❌ 技能重载失败：{e}")
             import traceback
             traceback.print_exc()
             return False
@@ -469,20 +470,20 @@ class Agent:
             context: 当前对话上下文
         """
         if not filename:
-            print("❌ 用法：/add_skill <filename>")
-            print("   示例：/add_skill my_new_skill.md")
-            print("\n技能文件格式要求:")
-            print("  1. 文件必须位于 skills/ 目录")
-            print("  2. 使用 YAML frontmatter 格式:")
-            print("     ---")
-            print("     name: skill_name")
-            print("     title: 技能标题")
-            print("     description: 技能描述")
-            print("     category: 分类 (可选)")
-            print("     version: 版本号 (可选)")
-            print("     priority: 优先级 1-10 (可选)")
-            print("     ---")
-            print("     # 技能正文内容")
+            display.info("❌ 用法：/add_skill <filename>")
+            display.item("   示例：/add_skill my_new_skill.md")
+            display.info("\n技能文件格式要求:")
+            display.item("  1. 文件必须位于 skills/ 目录")
+            display.item("  2. 使用 YAML frontmatter 格式:")
+            display.item("     ---")
+            display.item("     name: skill_name")
+            display.item("     title: 技能标题")
+            display.item("     description: 技能描述")
+            display.item("     category: 分类 (可选)")
+            display.item("     version: 版本号 (可选)")
+            display.item("     priority: 优先级 1-10 (可选)")
+            display.item("     ---")
+            display.item("     # 技能正文内容")
             return
         
         skills_dir = Path("skills")
@@ -492,13 +493,13 @@ class Agent:
         
         # 验证文件扩展名
         if not filename.endswith('.md'):
-            print(f"❌ 错误：技能文件必须是 .md 格式")
+            display.error(f"❌ 错误：技能文件必须是 .md 格式")
             return
         
         # 检查文件是否存在
         if not skill_file.exists():
-            print(f"❌ 错误：文件不存在 {skill_file}")
-            print(f"\n💡 提示：你可以先创建文件，然后再次运行 /add_skill")
+            display.error(f"❌ 错误：文件不存在 {skill_file}")
+            display.hint(f"💡 提示：你可以先创建文件，然后再次运行 /add_skill")
             return
         
         try:
@@ -507,13 +508,13 @@ class Agent:
             
             # 检查加载是否成功
             if skill is None:
-                print(f"❌ 错误：无法加载技能文件 {skill_file}")
+                display.error(f"❌ 错误：无法加载技能文件 {skill_file}")
                 return
             
             # 检查是否已存在同名技能
             if skill['name'] in skill_loader.skills:
-                print(f"⚠️ 警告：技能 '{skill['name']}' 已存在！")
-                print(f"   如需更新，请先删除旧版本或使用 /reload_skills")
+                display.warning(f"⚠️ 警告：技能 '{skill['name']}' 已存在！")
+                display.hint(f"   如需更新，请先删除旧版本或使用 /reload_skills")
                 return
             
             # 将技能添加到内存中
@@ -524,16 +525,16 @@ class Agent:
             context.clear()
             context.extend(self._build_context())
             
-            print(f"✅ 技能添加成功!")
-            print(f"   名称：{skill['title']} ({skill['name']})")
-            print(f"   版本：v{skill.get('version', '1.0')}")
-            print(f"   类别：{skill.get('category', 'general')}")
-            print(f"   优先级：{skill.get('priority', 5)}")
-            print(f"   文件：{skill_file}")
-            print(f"\n🔄 系统提示词已更新，新技能立即可用！")
+            display.info(f"✅ 技能添加成功!")
+            display.item(f"   名称：{skill['title']} ({skill['name']})")
+            display.item(f"   版本：v{skill.get('version', '1.0')}")
+            display.item(f"   类别：{skill.get('category', 'general')}")
+            display.item(f"   优先级：{skill.get('priority', 5)}")
+            display.item(f"   文件：{skill_file}")
+            display.hint(f"\n🔄 系统提示词已更新，新技能立即可用！")
             
         except Exception as e:
-            print(f"❌ 添加技能失败：{e}")
+            display.error(f"❌ 添加技能失败：{e}")
             import traceback
             traceback.print_exc()
 
@@ -545,25 +546,25 @@ class Agent:
             context: 当前对话上下文
         """
         if not skill_name:
-            print("❌ 用法：/remove_skill <name>")
-            print("   示例：/remove_skill file_manager")
-            print("\n当前可用技能列表:")
+            display.info("❌ 用法：/remove_skill <name>")
+            display.item("   示例：/remove_skill file_manager")
+            display.info("\n当前可用技能列表:")
             if skill_loader.skills:
                 for name in sorted(skill_loader.skills.keys()):
-                    print(f"   • {name}")
+                    display.item(f"   • {name}")
             else:
-                print("   暂无可用技能")
+                display.info("   暂无可用技能")
             return
         
         # 检查技能是否存在
         if skill_name not in skill_loader.skills:
-            print(f"❌ 错误：技能 '{skill_name}' 不存在")
-            print("\n当前可用技能列表:")
+            display.error(f"❌ 错误：技能 '{skill_name}' 不存在")
+            display.info("\n当前可用技能列表:")
             if skill_loader.skills:
                 for name in sorted(skill_loader.skills.keys()):
-                    print(f"   • {name}")
+                    display.item(f"   • {name}")
             else:
-                print("   暂无可用技能")
+                display.info("   暂无可用技能")
             return
         
         # 从内存中移除技能
@@ -574,8 +575,8 @@ class Agent:
         context.clear()
         context.extend(self._build_context())
         
-        print(f"✅ 技能已删除：{skill_name}")
-        print(f"🔄 系统提示词已更新，技能已移除！")
+        display.info(f"✅ 技能已删除：{skill_name}")
+        display.hint(f"🔄 系统提示词已更新，技能已移除！")
 
     # ── 会话 fork ─────────────────────────────
 
@@ -609,7 +610,7 @@ class Agent:
         context.clear()
         context.extend(self._build_context())
         
-        print(f"🍴 已 fork：『{summary}』\n"
+        display.info(f"🍴 已 fork：『{summary}』\n"
               f"   旧会话: {old_sid}\n"
               f"   新会话: {new_sid}（携带 {len(old_messages)} 条历史）")
 
@@ -619,20 +620,20 @@ class Agent:
         """回退到对话的某个历史时刻。"""
         history_file = self._session_history_path()
         if not os.path.exists(history_file):
-            print("没有历史记录可以回退")
+            display.info("没有历史记录可以回退")
             return
 
         # 从当前 context 提取历史消息（不含 system），按时间正序 [老, ..., 新]
         history_msgs = [m for m in context if m["role"] != "system"]
 
         if not history_msgs:
-            print("没有历史记录可以回退")
+            display.info("没有历史记录可以回退")
             return
 
         # 显示带编号的消息列表（序号小的为老消息）
         roles_zh = {"user": "👤 用户", "assistant": "🤖 AI", "tool": "🔧 工具"}
-        print(f"\n📜 对话历史（共 {len(history_msgs)} 条消息，从上往下为时间顺序）:")
-        print()
+        display.info(f"\n📜 对话历史（共 {len(history_msgs)} 条消息，从上往下为时间顺序）:")
+        print()  # kept for spacing
         
         for i, msg in enumerate(history_msgs):
             role = roles_zh.get(msg["role"], msg["role"])
@@ -642,30 +643,30 @@ class Agent:
             else:
                 content = content[:120] + "..." if len(content) > 120 else content
             content = content.replace("\n", " ")
-            print(f"  [{i+1:3d}] {role}: {content}")
+            display.item(f"  [{i+1:3d}] {role}: {content}")
 
-        print()
-        print(f"  输入 1~{len(history_msgs)} 回退到对应位置（保留该条及之前的消息）")
-        print(f"  输入 q 取消")
-        print()
+        print()  # kept for spacing
+        display.hint(f"  输入 1~{len(history_msgs)} 回退到对应位置（保留该条及之前的消息）")
+        display.hint(f"  输入 q 取消")
+        print()  # kept for spacing
 
         try:
             choice = input("AI <- 选择: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print()
+            print()  # kept for spacing
             return
 
         if choice.lower() == "q":
-            print("已取消")
+            display.info("已取消")
             return
 
         try:
             idx = int(choice) - 1
             if idx < 0 or idx >= len(history_msgs):
-                print(f"❌ 无效选择，请输入 1~{len(history_msgs)}")
+                display.error(f"❌ 无效选择，请输入 1~{len(history_msgs)}")
                 return
         except ValueError:
-            print("❌ 请输入数字")
+            display.error("❌ 请输入数字")
             return
 
         # 保留选中的消息及之前的内容，删除之后的新消息
@@ -675,7 +676,7 @@ class Agent:
         # 写回文件
         self._save_context(context)
         
-        print(f"⏪ 已回退到第 {choice} 条消息位置（删除了 {len(history_msgs) - keep_in_context} 条后续消息）")
+        display.info(f"⏪ 已回退到第 {choice} 条消息位置（删除了 {len(history_msgs) - keep_in_context} 条后续消息）")
 
     # ── 上下文压缩 ─────────────────────────────
 
@@ -684,7 +685,7 @@ class Agent:
         history_msgs = [m for m in context if m["role"] != "system"]
 
         if len(history_msgs) <= 4:
-            print("对话历史较短，无需压缩")
+            display.info("对话历史较短，无需压缩")
             return
 
         # 从后往前找安全的截断点：确保 tool 消息不孤立
@@ -729,7 +730,7 @@ class Agent:
             f"{compact_text}"
         )
 
-        print("🔄 正在压缩对话历史...", end="", flush=True)
+        print("🔄 正在压缩对话历史...", end="", flush=True)  # inline status
         try:
             compact_context = [
                 {"role": "system", "content": "你是一个对话压缩助手，擅长提炼关键信息。"},
@@ -740,7 +741,7 @@ class Agent:
             if not summary:
                 raise ValueError("LLM 返回空")
         except Exception as e:
-            print(f" 压缩失败: {e}")
+            display.error(f" 压缩失败: {e}")
             return
 
         # 重建 context：system + 压缩摘要 + 最近消息
@@ -752,7 +753,7 @@ class Agent:
 
         # 写回文件
         self._save_context(context)
-        print(f" ✅\n📦 已压缩 {len(to_compact)} 条消息为摘要，保留 {len(recent)} 条最近消息")
+        display.info(f" ✅\n📦 已压缩 {len(to_compact)} 条消息为摘要，保留 {len(recent)} 条最近消息")
 
     @staticmethod
     def _repair_tool_ordering(messages: list[dict]) -> list[dict]:
@@ -794,7 +795,7 @@ class Agent:
             result.extend(buffer)
 
         if dropped:
-            print(f"  ⚠️ 已丢弃 {dropped} 条无法配对的 tool 消息")
+            display.warning(f"  ⚠️ 已丢弃 {dropped} 条无法配对的 tool 消息")
 
         return result
 
@@ -949,9 +950,7 @@ class Agent:
         content = ""
         reasoning_content = ""
         tool_calls: dict[int, dict] = {}
-        reasoning_shown = False
-        if not silent:
-            print("AI -> ", end="", flush=True)
+        stream = display.LLMStreamer(silent=silent)
 
         for chunk in response:
             if not chunk.choices:
@@ -961,19 +960,11 @@ class Agent:
             # 捕获 reasoning_content（思考模式），API 后续请求要求回传
             if hasattr(delta, "reasoning_content") and delta.reasoning_content:
                 reasoning_content += delta.reasoning_content
-                if not silent:
-                    if not reasoning_shown:
-                        print("\033[2m[思考]", end="", flush=True)
-                        reasoning_shown = True
-                    print(delta.reasoning_content, end="", flush=True)
+                stream.think(delta.reasoning_content)
 
             if delta.content:
                 content += delta.content
-                if not silent:
-                    if reasoning_shown:
-                        print("\033[0m\n", end="", flush=True)
-                        reasoning_shown = False
-                    print(self._render_markdown(delta.content), end="", flush=True)
+                stream.content(self._render_markdown(delta.content))
 
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
@@ -988,11 +979,7 @@ class Agent:
                         if tc_delta.function.arguments:
                             tool_calls[idx]["function"]["arguments"] += tc_delta.function.arguments
 
-        if not silent:
-            if reasoning_shown:
-                print("\033[0m")
-            else:
-                print()  # 流式输出结束换行
+        stream.end()
 
         msg: dict = {"role": "assistant", "content": content}
         if reasoning_content:
@@ -1053,7 +1040,7 @@ class Agent:
 
         # 打印工具调用摘要
         safe_args = {k: str(v)[:100] for k, v in args.items()}
-        print(f"  🛠️  {name}({json.dumps(safe_args, ensure_ascii=False, indent=2)})")
+        display.llm_tool(f"  🛠️  {name}({json.dumps(safe_args, ensure_ascii=False, indent=2)})")
 
         try:
             return tools.dispatch(name, **args)
@@ -1079,7 +1066,7 @@ class Agent:
 
             loop, reason = self._detect_loop(iteration, recent_responses)
             if loop:
-                print(f"\n⚠️  {reason}，强制跳出循环\n")
+                display.warning(f"\n⚠️  {reason}，强制跳出循环\n")
                 context.append({
                     "role": "system",
                     "content": f"系统提示：{reason}。请停止操作并总结。"
@@ -1090,9 +1077,9 @@ class Agent:
                 assistant_msg = self._stream_chat(context)
             except llm.APIError as e:
                 err_str = str(e)
-                print(f"API 错误: {e}")
+                display.error(f"API 错误: {e}")
                 if "'tool'" in err_str and "preceding" in err_str:
-                    print("  🔧 检测到 tool 顺序错误，自动修复上下文...")
+                    display.warning("  🔧 检测到 tool 顺序错误，自动修复上下文...")
                     sys_msg = context[0]
                     repaired = self._repair_tool_ordering(context[1:])
                     context.clear()
@@ -1100,16 +1087,16 @@ class Agent:
                     context.extend(repaired)
                     try:
                         assistant_msg = self._stream_chat(context)
-                        print("  ✅ 修复成功，继续对话")
+                        display.info("  ✅ 修复成功，继续对话")
                     except Exception as e2:
-                        print(f"  ❌ 修复后仍失败: {e2}")
+                        display.error(f"  ❌ 修复后仍失败: {e2}")
                         had_error = True
                         break
                 else:
                     had_error = True
                     break
             except Exception as e:
-                print(f"未知错误: {e}")
+                display.error(f"未知错误: {e}")
                 had_error = True
                 break
 
@@ -1131,7 +1118,7 @@ class Agent:
                     preview = result.strip()[:300]
                     if len(result) > 300:
                         preview += "  ..."
-                    print(f"  📋  {preview}")
+                    display.llm_tool(f"  📋  {preview}")
 
                     if len(result) > 2000:
                         result = result[:2000] + f"\n... (已截断，原文 {len(result)} 字符)"
@@ -1145,7 +1132,7 @@ class Agent:
             break
 
         if iteration > 1:
-            print(f"📊 本次交互共迭代 {iteration} 次\n")
+            display.llm_iteration(iteration)
 
         return last_text, had_error
 
@@ -1215,43 +1202,32 @@ class Agent:
         except Exception:
             pass
 
-        # TUI 展示
-        W = 48
-        sep = "─" * W
-        def tb(text: str) -> str:
-            return f"║  {text:<{W+4}s}║"
-        print(f"\n╔{sep}╗")
-        print(tb("📂  会话结束"))
-        print(f"║{sep}║")
-        print(tb(f"总结: {summary}"))
+        # 显示结束面板
         new_path = self._session_history_path()
-        print(tb(f"文件: {os.path.basename(new_path)}"))
-        print(f"║{sep}║")
-        print(tb("📊  统计信息"))
-        print(f"║{sep}║")
-        print(tb(f"模型: {self.model}"))
-        print(tb(f"消息: {msg_count} 条"))
-        print(tb(f"创建: {created}"))
-        if duration:
-            print(tb(f"耗时: {duration}"))
-        print(f"╚{sep}╝")
-        print("\n👋 再见！")
+        display.shutdown_panel(
+            summary=summary,
+            file=os.path.basename(new_path),
+            model=self.model,
+            msg_count=msg_count,
+            created=created,
+            duration=duration,
+        )
 
     def run(self):
         """交互式 REPL 模式：循环等待用户输入。"""
         context = self._build_context()
 
-        print(f"🤖 Five Pebbels 已启动 (模型: {self.model})\n")
+        display.startup(self.model)
 
         try:
             while True:
                 try:
                     user_input = self._get_user_input()
                 except EOFError:
-                    print()
+                    print()  # kept for spacing
                     break
                 except KeyboardInterrupt:
-                    print("已中断!\n如需退出可使用 '/exit' 命令退出")
+                    display.hint("已中断!\n如需退出可使用 '/exit' 命令退出")
                     continue
                 try:
                     if not user_input.strip():
@@ -1263,9 +1239,9 @@ class Agent:
                     self._process_turn(context, user_input)
                     self._save_context(context)
                 except KeyboardInterrupt:
-                    print("已中断!\n如需退出可使用 '/exit' 命令退出")
+                    display.hint("已中断!\n如需退出可使用 '/exit' 命令退出")
         except Exception as e:
-            print(f"\n❌ 程序异常退出: {e}")
+            display.error(f"\n❌ 程序异常退出: {e}")
         finally:
             try:
                 self._shutdown(context)
@@ -1279,43 +1255,6 @@ class Agent:
         self._save_context(context)
         return result
     
-
-
-def print_logo():
-    print('''
-::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-:::::::::::::::::::::::::,,,,,,,,,,:::::::::::::::::::::::::
-::::::::::::::::::::::,,,,         ,,,::::::::::::::::::::::
-::::::::::::::::::::,,  ;)XYYYYYYUn+   ,::::::::::::::::::::
-::::::::::::::::::, ,[uzccvvvvvvvvvcczf> ,::::::::::::::::::
-:::::::::::,  ,:: ,?rcXXv]        l/XXzv\\i ,::,  ,::::::::::
-:::::::::,,~|}I ,_/vX1,               irXx1! ,<|{I,:::::::::
-:::::::::, |oLi  rMXI                   ]bp_  )hO< ,::::::::
-:::::::::, |oL>i1uL\\:                   ~cJt?;1aO< ,::::::::
-:::::::::, |oCi/oY!                      ,}dZ~{hO< ,::::::::
-:::::::::, |ow|XMYl                       [bktn*0< ,::::::::
-:::::::::, |oWdo8Yl                       [b&bh80< ,::::::::
-:::::::::, |o0?x#Yl  l<~<I        ,i~~>:  [bp}\\o0< ,::::::::
-:::::::::, |oC>t*Yl :ja#kt,       <J##Z?  [bw+{hO< ,::::::::
-:::::::::, |oL>t*Yl ;v%$&x:       +Z$$b}  [bw_1hO< ,::::::::
-:::::::::, \\oL>t*Yl ;u8$&r:       ~Z$$b}  [bw+1aO< ,::::::::
-:::::::::, (kC+r#Yl ;nM%*j:       ~Q88q]  [bq])bL< ,::::::::
-:::::::::,,!]jQhWXi ,>[}]i        :+}}-I ,}dMpY(+;,:::::::::
-:::::::::::, >{()nL\\:                   ~cJt)(?; ,::::::::::
-:::::::::::::,   r#Xl                   ]bp_   ,::::::::::::
-:::::::::::::::,,_/vX1,               >rXx1!,,::::::::::::::
-::::::::::::::::: ,?rcXYv]        l/XXzv\\! ,::::::::::::::::
-::::::::::::::::::, ,[ucccvcvvvvvcccccf> ,::::::::::::::::::
-::::::::::::::::::::,,  :)zYYYYYYYn+   ,::::::::::::::::::::
-::::::::::::::::::::::::,,         ,:,::::::::::::::::::::::
-:::::::::::::::::::::::::,,,,,,,,,,:::::::::::::::::::::::::
-::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-::::::::::::::::::::::::Five Pebbels::::::::::::::::::::::::
-::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-''')
 
 
 def main():
@@ -1335,9 +1274,9 @@ def main():
             meta = agent._load_meta()
             meta["current"] = recent_sid
             agent._save_meta(meta)
-            print(f"🔄 已切换到最近会话：{recent_sid}")
+            display.info(f"🔄 已切换到最近会话：{recent_sid}")
         else:
-            print("⚠️ 没有找到历史会话，使用新会话")
+            display.hint("⚠️ 没有找到历史会话，使用新会话")
     
     if args.query:
         agent.run_once(args.query)
@@ -1352,5 +1291,5 @@ def main():
 
 
 if __name__ == "__main__":
-    print_logo()
+    display.print_logo()
     main()

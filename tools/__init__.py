@@ -10,6 +10,7 @@ import importlib
 import os
 from typing import Dict, Any, List, Callable
 from pathlib import Path
+import display
 
 
 class ToolRegistry:
@@ -32,7 +33,7 @@ class ToolRegistry:
         plugins_dir = Path(__file__).parent / "plugins"
         
         if not plugins_dir.exists():
-            print(f"⚠️ 插件目录不存在：{plugins_dir}")
+            display.debug(f"⚠️ 插件目录不存在：{plugins_dir}")
             return
         
         for plugin_file in plugins_dir.glob("*_plugin.py"):
@@ -46,12 +47,12 @@ class ToolRegistry:
                         'executor': module.execute,
                         'module': module
                     }
-                    print(f"✅ 已加载插件：{plugin_name}")
+                    display.debug(f"✅ 已加载插件：{plugin_name}")
                 else:
-                    print(f"⚠️ 插件 {plugin_name} 缺少必要接口，跳过")
+                    display.debug(f"⚠️ 插件 {plugin_name} 缺少必要接口，跳过")
                     
             except Exception as e:
-                print(f"❌ 加载插件 {plugin_name} 失败：{e}")
+                display.debug(f"❌ 加载插件 {plugin_name} 失败：{e}")
     
     def get_all_definitions(self) -> List[dict]:
         """获取所有工具的 OpenAI schema 定义"""
