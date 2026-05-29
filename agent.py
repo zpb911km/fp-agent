@@ -1130,14 +1130,10 @@ class Agent:
             if tool_calls and len(tool_calls) > 0:
                 for tc in tool_calls:
                     result = self._execute_tool(tc)
-                    # 打印工具结果摘要给用户
-                    preview = result.strip()[:300]
-                    if len(result) > 300:
-                        preview += "  ..."
-                    display.llm_tool(f"  📋  {preview}")
+                    display.llm_tool(f"  📋  {result.strip()}")
 
-                    if len(result) > 2000:
-                        result = result[:2000] + f"\n... (已截断，原文 {len(result)} 字符)"
+                    if len(result) > 50000:
+                        result = result[:50000] + f"\n... (已截断，原文 {len(result)} 字符)"
                     context.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],

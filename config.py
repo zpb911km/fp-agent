@@ -72,3 +72,101 @@ MAX_CONTEXT_TOKENS: int = _value("MAX_CONTEXT_TOKENS", 8000)
 # LLM 参数
 TEMPERATURE: float = _value("TEMPERATURE", 0.8)
 MAX_TOKENS: int = _value("MAX_TOKENS", 32768)
+
+
+# ═══════════════════════════════════════════════════
+# 显示样式 — 从 config.json 读取，按名称注册
+# ═══════════════════════════════════════════════════
+
+_ANSI_COLORS = {
+    "black":         "\033[30m",
+    "red":           "\033[31m",
+    "green":         "\033[32m",
+    "yellow":        "\033[33m",
+    "blue":          "\033[34m",
+    "magenta":       "\033[35m",
+    "cyan":          "\033[36m",
+    "white":         "\033[37m",
+    "bright_black":  "\033[90m",
+    "bright_red":    "\033[91m",
+    "bright_green":  "\033[92m",
+    "bright_yellow": "\033[93m",
+    "bright_blue":   "\033[94m",
+    "bright_magenta":"\033[95m",
+    "bright_cyan":   "\033[96m",
+    "bright_white":  "\033[97m",
+    "default":       "",
+}
+
+_BOLD   = "\033[1m"
+_DIM    = "\033[2m"
+_ITALIC = "\033[3m"
+_RESET  = "\033[0m"
+
+
+def get_display_style(name: str) -> dict:
+    """获取指定名称的显示样式。
+
+    返回 {"color": ANSI码, "bold": bool, "dim": bool, "italic": bool}。
+    未注册的名称返回无颜色默认样式。
+    """
+    raw = _json_cfg.get("display_styles", {}).get(name, {})
+    color_name = raw.get("color", "default")
+    return {
+        "color": _ANSI_COLORS.get(color_name, ""),
+        "bold": raw.get("bold", False),
+        "dim": raw.get("dim", False),
+        "italic": raw.get("italic", False),
+    }
+
+
+def get_display_truncation(name: str) -> int:
+    """获取指定名称的截断长度。 -1 表示不截断。"""
+    val = _json_cfg.get("display_truncation", {}).get(name, -1)
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return -1
+
+
+def apply_style(text: str, name: str) -> str:
+    """按名称对文本应用 ANSI 颜色和样式。
+
+    终端不支持颜色（NO_COLOR / 非 TTY）时返回纯文本。
+    """
+    if os.environ.get("NO_COLOR") or not hasattr(os, 'getenv') or not os.isatty(0):
+        # 粗判：仅 stdout 是 TTY 时才着色
+        pass
+    if os.environ.get("NO_COLOR"):
+        return text
+    import sys
+    if not sys.stdout.isatty():
+        return text
+
+    style = get_display_style(name)
+    prefix = style["color"]
+    if style["bold"]:
+        prefix += _BOLD
+    if style["dim"]:
+        prefix += _DIM
+    if style["italic"]:
+        prefix += _ITALIC
+
+    if not prefix:
+        return text
+    return f"{prefix}{text}{_RESET}"
+
+
+def truncate(text: str, name: str) -> str:
+    """按名称对应的截断长度截断文本。
+
+    -1 不截断；截断时末尾追加 … <+N chars>。
+    """
+    n = get_display_truncation(name)
+    if n < 0 or len(text) <= n:
+        return text
+    return text[:n] + f"… <+{len(text) - n} chars>"
+
+
+# ── 可用颜色名列表（供参考） ──────────────────
+COLOR_NAMES = list(_ANSI_COLORS.keys())
