@@ -24,7 +24,7 @@ _GREEN = "\033[32m"
 _YELLOW = "\033[33m"
 _CYAN = "\033[36m"
 _WHITE = "\033[37m"
-_BRIGHT_BLACK = "\033[35m"
+_MAGENTA = "\033[95m"
 _BRIGHT_RED = "\033[91m"
 
 
@@ -87,7 +87,7 @@ def error(msg: str, fix: str = ""):
     """错误（亮红粗体），可带第二行解决指引"""
     print(_c(msg, _BRIGHT_RED, bold=True))
     if fix:
-        print(_c(f"   → {fix}", _BRIGHT_BLACK))
+        print(_c(f"   → {fix}", _MAGENTA))
 
 
 def warning(msg: str):
@@ -104,7 +104,7 @@ def warning(msg: str):
 
 def llm_thought(msg: str):
     """LLM 思考过程（灰色）"""
-    print(_c(msg, _BRIGHT_BLACK, dim=True))
+    print(_c(msg, _MAGENTA, dim=True))
 
 
 def llm_tool(msg: str):
@@ -124,7 +124,7 @@ def llm_newline():
 
 def llm_iteration(count: int):
     """打印迭代次数统计"""
-    print(_c(f"📊 本次交互共迭代 {count} 次", _BRIGHT_BLACK, dim=True))
+    print(_c(f"📊 本次交互共迭代 {count} 次", _MAGENTA, dim=True))
     print()
 
 
@@ -148,36 +148,52 @@ class LLMStreamer:
         self.silent = silent
         self._thinking = False
         self._has_content = False
+        self._buffer = ""
 
     def think(self, text: str):
-        """输出思考 token（灰色），首次自动显示 ┌思考┐ 标记"""
+        """输出思考 token（灰色），首次自动显示思考标记"""
         if self.silent or not text:
             return
         if not self._thinking:
             # 如果之前输出过内容，先换行再显示思考标记
             prefix = "\n" if self._has_content else ""
-            print(_c(f"{prefix}思考: ", _BRIGHT_BLACK, dim=True), end="", flush=True)
+            print(_c(f"{prefix}思考: ", _MAGENTA, dim=True), end="", flush=True)
             self._thinking = True
-        print(_c(text, _BRIGHT_BLACK, dim=True), end="", flush=True)
+        print(_c(text, _MAGENTA, dim=True), end="", flush=True)
 
     def content(self, text: str):
-        """输出回复 token（默认色），从思考切换时自动重置颜色"""
+        """缓冲回复内容，等待 end() 时统一用 rich Markdown 渲染"""
         if self.silent or not text:
             return
         if self._thinking:
             print()  # 重置 + 换行
             self._thinking = False
-        print(text, end="", flush=True)
+        self._buffer += text
         self._has_content = True
 
     def end(self):
-        """结束流式输出，确保颜色重置 + 最终换行"""
+        """结束流式输出，用 rich 渲染完整的 Markdown 内容"""
         if self.silent:
             return
         if self._thinking:
-            print(_c("", _BRIGHT_BLACK))  # 重置并换行
+            print(_c("", _MAGENTA))  # 重置并换行
+        elif self._has_content and self._buffer:
+            self._render_markdown(self._buffer)
+            self._buffer = ""
         elif self._has_content:
-            print()  # 内容结束换行
+            print()
+
+    # ── 内部辅助 ──────────────────────────────────────
+
+    @staticmethod
+    def _render_markdown(text: str):
+        """用 rich 渲染 Markdown，缺失时降级为纯文本"""
+        try:
+            from rich.markdown import Markdown
+            from rich.console import Console
+            Console().print(Markdown(text))
+        except ImportError:
+            print(text)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -188,7 +204,7 @@ class LLMStreamer:
 def debug(msg: str):
     """调试日志（暗淡灰色），仅 DEBUG=1 时可见"""
     if os.environ.get("DEBUG"):
-        print(_c(f"┐dbg│ {msg}", _BRIGHT_BLACK, dim=True))
+        print(_c(f"┐dbg│ {msg}", _MAGENTA, dim=True))
 
 
 # ═══════════════════════════════════════════════════════════

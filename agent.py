@@ -980,7 +980,7 @@ class Agent:
 
             if delta.content:
                 content += delta.content
-                stream.content(self._render_markdown(delta.content))
+                stream.content(delta.content)
 
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
