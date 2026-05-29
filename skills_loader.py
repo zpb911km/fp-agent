@@ -11,7 +11,7 @@ import display
 class SkillLoader:
     """技能加载器 - 支持热重载"""
     
-    def __init__(self, skills_dir: str = None):
+    def __init__(self, skills_dir: Optional[str] = None):
         # 使用 config.SKILLS_DIR 作为默认值，允许外部传入覆盖
         self.skills_dir = Path(skills_dir if skills_dir else config.SKILLS_DIR)
         self.skills: Dict[str, dict] = {}

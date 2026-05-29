@@ -1,5 +1,6 @@
 import json
 import os
+from typing import Any
 
 # ============================================================
 # 路径定义（不依赖外部配置，始终从代码位置推导）
@@ -32,7 +33,7 @@ def _load_json_config():
 _json_cfg = _load_json_config()
 
 
-def _value(key, env_default=None):
+def _value(key: str, env_default: Any = None) -> Any:
     """三优先级取值：JSON > 环境变量 > env_default（代码默认值）"""
     # 1. JSON 中显式指定且不为 null
     if key in _json_cfg and _json_cfg[key] is not None:
@@ -53,9 +54,9 @@ def _value(key, env_default=None):
 # ============================================================
 # 核心配置项
 # ============================================================
-OPENAI_API_KEY = _value("OPENAI_API_KEY")
-OPENAI_API_BASE_URL = _value("OPENAI_API_BASE_URL")
-MODEL_NAME = _value("MODEL_NAME", "deepseek-v4-flash")
+OPENAI_API_KEY: str = _value("OPENAI_API_KEY")
+OPENAI_API_BASE_URL: str = _value("OPENAI_API_BASE_URL")
+MODEL_NAME: str = _value("MODEL_NAME", "deepseek-v4-flash")
 
 if not OPENAI_API_KEY or not OPENAI_API_BASE_URL:
     raise ValueError(
@@ -64,10 +65,10 @@ if not OPENAI_API_KEY or not OPENAI_API_BASE_URL:
     )
 
 # 死循环检测
-MAX_ITERATIONS = _value("MAX_ITERATIONS", 50)
-SIMILAR_RESPONSE_THRESHOLD = _value("SIMILAR_RESPONSE_THRESHOLD", 3)
-MAX_CONTEXT_TOKENS = _value("MAX_CONTEXT_TOKENS", 8000)
+MAX_ITERATIONS: int = _value("MAX_ITERATIONS", 50)
+SIMILAR_RESPONSE_THRESHOLD: int = _value("SIMILAR_RESPONSE_THRESHOLD", 3)
+MAX_CONTEXT_TOKENS: int = _value("MAX_CONTEXT_TOKENS", 8000)
 
 # LLM 参数
-TEMPERATURE = _value("TEMPERATURE", 0.8)
-MAX_TOKENS = _value("MAX_TOKENS", 32768)
+TEMPERATURE: float = _value("TEMPERATURE", 0.8)
+MAX_TOKENS: int = _value("MAX_TOKENS", 32768)

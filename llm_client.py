@@ -35,6 +35,7 @@ import sys
 from typing import Any, Iterator, Optional
 
 import requests
+from requests.exceptions import ChunkedEncodingError
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -290,7 +291,7 @@ class SSEIterator:
                     # 某些 API 可能在末尾发送非 JSON 数据，忽略
                     continue
         
-        except (requests.ConnectionError, requests.ChunkedEncodingError) as e:
+        except (requests.ConnectionError, ChunkedEncodingError) as e:
             raise APIError(f"流式连接中断: {e}", status_code=0)
         except Exception as e:
             raise APIError(f"流式解析异常: {e}", status_code=0)

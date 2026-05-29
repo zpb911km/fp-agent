@@ -110,8 +110,7 @@ def execute_core_tool(tool_name: str, params: Dict[str, Any]) -> Any:
     
     elif tool_name == "read_file":
         file_path = params.get("file_path")
-        if not file_path:
-            raise ValueError("read_file 工具需要 file_path 参数")
+        assert isinstance(file_path, str), "read_file 需要 file_path 参数"
         
         offset = params.get("offset", 0)
         limit = params.get("limit")
@@ -119,8 +118,8 @@ def execute_core_tool(tool_name: str, params: Dict[str, Any]) -> Any:
         with open(file_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
         
-        start = offset if offset >= 0 else 0
-        end = start + limit if limit else None
+        start = offset if isinstance(offset, int) and offset >= 0 else 0
+        end = start + limit if isinstance(limit, int) else None
         
         return ''.join(lines[start:end])
     
@@ -144,8 +143,8 @@ def execute_core_tool(tool_name: str, params: Dict[str, Any]) -> Any:
         old_string = params.get("old_string")
         new_string = params.get("new_string")
         
-        if not all([file_path, old_string, new_string]):
-            raise ValueError("edit_file 需要 file_path, old_string, new_string 三个参数")
+        assert isinstance(file_path, str) and isinstance(old_string, str) and isinstance(new_string, str), \
+            "edit_file 需要 file_path, old_string, new_string 三个字符串参数"
         
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()

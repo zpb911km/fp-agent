@@ -99,9 +99,9 @@ def bash(command: str) -> str:
     return execute_tool('bash', {'command': command})
 
 
-def read_file(file_path: str, offset: int = None, limit: int = None) -> str:
+def read_file(file_path: str, offset: int | None = None, limit: int | None = None) -> str:
     """读取文件内容"""
-    params = {'file_path': file_path}
+    params: Dict[str, Any] = {'file_path': file_path}
     if offset is not None:
         params['offset'] = offset
     if limit is not None:
