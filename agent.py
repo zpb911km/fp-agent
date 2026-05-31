@@ -35,8 +35,9 @@ class Agent:
         # 会话管理
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
         self._session_id = self._init_session()
-        display.info(f"📂 新会话：{self._session_id}")
-        display.hint(f"💡 输入 /help 查看命令，/resume 可回到历史会话")
+        if not os.environ.get("FP_SUBAGENT_QUIET"):
+            display.info(f"📂 新会话：{self._session_id}")
+            display.hint(f"💡 输入 /help 查看命令，/resume 可回到历史会话")
     # ── 会话管理 ──────────────────────────────
 
     def _find_most_recent_session(self) -> str | None:
@@ -1047,26 +1048,37 @@ class Agent:
     # ── 工具执行 ───────────────────────────────
 
     @staticmethod
-    def _execute_tool(tc: dict) -> str:
+    def _execute_tool(tc: dict, silent: bool = False) -> str:
         name = tc["function"]["name"]
         try:
             args = json.loads(tc["function"]["arguments"])
         except json.JSONDecodeError as e:
             return f"错误：工具参数 JSON 解析失败 - {e}"
 
-        # 打印工具调用摘要
-        safe_args = {k: str(v)[:100] for k, v in args.items()}
-        display.llm_tool(f"  🛠️  {name}({json.dumps(safe_args, ensure_ascii=False, indent=2)})")
+        # 打印工具调用摘要（静默模式下跳过）
+        if not silent:
+            safe_args = {k: str(v)[:100] for k, v in args.items()}
+            display.llm_tool(f"  🛠️  {name}({json.dumps(safe_args, ensure_ascii=False, indent=2)})")
 
         try:
-            return tools.dispatch(name, **args)
+            result = tools.dispatch(name, **args)
         except Exception as e:
             return f"❌ 工具执行失败 ({name}): {e}"
 
+        if not silent:
+            display.llm_tool(f"  📋  {result.strip()}")
+        return result
+
     # ── 主循环 ──────────────────────────────────
 
-    def _process_turn(self, context: list[dict], user_input: str) -> tuple[str, bool]:
-        """处理一条用户输入：LLM 循环 + 工具调用，返回 (最终回复文本, 是否出错)."""
+    def _process_turn(self, context: list[dict], user_input: str, silent: bool = False) -> tuple[str, bool]:
+        """处理一条用户输入：LLM 循环 + 工具调用，返回 (最终回复文本, 是否出错).
+        
+        Args:
+            context: 对话上下文
+            user_input: 用户输入
+            silent: 静默模式，不输出 LLM 流式内容、工具日志、迭代统计
+        """
         recent_responses = deque(maxlen=config.SIMILAR_RESPONSE_THRESHOLD + 1)
 
         if not user_input.strip():
@@ -1082,7 +1094,8 @@ class Agent:
 
             loop, reason = self._detect_loop(iteration, recent_responses)
             if loop:
-                display.warning(f"\n⚠️  {reason}，强制跳出循环\n")
+                if not silent:
+                    display.warning(f"\n⚠️  {reason}，强制跳出循环\n")
                 context.append({
                     "role": "system",
                     "content": f"系统提示：{reason}。请停止操作并总结。"
@@ -1090,29 +1103,34 @@ class Agent:
                 break
 
             try:
-                assistant_msg = self._stream_chat(context)
+                assistant_msg = self._stream_chat(context, silent=silent)
             except llm.APIError as e:
+                if not silent:
+                    display.error(f"API 错误: {e}")
                 err_str = str(e)
-                display.error(f"API 错误: {e}")
                 if "'tool'" in err_str and "preceding" in err_str:
-                    display.warning("  🔧 检测到 tool 顺序错误，自动修复上下文...")
+                    if not silent:
+                        display.warning("  🔧 检测到 tool 顺序错误，自动修复上下文...")
                     sys_msg = context[0]
                     repaired = self._repair_tool_ordering(context[1:])
                     context.clear()
                     context.append(sys_msg)
                     context.extend(repaired)
                     try:
-                        assistant_msg = self._stream_chat(context)
-                        display.info("  ✅ 修复成功，继续对话")
+                        assistant_msg = self._stream_chat(context, silent=silent)
+                        if not silent:
+                            display.info("  ✅ 修复成功，继续对话")
                     except Exception as e2:
-                        display.error(f"  ❌ 修复后仍失败: {e2}")
+                        if not silent:
+                            display.error(f"  ❌ 修复后仍失败: {e2}")
                         had_error = True
                         break
                 else:
                     had_error = True
                     break
             except Exception as e:
-                display.error(f"未知错误: {e}")
+                if not silent:
+                    display.error(f"未知错误: {e}")
                 had_error = True
                 break
 
@@ -1129,8 +1147,7 @@ class Agent:
             tool_calls = assistant_msg.get("tool_calls")
             if tool_calls and len(tool_calls) > 0:
                 for tc in tool_calls:
-                    result = self._execute_tool(tc)
-                    display.llm_tool(f"  📋  {result.strip()}")
+                    result = self._execute_tool(tc, silent=silent)
 
                     if len(result) > 50000:
                         result = result[:50000] + f"\n... (已截断，原文 {len(result)} 字符)"
@@ -1143,7 +1160,7 @@ class Agent:
 
             break
 
-        if iteration > 1:
+        if iteration > 1 and not silent:
             display.llm_iteration(iteration)
 
         return last_text, had_error
@@ -1260,10 +1277,15 @@ class Agent:
             except Exception:
                 pass
 
-    def run_once(self, user_input: str) -> str:
-        """单次查询模式：处理一条输入就退出，返回最终回复文本。"""
+    def run_once(self, user_input: str, silent: bool = False) -> str:
+        """单次查询模式：处理一条输入就退出，返回最终回复文本。
+        
+        Args:
+            user_input: 用户输入
+            silent: 静默模式，不输出任何中间过程
+        """
         context = self._build_context()
-        result, _ = self._process_turn(context, user_input)
+        result, _ = self._process_turn(context, user_input, silent=silent)
         self._save_context(context)
         return result
     
@@ -1286,16 +1308,24 @@ def main():
             meta = agent._load_meta()
             meta["current"] = recent_sid
             agent._save_meta(meta)
-            display.info(f"🔄 已切换到最近会话：{recent_sid}")
+            if not os.environ.get("FP_SUBAGENT_QUIET"):
+                display.info(f"🔄 已切换到最近会话：{recent_sid}")
         else:
-            display.hint("⚠️ 没有找到历史会话，使用新会话")
+            if not os.environ.get("FP_SUBAGENT_QUIET"):
+                display.hint("⚠️ 没有找到历史会话，使用新会话")
+    
+    silent_mode = os.environ.get("FP_SUBAGENT_SILENT") == "1"
     
     if args.query:
-        agent.run_once(args.query)
+        result = agent.run_once(args.query, silent=silent_mode)
+        if silent_mode and result:
+            print(result)
     elif not sys.stdin.isatty():
         query = sys.stdin.read().strip()
         if query:
-            agent.run_once(query)
+            result = agent.run_once(query, silent=silent_mode)
+            if silent_mode and result:
+                print(result)
         else:
             agent.run()
     else:
@@ -1303,5 +1333,6 @@ def main():
 
 
 if __name__ == "__main__":
-    display.print_logo()
+    if not os.environ.get("FP_SUBAGENT_QUIET"):
+        display.print_logo()
     main()
