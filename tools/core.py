@@ -94,18 +94,23 @@ def execute_core_tool(tool_name: str, params: Dict[str, Any]) -> Any:
         if not command:
             raise ValueError("bash 工具需要 command 参数")
         
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        
-        output = result.stdout
-        if result.stderr:
-            output += f"\n[stderr]\n{result.stderr}"
-        
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            
+            output = result.stdout
+            if result.stderr:
+                output += f"\n[stderr]\n{result.stderr}"
+        except KeyboardInterrupt:
+            output = "[error] 用户中断,请等用户指示"
+        except Exception as e:
+            output = f"[error] 运行出错：{e}"
+            
         return output
     
     elif tool_name == "read_file":
@@ -151,6 +156,10 @@ def execute_core_tool(tool_name: str, params: Dict[str, Any]) -> Any:
         
         if old_string not in content:
             raise ValueError(f"未找到目标文本：{old_string[:50]}...")
+        
+        # 检查是否是唯一匹配
+        if content.count(old_string) > 1:
+            raise ValueError(f"存在多个匹配项,请指定更加明确的old_string参数")
         
         new_content = content.replace(old_string, new_string, 1)
         
