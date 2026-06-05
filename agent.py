@@ -201,6 +201,7 @@ class Agent:
         "/add_skill <filename>": "从文件添加新技能",
         "/remove_skill <name>": "删除指定技能",
         "/exit": "退出程序",
+        "exit!": "核弹级退出：删除会话、不留痕迹、假装没发生过",
     }
 
     def _show_help(self):
@@ -1242,6 +1243,30 @@ class Agent:
             duration=duration,
         )
 
+    def _nuclear_exit(self, context: list[dict]):
+        """exit! 命令：核弹级退出。
+        删除当前会话文件、从 meta 中抹除记录、不保存任何内容、不留痕迹。
+        就像这段对话从未发生过。
+        """
+        # 删除会话文件
+        hist_path = self._session_history_path()
+        if os.path.exists(hist_path):
+            try:
+                os.remove(hist_path)
+            except OSError:
+                pass
+
+        # 从 meta 中抹除该会话记录
+        meta = self._load_meta()
+        if self._session_id in meta.get("sessions", {}):
+            del meta["sessions"][self._session_id]
+        if meta.get("current") == self._session_id:
+            meta["current"] = None
+        self._save_meta(meta)
+
+        # 设置标记，阻止 finally 块调用 _shutdown
+        self._nuclear_exit_flag = True
+
     def run(self):
         """交互式 REPL 模式：循环等待用户输入。"""
         context = self._build_context()
@@ -1262,6 +1287,11 @@ class Agent:
                     if not user_input.strip():
                         continue
 
+                    # exit! 命令：核弹级退出，不留痕迹
+                    if user_input.strip() == "exit!":
+                        self._nuclear_exit(context)
+                        break
+
                     if self._handle_command(user_input, context):
                         continue
 
@@ -1272,10 +1302,11 @@ class Agent:
         except Exception as e:
             display.error(f"\n❌ 程序异常退出: {e}")
         finally:
-            try:
-                self._shutdown(context)
-            except Exception:
-                pass
+            if not getattr(self, '_nuclear_exit_flag', False):
+                try:
+                    self._shutdown(context)
+                except Exception:
+                    pass
 
     def run_once(self, user_input: str, silent: bool = False) -> str:
         """单次查询模式：处理一条输入就退出，返回最终回复文本。
@@ -1316,12 +1347,20 @@ def main():
     
     silent_mode = os.environ.get("FP_SUBAGENT_SILENT") == "1"
     
+    # exit! 全局拦截：无论交互/非交互，检测到 exit! 直接核灭
+    if args.query and args.query.strip() == "exit!":
+        agent._nuclear_exit([])
+        return
+    
     if args.query:
         result = agent.run_once(args.query, silent=silent_mode)
         if silent_mode and result:
             print(result)
     elif not sys.stdin.isatty():
         query = sys.stdin.read().strip()
+        if query == "exit!":
+            agent._nuclear_exit([])
+            return
         if query:
             result = agent.run_once(query, silent=silent_mode)
             if silent_mode and result:
