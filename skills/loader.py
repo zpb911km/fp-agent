@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKILLS_DIR = os.path.join(PROJECT_ROOT, "skills")
 
+# 模板变量：agent 主入口文件路径（用于自修改等技能）
+AGENT_ENTRY = os.path.join(PROJECT_ROOT, "cli.py")
+
 
 @dataclass
 class Skill:
@@ -54,6 +57,9 @@ class SkillLoader:
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
             
+            # 模板变量替换
+            content = self._substitute_templates(content)
+            
             # 解析 YAML frontmatter
             skill = self._parse_skill(content)
             if skill:
@@ -63,6 +69,16 @@ class SkillLoader:
         except Exception as e:
             print(f"[SkillLoader] Failed to load {filepath}: {e}")
             return None
+    
+    @staticmethod
+    def _substitute_templates(text: str) -> str:
+        """替换技能内容中的模板变量"""
+        replacements = {
+            "{{path_to_agent_file}}": AGENT_ENTRY,
+        }
+        for placeholder, value in replacements.items():
+            text = text.replace(placeholder, value)
+        return text
     
     def _parse_skill(self, content: str) -> Optional[Skill]:
         """解析技能内容（支持 YAML frontmatter）"""

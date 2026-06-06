@@ -1,12 +1,86 @@
-CLAUDE.md
-config.json
-legacy/
-__pycache__/**
-data/**
-*.mmd
-*.pyc
-legacy.zip
-tools_backup_for_ref.py
-skills/*.md
+# ─── 编辑器 / IDE ─────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── Python ───────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+*.whl
+*.manifest
+*.spec
+
+# ─── 虚拟环境 ────────────────────────────
+.venv/
+venv/
+env/
+.conda/
+.python-version
+
+# ─── 测试 / 临时文件 ─────────────────────
 test_fp.sh
+test_interrupt.py
+*.log
+*.tmp
+*.bak
+*.backup
+
+# ─── 配置文件（含敏感信息） ──────────────
+config.json
+.env
+.env.*
+*.key
+*.pem
+*.crt
+**/secrets/
+
+# ─── 数据文件 ────────────────────────────
+data/**
 data.zip
+legacy/
+legacy.zip
+
+# ─── 技能文件（用户自定义） ───────────────
+skills/*.md
+
+# ─── AI 辅助文件 ─────────────────────────
+CLAUDE.md
+CLAUDE*
+.cursorrules
+.windsurfrules
+
+# ─── 项目备份 ────────────────────────────
+tools_backup_for_ref.py
+
+# ─── mmd 图表 ─────────────────────────────
+*.mmd
+
+# ─── 大文件 / 媒体 ──────────────────────
+*.wav
+*.mp3
+*.mp4
+*.avi
+*.mkv
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.ico
+
+# ─── 文档生成 ───────────────────────────
+site/
+_build/
+
