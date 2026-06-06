@@ -391,36 +391,46 @@ class Agent:
     # ============ LLM 调用（异步） ============
     
     async def _stream_chat(self, context: List[Dict], silent: bool = False) -> Dict:
-        """发起聊天请求（非流式，从完整 response 直接提取内容）"""
-        streamer = display.LLMStreamer(silent=silent)
+        """发起聊天请求（非流式，从完整 response 直接提取内容）
         
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=context,
-            tools=tools.TOOL_DEFINITIONS,
-            stream=False,
-            temperature=config.LLM_TEMPERATURE,
-            max_tokens=config.LLM_MAX_TOKENS,
-            extra_body={"enable_thinking": False},
-        )
+        非 silent 模式：
+          - 发起请求前启动 spinner 动画（避免假死感）
+          - 不再打印思考内容（reasoning_content）
+          - 收到完整回复后停止 spinner 并立即输出
+        """
+        # 非 silent 模式：启动 spinner
+        spinner = None
+        if not silent:
+            spinner = display.Spinner("思考中")
+            await spinner.start()
+        
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=context,
+                tools=tools.TOOL_DEFINITIONS,
+                stream=False,
+                temperature=config.LLM_TEMPERATURE,
+                max_tokens=config.LLM_MAX_TOKENS,
+                extra_body={"enable_thinking": False},
+            )
+        finally:
+            if spinner:
+                await spinner.stop()
         
         message = response.choices[0].message
         
-        # 提取内容并输出到 streamer
+        # 提取回复内容（不输出 reasoning_content）
         reply_content = message.content or ""
-        reasoning_content = ""
-        if hasattr(message, "reasoning_content") and message.reasoning_content:
-            reasoning_content = message.reasoning_content
-            streamer.think(reasoning_content)
         
+        # 有实际回复内容时用 streamer 展示（纯文本/工具调用标记）
+        streamer = display.LLMStreamer(silent=silent)
         if reply_content:
             streamer.write(reply_content)
         streamer.end()
         
-        # 构建返回消息
+        # 构建返回消息（不再包含 reasoning_content）
         msg = {"role": "assistant", "content": reply_content}
-        if reasoning_content:
-            msg["reasoning_content"] = reasoning_content
         if message.tool_calls:
             msg["tool_calls"] = [
                 {

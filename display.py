@@ -6,6 +6,7 @@ display.py — Five Pebbles 显示模块
 的 display_styles / display_truncation 按名称读取。
 """
 
+import asyncio
 import os
 import sys
 
@@ -308,3 +309,58 @@ def print_logo():
     """打印 ASCII 启动画（支持按配置截断）"""
     art = truncate(LOGO_ART, "logo")
     print(apply_style(art, "logo"))
+
+
+# ═══════════════════════════════════════════════════════════
+# F. Spinner — 异步等待动画
+#   用于非流式 LLM 调用期间的视觉反馈，避免终端假死感
+# ═══════════════════════════════════════════════════════════
+
+class Spinner:
+    """异步 spinner 动画
+    
+    在发起非流式 LLM 请求前启动，请求完成后停止。
+    使用 asyncio 后台任务驱动字符旋转，支持中途取消。
+    
+    用法:
+        spinner = Spinner("思考中")
+        await spinner.start()
+        try:
+            response = await api_call()
+        finally:
+            await spinner.stop()
+    """
+    
+    def __init__(self, message: str = "思考中"):
+        self._message = message
+        self._task = None
+        self._chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    
+    async def start(self):
+        """启动 spinner（启动一个后台 asyncio 任务）"""
+        self._task = asyncio.create_task(self._spin())
+    
+    async def _spin(self):
+        """后台旋转动画"""
+        idx = 0
+        try:
+            while True:
+                char = self._chars[idx % len(self._chars)]
+                msg = f"\r{char} {self._message}..."
+                sys.stdout.write(msg)
+                sys.stdout.flush()
+                idx += 1
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            # 清除 spinner 行（覆盖空白后回到行首）
+            sys.stdout.write("\r" + " " * (len(self._message) + 6) + "\r")
+            sys.stdout.flush()
+    
+    async def stop(self):
+        """停止 spinner 并清除动画行"""
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
