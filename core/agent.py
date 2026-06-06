@@ -81,8 +81,12 @@ class Agent:
         # 生命周期管理器
         self.lifecycle = LifecycleManager(enable_log=enable_log)
         
-        # 插件注册表
-        self.plugins = PluginRegistry(self.lifecycle)
+        # 插件注册表（自动扫描 plugins/ 目录, 文件即开关）
+        _plugin_dir = os.path.join(os.path.dirname(__file__), '..', 'plugins')
+        self.plugins = PluginRegistry(
+            self.lifecycle,
+            plugin_dir=os.path.normpath(_plugin_dir),
+        )
         
         # 技能系统
         skill_loader.load_all()
@@ -767,6 +771,9 @@ class Agent:
         # 添加用户消息
         self._context.append({"role": "user", "content": user_input})
         
+        # 生命周期：消息已接收
+        await self.lifecycle.emit(LifecycleHook.ON_MESSAGE_RECEIVED, content=user_input)
+        
         iteration = 0
         last_text = ""
         
@@ -786,6 +793,9 @@ class Agent:
             # 发送前确保 tool 消息完整性
             self._context = [self._context[0]] + self._repair_tool_ordering(self._context[1:])
             
+            # 生命周期：LLM 调用前
+            await self.lifecycle.emit(LifecycleHook.ON_BEFORE_LLM_CALL)
+            
             self._processing = True
             try:
                 assistant_msg = await self._stream_chat(self._context)
@@ -797,6 +807,7 @@ class Agent:
             except Exception as e:
                 self._processing = False
                 display.error(f"API/LLM 错误: {e}")
+                await self.lifecycle.emit(LifecycleHook.ON_ERROR, error=str(e))
                 err_str = str(e)
                 if "'tool'" in err_str and "preceding" in err_str:
                     display.warning("  🔧 检测到 tool 顺序错误，二次修复...")
@@ -815,6 +826,10 @@ class Agent:
                 else:
                     break
             self._processing = False
+            
+            # 生命周期：LLM 调用完成
+            tc_names = [tc["function"]["name"] for tc in assistant_msg.get("tool_calls", [])] if assistant_msg.get("tool_calls") else []
+            await self.lifecycle.emit(LifecycleHook.ON_AFTER_LLM_CALL, has_tool_calls=bool(tc_names), tool_names=tc_names, content=assistant_msg.get("content", ""))
             
             # === 流式中断处理：加法填充上下文 ===
             interrupted = assistant_msg.pop("_interrupted", False)
@@ -843,15 +858,23 @@ class Agent:
             # 处理工具调用
             tool_calls = assistant_msg.get("tool_calls", [])
             if tool_calls:
+                # 生命周期：工具选择
+                sel_tool_names = [tc["function"]["name"] for tc in tool_calls]
+                await self.lifecycle.emit(LifecycleHook.ON_TOOL_SELECT, tools=sel_tool_names)
+                
                 tool_interrupted = False
                 for i, tc in enumerate(tool_calls):
                     try:
+                        # 生命周期：工具调用（执行前）
+                        await self.lifecycle.emit(LifecycleHook.ON_TOOL_CALL, tool_name=tc["function"]["name"], tool_args=tc["function"]["arguments"][:200])
                         result = await self._execute_tool(tc)
                         self._context.append({
                             "role": "tool",
                             "tool_call_id": tc["id"],
                             "content": result
                         })
+                        # 生命周期：工具调用完成
+                        await self.lifecycle.emit(LifecycleHook.ON_TOOL_RESULT, tool_name=tc["function"]["name"], result=result[:200])
                     except (KeyboardInterrupt, asyncio.CancelledError):
                         self._interrupted = False  # 重置，防止残留
                         # 当前工具标记为调用失败
@@ -881,6 +904,9 @@ class Agent:
         # 裁剪上下文
         self._context = self._trim_context(self._context)
         
+        # 生命周期：上下文已更新
+        await self.lifecycle.emit(LifecycleHook.ON_CONTEXT_UPDATE, msg_count=len(self._context))
+        
         # 保存上下文
         self.session.save_context(self._context)
         
@@ -894,6 +920,9 @@ class Agent:
         # 清理中断标志（防止状态残留）
         self._interrupted = False
         self._processing = False
+        
+        # 生命周期：返回响应前
+        await self.lifecycle.emit(LifecycleHook.ON_BEFORE_RESPONSE, content=final_content)
         
         return Response(content=final_content)
     
