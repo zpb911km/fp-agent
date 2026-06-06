@@ -1,12 +1,13 @@
 """
-Python 插件 - 执行 Python 代码
+Python 插件 — 执行 Python 代码
 
 通过临时文件方式执行用户提供的 Python 代码，适合复杂数据处理和算法验证。
 """
 
+import os
 import subprocess
 import tempfile
-import os
+from typing import Any, Dict
 
 
 # ── 插件定义（OpenAI function calling schema） ──────────────────────
@@ -27,7 +28,7 @@ PLUGIN_DEFINITION = {
 }
 
 
-def execute(params: dict) -> str:
+def execute(params: Dict[str, Any]) -> str:
     """
     执行 Python 代码
     
@@ -35,33 +36,53 @@ def execute(params: dict) -> str:
         params: 包含 'code' 键的字典
         
     Returns:
-        执行结果字符串
+        代码执行输出
     """
-    code = params.get("code")
-    
+    code = params.get("code", "")
     if not code:
         raise ValueError("python 插件需要 code 参数")
     
-    # 创建临时文件
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-        f.write(code)
-        temp_path = f.name
-    
+    tmp_path = None
     try:
-        # 执行 Python 代码
+        # 写入临时文件
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".py",
+            prefix="agent_python_",
+            delete=False,
+            encoding="utf-8",
+        ) as f:
+            f.write(code)
+            tmp_path = f.name
+        
+        # 执行
         result = subprocess.run(
-            ['python3', temp_path],
+            ["python3", tmp_path],
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=30,
         )
         
         output = result.stdout
         if result.stderr:
-            output += f"\n[错误]\n{result.stderr}"
+            if output:
+                output += "\n"
+            output += result.stderr
         
-        return output if output else "[无输出]"
+        # 截断
+        if len(output) > 5000:
+            output = output[:5000] + f"\n...（已截断，原文 {len(output)} 字符）"
         
+        return output if output else "（无输出）"
+    
+    except subprocess.TimeoutExpired:
+        return "错误：代码执行超时（30秒）"
+    except Exception as e:
+        return f"错误：{e}"
     finally:
         # 清理临时文件
-        os.unlink(temp_path)
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass

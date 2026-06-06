@@ -1,15 +1,15 @@
 """
-Memory Read 插件 - 读取长期记忆
+Memory Read 插件 — 读取/搜索长期记忆
 
 支持列出所有记忆或通过关键词搜索记忆内容。
+关键词使用空格分隔，AND 逻辑匹配（必须同时包含所有关键词）。
 """
 
 import glob
 import os
-from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List
 
-from ._plugin_config import get_memory_dir
+import config
 
 
 # ── 插件定义（OpenAI function calling schema） ──────────────────────
@@ -22,23 +22,20 @@ PLUGIN_DEFINITION = {
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "搜索关键词（可选，空传则列出全部;使用空格分隔不同的关键词）"},
+                "query": {"type": "string", "description": "搜索关键词（可选，空传则列出全部；使用空格分隔不同的关键词，AND 逻辑匹配）"},
             },
         },
     },
 }
 
 
-
-
 def _list_memories(memory_dir: str) -> List[dict]:
     """列出所有记忆的元信息"""
     memories = []
-    
     for path in sorted(glob.glob(os.path.join(memory_dir, "*.md"))):
         name = os.path.splitext(os.path.basename(path))[0]
         
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, "r", encoding="utf-8") as f:
             content = f.read()
         
         description = ""
@@ -54,7 +51,7 @@ def _list_memories(memory_dir: str) -> List[dict]:
             "name": name,
             "type": mem_type,
             "description": description,
-            "path": path
+            "path": path,
         })
     
     return memories
@@ -62,7 +59,7 @@ def _list_memories(memory_dir: str) -> List[dict]:
 
 def _parse_memory_content(path: str) -> str:
     """从文件中提取正文内容（跳过 YAML frontmatter）"""
-    with open(path, 'r', encoding='utf-8') as f:
+    with open(path, "r", encoding="utf-8") as f:
         lines = f.read().split("\n")
     
     body_start = 0
@@ -75,7 +72,7 @@ def _parse_memory_content(path: str) -> str:
     return "\n".join(lines[body_start:]).strip()
 
 
-def execute(params: dict) -> str:
+def execute(params: Dict[str, Any]) -> str:
     """
     读取记忆
     
@@ -86,7 +83,7 @@ def execute(params: dict) -> str:
         记忆列表或搜索结果
     """
     query = params.get("query", "").strip()
-    memory_dir = get_memory_dir()
+    memory_dir = config.MEMORY_DIR
     
     # 确保目录存在
     os.makedirs(memory_dir, exist_ok=True)
@@ -97,7 +94,7 @@ def execute(params: dict) -> str:
     if not all_memories:
         return "暂无记忆"
     
-    # 如果有查询参数，执行搜索
+    # 搜索过滤
     if query:
         keywords = [kw.lower() for kw in query.split()]
         
@@ -115,16 +112,15 @@ def execute(params: dict) -> str:
     else:
         memories_to_show = all_memories
     
-    # 格式化输出结果
+    # 格式化输出
     lines = ["📋 记忆列表:", ""]
     
     for m in memories_to_show:
         lines.append(f"[{m['type']}] {m['name']} — {m['description']}")
         
-        # 如果需要显示正文（空查询时显示全部内容）
+        # 空查询时显示全部正文内容
         if not query:
             content = _parse_memory_content(m["path"])
-            # 截断过长的内容
             if len(content) > 500:
                 content = content[:500] + "  ..."
             lines.append(f"   内容:\n{content}")

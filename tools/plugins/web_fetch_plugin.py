@@ -1,13 +1,11 @@
 """
-Web Fetch 插件 - 抓取网页内容
+Web Fetch 插件 — 抓取网页内容
 
-使用 requests 库抓取网页并提取纯文本内容。
+使用 requests 库抓取网页并返回纯文本内容。
 """
 
 import re
-import tempfile
-import os
-from typing import Dict, Any
+from typing import Any, Dict
 
 
 # ── 插件定义（OpenAI function calling schema） ──────────────────────
@@ -28,7 +26,7 @@ PLUGIN_DEFINITION = {
 }
 
 
-def execute(params: dict) -> str:
+def execute(params: Dict[str, Any]) -> str:
     """
     抓取网页内容
     
@@ -36,10 +34,9 @@ def execute(params: dict) -> str:
         params: 包含 'url' 键的字典
         
     Returns:
-        网页纯文本内容
+        网页纯文本内容（前 5000 字符）
     """
-    url = params.get("url")
-    
+    url = params.get("url", "")
     if not url:
         raise ValueError("web_fetch 插件需要 url 参数")
     
@@ -47,23 +44,27 @@ def execute(params: dict) -> str:
         import requests
         
         resp = requests.get(
-            url, 
-            timeout=15, 
+            url,
+            timeout=15,
             headers={
                 "User-Agent": "Mozilla/5.0 (compatible; AIAgent/1.0)",
-            }
+            },
         )
         resp.raise_for_status()
         html = resp.text
-
+        
         # 剥离 script/style 标签
         text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
         text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+        # 去除 HTML 标签
         text = re.sub(r'<[^>]+>', ' ', text)
         text = re.sub(r'\s+', ' ', text).strip()
         
-        return text[:5000] if len(text) > 5000 else text
+        if len(text) > 5000:
+            text = text[:5000] + f"\n...（已截断，原文 {len(text)} 字符）"
         
+        return text
+    
     except ImportError:
         return "需要安装 requests: pip install requests"
     except Exception as e:

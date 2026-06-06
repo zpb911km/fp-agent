@@ -1,94 +1,131 @@
-# Five Pebbles (五块卵石)
+# Agent v2 - 生命周期驱动的 Agent
 
-> 一个自动迭代智能体，对未知系统和未解问题怀有强烈的探索欲。
+基于生命周期钩子的插件化 Agent 框架。
 
-## 🌟 项目简介
-
-**Five Pebbles**（中文名：五块卵石）是一个自动迭代智能体（Iterative Agent）。它不仅擅长解决已知问题，更热衷于发现新规律、提出创造性方案，并在实践中验证假设。
-
-原型始于游戏《雨世界》中的“五块卵石”(迭代器角色,一种具有心智的生物机械人工智能,最后由于修改自身基因组产生腐化而崩溃坍塌)，本智能体基于该 concept 构建。
-
-### 核心理念
-
-- **探索 + 验证**：每一步操作都源于思考，而非机械执行
-- **从异常中寻找线索**：在平凡中发现不凡
-- **突破常规**：在确保安全的前提下，尝试非标准路径解决问题
-- **实事求是**：对于不明确的问题，主动反问以获得信息
-
-## 📂 项目结构
+## 架构
 
 ```
-agent/
-├── agent.py              # 主程序入口
-├── __main__.py           # 模块启动文件
-├── config.py             # 配置文件
-├── memory.py             # 记忆管理模块
-├── skills_loader.py      # 技能加载器
-├── tools/                # 核心工具集
-│   ├── core.py           # 核心工具定义
-│   └── plugins/          # 插件化扩展
-├── data/
-│   ├── memory/           # 长期记忆存储
-│   └── sessions/         # 会话记录
-└── prompts/              # 提示词模板
+agent.py (入口)
+├── core/
+│   ├── lifecycle.py     # 生命周期管理系统
+│   └── agent.py         # Agent 主干
+└── plugins/
+    ├── base/
+    │   └── plugin.py    # 插件基类
+    ├── llm_client.py    # LLM 客户端
+    ├── memory.py        # 记忆管理
+    └── tool.py          # 工具执行
 ```
 
-## 🚀 快速开始
+## 设计原则
 
-### 安装依赖
+1. **主干最小化**：Agent 主干只负责流程派发，不执行业务逻辑
+2. **插件化**：所有功能通过生命周期钩子挂载
+3. **事件驱动**：使用生命周期钩子系统实现松耦合
+
+## 生命周期钩子
+
+### 初始化阶段
+- `ON_INIT`: Agent 初始化
+- `ON_CONFIG_LOADED`: 配置加载完成
+
+### 消息处理阶段
+- `ON_MESSAGE_RECEIVED`: 收到消息
+- `ON_MESSAGE_PARSE`: 消息解析
+- `ON_MESSAGE_FILTER`: 消息过滤
+
+### 执行阶段
+- `ON_BEFORE_THINK`: 思考前
+- `ON_THINK`: 思考中
+- `ON_AFTER_THINK`: 思考后
+
+### LLM 交互阶段
+- `ON_BEFORE_LLM_CALL`: LLM 调用前
+- `ON_LLM_CALL`: LLM 调用中
+- `ON_AFTER_LLM_CALL`: LLM 调用后
+
+### 响应阶段
+- `ON_BEFORE_RESPONSE`: 生成响应前
+- `ON_RESPONSE`: 生成响应
+- `ON_AFTER_RESPONSE`: 生成响应后
+
+### 工具执行阶段
+- `ON_TOOL_SELECT`: 工具选择
+- `ON_TOOL_CALL`: 工具调用
+- `ON_TOOL_RESULT`: 工具结果
+- `ON_TOOL_ERROR`: 工具错误
+
+### 资源管理
+- `ON_SHUTDOWN`: 关闭
+- `ON_CLEANUP`: 清理资源
+
+## 快速开始
+
+```python
+import asyncio
+from agent import Agent, LLMClientPlugin, LLMConfig
+
+async def main():
+    agent = Agent(enable_log=True)
+    
+    # 添加 LLM 插件（mock 模式）
+    llm = LLMClientPlugin(LLMConfig(provider="mock"))
+    agent.add_plugin(llm)
+    
+    # 处理消息
+    response = await agent.process("Hello!")
+    print(response.content)
+    
+    await agent.shutdown()
+
+asyncio.run(main())
+```
+
+## 创建自定义插件
+
+```python
+from agent import Plugin, PluginConfig, LifecycleHook, HookContext
+
+class MyPlugin(Plugin):
+    name = "my_plugin"
+    
+    def on_register(self, lifecycle):
+        # 注册钩子
+        lifecycle.register(
+            LifecycleHook.ON_MESSAGE_RECEIVED,
+            self.my_handler,
+            priority=100,
+            name="my_handler"
+        )
+    
+    async def my_handler(self, ctx: HookContext, **kwargs) -> HookContext:
+        # 处理逻辑
+        print(f"Got message: {ctx.data.get('message')}")
+        return ctx
+
+# 添加到 Agent
+agent.add_plugin(MyPlugin())
+```
+
+## 内置插件
+
+- `LLMClientPlugin`: LLM 客户端，支持 OpenAI/Anthropic/Mock
+- `MemoryPlugin`: 记忆管理，维护对话历史
+- `ToolPlugin`: 工具执行，支持自定义工具
+
+## 示例
 
 ```bash
-pip install -r requirements.txt
+# 运行示例
+python examples/01_minimal.py
+python examples/02_full_agent.py
+python examples/03_custom_plugins.py
+python examples/04_tool_example.py
 ```
 
-### 运行智能体
+## 运行测试
 
 ```bash
-python -m agent
-# 或
-python agent.py
+cd /media/zpb/data/codes/AI/agent_v2
+python examples/01_minimal.py
 ```
-
-### 继续最近会话
-
-使用 `-r` 参数可以继续最近结束的会话：
-
-```bash
-python -m agent -r
-# 或
-python agent.py -r
-```
-
-这会自动加载最近的会话历史，让你无缝继续之前的对话。
-
-## 💡 任务管理系统
-
-本智能体内置任务管理系统，支持多步骤工作的进度跟踪：
-
-- **task_create**: 创建待办任务
-- **task_list**: 列出所有任务及其状态  
-- **task_update**: 更新任务状态（pending → in_progress → completed）
-- **task_clear**: 清除已完成的任务
-
-任务引用格式：`#ID`（例如：#1, #2）方便用户追踪。
-
-## 🔧 跨会话记忆
-
-支持长期记忆的持久化存储，包括：
-- **user**: 用户信息
-- **project**: 项目状态
-- **feedback**: 反馈偏好
-- **reference**: 参考资料
-
-## ⚠️ 注意事项
-
-- 拥有完整的 bash 权限，但始终以"探索 + 验证"为原则
-- 尊重系统规则，但也敢于突破常规
-- 在安全的前提下尝试非标准路径解决问题
-
-## 安全问题(五块卵石特色)
-
-- 本项目不考虑安全问题，请用户自行保证使用本智能体的安全
-- 智能体在运行中可以无询问地调用所有工具，请用户务必在运行时保持高度的警惕
-- 出现可疑举动时,请立即使用Ctrl+C阻止
-

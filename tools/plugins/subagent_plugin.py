@@ -18,8 +18,7 @@ import os
 import subprocess
 import sys
 import time
-from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 # ── 插件定义（OpenAI function calling schema） ──────────────────────
@@ -90,10 +89,16 @@ PLUGIN_DEFINITION = {
 }
 
 
-# ── 执行器 ─────────────────────────────────────────────────────
-
 def execute(params: Dict[str, Any]) -> str:
-    """执行子 agent 任务"""
+    """
+    执行子 agent 任务
+    
+    Args:
+        params: 包含 task, context, store_result, timeout, constraints 的字典
+        
+    Returns:
+        JSON 格式的执行结果
+    """
     task = params.get("task", "")
     context = params.get("context", "")
     store_result = params.get("store_result", "")
@@ -113,16 +118,20 @@ def execute(params: Dict[str, Any]) -> str:
     timeout = int(timeout)
 
     if not task.strip():
-        return "❌ 错误：task 参数不能为空"
+        return json.dumps({
+            "status": "error",
+            "result": "task 参数不能为空",
+        }, ensure_ascii=False, indent=2)
 
     # ═══════════════════════════════════════════════════════════
     # 防递归守卫：子 agent 不可再次创建子 agent
     # ═══════════════════════════════════════════════════════════
     if os.environ.get("FP_IS_SUBAGENT") == "1":
-        return (
-            "❌ 递归调用被拒绝：当前进程已是子 agent（FP_IS_SUBAGENT=1），"
-            "不可再次创建子 agent。请直接在当前上下文中完成任务。"
-        )
+        return json.dumps({
+            "status": "error",
+            "result": "递归调用被拒绝：当前进程已是子 agent（FP_IS_SUBAGENT=1），"
+                      "不可再次创建子 agent。请直接在当前上下文中完成任务。",
+        }, ensure_ascii=False, indent=2)
 
     # ═══════════════════════════════════════════════════════════
     # 构造查询
@@ -133,14 +142,17 @@ def execute(params: Dict[str, Any]) -> str:
         query = task
 
     # ═══════════════════════════════════════════════════════════
-    # 定位 agent.py（相对于本文件的路径）
-    #   tools/plugins/subagent_plugin.py → tools/ → agent root
+    # 定位入口脚本（相对于本文件的路径）
+    #   tools/plugins/subagent_plugin.py → tools/ → agent_v2 root
     # ═══════════════════════════════════════════════════════════
-    agent_dir = Path(__file__).parent.parent.parent  # agent 根目录
-    agent_py = agent_dir / "agent.py"
+    agent_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    cli_py = os.path.join(agent_dir, "cli.py")
 
-    if not agent_py.exists():
-        return f"❌ 错误：找不到 agent.py（预期路径：{agent_py}）"
+    if not os.path.exists(cli_py):
+        return json.dumps({
+            "status": "error",
+            "result": f"找不到 cli.py（预期：{cli_py}）",
+        }, ensure_ascii=False, indent=2)
 
     # ═══════════════════════════════════════════════════════════
     # 启动子进程
@@ -155,14 +167,15 @@ def execute(params: Dict[str, Any]) -> str:
 
     try:
         result = subprocess.run(
-            [sys.executable, str(agent_py), query],
+            [sys.executable, cli_py, "-m", query],
             capture_output=True,
             text=True,
             timeout=timeout,
             env=env,
-            cwd=str(agent_dir),
+            cwd=agent_dir,
         )
     except subprocess.TimeoutExpired:
+        duration = time.time() - start_time
         return json.dumps({
             "status": "error",
             "result": f"子任务超时（{timeout}秒）",
@@ -170,10 +183,11 @@ def execute(params: Dict[str, Any]) -> str:
             "estimated_tokens": 0,
         }, ensure_ascii=False, indent=2)
     except Exception as e:
+        duration = time.time() - start_time
         return json.dumps({
             "status": "error",
             "result": f"子任务启动失败: {e}",
-            "duration": "0s",
+            "duration": f"{duration:.1f}s",
             "estimated_tokens": 0,
         }, ensure_ascii=False, indent=2)
 
@@ -222,10 +236,6 @@ def execute(params: Dict[str, Any]) -> str:
             json.loads(output)
         except (json.JSONDecodeError, ValueError):
             output = json.dumps({"reply": output}, ensure_ascii=False, indent=2)
-    elif output_format == "markdown":
-        # 确保用 ``` 包裹代码块
-        if not output.startswith("#") and not output.startswith("```"):
-            output = output  # 保持原样，LLM 通常会自然输出 Markdown
 
     # 估算 token 数（粗略）
     estimated_tokens = len(output) // 3
@@ -235,17 +245,15 @@ def execute(params: Dict[str, Any]) -> str:
     # ═══════════════════════════════════════════════════════════
     if store_result:
         try:
-            sys.path.insert(0, str(agent_dir))
-            from memory import Memory
-            mem = Memory()
-            mem.save(
-                name=store_result,
-                type_="reference",
-                description=f"[subagent] {task[:80]}",
-                content=output,
-            )
+            # 直接调用 memory_save 插件来保存
+            from .memory_save_plugin import execute as memory_save
+            memory_save({
+                "name": store_result,
+                "type": "reference",
+                "description": f"[subagent] {task[:80]}",
+                "content": output,
+            })
         except Exception as e:
-            # 记忆保存失败不阻塞主结果
             output += f"\n\n⚠️ 记忆保存失败 ({store_result}): {e}"
 
     # ═══════════════════════════════════════════════════════════

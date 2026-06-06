@@ -1,5 +1,5 @@
 """
-display.py — Five Pebbels 显示模块
+display.py — Five Pebbles 显示模块
 
 将 6 类输出 (A操作反馈/B行为提示/C异常警示/D LLM流/E系统日志/🎨仪式感)
 统一着色输出到终端。所有颜色、样式、截断长度均从 config.json
@@ -93,7 +93,7 @@ class LLMStreamer:
     """LLM 流式输出管理器
     
     封装思考/回复切换的 ANSI 状态管理，调用方只需传入 token。
-    自动处理 ┌思考┐ 标记、灰色着色、模式切换时的重置。
+    自动处理思考标记、灰色着色、模式切换时的重置。
     
     用法:
         stream = LLMStreamer(silent=False)
@@ -110,45 +110,52 @@ class LLMStreamer:
         self._thinking = False
         self._has_content = False
         self._buffer = ""
-
+        self.content = ""  # 最终内容
+        self.thinking = ""  # 思考内容
+    
     def think(self, text: str):
         """输出思考 token（配色从配置），首次自动显示思考标记"""
-        if self.silent or not text:
+        if self.silent:
+            self.thinking += text
+            return
+        if not text:
             return
         if not self._thinking:
-            # 如果之前输出过内容，先换行再显示思考标记
             prefix = "\n" if self._has_content else ""
             print(apply_style(f"{prefix}思考: ", "llm_thought"), end="", flush=True)
             self._thinking = True
         
-        # 支持截断
         truncated = truncate(text, "llm_thought")
         print(apply_style(truncated, "llm_thought"), end="", flush=True)
-
-    def content(self, text: str):
+        self.thinking += text
+    
+    def write(self, text: str):
         """缓冲回复内容，等待 end() 时统一用 rich Markdown 渲染"""
-        if self.silent or not text:
+        if self.silent:
+            self._buffer += text
+            self._has_content = True
+            self.content += text
+            return
+        if not text:
             return
         if self._thinking:
-            print()  # 重置 + 换行
+            print()
             self._thinking = False
         self._buffer += text
         self._has_content = True
-
+    
     def end(self):
         """结束流式输出，用 rich 渲染完整的 Markdown 内容"""
         if self.silent:
             return
         if self._thinking:
-            print(apply_style("", "llm_thought"))  # 重置并换行
+            print(apply_style("", "llm_thought"))
         elif self._has_content and self._buffer:
             self._render_markdown(self._buffer)
             self._buffer = ""
         elif self._has_content:
             print()
-
-    # ── 内部辅助 ──────────────────────────────────────
-
+    
     @staticmethod
     def _render_markdown(text: str):
         """用 rich 渲染 Markdown，缺失时降级为纯文本"""
@@ -176,35 +183,82 @@ def debug(msg: str):
 #   注册名称: "startup", "shutdown_panel", "logo"
 # ═══════════════════════════════════════════════════════════
 
-def startup(model: str):
+def startup(model: str, resume: bool = False):
     """启动横幅"""
-    print(apply_style(f"🤖 Five Pebbels 已启动 (模型: {model})", "startup"))
+    if resume:
+        print(apply_style(f"🤖 Five Pebbles 已续会话 (模型: {model})", "startup"))
+    else:
+        print(apply_style(f"🤖 Five Pebbles 已启动 (模型: {model})", "startup"))
     print()
+
+
+def _display_width(text: str) -> int:
+    """返回字符串在终端中的实际显示宽度（全宽=2，半宽=1）"""
+    try:
+        from wcwidth import wcswidth
+        w = wcswidth(text)
+        return w if w >= 0 else len(text)
+    except ImportError:
+        return len(text)
 
 
 def shutdown_panel(summary: str, file: str, model: str,
                    msg_count: int, created: str,
                    duration: str = ""):
-    """退出时的统计面板（框线装饰）"""
-    W = 48
-    sep = "─" * W
+    """退出时的统计面板（框线装饰），自动适应内容宽度"""
+    MIN_W = 48   # 最小宽度
+    MAX_W = 60   # 最大宽度，防止撑爆终端
+
+    # 先收集所有内容行（不含边框装饰），算出最大显示宽度
+    entries: list[tuple[str, str]] = [
+        ("📂  会话结束", "header"),
+        ("", "sep"),
+        (f"总结: {summary}", "info"),
+        (f"文件: {file}", "info"),
+        ("", "sep"),
+        ("📊  统计信息", "header"),
+        ("", "sep"),
+        (f"模型: {model}", "info"),
+        (f"消息: {msg_count} 条", "info"),
+        (f"创建: {created}", "info"),
+    ]
+    if duration:
+        entries.append((f"耗时: {duration}", "info"))
+
+    # 用终端显示宽度计算，而非 Python len()
+    max_text_width = max(_display_width(text) for text, _ in entries)
+    W = min(max(MIN_W, max_text_width + 6), MAX_W)
+    text_w = W - 6  # 文本实际可用显示宽度
+
+    sep = "─" * (W - 2)          # ╔═...═╗ 中间的横线长度
 
     def tb(text: str) -> str:
-        return f"║  {text:<{W + 4}s}║"
+        """内容行：║ + 2空格 + 文本(左对齐，超长截断) + 2空格 + ║"""
+        if _display_width(text) <= text_w:
+            # 足够短，正常填充空格对齐
+            pad = text_w - _display_width(text)
+            return f"║  {text}{' ' * pad}  ║"
+        else:
+            # 超长截断：逐个字符裁剪至 ≤ text_w - 1，末尾加 …
+            result = ""
+            for ch in text:
+                candidate = result + ch
+                if _display_width(candidate + "…") > text_w:
+                    break
+                result = candidate
+            display = result + "…"
+            pad = text_w - _display_width(display)
+            return f"║  {display}{' ' * pad}  ║"
+
+    def sep_line() -> str:
+        return f"║{sep}║"
 
     print(f"\n╔{sep}╗")
-    print(tb("📂  会话结束"))
-    print(f"║{sep}║")
-    print(tb(f"总结: {summary}"))
-    print(tb(f"文件: {file}"))
-    print(f"║{sep}║")
-    print(tb("📊  统计信息"))
-    print(f"║{sep}║")
-    print(tb(f"模型: {model}"))
-    print(tb(f"消息: {msg_count} 条"))
-    print(tb(f"创建: {created}"))
-    if duration:
-        print(tb(f"耗时: {duration}"))
+    for text, typ in entries:
+        if typ == "sep":
+            print(sep_line())
+        else:
+            print(tb(text))
     print(f"╚{sep}╝")
     print()
     print("👋  再见！")
@@ -241,7 +295,7 @@ LOGO_ART = r'''
 ::::::::::::::::::::::::,,         ,:,::::::::::::::::::::::
 :::::::::::::::::::::::::,,,,,,,,,,:::::::::::::::::::::::::
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-::::::::::::::::::::::::Five Pebbels::::::::::::::::::::::::
+::::::::::::::::::::::::Five Pebbles::::::::::::::::::::::::
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 '''
 

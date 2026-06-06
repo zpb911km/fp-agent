@@ -1,15 +1,14 @@
 """
-Memory Save 插件 - 保存长期记忆
+Memory Save 插件 — 保存长期记忆
 
 用于跨会话持久化用户偏好、项目信息、重要决策等。
 """
 
-from datetime import datetime
 import os
-from pathlib import Path
-from typing import Dict, Any
+from datetime import datetime
+from typing import Any, Dict
 
-from ._plugin_config import get_memory_dir
+import config
 
 
 # ── 插件定义（OpenAI function calling schema） ──────────────────────
@@ -37,9 +36,10 @@ PLUGIN_DEFINITION = {
 }
 
 
+VALID_TYPES = ["user", "project", "feedback", "reference"]
 
 
-def execute(params: dict) -> str:
+def execute(params: Dict[str, Any]) -> str:
     """
     保存记忆
     
@@ -50,38 +50,35 @@ def execute(params: dict) -> str:
         保存结果
     """
     name = params.get("name", "")
-    mem_type = params.get("type")
-    description = params.get("description")
+    mem_type = params.get("type", "")
+    description = params.get("description", "")
     content = params.get("content", "")
     
-    # 验证参数
-    required = ["name", "type", "description", "content"]
-    for field in required:
-        if not params.get(field):
-            raise ValueError(f"memory_save 需要以下参数：{', '.join(required)}")
+    # 验证必填参数
+    if not all([name, mem_type, description, content]):
+        raise ValueError("memory_save 需要以下参数：name, type, description, content")
     
-    valid_types = ["user", "project", "feedback", "reference"]
-    if mem_type not in valid_types:
-        raise ValueError(f"type 必须是 {valid_types} 之一")
+    # 验证类型
+    if mem_type not in VALID_TYPES:
+        raise ValueError(f"type 必须是 {VALID_TYPES} 之一")
     
-    memory_dir = get_memory_dir()
+    memory_dir = config.MEMORY_DIR
     os.makedirs(memory_dir, exist_ok=True)
     
-    # 格式化名称
+    # 安全文件名
     safe_name = name.replace(" ", "_").replace("/", "_")
     
-    # 创建文件路径
-    path = Path(memory_dir) / f"{safe_name}.md"
+    path = os.path.join(memory_dir, f"{safe_name}.md")
     date = datetime.now().strftime("%Y-%m-%d %H:%M")
     
     # 写入 YAML frontmatter + 正文
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(f"---\n")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("---\n")
         f.write(f"name: {safe_name}\n")
         f.write(f"description: {description}\n")
         f.write(f"type: {mem_type}\n")
         f.write(f"created: {date}\n")
-        f.write(f"---\n\n")
+        f.write("---\n\n")
         f.write(content + "\n")
     
     return f"✅ 记忆已保存：{safe_name} ({mem_type})"

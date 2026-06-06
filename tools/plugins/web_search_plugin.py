@@ -1,11 +1,11 @@
 """
-Web Search 插件 - 网络搜索
+Web Search 插件 — 网络搜索
 
-使用 ddgs 库进行网络搜索（原 duckduckgo_search）。
+使用 ddgs 库进行网络搜索。
 需要安装：pip install ddgs
 """
 
-from typing import Dict, Any
+from typing import Any, Dict
 
 
 # ── 插件定义（OpenAI function calling schema） ──────────────────────
@@ -36,8 +36,7 @@ def execute(params: Dict[str, Any]) -> str:
     Returns:
         搜索结果字符串
     """
-    query = params.get("query")
-    
+    query = params.get("query", "")
     if not query:
         raise ValueError("web_search 插件需要 query 参数")
     
@@ -47,17 +46,20 @@ def execute(params: Dict[str, Any]) -> str:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=5))
         
-        output_lines = [f"🔍 搜索 '{query}' 的结果:\n"]
+        if not results:
+            return "未找到相关结果"
         
-        for i, result in enumerate(results, 1):
-            output_lines.append(f"\n{i}. {result['title']}")
-            output_lines.append(f"   URL: {result['href']}")
-            snippet = result.get('body', '')[:200]
-            output_lines.append(f"   摘要：{snippet}...")
+        output_lines = [f"🔍 搜索 '{query}' 的结果:\n"]
+        for i, r in enumerate(results, 1):
+            output_lines.append(f"\n{i}. {r.get('title', '无标题')}")
+            output_lines.append(f"   URL: {r.get('href', '')}")
+            snippet = r.get('body', '')[:200]
+            if snippet:
+                output_lines.append(f"   摘要：{snippet}...")
         
         return "\n".join(output_lines)
-        
+    
     except ImportError:
-        return "❌ 错误：未安装 ddgs 库\n请运行：pip install ddgs"
+        return "错误：未安装 ddgs 库（pip install ddgs）"
     except Exception as e:
-        return f"❌ 搜索失败：{e}"
+        return f"错误：{e}"

@@ -1,0 +1,353 @@
+"""
+会话管理
+
+管理对话历史和会话文件。每个会话文件格式：
+
+  第 1 行:  {"__meta__": true, "id": "s_xxx", "created": "...", "updated": "...", ...}
+  第 2+ 行: {"role": "user", "content": "..."}   （按时间正序，最新在末尾）
+
+无独立 meta 文件 / _current 文件。启动时扫描目录，
+取 updated 最新的会话作为"上一个会话"。
+"""
+
+import json
+import os
+import re
+import sys
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+import config
+SESSIONS_DIR = os.path.join(PROJECT_ROOT, "data", "sessions")
+
+
+# ── 辅助：会话文件名模式 ──────────────────────────
+
+SID_PATTERN = re.compile(r"^s_\d{6}_\d{12,}.*\.jsonl$")  # 微秒级 sid
+
+def _is_session_file(filename: str) -> bool:
+    return bool(SID_PATTERN.match(filename))
+
+def _extract_sid(filename: str) -> str:
+    """从文件名提取原始 sid（去掉 summary 后缀）。"""
+    # s_260606_1600_summary_123456.jsonl → s_260606_1600
+    match = re.match(r"^(s_\d{6}_\d{12,})", filename)
+    return match.group(1) if match else filename.replace(".jsonl", "")
+
+
+# ── 会话文件（嵌入 meta） ─────────────────────────
+
+def _default_meta(sid: str) -> dict:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return {
+        "__meta__": True,
+        "id": sid,
+        "created": now,
+        "updated": now,
+        "summary": "",
+        "message_count": 0,
+    }
+
+def _generate_sid() -> str:
+    """生成唯一会话 ID（微秒级 + 防冲突后缀）。"""
+    base = datetime.now().strftime("s_%y%m%d_%H%M%S%f")  # 含微秒
+    sid = base
+    # 如果文件已存在，加自增后缀
+    for i in range(100):
+        if not os.path.exists(_session_path(sid)):
+            return sid
+        sid = f"{base}_{i}"
+    # 极端情况：加随机数
+    import random
+    return f"{base}_{random.randint(1000, 9999)}"
+
+def _session_path(sid: str) -> str:
+    """返回 sid 对应的 .jsonl 文件路径（不含 summary 后缀的原始文件）。"""
+    return os.path.join(SESSIONS_DIR, f"{sid}.jsonl")
+
+def _read_meta_from_file(path: str) -> Optional[dict]:
+    """读取会话文件第一行中的 meta 信息。"""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            first = f.readline().strip()
+            if first:
+                meta = json.loads(first)
+                if meta.get("__meta__"):
+                    return meta
+    except Exception:
+        pass
+    return None
+
+def _write_meta_to_file(path: str, meta: dict) -> bool:
+    """重写会话文件的第一行（meta header）。"""
+    if not os.path.exists(path):
+        return False
+    try:
+        content = json.dumps(meta, ensure_ascii=False)
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content + "\n")
+            f.writelines(lines[1:])
+        return True
+    except Exception:
+        return False
+
+def _find_latest_session() -> Optional[str]:
+    """扫描 sessions 目录，返回 updated 最新的会话 sid。
+    若无任何会话，返回 None。"""
+    latest_sid = None
+    latest_time = ""
+
+    try:
+        for fname in os.listdir(SESSIONS_DIR):
+            if not _is_session_file(fname):
+                continue
+            path = os.path.join(SESSIONS_DIR, fname)
+            meta = _read_meta_from_file(path)
+            if meta and meta.get("updated", "") > latest_time:
+                latest_time = meta["updated"]
+                latest_sid = meta.get("id", _extract_sid(fname))
+    except Exception:
+        pass
+
+    return latest_sid
+
+
+# ── SessionManager ────────────────────────────────
+
+class SessionManager:
+    """会话管理器"""
+
+    _session_id: str
+    _meta: dict
+    _context: List[Dict[str, Any]]
+
+    def __init__(self, resume: bool = False):
+        """
+        resume=False → 创建新会话（默认）
+        resume=True  → 续上一个会话（找 updated 最新的）
+        """
+        os.makedirs(SESSIONS_DIR, exist_ok=True)
+
+        if resume:
+            latest = _find_latest_session()
+            if latest and self._session_exists(latest):
+                self._session_id = latest
+                self._meta = self._load_meta_from_session()
+                self._context: List[Dict[str, Any]] = []
+                return
+
+        # 默认：创建新会话
+        self._session_id = self._init_session()
+        self._meta = self._load_meta_from_session()
+        self._context: List[Dict[str, Any]] = []
+
+    # ── 内部工具 ──────────────────────────────────
+
+    @staticmethod
+    def _session_exists(sid: str) -> bool:
+        path = _session_path(sid)
+        return os.path.exists(path)
+
+    def _session_path(self, sid: Optional[str] = None) -> str:
+        sid = sid or self._session_id
+        return _session_path(sid)
+
+    def _load_meta_from_session(self, sid: Optional[str] = None) -> dict:
+        """从会话文件读取 meta。"""
+        sid = sid or self._session_id
+        path = self._session_path(sid)
+        meta = _read_meta_from_file(path)
+        if meta is None:
+            meta = _default_meta(sid)
+        return meta
+
+    def _write_meta(self, meta: Optional[dict] = None):
+        """将 meta 写回文件第一行。"""
+        if meta is None:
+            meta = self._meta
+        path = self._session_path()
+        _write_meta_to_file(path, meta)
+
+    # ── 会话生命周期 ──────────────────────────────
+
+    def _init_session(self) -> str:
+        """创建新会话。"""
+        sid = _generate_sid()
+        meta = _default_meta(sid)
+        path = _session_path(sid)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(meta, ensure_ascii=False) + "\n")
+        self._meta = meta
+        return sid
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    def list_sessions(self) -> Dict[str, Dict[str, Any]]:
+        """列出所有会话及其 meta。扫描 sessions 目录。"""
+        sessions = {}
+        try:
+            for fname in os.listdir(SESSIONS_DIR):
+                if not _is_session_file(fname):
+                    continue
+                path = os.path.join(SESSIONS_DIR, fname)
+                meta = _read_meta_from_file(path)
+                if meta:
+                    sid = meta.get("id", _extract_sid(fname))
+                    sessions[sid] = meta
+        except Exception:
+            pass
+        return sessions
+
+    def switch_session(self, sid: str) -> bool:
+        """切换到指定会话。"""
+        if not self._session_exists(sid):
+            return False
+        self._session_id = sid
+        self._meta = self._load_meta_from_session()
+        self._context.clear()
+        return True
+
+    def create_session(self) -> str:
+        """创建新会话并切换过去。"""
+        self._session_id = self._init_session()
+        self._meta = self._load_meta_from_session()
+        self._context.clear()
+        return self._session_id
+
+    def resume_latest(self) -> bool:
+        """尝试续最近会话。成功返回 True，否则创建新会话。"""
+        latest = _find_latest_session()
+        if latest and self._session_exists(latest):
+            self._session_id = latest
+            self._meta = self._load_meta_from_session()
+            self._context.clear()
+            return True
+        # 没有历史会话 → 创建新会话
+        self._session_id = self._init_session()
+        self._meta = self._load_meta_from_session()
+        self._context.clear()
+        return False
+
+    # ── 消息存储（正序，最新在文件末尾） ──────────
+
+    def save_message(self, role: str, content: str, **kwargs):
+        """追加一条消息到文件末尾，并更新文件内嵌的 meta。"""
+        msg = {"role": role, "content": content}
+        for k, v in kwargs.items():
+            if v:
+                msg[k] = v
+
+        path = self._session_path()
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+
+        self._meta["message_count"] = self._meta.get("message_count", 0) + 1
+        self._meta["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._write_meta(self._meta)
+
+    def save_context(self, context: List[Dict[str, Any]]):
+        """将完整上下文写入文件（重写）。正序写入，最新在末尾。"""
+        path = self._session_path()
+
+        lines = []
+        msg_count = 0
+        for msg in context:
+            if msg.get("role") == "system":
+                continue
+            msg_count += 1
+            save_msg = {"role": msg["role"], "content": msg.get("content", "")}
+            for k in ("tool_calls", "tool_call_id", "reasoning_content"):
+                if msg.get(k):
+                    save_msg[k] = msg[k]
+            lines.append(json.dumps(save_msg, ensure_ascii=False))
+
+        self._meta["message_count"] = msg_count
+        self._meta["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(json.dumps(self._meta, ensure_ascii=False) + "\n")
+                for line in lines:
+                    f.write(line + "\n")
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
+    def load_context(self, system_prompt: str) -> List[Dict[str, Any]]:
+        """加载上下文（system + 历史消息，正序）。"""
+        context = [{"role": "system", "content": system_prompt}]
+        path = self._session_path()
+
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                for line in lines[1:]:
+                    line = line.strip()
+                    if line:
+                        msg = json.loads(line)
+                        context.append(msg)
+            except Exception:
+                pass
+
+        self._context = context
+        return context
+
+    # ── 上下文管理 ──────────────────────────────
+
+    def get_context(self) -> List[Dict[str, Any]]:
+        return self._context
+
+    def set_context(self, context: List[Dict[str, Any]]):
+        self._context = context
+
+    def update_meta(self, sid: Optional[str] = None, **kwargs):
+        """更新指定会话的内嵌 meta 字段。"""
+        sid = sid or self._session_id
+        path = _session_path(sid)
+        meta = _read_meta_from_file(path)
+        if meta is None:
+            return
+        meta.update(kwargs)
+        meta["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _write_meta_to_file(path, meta)
+        if sid == self._session_id:
+            self._meta = meta
+
+    def clear_context(self, system_prompt: str):
+        """清空上下文（保留 system），重置 meta。"""
+        self._meta = _default_meta(self._session_id)
+        path = self._session_path()
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(self._meta, ensure_ascii=False) + "\n")
+        self._context = [{"role": "system", "content": system_prompt}]
+
+
+class LoopDetector:
+    """死循环检测器"""
+
+    def __init__(self, max_iterations: Optional[int] = None):
+        self.max_iterations = max_iterations if max_iterations is not None else config.MAX_ITERATIONS
+
+    def check(self, iteration: int, response: str) -> Tuple[bool, str]:
+        if iteration >= self.max_iterations:
+            return True, f"达到最大迭代次数 ({self.max_iterations})"
+        return False, ""
+
+    def reset(self):
+        pass

@@ -1,5 +1,5 @@
 """
-核心工具模块 - 不可插件化的基础工具
+核心工具模块 — 不可插件化的基础工具
 
 这些工具必须保持直接绑定，作为系统的基础设施：
 - bash: Shell 命令执行
@@ -8,10 +8,9 @@
 - edit_file: 精确文本替换
 """
 
-import subprocess
-import tempfile
 import os
-from typing import Dict, Any
+import subprocess
+from typing import Any, Dict
 
 
 # ── 核心工具定义（OpenAI function calling schema） ──────────────────────
@@ -83,12 +82,20 @@ CORE_TOOL_DEFINITIONS = [
 
 def get_core_definitions() -> list:
     """返回核心工具的 OpenAI schema 定义"""
-    return CORE_TOOL_DEFINITIONS.copy()
+    return list(CORE_TOOL_DEFINITIONS)
 
 
 def execute_core_tool(tool_name: str, params: Dict[str, Any]) -> Any:
-    """执行核心工具"""
+    """
+    执行核心工具
     
+    Args:
+        tool_name: bash / read_file / write_file / edit_file
+        params: 参数字典
+        
+    Returns:
+        执行结果
+    """
     if tool_name == "bash":
         command = params.get("command")
         if not command:
@@ -106,27 +113,40 @@ def execute_core_tool(tool_name: str, params: Dict[str, Any]) -> Any:
             output = result.stdout
             if result.stderr:
                 output += f"\n[stderr]\n{result.stderr}"
-        except KeyboardInterrupt:
-            output = "[error] 用户中断,请等用户指示"
-        except Exception as e:
-            output = f"[error] 运行出错：{e}"
             
-        return output
+            # 截断 10000 字符
+            if len(output) > 10000:
+                output = output[:10000] + f"\n...（已截断，原文 {len(output)} 字符）"
+            
+            return output
+        except subprocess.TimeoutExpired:
+            return "错误：命令执行超时（300秒）"
+        except Exception as e:
+            return f"错误：{e}"
     
     elif tool_name == "read_file":
         file_path = params.get("file_path")
-        assert isinstance(file_path, str), "read_file 需要 file_path 参数"
+        if not file_path:
+            raise ValueError("read_file 需要 file_path 参数")
         
-        offset = params.get("offset", 0)
-        limit = params.get("limit")
-        
-        with open(file_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        
-        start = offset if isinstance(offset, int) and offset >= 0 else 0
-        end = start + limit if isinstance(limit, int) else None
-        
-        return ''.join(lines[start:end])
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                offset = params.get("offset", 0)
+                limit = params.get("limit")
+                
+                if offset:
+                    for _ in range(offset):
+                        f.readline()
+                
+                content = f.read()
+                if limit:
+                    lines = content.split("\n")
+                    return "\n".join(lines[:limit])
+                return content
+        except FileNotFoundError:
+            return f"错误：文件不存在 {file_path}"
+        except Exception as e:
+            return f"错误：{e}"
     
     elif tool_name == "write_file":
         file_path = params.get("file_path")
@@ -135,38 +155,46 @@ def execute_core_tool(tool_name: str, params: Dict[str, Any]) -> Any:
         if not file_path or content is None:
             raise ValueError("write_file 需要 file_path 和 content 参数")
         
-        # 确保目录存在
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-        
-        return f"✅ 文件已写入：{file_path}"
+        try:
+            # 确保目录存在
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            
+            return f"文件已写入: {file_path}"
+        except Exception as e:
+            return f"错误：{e}"
     
     elif tool_name == "edit_file":
         file_path = params.get("file_path")
         old_string = params.get("old_string")
         new_string = params.get("new_string")
         
-        assert isinstance(file_path, str) and isinstance(old_string, str) and isinstance(new_string, str), \
-            "edit_file 需要 file_path, old_string, new_string 三个字符串参数"
+        if not file_path or old_string is None or new_string is None:
+            raise ValueError("edit_file 需要 file_path, old_string, new_string 参数")
         
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        if old_string not in content:
-            raise ValueError(f"未找到目标文本：{old_string[:50]}...")
-        
-        # 检查是否是唯一匹配
-        if content.count(old_string) > 1:
-            raise ValueError(f"存在多个匹配项,请指定更加明确的old_string参数")
-        
-        new_content = content.replace(old_string, new_string, 1)
-        
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(new_content)
-        
-        return f"✅ 已替换文本（首次出现）"
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            
+            if old_string not in content:
+                return f"错误：未找到要替换的文本"
+            
+            # 检查唯一性
+            if content.count(old_string) > 1:
+                return f"错误：存在多个匹配项，请指定更加明确的 old_string 参数"
+            
+            content = content.replace(old_string, new_string, 1)
+            
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            
+            return f"文件已修改: {file_path}"
+        except FileNotFoundError:
+            return f"错误：文件不存在 {file_path}"
+        except Exception as e:
+            return f"错误：{e}"
     
     else:
         raise ValueError(f"未知核心工具：{tool_name}")
