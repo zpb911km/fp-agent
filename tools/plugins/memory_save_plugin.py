@@ -1,9 +1,10 @@
 """
-Memory Save 插件 — 保存长期记忆
+Memory Save 插件 — 保存长期记忆（异步版本）
 
 用于跨会话持久化用户偏好、项目信息、重要决策等。
 """
 
+import asyncio
 import os
 from datetime import datetime
 from typing import Any, Dict
@@ -39,9 +40,9 @@ PLUGIN_DEFINITION = {
 VALID_TYPES = ["user", "project", "feedback", "reference"]
 
 
-def execute(params: Dict[str, Any]) -> str:
+async def execute(params: Dict[str, Any]) -> str:
     """
-    保存记忆
+    保存记忆（异步）
     
     Args:
         params: 包含 name, type, description, content 的字典
@@ -63,7 +64,6 @@ def execute(params: Dict[str, Any]) -> str:
         raise ValueError(f"type 必须是 {VALID_TYPES} 之一")
     
     memory_dir = config.MEMORY_DIR
-    os.makedirs(memory_dir, exist_ok=True)
     
     # 安全文件名
     safe_name = name.replace(" ", "_").replace("/", "_")
@@ -71,14 +71,19 @@ def execute(params: Dict[str, Any]) -> str:
     path = os.path.join(memory_dir, f"{safe_name}.md")
     date = datetime.now().strftime("%Y-%m-%d %H:%M")
     
-    # 写入 YAML frontmatter + 正文
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("---\n")
-        f.write(f"name: {safe_name}\n")
-        f.write(f"description: {description}\n")
-        f.write(f"type: {mem_type}\n")
-        f.write(f"created: {date}\n")
-        f.write("---\n\n")
-        f.write(content + "\n")
+    loop = asyncio.get_running_loop()
+    
+    def _write():
+        os.makedirs(memory_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("---\n")
+            f.write(f"name: {safe_name}\n")
+            f.write(f"description: {description}\n")
+            f.write(f"type: {mem_type}\n")
+            f.write(f"created: {date}\n")
+            f.write("---\n\n")
+            f.write(content + "\n")
+    
+    await loop.run_in_executor(None, _write)
     
     return f"✅ 记忆已保存：{safe_name} ({mem_type})"

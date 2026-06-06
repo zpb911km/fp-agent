@@ -179,6 +179,7 @@ def get_default_config() -> dict:
             "info": {"color": "green"},
             "error": {"color": "bright_red", "bold": True},
             "warning": {"color": "yellow"},
+            "yellow_bold": {"color": "yellow", "bold": True},
             "llm_thought": {"color": "magenta", "dim": True},
             "llm_tool": {"color": "yellow"},
         }

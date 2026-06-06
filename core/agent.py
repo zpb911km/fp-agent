@@ -1,8 +1,9 @@
 """
-Agent 主干类
+Agent 主干类（全异步版本）
 生命周期驱动的完整 Agent 实现
 """
 
+import asyncio
 import json
 import os
 import re
@@ -42,7 +43,7 @@ class Response:
 
 class Agent:
     """
-    完整 Agent 实现
+    完整 Agent 实现（全异步）
     
     特性：
     - 生命周期驱动的插件系统
@@ -53,14 +54,14 @@ class Agent:
     - 上下文压缩
     """
     
-    def __init__(self, enable_log: bool = False, resume: bool = False):
+    def __init__(self, enable_log: bool = False, resume: Optional[str] = None):
         self.enable_log = enable_log
         
         # 检查配置
         if not config.check_llm_config():
             raise ValueError("LLM API 配置不完整")
         
-        # LLM 客户端
+        # LLM 客户端（异步 httpx）
         from core.llm_client import Client
         self.client = Client(
             api_key=config.LLM_API_KEY,
@@ -90,6 +91,10 @@ class Agent:
         
         # 核弹退出标记（由 exit! 命令设置，shutdown 检查）
         self._nuclear_exit = False
+        
+        # ESC/Ctrl+C 中断标记
+        self._interrupted = False
+        self._processing = False  # 是否正在处理请求（供信号处理器判断）
         
         # 循环检测器
         self._loop_detector = session.LoopDetector(
@@ -350,51 +355,81 @@ class Agent:
         self._context.extend([{"role": "system", "content": self._system_prompt}])
         self.session.clear_context(self._system_prompt)
     
-    # ============ LLM 调用 ============
+    # ============ 中断机制 ============
     
-    def _stream_chat(self, context: List[Dict], silent: bool = False) -> Dict:
-        """发起流式聊天请求"""
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=context,
-            tools=tools.TOOL_DEFINITIONS,
-            stream=True,
-            temperature=config.LLM_TEMPERATURE,
-            max_tokens=config.LLM_MAX_TOKENS,
-            extra_body={"enable_thinking": False},
-        )
-        
+    def cancel(self):
+        """信号处理器回调：标记中断，下次检查点会响应"""
+        self._interrupted = True
+    
+    def _check_interrupted(self):
+        """检查中断标志并抛出 CancelledError"""
+        if self._interrupted:
+            self._interrupted = False
+            self._processing = False
+            raise asyncio.CancelledError("用户中断")
+    
+    # ============ LLM 调用（异步） ============
+    
+    async def _stream_chat(self, context: List[Dict], silent: bool = False) -> Dict:
+        """发起流式聊天请求（异步）"""
         content = ""
         reasoning_content = ""
         tool_calls: Dict[int, Dict] = {}
         streamer = display.LLMStreamer(silent=silent)
         
-        for chunk in response:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
+        try:
+            # ⚠️ 必须放在 try 块内：若在此 await 时被 task.cancel() 中断，
+            # CancelledError 需被捕获以正确返回部分内容。
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=context,
+                tools=tools.TOOL_DEFINITIONS,
+                stream=True,
+                temperature=config.LLM_TEMPERATURE,
+                max_tokens=config.LLM_MAX_TOKENS,
+                extra_body={"enable_thinking": False},
+            )
             
-            # 捕获 reasoning_content
-            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                reasoning_content += delta.reasoning_content
-                streamer.think(delta.reasoning_content)
-            
-            if delta.content:
-                content += delta.content
-                streamer.write(delta.content)
-            
-            if delta.tool_calls:
-                for tc_delta in delta.tool_calls:
-                    idx = tc_delta.index
-                    if idx not in tool_calls:
-                        tool_calls[idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
-                    if tc_delta.id:
-                        tool_calls[idx]["id"] = tc_delta.id
-                    if tc_delta.function:
-                        if tc_delta.function.name:
-                            tool_calls[idx]["function"]["name"] += tc_delta.function.name
-                        if tc_delta.function.arguments:
-                            tool_calls[idx]["function"]["arguments"] += tc_delta.function.arguments
+            async for chunk in response:
+                # 检查中断
+                self._check_interrupted()
+                
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                
+                # 捕获 reasoning_content
+                if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                    reasoning_content += delta.reasoning_content
+                    streamer.think(delta.reasoning_content)
+                
+                if delta.content:
+                    content += delta.content
+                    streamer.write(delta.content)
+                
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tool_calls:
+                            tool_calls[idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                        if tc_delta.id:
+                            tool_calls[idx]["id"] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                tool_calls[idx]["function"]["name"] += tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tool_calls[idx]["function"]["arguments"] += tc_delta.function.arguments
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            # 中断时关闭 SSE 连接，保留已收集的部分内容
+            try:
+                await response.close()
+            except (NameError, AttributeError):
+                pass  # response 尚未创建（中断发生在 create() 阶段）
+            streamer.end(interrupted=True)
+            self._interrupted = False  # 重置标志，防止残留
+            interrupted = True
+        else:
+            interrupted = False
         
         streamer.end()
         
@@ -403,13 +438,14 @@ class Agent:
             msg["reasoning_content"] = reasoning_content
         if tool_calls:
             msg["tool_calls"] = [v for _, v in sorted(tool_calls.items())]
+        msg["_interrupted"] = interrupted
         
         return msg
     
-    # ============ 工具执行 ============
+    # ============ 工具执行（异步） ============
     
-    def _execute_tool(self, tc: Dict, silent: bool = False) -> str:
-        """执行工具调用"""
+    async def _execute_tool(self, tc: Dict, silent: bool = False) -> str:
+        """执行工具调用（异步）"""
         name = tc["function"]["name"]
         try:
             args = json.loads(tc["function"]["arguments"])
@@ -421,7 +457,9 @@ class Agent:
             display.llm_tool(f"  🛠️  {name}({json.dumps(safe_args, ensure_ascii=False)})")
         
         try:
-            result = tools.dispatch(name, **args)
+            result = await tools.dispatch(name, **args)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            raise
         except Exception as e:
             return f"❌ 工具执行失败 ({name}): {e}"
         
@@ -465,14 +503,7 @@ class Agent:
     
     @staticmethod
     def _repair_tool_ordering(messages: List[Dict]) -> List[Dict]:
-        """修复 tool 消息顺序 — 不丢弃信息，转为合成消息保留
-        
-        两种场景的修复策略：
-        1. 孤立的 tool result（无对应的 assistant.tool_calls）
-           → 转为 user 消息保留内容，带 [工具调用结果] 标记
-        2. 孤立的 assistant（有 tool_calls，但对应的 tool result 缺失）
-           → 移除 tool_calls，将调用信息转为文本追加到 content
-        """
+        """修复 tool 消息顺序 — 不丢弃信息，转为合成消息保留"""
         result = []
         buffer: List[Dict] = []
         active_tool_ids: set = set()
@@ -481,7 +512,6 @@ class Agent:
         
         for m in messages:
             if m["role"] == "assistant" and m.get("tool_calls"):
-                # 检查是否有 tool result 缺失
                 tc_ids = {tc["id"] for tc in m["tool_calls"] if tc.get("id")}
                 missing_results = False
                 
@@ -501,7 +531,6 @@ class Agent:
                         result.extend(buffer)
                         buffer = []
                 else:
-                    # 不丢弃！转为 user 消息保留重要内容
                     converted += 1
                     tool_content = m.get("content", "")
                     converted_msg = {
@@ -513,15 +542,12 @@ class Agent:
             else:
                 buffer.append(m)
         
-        # 处理尾部：如果还有未配对的 tool_calls，修复对应的 assistant
-        # 检查 result 中最后一个 assistant 是否还有未匹配的 tool_calls
         if active_tool_ids:
             for i in range(len(result) - 1, -1, -1):
                 if result[i]["role"] == "assistant" and result[i].get("tool_calls"):
                     remaining_ids = {tc["id"] for tc in result[i]["tool_calls"] if tc.get("id")}
                     still_missing = remaining_ids & active_tool_ids
                     if still_missing:
-                        # 将缺失的 tool_calls 转为文本注释
                         tc_texts = []
                         new_tc_list = []
                         for tc in result[i]["tool_calls"]:
@@ -554,15 +580,14 @@ class Agent:
         
         return result
     
-    def _compact_context(self):
-        """压缩上下文"""
+    async def _compact_context(self):
+        """压缩上下文（异步）"""
         history_msgs = [m for m in self._context if m["role"] != "system"]
         
         if len(history_msgs) <= 4:
             display.info("对话历史较短，无需压缩")
             return
         
-        # 保留最近消息
         recent = history_msgs[-4:]
         to_compact = history_msgs[:-4]
         
@@ -580,7 +605,7 @@ class Agent:
                 {"role": "system", "content": "你是一个对话压缩助手，擅长提炼关键信息。"},
                 {"role": "user", "content": f"请将以下对话历史压缩为一段连贯的摘要，保留关键信息（用户需求、已做的操作、重要结论）。用中文，200字以内。只输出摘要。\n\n{compact_text}"}
             ]
-            assistant_msg = self._stream_chat(compact_context, silent=True)
+            assistant_msg = await self._stream_chat(compact_context, silent=True)
             summary = assistant_msg.get("content", "").strip()
             if not summary:
                 raise ValueError("LLM 返回空")
@@ -596,15 +621,14 @@ class Agent:
         
         display.info(f" ✅\n📦 已压缩 {len(to_compact)} 条消息为摘要")
     
-    def _cmd_back(self):
-        """回退到对话的某个历史时刻"""
+    async def _cmd_back(self):
+        """回退到对话的某个历史时刻（异步）"""
         history_msgs = [m for m in self._context if m["role"] != "system"]
         
         if not history_msgs:
             display.info("没有历史记录可以回退")
             return
         
-        # 显示带编号的消息列表
         roles_zh = {"user": "👤 用户", "assistant": "🤖 AI", "tool": "🔧 工具"}
         display.info(f"\n📜 对话历史（共 {len(history_msgs)} 条消息）:")
         print()
@@ -624,8 +648,9 @@ class Agent:
         display.hint(f"  输入 q 取消")
         print()
         
+        loop = asyncio.get_running_loop()
         try:
-            choice = input("AI <- 选择: ").strip()
+            choice = await loop.run_in_executor(None, lambda: input("AI <- 选择: ").strip())
         except (EOFError, KeyboardInterrupt):
             print()
             return
@@ -643,47 +668,38 @@ class Agent:
             display.error("❌ 请输入数字")
             return
         
-        # 保留选中的消息及之前的内容，删除之后的新消息
         keep_in_context = idx + 1
         del self._context[keep_in_context + 1:]
         
-        # 写回文件
         self.session.save_context(self._context)
         
         display.info(f"⏪ 已回退到第 {choice} 条消息位置")
     
     def _cmd_fork(self):
         """基于当前上下文新建会话"""
-        # 1. 备份当前 non-system 消息
         old_messages = [m for m in self._context if m["role"] != "system"]
         
         if not old_messages:
             display.info("当前会话没有消息，无法 fork")
             return
         
-        # 2. 保存旧会话
         self.session.save_context(self._context)
         
-        # 生成旧会话摘要
         summary = ""
         if old_messages:
             last_msg = old_messages[-1]
             summary = last_msg.get("content", "")[:50]
         
-        # 3. 创建新会话
         old_sid = self.session.session_id
         new_sid = self.session.create_session()
         
-        # 4. 将旧消息写入新会话文件（用 save_context 确保格式正确）
         self._context = [{"role": "system", "content": self._load_system_prompt()}]
         for m in old_messages:
             self._context.append(m)
         self.session.save_context(self._context)
         
-        # 5. 更新旧会话的 summary（内嵌 meta）
         self.session.update_meta(old_sid, summary=summary)
         
-        # 6. 重建上下文
         self._context = self._build_context()
         
         display.info(f"🍴 已 fork：从 {old_sid} → {new_sid}")
@@ -721,7 +737,7 @@ class Agent:
         return {f"/{name}": desc for name, desc in cmds.items()}
     
     async def handle_command(self, cmd_line: str) -> bool:
-        """处理斜杠命令，委托给 commands 模块"""
+        """处理斜杠命令"""
         if not cmd_line.strip().startswith("/"):
             return False
         
@@ -731,11 +747,11 @@ class Agent:
         
         return await execute_command(self, cmd, arg)
     
-    # ============ 主处理流程 ============
+    # ============ 主处理流程（全异步） ============
     
     async def process(self, user_input: str) -> Response:
         """
-        处理用户输入
+        处理用户输入（全异步）
         """
         await self._ensure_initialized()
         
@@ -766,12 +782,19 @@ class Agent:
                 })
                 break
             
-            # 发送前确保 tool 消息完整性（修复 trim/compact 可能产生的孤立消息）
+            # 发送前确保 tool 消息完整性
             self._context = [self._context[0]] + self._repair_tool_ordering(self._context[1:])
             
+            self._processing = True
             try:
-                assistant_msg = self._stream_chat(self._context)
+                assistant_msg = await self._stream_chat(self._context)
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                # CancelledError 在 _stream_chat 内部已被捕获（含 partial content），
+                # 但若仍逃逸至此（理论不应发生），直接放行让上层处理
+                self._processing = False
+                raise
             except Exception as e:
+                self._processing = False
                 display.error(f"API/LLM 错误: {e}")
                 err_str = str(e)
                 if "'tool'" in err_str and "preceding" in err_str:
@@ -779,14 +802,35 @@ class Agent:
                     repaired = self._repair_tool_ordering(self._context[1:])
                     self._context = [self._context[0]] + repaired
                     try:
-                        assistant_msg = self._stream_chat(self._context)
+                        self._processing = True
+                        assistant_msg = await self._stream_chat(self._context)
+                    except (asyncio.CancelledError, KeyboardInterrupt):
+                        self._processing = False
+                        raise
                     except Exception as e2:
+                        self._processing = False
                         display.error(f"  ❌ 修复后仍失败: {e2}")
                         break
                 else:
                     break
+            self._processing = False
             
+            # === 流式中断处理：加法填充上下文 ===
+            interrupted = assistant_msg.pop("_interrupted", False)
+            if interrupted and "tool_calls" in assistant_msg:
+                # tool_calls 已生成但未执行 → 退化为文本回复
+                tc_names = [tc["function"]["name"] for tc in assistant_msg["tool_calls"]]
+                content = assistant_msg.get("content", "")
+                note = f"\n\n[用户中断 — 计划调用的工具: {', '.join(tc_names)}，请求已被用户打断]"
+                assistant_msg["content"] = (content + note) if content else note.strip()
+                del assistant_msg["tool_calls"]
+            
+            # 始终 append assistant 消息（包括中断时的部分内容）
             self._context.append(assistant_msg)
+            
+            if interrupted:
+                display.info("⏹️ 已中断（保留了已生成的内容）")
+                break
             
             text_content = assistant_msg.get("content", "")
             if not text_content:
@@ -798,18 +842,41 @@ class Agent:
             # 处理工具调用
             tool_calls = assistant_msg.get("tool_calls", [])
             if tool_calls:
-                for tc in tool_calls:
-                    result = self._execute_tool(tc)
+                tool_interrupted = False
+                try:
+                    for i, tc in enumerate(tool_calls):
+                        result = await self._execute_tool(tc)
+                        self._context.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": result
+                        })
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    self._interrupted = False  # 重置，防止残留
+                    # 当前工具标记为调用失败
                     self._context.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],
-                        "content": result
+                        "content": "工具调用失败：用户中断"
                     })
+                    # 剩余工具标记为未执行
+                    for remaining in tool_calls[i + 1:]:
+                        self._context.append({
+                            "role": "tool",
+                            "tool_call_id": remaining["id"],
+                            "content": "未执行（工具调用失败：用户中断）"
+                        })
+                    display.info("⏹️ 已中断（上下文已保留工具调用信息）")
+                    tool_interrupted = True
                 
-                # 继续循环
+                if tool_interrupted:
+                    # ⚠️ 实测：break 在 for 的 except 中只能退出 for 循环，
+                    # 之后的 continue 会让 while 继续运行，形成死循环！
+                    # 所以这里显式 break while 循环
+                    break
+                
                 continue
             else:
-                # 没有工具调用，输出结果并结束
                 break
         
         # 裁剪上下文
@@ -825,6 +892,10 @@ class Agent:
                 final_content = msg["content"]
                 break
         
+        # 清理中断标志（防止状态残留）
+        self._interrupted = False
+        self._processing = False
+        
         return Response(content=final_content)
     
     async def _ensure_initialized(self):
@@ -834,11 +905,13 @@ class Agent:
             await self.lifecycle.emit(LifecycleHook.ON_INIT)
     
     async def shutdown(self):
-        """关闭 Agent"""
+        """关闭 Agent（异步）"""
         # 核弹退出：跳过所有保存逻辑
         if getattr(self, "_nuclear_exit", False):
             await self.lifecycle.emit(LifecycleHook.ON_SHUTDOWN)
             await self.lifecycle.emit(LifecycleHook.ON_CLEANUP)
+            # 关闭 LLM 客户端
+            await self.client.close()
             return
         
         # 保存上下文
@@ -852,7 +925,7 @@ class Agent:
                 summary_context = self._context + [
                     {"role": "user", "content": "请总结一下，给这次对话起一个5到10个汉字的名字。不要添加任何多余的文字。"}
                 ]
-                assistant_msg = self._stream_chat(summary_context, silent=True)
+                assistant_msg = await self._stream_chat(summary_context, silent=True)
                 summary = assistant_msg.get("content", "").strip()
         except Exception:
             pass
@@ -898,3 +971,6 @@ class Agent:
         
         await self.lifecycle.emit(LifecycleHook.ON_SHUTDOWN)
         await self.lifecycle.emit(LifecycleHook.ON_CLEANUP)
+        
+        # 关闭 LLM 客户端
+        await self.client.close()

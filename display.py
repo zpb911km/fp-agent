@@ -144,9 +144,13 @@ class LLMStreamer:
         self._buffer += text
         self._has_content = True
     
-    def end(self):
+    def end(self, interrupted: bool = False):
         """结束流式输出，用 rich 渲染完整的 Markdown 内容"""
         if self.silent:
+            return
+        if interrupted:
+            # 中断模式下：不渲染残片，直接打印中断标记
+            print(apply_style("⏹️ 已中断", "yellow_bold"))
             return
         if self._thinking:
             print(apply_style("", "llm_thought"))

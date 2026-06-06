@@ -1,11 +1,11 @@
 """
-Python 插件 — 执行 Python 代码
+Python 插件 — 执行 Python 代码（异步版本）
 
 通过临时文件方式执行用户提供的 Python 代码，适合复杂数据处理和算法验证。
 """
 
+import asyncio
 import os
-import subprocess
 import tempfile
 from typing import Any, Dict
 
@@ -28,9 +28,9 @@ PLUGIN_DEFINITION = {
 }
 
 
-def execute(params: Dict[str, Any]) -> str:
+async def execute(params: Dict[str, Any]) -> str:
     """
-    执行 Python 代码
+    执行 Python 代码（异步）
     
     Args:
         params: 包含 'code' 键的字典
@@ -44,30 +44,52 @@ def execute(params: Dict[str, Any]) -> str:
     
     tmp_path = None
     try:
-        # 写入临时文件
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".py",
-            prefix="agent_python_",
-            delete=False,
-            encoding="utf-8",
-        ) as f:
-            f.write(code)
-            tmp_path = f.name
+        # 写入临时文件（同步文件 IO，用 run_in_executor）
+        loop = asyncio.get_running_loop()
         
-        # 执行
-        result = subprocess.run(
-            ["python3", tmp_path],
-            capture_output=True,
-            text=True,
-            timeout=30,
+        def _write_temp():
+            f = tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".py",
+                prefix="agent_python_",
+                delete=False,
+                encoding="utf-8",
+            )
+            f.write(code)
+            path = f.name
+            f.close()
+            return path
+        
+        tmp_path = await loop.run_in_executor(None, _write_temp)
+        
+        # 异步执行
+        proc = await asyncio.create_subprocess_exec(
+            "python3", tmp_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         
-        output = result.stdout
-        if result.stderr:
-            if output:
-                output += "\n"
-            output += result.stderr
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return "错误：代码执行超时（30秒）"
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            proc.kill()
+            await proc.wait()
+            raise
+        
+        output = stdout.decode("utf-8", errors="replace")
+        if stderr:
+            stderr_text = stderr.decode("utf-8", errors="replace")
+            if stderr_text.strip():
+                if output:
+                    output += "\n"
+                output += stderr_text
         
         # 截断
         if len(output) > 5000:
@@ -75,8 +97,6 @@ def execute(params: Dict[str, Any]) -> str:
         
         return output if output else "（无输出）"
     
-    except subprocess.TimeoutExpired:
-        return "错误：代码执行超时（30秒）"
     except Exception as e:
         return f"错误：{e}"
     finally:

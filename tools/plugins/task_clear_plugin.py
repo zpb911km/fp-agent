@@ -1,9 +1,10 @@
 """
-Task Clear 插件 — 清除已完成的任务
+Task Clear 插件 — 清除已完成的任务（异步版本）
 
 自包含插件，直接读写 tasks.json，不依赖任何全局状态。
 """
 
+import asyncio
 import json
 import os
 from typing import Any, Dict
@@ -26,17 +27,8 @@ PLUGIN_DEFINITION = {
 }
 
 
-def execute(params: Dict[str, Any]) -> str:
-    """
-    清除已完成的任务
-    
-    Args:
-        params: 空字典（无参数）
-        
-    Returns:
-        清除结果
-    """
-    tasks_path = config.TASKS_FILE
+def _sync_clear(tasks_path: str) -> str:
+    """同步执行清除（在 executor 中运行）"""
     if not os.path.exists(tasks_path):
         return "暂无任务文件"
     
@@ -58,3 +50,11 @@ def execute(params: Dict[str, Any]) -> str:
         json.dump({"tasks": pending, "next_id": next_id}, f, ensure_ascii=False, indent=2)
     
     return f"✅ 已清除 {len(completed)} 个已完成任务，剩余 {len(pending)} 个待办任务"
+
+
+async def execute(params: Dict[str, Any]) -> str:
+    """
+    清除已完成的任务（异步）
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync_clear, config.TASKS_FILE)

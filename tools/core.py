@@ -1,16 +1,16 @@
 """
-核心工具模块 — 不可插件化的基础工具
+核心工具模块 — 不可插件化的基础工具（全异步版本）
 
 这些工具必须保持直接绑定，作为系统的基础设施：
-- bash: Shell 命令执行
+- bash: Shell 命令执行（使用 asyncio.create_subprocess_shell）
 - read_file: 文件读取
 - write_file: 文件写入
 - edit_file: 精确文本替换
 """
 
+import asyncio
 import os
-import subprocess
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 # ── 核心工具定义（OpenAI function calling schema） ──────────────────────
@@ -85,55 +85,58 @@ def get_core_definitions() -> list:
     return list(CORE_TOOL_DEFINITIONS)
 
 
-def execute_core_tool(tool_name: str, params: Dict[str, Any]) -> Any:
-    """
-    执行核心工具
+async def _execute_bash(command: str) -> str:
+    """异步执行 shell 命令"""
+    if not command:
+        raise ValueError("bash 工具需要 command 参数")
     
-    Args:
-        tool_name: bash / read_file / write_file / edit_file
-        params: 参数字典
-        
-    Returns:
-        执行结果
-    """
-    if tool_name == "bash":
-        command = params.get("command")
-        if not command:
-            raise ValueError("bash 工具需要 command 参数")
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
         
         try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=300
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=300,
             )
-            
-            output = result.stdout
-            if result.stderr:
-                output += f"\n[stderr]\n{result.stderr}"
-            
-            # 截断 10000 字符
-            if len(output) > 10000:
-                output = output[:10000] + f"\n...（已截断，原文 {len(output)} 字符）"
-            
-            return output
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
             return "错误：命令执行超时（300秒）"
-        except Exception as e:
-            return f"错误：{e}"
-    
-    elif tool_name == "read_file":
-        file_path = params.get("file_path")
-        if not file_path:
-            raise ValueError("read_file 需要 file_path 参数")
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            # 中断时 kill 子进程并重新抛出
+            proc.kill()
+            await proc.wait()
+            raise
         
-        try:
+        output = stdout.decode("utf-8", errors="replace")
+        if stderr:
+            stderr_text = stderr.decode("utf-8", errors="replace")
+            if stderr_text.strip():
+                output += f"\n[stderr]\n{stderr_text}"
+        
+        # 截断 10000 字符
+        if len(output) > 10000:
+            output = output[:10000] + f"\n...（已截断，原文 {len(output)} 字符）"
+        
+        return output
+    except Exception as e:
+        return f"错误：{e}"
+
+
+async def _execute_read_file(file_path: str, offset: Optional[int] = None, limit: Optional[int] = None) -> str:
+    """异步读取文件"""
+    if not file_path:
+        raise ValueError("read_file 需要 file_path 参数")
+    
+    try:
+        loop = asyncio.get_running_loop()
+        
+        def _read():
             with open(file_path, "r", encoding="utf-8") as f:
-                offset = params.get("offset", 0)
-                limit = params.get("limit")
-                
                 if offset:
                     for _ in range(offset):
                         f.readline()
@@ -143,38 +146,42 @@ def execute_core_tool(tool_name: str, params: Dict[str, Any]) -> Any:
                     lines = content.split("\n")
                     return "\n".join(lines[:limit])
                 return content
-        except FileNotFoundError:
-            return f"错误：文件不存在 {file_path}"
-        except Exception as e:
-            return f"错误：{e}"
+        
+        return await loop.run_in_executor(None, _read)
+    except FileNotFoundError:
+        return f"错误：文件不存在 {file_path}"
+    except Exception as e:
+        return f"错误：{e}"
+
+
+async def _execute_write_file(file_path: str, content: str) -> str:
+    """异步写入文件"""
+    if not file_path or content is None:
+        raise ValueError("write_file 需要 file_path 和 content 参数")
     
-    elif tool_name == "write_file":
-        file_path = params.get("file_path")
-        content = params.get("content")
+    try:
+        loop = asyncio.get_running_loop()
         
-        if not file_path or content is None:
-            raise ValueError("write_file 需要 file_path 和 content 参数")
-        
-        try:
-            # 确保目录存在
+        def _write():
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(content)
-            
-            return f"文件已写入: {file_path}"
-        except Exception as e:
-            return f"错误：{e}"
+        
+        await loop.run_in_executor(None, _write)
+        return f"文件已写入: {file_path}"
+    except Exception as e:
+        return f"错误：{e}"
+
+
+async def _execute_edit_file(file_path: str, old_string: str, new_string: str) -> str:
+    """异步编辑文件"""
+    if not file_path or old_string is None or new_string is None:
+        raise ValueError("edit_file 需要 file_path, old_string, new_string 参数")
     
-    elif tool_name == "edit_file":
-        file_path = params.get("file_path")
-        old_string = params.get("old_string")
-        new_string = params.get("new_string")
+    try:
+        loop = asyncio.get_running_loop()
         
-        if not file_path or old_string is None or new_string is None:
-            raise ValueError("edit_file 需要 file_path, old_string, new_string 参数")
-        
-        try:
+        def _edit():
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
             
@@ -191,10 +198,43 @@ def execute_core_tool(tool_name: str, params: Dict[str, Any]) -> Any:
                 f.write(content)
             
             return f"文件已修改: {file_path}"
-        except FileNotFoundError:
-            return f"错误：文件不存在 {file_path}"
-        except Exception as e:
-            return f"错误：{e}"
+        
+        return await loop.run_in_executor(None, _edit)
+    except FileNotFoundError:
+        return f"错误：文件不存在 {file_path}"
+    except Exception as e:
+        return f"错误：{e}"
+
+
+async def execute_core_tool(tool_name: str, params: Dict[str, Any]) -> Any:
+    """
+    执行核心工具（异步）
     
+    Args:
+        tool_name: bash / read_file / write_file / edit_file
+        params: 参数字典
+        
+    Returns:
+        执行结果
+    """
+    if tool_name == "bash":
+        return await _execute_bash(params.get("command", ""))
+    elif tool_name == "read_file":
+        return await _execute_read_file(
+            params.get("file_path", ""),
+            params.get("offset"),
+            params.get("limit"),
+        )
+    elif tool_name == "write_file":
+        return await _execute_write_file(
+            params.get("file_path", ""),
+            params.get("content", ""),
+        )
+    elif tool_name == "edit_file":
+        return await _execute_edit_file(
+            params.get("file_path", ""),
+            params.get("old_string", ""),
+            params.get("new_string", ""),
+        )
     else:
         raise ValueError(f"未知核心工具：{tool_name}")

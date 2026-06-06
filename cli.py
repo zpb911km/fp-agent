@@ -3,6 +3,7 @@
 """
 
 import asyncio
+import signal
 import sys
 import os
 
@@ -135,13 +136,26 @@ class InputHandler:
         return input(self.prompt)
 
 
+def _raw_sigint_handler(signum, frame):
+    """纯 C 级 SIGINT 处理器：取消所有 asyncio 任务注入 CancelledError。
+    
+    不依赖 event loop 的 wakeup fd → select() 链路，终端 Ctrl+C 直达。
+    agent.py 的 _check_interrupted 和 _stream_chat 的 try/except 负责优雅捕获。
+    """
+    try:
+        for task in asyncio.all_tasks():
+            task.cancel()
+    except RuntimeError:
+        pass  # 无运行中的事件循环
+
+
 async def main():
     """主入口"""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Agent v2 CLI")
-    parser.add_argument("-m", "--message", type=str, help="单次消息模式")
-    parser.add_argument("-r", "--resume", action="store_true", help="续上一个会话")
+    parser = argparse.ArgumentParser(description="五块卵石 - AI Agent 命令行界面")
+    parser.add_argument("-m", "--message", help="单次消息模式")
+    parser.add_argument("-r", "--resume", nargs="?", const="auto", default=None, metavar="SESSION_ID", help="恢复历史会话")
     parser.add_argument("--init", action="store_true", help="初始化配置文件")
 
     args = parser.parse_args()
@@ -156,6 +170,16 @@ async def main():
     from core.agent import Agent
 
     agent = Agent(resume=args.resume)
+
+    # ── 安装 SIGINT 处理器 ────────────────────────────────
+    #
+    # 使用 signal.signal() 而不是 loop.add_signal_handler()
+    # 原因：add_signal_handler 依赖 event loop 的 wakeup fd 机制，
+    #   在你这个终端环境下信号无法通过该链路抵达处理器。
+    # signal.signal() 安装纯 C 级处理器，信号到达时直接触发，
+    #   通过 asyncio.all_tasks().cancel() 注入 CancelledError。
+    # agent._stream_chat 的 try/except 负责优雅捕获中断。
+    signal.signal(signal.SIGINT, _raw_sigint_handler)
 
     if not os.environ.get("FP_SUBAGENT_QUIET"):
         display.print_logo()
@@ -187,7 +211,7 @@ async def main():
 
                 try:
                     response = await agent.process(user_input)
-                except SystemExit:
+                except (SystemExit, asyncio.CancelledError):
                     break
                 except Exception as e:
                     display.error(f"错误: {e}")

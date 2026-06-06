@@ -130,15 +130,18 @@ class SessionManager:
     _meta: dict
     _context: List[Dict[str, Any]]
 
-    def __init__(self, resume: bool = False):
+    def __init__(self, resume: Optional[str] = None):
         """
         resume=False → 创建新会话（默认）
         resume=True  → 续上一个会话（找 updated 最新的）
         """
         os.makedirs(SESSIONS_DIR, exist_ok=True)
 
-        if resume:
-            latest = _find_latest_session()
+        if resume is not None:
+            if resume.startswith('s'):
+                latest = resume
+            else:
+                latest = _find_latest_session()
             if latest and self._session_exists(latest):
                 self._session_id = latest
                 self._meta = self._load_meta_from_session()

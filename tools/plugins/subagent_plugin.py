@@ -1,5 +1,5 @@
 """
-Subagent 插件 — 派遣子 agent 执行独立任务
+Subagent 插件 — 派遣子 agent 执行独立任务（异步版本）
 
 主 agent 可以派遣子 agent 处理独立子任务，子 agent 拥有独立的会话上下文，
 其全部思考过程和工具调用都不占用主上下文的 token 空间。
@@ -13,9 +13,9 @@ Subagent 插件 — 派遣子 agent 执行独立任务
 防递归：子 agent 不可再次创建子 agent（环境变量守卫 + 执行时拒绝）
 """
 
+import asyncio
 import json
 import os
-import subprocess
 import sys
 import time
 from typing import Any, Dict, Optional
@@ -89,9 +89,9 @@ PLUGIN_DEFINITION = {
 }
 
 
-def execute(params: Dict[str, Any]) -> str:
+async def execute(params: Dict[str, Any]) -> str:
     """
-    执行子 agent 任务
+    执行子 agent 任务（异步）
     
     Args:
         params: 包含 task, context, store_result, timeout, constraints 的字典
@@ -142,8 +142,7 @@ def execute(params: Dict[str, Any]) -> str:
         query = task
 
     # ═══════════════════════════════════════════════════════════
-    # 定位入口脚本（相对于本文件的路径）
-    #   tools/plugins/subagent_plugin.py → tools/ → agent_v2 root
+    # 定位入口脚本
     # ═══════════════════════════════════════════════════════════
     agent_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     cli_py = os.path.join(agent_dir, "cli.py")
@@ -155,33 +154,45 @@ def execute(params: Dict[str, Any]) -> str:
         }, ensure_ascii=False, indent=2)
 
     # ═══════════════════════════════════════════════════════════
-    # 启动子进程
+    # 启动子进程（异步）
     # ═══════════════════════════════════════════════════════════
     start_time = time.time()
 
     env = os.environ.copy()
-    env["FP_IS_SUBAGENT"] = "1"     # 标记为子 agent（防递归）
-    env["FP_SUBAGENT_QUIET"] = "1"  # 安静模式（不打印 logo 等）
+    env["FP_IS_SUBAGENT"] = "1"
+    env["FP_SUBAGENT_QUIET"] = "1"
     if not verbose:
-        env["FP_SUBAGENT_SILENT"] = "1"  # 静默模式：LLM 流式/工具日志/迭代统计全部隐藏
+        env["FP_SUBAGENT_SILENT"] = "1"
 
     try:
-        result = subprocess.run(
-            [sys.executable, cli_py, "-m", query],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, cli_py, "-m", query,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
             env=env,
             cwd=agent_dir,
         )
-    except subprocess.TimeoutExpired:
-        duration = time.time() - start_time
-        return json.dumps({
-            "status": "error",
-            "result": f"子任务超时（{timeout}秒）",
-            "duration": f">{timeout}s",
-            "estimated_tokens": 0,
-        }, ensure_ascii=False, indent=2)
+        
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            duration = time.time() - start_time
+            return json.dumps({
+                "status": "error",
+                "result": f"子任务超时（{timeout}秒）",
+                "duration": f">{timeout}s",
+                "estimated_tokens": 0,
+            }, ensure_ascii=False, indent=2)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            proc.kill()
+            await proc.wait()
+            raise
+        
     except Exception as e:
         duration = time.time() - start_time
         return json.dumps({
@@ -197,19 +208,12 @@ def execute(params: Dict[str, Any]) -> str:
     # ═══════════════════════════════════════════════════════════
     # 错误处理
     # ═══════════════════════════════════════════════════════════
-    if result.returncode != 0:
-        error_detail = result.stderr.strip()[:500] if result.stderr.strip() else "无错误信息"
-        return json.dumps({
-            "status": "error",
-            "result": f"子进程异常退出（退出码 {result.returncode}）: {error_detail}",
-            "duration": duration_str,
-            "estimated_tokens": 0,
-        }, ensure_ascii=False, indent=2)
+    output = stdout.decode("utf-8", errors="replace").strip()
+    stderr_text = stderr.decode("utf-8", errors="replace").strip()
 
     # ═══════════════════════════════════════════════════════════
-    # 提取输出
+    # 提取子 agent 的实际回复（在 stdout 中寻找 handle_command 的结果）
     # ═══════════════════════════════════════════════════════════
-    output = result.stdout.strip()
 
     if not output:
         return json.dumps({
@@ -232,12 +236,11 @@ def execute(params: Dict[str, Any]) -> str:
     # 格式转换
     if output_format == "json":
         try:
-            # 如果输出本身已是 JSON，不做额外包装
             json.loads(output)
         except (json.JSONDecodeError, ValueError):
             output = json.dumps({"reply": output}, ensure_ascii=False, indent=2)
 
-    # 估算 token 数（粗略）
+    # 估算 token 数
     estimated_tokens = len(output) // 3
 
     # ═══════════════════════════════════════════════════════════
@@ -245,9 +248,8 @@ def execute(params: Dict[str, Any]) -> str:
     # ═══════════════════════════════════════════════════════════
     if store_result:
         try:
-            # 直接调用 memory_save 插件来保存
             from .memory_save_plugin import execute as memory_save
-            memory_save({
+            await memory_save({
                 "name": store_result,
                 "type": "reference",
                 "description": f"[subagent] {task[:80]}",
@@ -257,7 +259,7 @@ def execute(params: Dict[str, Any]) -> str:
             output += f"\n\n⚠️ 记忆保存失败 ({store_result}): {e}"
 
     # ═══════════════════════════════════════════════════════════
-    # 返回结果（JSON 格式，便于主 agent 解析）
+    # 返回结果
     # ═══════════════════════════════════════════════════════════
     mode_note = "subagent 静默模式" if not verbose else "subagent 调试模式（含完整过程）"
     summary = {

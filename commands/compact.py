@@ -1,4 +1,4 @@
-"""compact 命令 — 压缩对话历史"""
+"""compact 命令 — 压缩对话历史（异步）"""
 
 import display
 
@@ -8,6 +8,6 @@ aliases = []
 description = "压缩对话历史"
 
 
-def execute(agent, arg: str) -> bool:
-    agent._compact_context()
+async def execute(agent, arg: str) -> bool:
+    await agent._compact_context()
     return True

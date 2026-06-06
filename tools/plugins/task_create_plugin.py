@@ -1,9 +1,10 @@
 """
-Task Create 插件 — 创建新任务
+Task Create 插件 — 创建新任务（异步版本）
 
 自包含插件，直接读写 tasks.json，不依赖任何全局状态。
 """
 
+import asyncio
 import json
 import os
 from typing import Any, Dict
@@ -30,26 +31,10 @@ PLUGIN_DEFINITION = {
 }
 
 
-def execute(params: Dict[str, Any]) -> str:
-    """
-    创建新任务
-    
-    Args:
-        params: 包含 subject, description 的字典
-        
-    Returns:
-        创建结果
-    """
-    subject = params.get("subject", "")
-    description = params.get("description", "")
-    
-    if not subject or not description:
-        raise ValueError("task_create 需要 subject 和 description 参数")
-    
-    tasks_path = config.TASKS_FILE
+def _sync_create(subject: str, description: str, tasks_path: str) -> str:
+    """同步创建任务"""
     os.makedirs(os.path.dirname(tasks_path), exist_ok=True)
     
-    # 读取现有任务
     if os.path.exists(tasks_path):
         try:
             with open(tasks_path, "r", encoding="utf-8") as f:
@@ -73,3 +58,17 @@ def execute(params: Dict[str, Any]) -> str:
         json.dump({"tasks": tasks, "next_id": next_id + 1}, f, ensure_ascii=False, indent=2)
     
     return f"✅ 已创建任务 #{new_task['id']}: {subject}"
+
+
+async def execute(params: Dict[str, Any]) -> str:
+    """
+    创建新任务（异步）
+    """
+    subject = params.get("subject", "")
+    description = params.get("description", "")
+    
+    if not subject or not description:
+        raise ValueError("task_create 需要 subject 和 description 参数")
+    
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync_create, subject, description, config.TASKS_FILE)

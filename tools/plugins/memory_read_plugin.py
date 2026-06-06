@@ -1,10 +1,11 @@
 """
-Memory Read 插件 — 读取/搜索长期记忆
+Memory Read 插件 — 读取/搜索长期记忆（异步版本）
 
 支持列出所有记忆或通过关键词搜索记忆内容。
 关键词使用空格分隔，AND 逻辑匹配（必须同时包含所有关键词）。
 """
 
+import asyncio
 import glob
 import os
 from typing import Any, Dict, List
@@ -72,9 +73,9 @@ def _parse_memory_content(path: str) -> str:
     return "\n".join(lines[body_start:]).strip()
 
 
-def execute(params: Dict[str, Any]) -> str:
+async def execute(params: Dict[str, Any]) -> str:
     """
-    读取记忆
+    读取记忆（异步）
     
     Args:
         params: 包含可选的 'query' 键的字典
@@ -85,11 +86,13 @@ def execute(params: Dict[str, Any]) -> str:
     query = params.get("query", "").strip()
     memory_dir = config.MEMORY_DIR
     
-    # 确保目录存在
+    loop = asyncio.get_running_loop()
+    
+    # 确保目录存在（同步操作委托到线程池）
     os.makedirs(memory_dir, exist_ok=True)
     
     # 列出所有记忆
-    all_memories = _list_memories(memory_dir)
+    all_memories = await loop.run_in_executor(None, _list_memories, memory_dir)
     
     if not all_memories:
         return "暂无记忆"
@@ -120,7 +123,7 @@ def execute(params: Dict[str, Any]) -> str:
         
         # 空查询时显示全部正文内容
         if not query:
-            content = _parse_memory_content(m["path"])
+            content = await loop.run_in_executor(None, _parse_memory_content, m["path"])
             if len(content) > 500:
                 content = content[:500] + "  ..."
             lines.append(f"   内容:\n{content}")

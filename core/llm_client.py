@@ -1,15 +1,17 @@
 """
 OpenAI API HTTP 客户端替代模块
 ================================
-使用 requests 库直接调用 OpenAI 格式的 API，无需安装 openai SDK。
+使用 httpx 库直接调用 OpenAI 格式的 API，无需安装 openai SDK。
 支持流式和非流式两种调用方式，完全兼容 agent.py 的现有接口。
+
+全异步版本：基于 httpx.AsyncClient。
 
 Usage:
     import openai
     client = openai.Client(api_key="...", base_url="...")
     
     # 流式调用
-    response = client.chat.completions.create(
+    async for chunk in await client.chat.completions.create(
         model="gpt-4",
         messages=[{"role": "user", "content": "Hello"}],
         stream=True,
@@ -17,12 +19,11 @@ Usage:
         max_tokens=32768,
         tools=[...],
         extra_body={"enable_thinking": False},
-    )
-    for chunk in response:
+    ):
         print(chunk.choices[0].delta.content)
     
     # 非流式调用
-    response = client.chat.completions.create(
+    response = await client.chat.completions.create(
         model="gpt-4",
         messages=[{"role": "user", "content": "Hello"}],
         stream=False,
@@ -32,10 +33,9 @@ Usage:
 
 import json
 import sys
-from typing import Any, Iterator, Optional
+from typing import Any, AsyncIterator, Optional
 
-import requests
-from requests.exceptions import ChunkedEncodingError
+import httpx
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -101,7 +101,7 @@ class Choice:
 
 
 class Chunk:
-    """流式响应的一个 chunk —— 可被 for 循环迭代"""
+    """流式响应的一个 chunk —— 可被 async for 迭代"""
     __slots__ = ("id", "object", "created", "model", "choices", "usage")
     
     def __init__(self, data: dict):
@@ -187,13 +187,13 @@ class CompletionResponse:
 
 
 # ═══════════════════════════════════════════════════════════════
-# SSE 流式解析器
+# SSE 流式解析器（异步版本）
 # ═══════════════════════════════════════════════════════════════
 
 class SSEIterator:
     """
-    Server-Sent Events 流式迭代器。
-    将 requests 的流式响应按 'data: ' 行解析，产出 Chunk 对象。
+    Server-Sent Events 流式异步迭代器。
+    将 httpx 的流式响应按 'data: ' 行解析，产出 Chunk 对象。
     
     自动处理 think 标签：
     某些模型将思考内容以 <think>...</think> 形式放在 content 字段中，
@@ -202,21 +202,18 @@ class SSEIterator:
     保持 content 只包含最终回复。
     """
     
-    def __init__(self, response: requests.Response):
+    def __init__(self, response: httpx.Response):
         self._response = response
-        self._iterator = response.iter_lines(decode_unicode=True)
         self._think_mode: bool = False      # 是否在 <think> 标签内
         self._think_buffer: str = ""         # 跨 chunk 累积思考内容
+        self._closed: bool = False
     
-    def __iter__(self) -> Iterator[Chunk]:
+    def __aiter__(self) -> AsyncIterator[Chunk]:
         return self._parse()
     
-    def _resolve_think_tag(self, delta: Delta) -> None:
+    async def _resolve_think_tag(self, delta: Delta) -> None:
         """
         解析 delta.content 中的 <think> 标签，将思考内容转移到 reasoning_content。
-        
-        仅在 delta 没有原生 reasoning_content 时触发（避免干扰 DeepSeek 等原生支持）。
-        使用状态机跨 chunk 追踪 think 标签的开启/闭合。
         """
         content = delta.content
         if content is None:
@@ -263,12 +260,12 @@ class SSEIterator:
                 delta.reasoning_content = self._think_buffer
                 delta.content = None
     
-    def _parse(self) -> Iterator[Chunk]:
+    async def _parse(self) -> AsyncIterator[Chunk]:
         try:
-            for line in self._iterator:
+            async for line in self._response.aiter_lines():
                 if not line:
                     continue
-                # 跳过非 data: 开头的行（如注释、空行）
+                # 跳过非 data: 开头的行
                 if line.startswith("data: "):
                     data_str = line[6:]
                 elif line.startswith("data:"):
@@ -283,24 +280,36 @@ class SSEIterator:
                 try:
                     data = json.loads(data_str)
                     chunk = Chunk(data)
-                    # 处理 think 标签（跨 chunk 状态机）
+                    # 处理 think 标签
                     if chunk.choices:
-                        self._resolve_think_tag(chunk.choices[0].delta)
+                        await self._resolve_think_tag(chunk.choices[0].delta)
                     yield chunk
                 except json.JSONDecodeError:
-                    # 某些 API 可能在末尾发送非 JSON 数据，忽略
                     continue
         
-        except (requests.ConnectionError, ChunkedEncodingError) as e:
+        except (httpx.RemoteProtocolError, httpx.ReadError) as e:
             raise APIError(f"流式连接中断: {e}", status_code=0)
         except Exception as e:
             raise APIError(f"流式解析异常: {e}", status_code=0)
         finally:
-            self._response.close()
+            await self._close()
+    
+    async def _close(self):
+        """安全关闭响应连接"""
+        if not self._closed:
+            self._closed = True
+            try:
+                await self._response.aclose()
+            except Exception:
+                pass
+    
+    async def close(self):
+        """外部主动关闭"""
+        await self._close()
 
 
 # ═══════════════════════════════════════════════════════════════
-# 核心 Client
+# 核心 Client（异步版本）
 # ═══════════════════════════════════════════════════════════════
 
 class Completions:
@@ -309,7 +318,7 @@ class Completions:
     def __init__(self, client: "Client"):
         self._client = client
     
-    def create(
+    async def create(
         self,
         model: str,
         messages: list[dict],
@@ -321,12 +330,12 @@ class Completions:
         **kwargs,
     ) -> Any:
         """
-        发起聊天补全请求。
+        发起聊天补全请求（异步）。
         
         参数完全对齐 openai SDK 的 client.chat.completions.create。
         
         Returns:
-            - stream=True 时返回 SSEIterator (可迭代 Chunk)
+            - stream=True 时返回 SSEIterator (可 async for 迭代 Chunk)
             - stream=False 时返回 CompletionResponse
         """
         url = f"{self._client.base_url}/chat/completions"
@@ -349,16 +358,14 @@ class Completions:
             body.update(extra_body)
         
         try:
-            resp = self._client._session.post(
+            resp = await self._client._session.post(
                 url,
                 headers=headers,
                 json=body,
-                stream=stream,
-                timeout=(10, 300),  # (连接超时, 读取超时)
             )
-        except requests.ConnectionError as e:
+        except httpx.ConnectError as e:
             raise APIError(f"连接失败: {e}", status_code=0)
-        except requests.Timeout as e:
+        except httpx.TimeoutException as e:
             raise APIError(f"请求超时: {e}", status_code=0)
         
         # 处理 HTTP 错误
@@ -393,11 +400,11 @@ class Chat:
 
 class Client:
     """
-    OpenAI API 客户端。
+    OpenAI API 客户端（异步版本）。
     
     用法:
         client = Client(api_key="sk-xxx", base_url="https://api.openai.com/v1")
-        response = client.chat.completions.create(model="...", messages=[...], stream=True)
+        response = await client.chat.completions.create(model="...", messages=[...], stream=True)
     """
     
     def __init__(
@@ -408,7 +415,10 @@ class Client:
     ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
-        self._session = requests.Session()
+        self._session = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout, connect=10.0),
+            follow_redirects=True,
+        )
         self._timeout = timeout
         self.chat = Chat(self)
     
@@ -419,6 +429,6 @@ class Client:
             "Accept": "application/json",
         }
     
-    def close(self):
+    async def close(self):
         """释放连接池"""
-        self._session.close()
+        await self._session.aclose()

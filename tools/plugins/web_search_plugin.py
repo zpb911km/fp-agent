@@ -1,10 +1,11 @@
 """
-Web Search 插件 — 网络搜索
+Web Search 插件 — 网络搜索（异步版本）
 
 使用 ddgs 库进行网络搜索。
 需要安装：pip install ddgs
 """
 
+import asyncio
 from typing import Any, Dict
 
 
@@ -26,9 +27,9 @@ PLUGIN_DEFINITION = {
 }
 
 
-def execute(params: Dict[str, Any]) -> str:
+async def execute(params: Dict[str, Any]) -> str:
     """
-    执行网络搜索
+    执行网络搜索（异步）
     
     Args:
         params: 包含 'query' 键的字典
@@ -43,8 +44,13 @@ def execute(params: Dict[str, Any]) -> str:
     try:
         from ddgs import DDGS
         
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=5))
+        loop = asyncio.get_running_loop()
+        
+        def _search():
+            with DDGS() as ddgs:
+                return list(ddgs.text(query, max_results=5))
+        
+        results = await loop.run_in_executor(None, _search)
         
         if not results:
             return "未找到相关结果"

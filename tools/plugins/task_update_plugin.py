@@ -1,9 +1,10 @@
 """
-Task Update 插件 — 更新任务状态
+Task Update 插件 — 更新任务状态（异步版本）
 
 自包含插件，直接读写 tasks.json，不依赖任何全局状态。
 """
 
+import asyncio
 import json
 import os
 from typing import Any, Dict
@@ -37,26 +38,8 @@ PLUGIN_DEFINITION = {
 VALID_STATUSES = ["pending", "in_progress", "completed"]
 
 
-def execute(params: Dict[str, Any]) -> str:
-    """
-    更新任务状态
-    
-    Args:
-        params: 包含 task_id, status 的字典
-        
-    Returns:
-        更新结果
-    """
-    task_id = params.get("task_id")
-    status = params.get("status")
-    
-    if task_id is None or status is None:
-        raise ValueError("task_update 需要 task_id 和 status 参数")
-    
-    if status not in VALID_STATUSES:
-        raise ValueError(f"status 必须是 {VALID_STATUSES} 之一")
-    
-    tasks_path = config.TASKS_FILE
+def _sync_update(task_id: int, status: str, tasks_path: str) -> str:
+    """同步更新任务状态"""
     if not os.path.exists(tasks_path):
         return "错误：未找到任务文件"
     
@@ -77,3 +60,20 @@ def execute(params: Dict[str, Any]) -> str:
             return f"✅ 任务 #{task_id} 状态已从 [{old_status}] 更新为 [{status}]"
     
     return f"错误：未找到任务 #{task_id}"
+
+
+async def execute(params: Dict[str, Any]) -> str:
+    """
+    更新任务状态（异步）
+    """
+    task_id = params.get("task_id")
+    status = params.get("status")
+    
+    if task_id is None or status is None:
+        raise ValueError("task_update 需要 task_id 和 status 参数")
+    
+    if status not in VALID_STATUSES:
+        raise ValueError(f"status 必须是 {VALID_STATUSES} 之一")
+    
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync_update, task_id, status, config.TASKS_FILE)

@@ -1,9 +1,10 @@
 """
-Task List 插件 — 列出所有任务
+Task List 插件 — 列出所有任务（异步版本）
 
 自包含插件，直接读取 tasks.json，不依赖任何全局状态。
 """
 
+import asyncio
 import json
 import os
 from typing import Any, Dict
@@ -33,17 +34,8 @@ STATUS_LABELS = {
 }
 
 
-def execute(params: Dict[str, Any]) -> str:
-    """
-    列出所有任务
-    
-    Args:
-        params: 空字典（无参数）
-        
-    Returns:
-        格式化任务列表
-    """
-    tasks_path = config.TASKS_FILE
+def _sync_list(tasks_path: str) -> str:
+    """同步列出任务"""
     if not os.path.exists(tasks_path):
         return "暂无任务"
     
@@ -67,3 +59,11 @@ def execute(params: Dict[str, Any]) -> str:
             lines.append(f"       {t['description']}")
     
     return "\n".join(lines)
+
+
+async def execute(params: Dict[str, Any]) -> str:
+    """
+    列出所有任务（异步）
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync_list, config.TASKS_FILE)

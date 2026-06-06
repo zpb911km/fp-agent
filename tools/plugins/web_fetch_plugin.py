@@ -1,11 +1,13 @@
 """
-Web Fetch 插件 — 抓取网页内容
+Web Fetch 插件 — 抓取网页内容（异步版本）
 
-使用 requests 库抓取网页并返回纯文本内容。
+使用 httpx 库抓取网页并返回纯文本内容。
 """
 
 import re
 from typing import Any, Dict
+
+import httpx
 
 
 # ── 插件定义（OpenAI function calling schema） ──────────────────────
@@ -14,7 +16,7 @@ PLUGIN_DEFINITION = {
     "type": "function",
     "function": {
         "name": "web_fetch",
-        "description": "抓取并解析网页内容，返回纯文本。超时 15 秒。需要安装 requests 库。",
+        "description": "抓取并解析网页内容，返回纯文本。超时 15 秒。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -26,9 +28,9 @@ PLUGIN_DEFINITION = {
 }
 
 
-def execute(params: Dict[str, Any]) -> str:
+async def execute(params: Dict[str, Any]) -> str:
     """
-    抓取网页内容
+    抓取网页内容（异步）
     
     Args:
         params: 包含 'url' 键的字典
@@ -41,17 +43,18 @@ def execute(params: Dict[str, Any]) -> str:
         raise ValueError("web_fetch 插件需要 url 参数")
     
     try:
-        import requests
-        
-        resp = requests.get(
-            url,
-            timeout=15,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; AIAgent/1.0)",
-            },
-        )
-        resp.raise_for_status()
-        html = resp.text
+        async with httpx.AsyncClient(
+            timeout=15.0,
+            follow_redirects=True,
+        ) as client:
+            resp = await client.get(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; AIAgent/1.0)",
+                },
+            )
+            resp.raise_for_status()
+            html = resp.text
         
         # 剥离 script/style 标签
         text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
@@ -65,7 +68,5 @@ def execute(params: Dict[str, Any]) -> str:
         
         return text
     
-    except ImportError:
-        return "需要安装 requests: pip install requests"
     except Exception as e:
         return f"抓取错误：{e}"
