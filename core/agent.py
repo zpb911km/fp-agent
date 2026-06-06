@@ -14,6 +14,15 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from core.lifecycle import LifecycleManager, LifecycleHook, HookContext
+
+# ── 跨平台中断标志 ─────────────────────────────────────
+# 由信号处理器设置（无平台依赖性），_check_interrupted() 检查。
+# 
+# 设计原因：
+# - Unix: signal handler 在主线程运行，可直接 all_tasks().cancel()
+# - Windows: Ctrl+C 在处理线程运行，all_tasks() 可能找不到 event loop
+# - 此标志作为跨平台回退，两种平台都能可靠工作
+_interrupted_flag = False
 from plugins.base.plugin import Plugin, PluginRegistry, PluginConfig
 
 import config
@@ -362,7 +371,18 @@ class Agent:
         self._interrupted = True
     
     def _check_interrupted(self):
-        """检查中断标志并抛出 CancelledError"""
+        """检查中断标志并抛出 CancelledError
+        
+        检查两个来源：
+        1. 全局 _interrupted_flag — 由 signal.signal 处理器设置（跨平台安全）
+        2. self._interrupted — 由 agent.cancel() 设置（add_signal_handler 回调）
+        """
+        global _interrupted_flag
+        if _interrupted_flag:
+            _interrupted_flag = False
+            self._interrupted = False
+            self._processing = False
+            raise asyncio.CancelledError("用户中断")
         if self._interrupted:
             self._interrupted = False
             self._processing = False

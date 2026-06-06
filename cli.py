@@ -137,16 +137,23 @@ class InputHandler:
 
 
 def _raw_sigint_handler(signum, frame):
-    """纯 C 级 SIGINT 处理器：取消所有 asyncio 任务注入 CancelledError。
-    
-    不依赖 event loop 的 wakeup fd → select() 链路，终端 Ctrl+C 直达。
-    agent.py 的 _check_interrupted 和 _stream_chat 的 try/except 负责优雅捕获。
-    """
+    """跨平台 SIGINT 处理器：取消 asyncio 任务 + 设置全局标志"""
+    # 方式 1（Unix 主线程）：直接取消所有 asyncio 任务
+    # 在 Unix 上，signal handler 在主线程运行，all_tasks() 可用
     try:
         for task in asyncio.all_tasks():
             task.cancel()
-    except RuntimeError:
+    except (RuntimeError, ValueError):
         pass  # 无运行中的事件循环
+    
+    # 方式 2（跨平台回退）：设置全局标志
+    # Windows 上 Ctrl+C 在独立线程运行，all_tasks() 可能失败，
+    # 此标志作为安全网，_check_interrupted() 会检查它
+    try:
+        import core.agent as _agent_mod
+        _agent_mod._interrupted_flag = True
+    except Exception:
+        pass
 
 
 async def main():
