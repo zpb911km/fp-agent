@@ -391,77 +391,48 @@ class Agent:
     # ============ LLM 调用（异步） ============
     
     async def _stream_chat(self, context: List[Dict], silent: bool = False) -> Dict:
-        """发起流式聊天请求（异步）"""
-        content = ""
-        reasoning_content = ""
-        tool_calls: Dict[int, Dict] = {}
+        """发起聊天请求（非流式，从完整 response 直接提取内容）"""
         streamer = display.LLMStreamer(silent=silent)
         
-        try:
-            # ⚠️ 必须放在 try 块内：若在此 await 时被 task.cancel() 中断，
-            # CancelledError 需被捕获以正确返回部分内容。
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=context,
-                tools=tools.TOOL_DEFINITIONS,
-                stream=True,
-                temperature=config.LLM_TEMPERATURE,
-                max_tokens=config.LLM_MAX_TOKENS,
-                extra_body={"enable_thinking": False},
-            )
-            
-            async for chunk in response:
-                # 检查中断
-                self._check_interrupted()
-                
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-                
-                # 捕获 reasoning_content
-                if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                    reasoning_content += delta.reasoning_content
-                    streamer.think(delta.reasoning_content)
-                
-                if delta.content:
-                    content += delta.content
-                    streamer.write(delta.content)
-                
-                if delta.tool_calls:
-                    for tc_delta in delta.tool_calls:
-                        idx = tc_delta.index
-                        if idx not in tool_calls:
-                            tool_calls[idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
-                        if tc_delta.id:
-                            tool_calls[idx]["id"] = tc_delta.id
-                        if tc_delta.function:
-                            if tc_delta.function.name:
-                                tool_calls[idx]["function"]["name"] += tc_delta.function.name
-                            if tc_delta.function.arguments:
-                                tool_calls[idx]["function"]["arguments"] += tc_delta.function.arguments
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            # 中断时关闭 SSE 连接，保留已收集的部分内容
-            try:
-                await response.close()
-            except (NameError, AttributeError):
-                pass  # response 尚未创建（中断发生在 create() 阶段）
-            streamer.end(interrupted=True)
-            self._interrupted = False  # 重置标志，防止残留
-            interrupted = True
-        else:
-            interrupted = False
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=context,
+            tools=tools.TOOL_DEFINITIONS,
+            stream=False,
+            temperature=config.LLM_TEMPERATURE,
+            max_tokens=config.LLM_MAX_TOKENS,
+            extra_body={"enable_thinking": False},
+        )
         
+        message = response.choices[0].message
+        
+        # 提取内容并输出到 streamer
+        reply_content = message.content or ""
+        reasoning_content = ""
+        if hasattr(message, "reasoning_content") and message.reasoning_content:
+            reasoning_content = message.reasoning_content
+            streamer.think(reasoning_content)
+        
+        if reply_content:
+            streamer.write(reply_content)
         streamer.end()
         
-        msg = {"role": "assistant", "content": content}
+        # 构建返回消息
+        msg = {"role": "assistant", "content": reply_content}
         if reasoning_content:
             msg["reasoning_content"] = reasoning_content
-        if tool_calls:
-            msg["tool_calls"] = [v for _, v in sorted(tool_calls.items())]
-        msg["_interrupted"] = interrupted
+        if message.tool_calls:
+            msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in message.tool_calls
+            ]
+        msg["_interrupted"] = False
         
         return msg
-    
     # ============ 工具执行（异步） ============
     
     async def _execute_tool(self, tc: Dict, silent: bool = False) -> str:
@@ -619,7 +590,7 @@ class Agent:
             compact_text += f"[{role}]: {content}\n\n"
         
         # 请求 LLM 压缩
-        display.info("🔄 正在压缩对话历史...", end="", flush=True)
+        display.info("🔄 正在压缩对话历史...")
         try:
             compact_context = [
                 {"role": "system", "content": "你是一个对话压缩助手，擅长提炼关键信息。"},
@@ -863,37 +834,35 @@ class Agent:
             tool_calls = assistant_msg.get("tool_calls", [])
             if tool_calls:
                 tool_interrupted = False
-                try:
-                    for i, tc in enumerate(tool_calls):
+                for i, tc in enumerate(tool_calls):
+                    try:
                         result = await self._execute_tool(tc)
                         self._context.append({
                             "role": "tool",
                             "tool_call_id": tc["id"],
                             "content": result
                         })
-                except (KeyboardInterrupt, asyncio.CancelledError):
-                    self._interrupted = False  # 重置，防止残留
-                    # 当前工具标记为调用失败
-                    self._context.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": "工具调用失败：用户中断"
-                    })
-                    # 剩余工具标记为未执行
-                    for remaining in tool_calls[i + 1:]:
+                    except (KeyboardInterrupt, asyncio.CancelledError):
+                        self._interrupted = False  # 重置，防止残留
+                        # 当前工具标记为调用失败
                         self._context.append({
                             "role": "tool",
-                            "tool_call_id": remaining["id"],
-                            "content": "未执行（工具调用失败：用户中断）"
+                            "tool_call_id": tc["id"],
+                            "content": "工具调用失败：用户中断"
                         })
-                    display.info("⏹️ 已中断（上下文已保留工具调用信息）")
-                    tool_interrupted = True
+                        # 剩余工具标记为未执行
+                        for remaining in tool_calls[i + 1:]:
+                            self._context.append({
+                                "role": "tool",
+                                "tool_call_id": remaining["id"],
+                                "content": "未执行（工具调用失败：用户中断）"
+                            })
+                        display.info("⏹️ 已中断（上下文已保留工具调用信息）")
+                        tool_interrupted = True
+                        break  # 退出 for 循环
                 
                 if tool_interrupted:
-                    # ⚠️ 实测：break 在 for 的 except 中只能退出 for 循环，
-                    # 之后的 continue 会让 while 继续运行，形成死循环！
-                    # 所以这里显式 break while 循环
-                    break
+                    break  # 退出 while 循环
                 
                 continue
             else:
