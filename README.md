@@ -7,8 +7,8 @@
 ![Python Version](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Version](https://img.shields.io/badge/version-2.0.0-orange)
-![Code Size](https://img.shields.io/github/languages/code-size/zpb/agent)
-![Last Commit](https://img.shields.io/github/last-commit/zpb/agent)
+![Code Size](https://img.shields.io/github/languages/code-size/zpb911km/fp-agent)
+![Last Commit](https://img.shields.io/github/last-commit/zpb911km/fp-agent)
 
 > *"像卵石被水流打磨，通过反复迭代逼近最优解"* — **Five Pebbles**
 
