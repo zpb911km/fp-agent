@@ -1,0 +1,1600 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Five Pebbles · WebUI</title>
+<style>
+  /* ═══════════════════════════════════════════
+     全局样式 — 深色赛博朋克主题
+     ═══════════════════════════════════════════ */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  
+  :root {
+    --bg-primary:    #0d1117;
+    --bg-secondary:  #161b22;
+    --bg-tertiary:   #1c2333;
+    --bg-hover:      #21262d;
+    --text-primary:  #e6edf3;
+    --text-secondary:#8b949e;
+    --text-dim:      #484f58;
+    --accent:        #58a6ff;
+    --accent-glow:   #1f6feb;
+    --green:         #3fb950;
+    --yellow:        #d29922;
+    --red:           #f85149;
+    --purple:        #bc8cff;
+    --cyan:          #39d2c0;
+    --orange:        #d4760c;
+    --border:        #30363d;
+    --radius:        10px;
+    --radius-sm:     6px;
+    --shadow:        0 0 20px rgba(0,0,0,0.5);
+    --font-mono:     'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    --font-sans:     -apple-system, 'SF Pro', 'Segoe UI', 'Noto Sans SC', sans-serif;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.6;
+    overflow: hidden;
+  }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: var(--font-mono); font-size: 0.9em; background: var(--bg-tertiary); padding: 0.15em 0.4em; border-radius: 3px; }
+  pre { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-tertiary); padding: 12px; border-radius: var(--radius-sm); overflow-x: auto; margin: 8px 0; border: 1px solid var(--border); }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--text-dim); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+
+  /* ═══════════════════════════════════════════
+     布局
+     ═══════════════════════════════════════════ */
+  .app-container {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    max-width: 1200px;
+    margin: 0 auto;
+    position: relative;
+  }
+
+  /* ── 顶栏 ─────────────────────────────── */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+    flex-shrink: 0;
+    min-height: 56px;
+  }
+  .topbar-left { display: flex; align-items: center; gap: 12px; }
+  .logo { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
+  .logo span { color: var(--accent); }
+  .logo-icon { font-size: 24px; }
+  .model-badge {
+    font-size: 11px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    padding: 2px 10px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    font-family: var(--font-mono);
+  }
+  .topbar-right { display: flex; align-items: center; gap: 10px; }
+  .status-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .session-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .topbar-btn {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 12px;
+    transition: all 0.2s;
+    font-family: var(--font-sans);
+  }
+  .topbar-btn:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--text-dim); }
+  .topbar-btn.danger:hover { border-color: var(--red); color: var(--red); }
+
+  /* ── 消息区域 ─────────────────────────── */
+  .messages-container {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .messages-container:empty::after {
+    content: '发送一条消息开始对话';
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-dim);
+    font-size: 14px;
+    user-select: none;
+  }
+
+  /* ── 消息气泡 ─────────────────────────── */
+  .msg-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px 0;
+    border-bottom: 1px solid rgba(48,54,61,0.4);
+  }
+  .msg-group:last-child { border-bottom: none; }
+
+  .msg {
+    display: flex;
+    gap: 12px;
+    padding: 4px 0;
+    animation: fadeIn 0.3s ease-out;
+  }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+  .msg-avatar {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    margin-top: 4px;
+  }
+  .msg-avatar.user {
+    background: linear-gradient(135deg, #1f6feb, #58a6ff);
+    color: #fff;
+  }
+  .msg-avatar.assistant {
+    background: linear-gradient(135deg, #55398a, #bc8cff);
+    color: #fff;
+  }
+  .msg-avatar.tool {
+    background: var(--bg-tertiary);
+    color: var(--yellow);
+    font-size: 14px;
+  }
+
+  .msg-body { flex: 1; min-width: 0; }
+
+  .msg-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .msg-author {
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .msg-author.user { color: var(--accent); }
+  .msg-author.assistant { color: var(--purple); }
+  .msg-author.tool { color: var(--yellow); }
+
+  .msg-time {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  .msg-content {
+    font-size: 14px;
+    line-height: 1.7;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+  }
+  .msg-content p { margin: 6px 0; }
+  .msg-content ul, .msg-content ol { margin: 6px 0; padding-left: 20px; }
+  .msg-content h1, .msg-content h2, .msg-content h3, .msg-content h4 { margin: 12px 0 6px; color: var(--text-primary); }
+  .msg-content hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+  .msg-content blockquote {
+    border-left: 3px solid var(--accent);
+    padding-left: 12px;
+    margin: 8px 0;
+    color: var(--text-secondary);
+  }
+  .msg-content table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+  .msg-content th, .msg-content td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+  .msg-content th { background: var(--bg-tertiary); font-weight: 600; }
+
+  /* ── 思考中动画 ──────────────────────── */
+  .thinking-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    padding: 4px 0 4px 44px;
+    animation: fadeIn 0.3s ease-out;
+  }
+  .thinking-dots span {
+    display: inline-block;
+    width: 6px; height: 6px;
+    background: var(--text-dim);
+    border-radius: 50%;
+    animation: dotBounce 1.4s infinite ease-in-out both;
+    margin: 0 2px;
+  }
+  .thinking-dots span:nth-child(1) { animation-delay: -0.32s; }
+  .thinking-dots span:nth-child(2) { animation-delay: -0.16s; }
+  .thinking-dots span:nth-child(3) { animation-delay: 0s; }
+  @keyframes dotBounce {
+    0%,80%,100% { transform: scale(0); }
+    40% { transform: scale(1); }
+  }
+
+  /* ── 工具调用卡片 ────────────────────── */
+  .tool-card {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px 12px;
+    margin: 4px 0 4px 44px;
+    animation: slideIn 0.25s ease-out;
+    font-size: 13px;
+  }
+  @keyframes slideIn { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: translateX(0); } }
+  .tool-card-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--yellow);
+    font-weight: 600;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .tool-card-header .icon { transition: transform 0.2s; }
+  .tool-card-header .icon.collapsed { transform: rotate(-90deg); }
+  .tool-card-body {
+    margin-top: 6px;
+    padding: 8px;
+    background: rgba(0,0,0,0.3);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-secondary);
+    max-height: 300px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .tool-card-body.hidden { display: none; }
+  .tool-result-success { color: var(--green); }
+  .tool-result-error { color: var(--red); }
+
+  /* ── 进度条 ───────────────────────────── */
+  .thinking-progress {
+    margin: 4px 0 4px 44px;
+    height: 2px;
+    background: var(--bg-tertiary);
+    border-radius: 2px;
+    overflow: hidden;
+    animation: fadeIn 0.3s ease-out;
+  }
+  .thinking-progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--purple), var(--accent));
+    background-size: 200% 100%;
+    animation: progressSlide 1.5s infinite linear;
+    border-radius: 2px;
+    width: 40%;
+  }
+  @keyframes progressSlide {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+
+  /* ── 输入区 ───────────────────────────── */
+  .input-area {
+    padding: 12px 20px 20px;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .input-wrapper {
+    display: flex;
+    gap: 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 4px;
+    transition: border-color 0.2s;
+  }
+  .input-wrapper:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(88,166,255,0.15);
+  }
+  .input-wrapper textarea {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    padding: 8px 12px;
+    resize: none;
+    min-height: 24px;
+    max-height: 120px;
+  }
+  .input-wrapper textarea::placeholder { color: var(--text-dim); }
+
+  .send-btn {
+    background: var(--accent);
+    border: none;
+    color: #fff;
+    width: 40px; height: 40px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    transition: all 0.2s;
+    flex-shrink: 0;
+    align-self: flex-end;
+  }
+  .send-btn:hover { background: var(--accent-glow); transform: scale(1.05); }
+  .send-btn:active { transform: scale(0.95); }
+  .send-btn:disabled { background: var(--text-dim); cursor: not-allowed; transform: none; }
+
+  .input-hint {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 6px;
+    padding: 0 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .input-hint kbd {
+    background: var(--bg-tertiary);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    border: 1px solid var(--border);
+  }
+
+  /* ── 错误消息 ─────────────────────────── */
+  .error-msg {
+    color: var(--red);
+    background: rgba(248,81,73,0.1);
+    border: 1px solid rgba(248,81,73,0.3);
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    margin: 4px 0;
+    font-size: 13px;
+  }
+
+  /* ── 历史消息（会话回看样式） ────────── */
+  .msg.history {
+    opacity: 0.85;
+    border-left: 2px solid var(--border);
+    padding-left: 10px;
+    margin: 2px 0;
+    background: rgba(48,54,61,0.15);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  }
+  .msg.history .msg-content {
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  .backtrack-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-left: auto;
+    flex-shrink: 0;
+    font-family: var(--font-sans);
+  }
+  .backtrack-btn:hover {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  .history-separator {
+    text-align: center;
+    padding: 16px 0 8px;
+    color: var(--text-dim);
+    font-size: 12px;
+    user-select: none;
+  }
+  .history-separator::before, .history-separator::after {
+    content: '';
+    display: inline-block;
+    width: 60px;
+    height: 1px;
+    background: var(--border);
+    vertical-align: middle;
+    margin: 0 10px;
+  }
+
+  /* ── 会话列表浮层 ────────────────────── */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(4px);
+  }
+  .modal-overlay.active { display: flex; }
+  .modal {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    max-width: 600px;
+    width: 90%;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: var(--shadow);
+  }
+  .modal-title {
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .modal-close {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 20px;
+    padding: 4px;
+  }
+  .modal-close:hover { color: var(--text-primary); }
+  .modal-body { flex: 1; overflow-y: auto; }
+
+  .session-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background 0.2s;
+    border: 1px solid transparent;
+    margin-bottom: 4px;
+  }
+  .session-item:hover { background: var(--bg-hover); }
+  .session-item.current { border-color: var(--accent); background: rgba(88,166,255,0.08); }
+  .session-item-info { flex: 1; min-width: 0; }
+  .session-item-summary {
+    font-size: 14px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .session-item-meta {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
+  .session-item-badge {
+    font-size: 10px;
+    color: var(--accent);
+    margin-left: 8px;
+    flex-shrink: 0;
+  }
+  .session-load-btn {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .session-load-btn:hover { background: var(--bg-hover); }
+  .session-del-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    padding: 4px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    flex-shrink: 0;
+    opacity: 0.4;
+    transition: opacity 0.15s, color 0.15s;
+  }
+  .session-item:hover .session-del-btn { opacity: 0.7; }
+  .session-del-btn:hover {
+    color: #e74c3c;
+    opacity: 1;
+    background: rgba(231,76,60,0.08);
+  }
+  .no-sessions {
+    text-align: center;
+    color: var(--text-dim);
+    padding: 40px 20px;
+  }
+
+  /* ── 响应式 ───────────────────────────── */
+  @media (max-width: 600px) {
+    .topbar { padding: 8px 12px; min-height: 48px; }
+    .logo { font-size: 18px; }
+    .messages-container { padding: 10px 12px; }
+    .input-area { padding: 8px 12px 16px; }
+    .msg-avatar { width: 28px; height: 28px; font-size: 14px; }
+    .session-label { max-width: 120px; }
+  }
+
+  /* ═══════════════════════════════════════════
+     登录遮罩层
+     ═══════════════════════════════════════════ */
+  .auth-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.75);
+    backdrop-filter: blur(8px);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: fadeIn 0.3s ease-out;
+  }
+  .auth-box {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 40px 36px 32px;
+    width: 400px;
+    max-width: 90vw;
+    text-align: center;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+  }
+  .auth-box .logo-icon { font-size: 48px; margin-bottom: 8px; }
+  .auth-box h1 { font-size: 24px; margin-bottom: 4px; }
+  .auth-box p { color: var(--text-secondary); font-size: 13px; margin-bottom: 24px; }
+  .auth-box .token-hint {
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--bg-tertiary);
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    margin-bottom: 20px;
+    word-break: break-all;
+    font-family: var(--font-mono);
+  }
+  .auth-input {
+    width: 100%;
+    padding: 12px 16px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-family: var(--font-mono);
+    outline: none;
+    transition: border-color 0.2s;
+    text-align: center;
+    letter-spacing: 2px;
+  }
+  .auth-input:focus { border-color: var(--accent); }
+  .auth-btn {
+    width: 100%;
+    margin-top: 12px;
+    padding: 12px;
+    background: var(--accent);
+    border: none;
+    border-radius: var(--radius-sm);
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  .auth-btn:hover { background: var(--accent-glow); }
+  .auth-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .auth-error {
+    color: var(--red);
+    font-size: 13px;
+    margin-top: 10px;
+    display: none;
+  }
+  .auth-error.show { display: block; }
+</style>
+</head>
+<body>
+
+<!-- ═══ 登录遮罩层 ═══ -->
+<div class="auth-overlay" id="authOverlay">
+  <div class="auth-box">
+    <div class="logo-icon">🪨</div>
+    <h1>Five Pebbles</h1>
+    <p>请输入启动 Token 以连接</p>
+    <div class="token-hint">
+      Token 在服务器启动时打印在终端中<br>
+      或查看项目根目录的 <code>.webui_token</code> 文件
+    </div>
+    <input type="password" class="auth-input" id="authInput"
+           placeholder="粘贴 Token..." autofocus
+           onkeydown="if(event.key==='Enter') doLogin()">
+    <button class="auth-btn" id="authBtn" onclick="doLogin()">🔓 连接</button>
+    <div class="auth-error" id="authError">Token 无效，请重试</div>
+  </div>
+</div>
+
+<div class="app-container">
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="logo-icon">🪨</span>
+      <span class="logo"><span>Five</span> Pebbles</span>
+      <span class="model-badge" id="modelBadge">—</span>
+    </div>
+    <div class="topbar-right">
+      <span class="session-label" id="sessionLabel" title="当前会话">—</span>
+      <span class="status-dot" id="statusDot"></span>
+      <button class="topbar-btn" onclick="openSessions()" title="历史会话">📋 会话</button>
+      <button class="topbar-btn" onclick="newSession()" title="新建会话">🆕 新建</button>
+      <button class="topbar-btn danger" onclick="clearSession()" title="清空当前会话">🗑️ 清空</button>
+    </div>
+  </header>
+
+  <!-- ═══ 消息列表 ═══ -->
+  <div class="messages-container" id="messagesContainer"></div>
+
+  <!-- ═══ 输入区 ═══ -->
+  <div class="input-area">
+    <div class="input-wrapper">
+      <textarea id="inputField" rows="1" placeholder="向 Five Pebbles 提问..." 
+                autofocus
+                onkeydown="handleKeyDown(event)"
+                oninput="autoResize(this)"></textarea>
+      <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="发送 (Enter)">
+        ➤
+      </button>
+    </div>
+    <div class="input-hint">
+      <span><kbd>Enter</kbd> 发送 · <kbd>Shift+Enter</kbd> 换行</span>
+      <span id="connectionStatus">🟢 已连接</span>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 会话列表浮层 ═══ -->
+<div class="modal-overlay" id="sessionsModal">
+  <div class="modal">
+    <div class="modal-title">
+      <span>📋 历史会话</span>
+      <button class="modal-close" onclick="closeSessions()">✕</button>
+    </div>
+    <div class="modal-body" id="sessionsList">
+      <div class="no-sessions">加载中...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════
+   Five Pebbles WebUI — 前端逻辑
+   ═══════════════════════════════════════════════════════════ */
+
+// ── 状态 ──
+let ws = null;
+let sessionId = null;
+let processing = false;
+let reconnectTimer = null;
+let lastGroupEl = null;        // 当前消息组（一个用户发问 + 对应回复）
+let thinkingEl = null;         // 思考中指示器
+let progressEl = null;         // 进度条
+
+// ── DOM 引用 ──
+const messagesEl = document.getElementById('messagesContainer');
+const inputEl = document.getElementById('inputField');
+const sendBtn = document.getElementById('sendBtn');
+const sessionLabel = document.getElementById('sessionLabel');
+const modelBadge = document.getElementById('modelBadge');
+const statusEl = document.getElementById('connectionStatus');
+
+// ── 认证 ──
+const AUTH_KEY = 'webui_token';
+function getToken() { return sessionStorage.getItem(AUTH_KEY) || ''; }
+function setToken(t) { sessionStorage.setItem(AUTH_KEY, t); }
+function clearToken() { sessionStorage.removeItem(AUTH_KEY); }
+function isAuthed() { return !!getToken(); }
+
+/** 为 fetch 选项添加 Authorization 头 */
+function withAuth(opts = {}) {
+  opts = opts || {};
+  opts.headers = opts.headers || {};
+  opts.headers['Authorization'] = `Bearer ${getToken()}`;
+  return opts;
+}
+
+/** 带认证的 fetch，自动处理 401 */
+async function authFetch(url, opts = {}) {
+  const res = await fetch(url, withAuth(opts));
+  if (res.status === 401) {
+    clearToken();
+    showLogin();
+    throw new Error('未授权');
+  }
+  return res;
+}
+
+// ── 登录 ──
+function showLogin() {
+  document.getElementById('authOverlay').style.display = 'flex';
+  document.getElementById('authInput').value = '';
+  document.getElementById('authError').classList.remove('show');
+  document.getElementById('authBtn').disabled = false;
+  setTimeout(() => document.getElementById('authInput').focus(), 100);
+}
+
+function hideLogin() {
+  document.getElementById('authOverlay').style.display = 'none';
+}
+
+async function doLogin() {
+  const token = document.getElementById('authInput').value.trim();
+  if (!token) return;
+  const btn = document.getElementById('authBtn');
+  const err = document.getElementById('authError');
+  btn.disabled = true;
+  err.classList.remove('show');
+  try {
+    const res = await fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token })
+    });
+    if (res.ok) {
+      setToken(token);
+      hideLogin();
+      initApp(); // 登录成功后初始化
+    } else {
+      err.classList.add('show');
+    }
+  } catch {
+    err.textContent = '服务器连接失败';
+    err.classList.add('show');
+  }
+  btn.disabled = false;
+}
+
+// ── 工具函数 ──
+function $(sel) { return document.querySelector(sel); }
+function $$(sel) { return document.querySelectorAll(sel); }
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function formatTime(ts) {
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function scrollToBottom() {
+  requestAnimationFrame(() => {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  });
+}
+
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+// ── 消息渲染 ──
+
+function getOrCreateMsgGroup() {
+  if (!lastGroupEl || !document.body.contains(lastGroupEl)) {
+    lastGroupEl = document.createElement('div');
+    lastGroupEl.className = 'msg-group';
+    messagesEl.appendChild(lastGroupEl);
+  }
+  return lastGroupEl;
+}
+
+function addUserMessage(content) {
+  const group = getOrCreateMsgGroup();
+  liveMsgIndex++;
+  const idx = liveMsgIndex;
+  
+  const msg = document.createElement('div');
+  msg.className = 'msg';
+  msg.innerHTML = `
+    <div class="msg-avatar user">👤</div>
+    <div class="msg-body">
+      <div class="msg-header">
+        <span class="msg-author user">你</span>
+        <span class="msg-time">${formatTime(Date.now()/1000)}</span>
+      </div>
+      <div class="msg-content">${escapeHtml(content)}</div>
+    </div>
+    <button class="backtrack-btn" title="回溯到此位置" data-index="${idx}">↩ 回溯至此</button>
+  `;
+  group.appendChild(msg);
+  scrollToBottom();
+}
+
+function addAssistantMessage(content) {
+  const group = getOrCreateMsgGroup();
+  liveMsgIndex++;
+  const idx = liveMsgIndex;
+  
+  const msg = document.createElement('div');
+  msg.className = 'msg';
+  msg.innerHTML = `
+    <div class="msg-avatar assistant">🪨</div>
+    <div class="msg-body">
+      <div class="msg-header">
+        <span class="msg-author assistant">Five Pebbles</span>
+        <span class="msg-time">${formatTime(Date.now()/1000)}</span>
+      </div>
+      <div class="msg-content"></div>
+    </div>
+    <button class="backtrack-btn" title="回溯到此位置" data-index="${idx}">↩ 回溯至此</button>
+  `;
+  group.appendChild(msg);
+  
+  // 逐步展示内容（打字效果）
+  const contentEl = msg.querySelector('.msg-content');
+  if (content) {
+    contentEl.textContent = content;
+  }
+  
+  scrollToBottom();
+  return contentEl;
+}
+
+function addToolCall(name, args) {
+  const group = getOrCreateMsgGroup();
+  
+  const card = document.createElement('div');
+  card.className = 'tool-card';
+  card.innerHTML = `
+    <div class="tool-card-header" onclick="toggleToolBody(this)">
+      <span class="icon">▼</span>
+      <span>🛠️ ${escapeHtml(name)}</span>
+    </div>
+    <div class="tool-card-body">${escapeHtml(args || '{}')}</div>
+  `;
+  group.appendChild(card);
+  scrollToBottom();
+}
+
+function addToolResult(name, result, isError) {
+  // 找到最后一个同名的 tool card
+  const cards = document.querySelectorAll('.tool-card');
+  let target = null;
+  for (let i = cards.length - 1; i >= 0; i--) {
+    const header = cards[i].querySelector('.tool-card-header');
+    if (header && header.textContent.includes(name)) {
+      target = cards[i];
+      break;
+    }
+  }
+  if (!target) {
+    // Create one
+    const card = document.createElement('div');
+    card.className = 'tool-card';
+    card.innerHTML = `
+      <div class="tool-card-header" onclick="toggleToolBody(this)">
+        <span class="icon">▼</span>
+        <span>🛠️ ${escapeHtml(name)}</span>
+      </div>
+      <div class="tool-card-body ${isError ? 'tool-result-error' : 'tool-result-success'}">${escapeHtml(result)}</div>
+    `;
+    const group = getOrCreateMsgGroup();
+    group.appendChild(card);
+    scrollToBottom();
+    return;
+  }
+  
+  const body = target.querySelector('.tool-card-body');
+  if (body) {
+    body.className = 'tool-card-body ' + (isError ? 'tool-result-error' : 'tool-result-success');
+    body.textContent = result;
+  }
+  
+  // 更新 header 加勾
+  const header = target.querySelector('.tool-card-header span:last-child');
+  if (header) {
+    header.textContent = `✅ ${name}`;
+  }
+  scrollToBottom();
+}
+
+function showThinking() {
+  removeThinking();
+  
+  const group = getOrCreateMsgGroup();
+  
+  // 进度条
+  progressEl = document.createElement('div');
+  progressEl.className = 'thinking-progress';
+  progressEl.innerHTML = '<div class="thinking-progress-bar"></div>';
+  group.appendChild(progressEl);
+  
+  thinkingEl = document.createElement('div');
+  thinkingEl.className = 'thinking-indicator';
+  thinkingEl.innerHTML = `
+    <span>⏳ 思考中</span>
+    <span class="thinking-dots">
+      <span></span><span></span><span></span>
+    </span>
+  `;
+  group.appendChild(thinkingEl);
+  
+  scrollToBottom();
+}
+
+function removeThinking() {
+  if (thinkingEl && document.body.contains(thinkingEl)) {
+    thinkingEl.remove();
+    thinkingEl = null;
+  }
+  if (progressEl && document.body.contains(progressEl)) {
+    progressEl.remove();
+    progressEl = null;
+  }
+}
+
+function showError(msg) {
+  const group = getOrCreateMsgGroup();
+  const err = document.createElement('div');
+  err.className = 'error-msg';
+  err.textContent = '❌ ' + msg;
+  group.appendChild(err);
+  scrollToBottom();
+}
+
+function toggleToolBody(headerEl) {
+  const icon = headerEl.querySelector('.icon');
+  const body = headerEl.nextElementSibling;
+  if (icon && body) {
+    icon.classList.toggle('collapsed');
+    body.classList.toggle('hidden');
+  }
+}
+
+function setProcessing(state) {
+  processing = state;
+  sendBtn.disabled = state;
+  inputEl.disabled = state;
+  if (!state) {
+    inputEl.focus();
+  }
+}
+
+// ── 清空会话（UI 层面） ──
+function clearUI() {
+  messagesEl.innerHTML = '';
+  lastGroupEl = null;
+  liveMsgIndex = 0;
+  removeThinking();
+}
+
+// ── WebSocket 连接 ──
+
+function connectWebSocket() {
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+  
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = window.location.host;
+  const token = getToken();
+  const wsUrl = `${protocol}//${host}/ws/chat?token=${encodeURIComponent(token)}`;
+  
+  ws = new WebSocket(wsUrl);
+  
+  ws.onopen = () => {
+    statusEl.textContent = '🟢 已连接';
+    setProcessing(false);
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    loadSessionsList(); // 加载会话列表（静默）
+  };
+  
+  ws.onclose = () => {
+    statusEl.textContent = '🔴 已断开';
+    setProcessing(false);
+    // 自动重连
+    if (!reconnectTimer) {
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectWebSocket();
+      }, 3000);
+    }
+  };
+  
+  ws.onerror = () => {
+    statusEl.textContent = '🔴 连接错误';
+  };
+  
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      handleEvent(data);
+    } catch (e) {
+      console.error('[WS] 解析失败:', e);
+    }
+  };
+}
+
+function handleEvent(data) {
+  const type = data.type;
+  
+  switch (type) {
+    case 'connected':
+      sessionId = data.sub_id;
+      statusEl.textContent = '🟢 已连接';
+      // 获取健康信息
+      fetch('/api/health')
+        .then(r => r.json())
+        .then(h => {
+          modelBadge.textContent = h.agent || '—';
+          sessionLabel.textContent = '📄 ' + (h.session || '—').slice(0, 12) + '...';
+        })
+        .catch(() => {});
+      break;
+    
+    case 'ping':
+      ws.send(JSON.stringify({ type: 'ping' }));
+      break;
+    
+    case 'pong':
+      break;
+    
+    case 'llm_start':
+      showThinking();
+      break;
+    
+    case 'llm_end':
+      removeThinking();
+      if (data.content && data.has_tool_calls) {
+        // LLM 在调用工具前附带了推理说明，显示它
+        addAssistantMessage(data.content);
+      }
+      break;
+    
+    case 'tool_select':
+      removeThinking();
+      // 显示即将调用的工具信息
+      if (data.tools && data.tools.length > 0) {
+        const toolNames = data.tools.join(', ');
+        const group = getOrCreateMsgGroup();
+        const info = document.createElement('div');
+        info.className = 'tool-card';
+        info.style.borderLeft = '3px solid var(--accent)';
+        info.innerHTML = `🔧 计划调用: ${escapeHtml(toolNames)}`;
+        group.appendChild(info);
+        scrollToBottom();
+      }
+      break;
+    
+    case 'tool_call':
+      removeThinking();
+      addToolCall(data.name, data.args);
+      break;
+    
+    case 'tool_result':
+      addToolResult(data.name, data.result, false);
+      break;
+    
+    case 'error':
+      removeThinking();
+      showError(data.error);
+      setProcessing(false);
+      break;
+    
+    case 'response':
+      removeThinking();
+      addAssistantMessage(data.content);
+      break;
+    
+    case 'done':
+      removeThinking();
+      setProcessing(false);
+      if (data.session_id) {
+        sessionId = data.session_id;
+        sessionLabel.textContent = '📄 ' + data.session_id.slice(0, 12) + '...';
+      }
+      // 如果是回溯操作完成，重新加载历史
+      if (_pendingBacktrack) {
+        _pendingBacktrack = false;
+        const curSid = data.session_id || sessionId;
+        if (curSid) {
+          setTimeout(() => fetchSessionHistory(curSid), 100);
+        }
+      }
+      break;
+    
+    case 'cancelled':
+      removeThinking();
+      setProcessing(false);
+      showError('请求被取消');
+      break;
+    
+    case 'shutdown':
+      statusEl.textContent = '🟠 服务器关闭中';
+      setProcessing(false);
+      break;
+    
+    // ── IO 通道事件（交互式命令） ──────────────────
+    case 'ask':
+      removeThinking();
+      // 显示 AI 的提问提示
+      addAssistantMessage('🔍 ' + data.prompt);
+      // 允许用户输入（实际上还在 processing 状态，但服务器会处理）
+      // 把 "processing" 暂时置为 false 让用户可以输入
+      // 但标记为 "等待输入" 模式
+      setProcessing(false);
+      inputEl.placeholder = '输入回复... (Enter 发送)';
+      inputEl.focus();
+      break;
+    
+    case 'info':
+      addAssistantMessage('ℹ️ ' + data.content);
+      break;
+    
+    case 'hint':
+      // 提示用样式更低调
+      const hintGroup = getOrCreateMsgGroup();
+      const hintEl = document.createElement('div');
+      hintEl.style.cssText = 'font-size:12px;color:var(--text-dim);padding:2px 0 2px 44px;font-style:italic;';
+      hintEl.textContent = '💡 ' + data.content;
+      hintGroup.appendChild(hintEl);
+      scrollToBottom();
+      break;
+    
+    case 'item':
+      const itemGroup = getOrCreateMsgGroup();
+      const itemEl = document.createElement('div');
+      itemEl.style.cssText = 'font-size:13px;color:var(--text-secondary);padding:1px 0 1px 44px;font-family:var(--font-mono);';
+      itemEl.textContent = data.content;
+      itemGroup.appendChild(itemEl);
+      scrollToBottom();
+      break;
+    
+    case 'say':
+      addAssistantMessage(data.content);
+      break;
+  }
+}
+
+// ── 发送消息 ──
+
+// 回溯按钮事件委托（所有 .backtrack-btn 点击由 messagesEl 代理）
+messagesEl.addEventListener('click', function(e) {
+  const btn = e.target.closest('.backtrack-btn');
+  if (!btn) return;
+  const idx = parseInt(btn.dataset.index, 10);
+  if (isNaN(idx)) return;
+  const sid = sessionId;
+  if (!sid) { showError('未指定当前会话'); return; }
+
+  // 标记回溯
+  _pendingBacktrack = true;
+  clearUI();
+  setProcessing(true);
+  ws.send(JSON.stringify({ type: 'message', content: `/back ${idx} 2` }));
+});
+
+function sendMessage() {
+  const text = inputEl.value.trim();
+  if (!text || processing || !ws || ws.readyState !== WebSocket.OPEN) return;
+  
+  // 清空输入
+  inputEl.value = '';
+  autoResize(inputEl);
+  
+  // 显示用户消息
+  addUserMessage(text);
+  
+  // 重置消息组（新的问答对）
+  lastGroupEl = null;
+  
+  // 发送到服务器
+  setProcessing(true);
+  ws.send(JSON.stringify({ type: 'message', content: text }));
+}
+
+function handleKeyDown(event) {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    sendMessage();
+  }
+}
+
+// ── 会话管理 ──
+
+function openSessions() {
+  const modal = document.getElementById('sessionsModal');
+  modal.classList.add('active');
+  loadSessionsList();
+}
+
+function closeSessions() {
+  document.getElementById('sessionsModal').classList.remove('active');
+}
+
+function loadSessionsList() {
+  const list = document.getElementById('sessionsList');
+  
+  authFetch('/api/sessions')
+    .then(r => r.json())
+    .then(data => {
+      const sessions = data.sessions || [];
+      if (sessions.length === 0) {
+        list.innerHTML = '<div class="no-sessions">暂无历史会话</div>';
+        return;
+      }
+      
+      let html = '';
+      sessions.forEach(s => {
+        const isCurrent = s.is_current;
+        const summary = s.summary || s.id.slice(0, 16) + '...';
+        const created = s.created || '—';
+        const msgCount = s.message_count || 0;
+        
+        html += `
+          <div class="session-item ${isCurrent ? 'current' : ''}" onclick="switchSession('${s.id}')">
+            <div class="session-item-info">
+              <div class="session-item-summary">${escapeHtml(summary)}</div>
+              <div class="session-item-meta">
+                ${created} · ${msgCount} 条消息
+              </div>
+            </div>
+            ${isCurrent ? '<span class="session-item-badge">当前</span>' : ''}
+            <button class="session-load-btn" onclick="event.stopPropagation(); switchSession('${s.id}')">
+              ${isCurrent ? '✓ 当前' : '切换到'}
+            </button>
+            ${!isCurrent ? `<button class="session-del-btn" onclick="event.stopPropagation(); deleteSession('${s.id}', this)" title="删除会话">🗑</button>` : ''}
+          </div>
+        `;
+      });
+      list.innerHTML = html;
+    })
+    .catch(err => {
+      list.innerHTML = `<div class="no-sessions">加载失败: ${err.message}</div>`;
+    });
+}
+
+function switchSession(sid) {
+  authFetch(`/api/sessions/${sid}/switch`, { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (data.status === 'switched') {
+        // 清空 UI 并加载新会话
+        clearUI();
+        sessionLabel.textContent = '📄 ' + sid.slice(0, 12) + '...';
+        closeSessions();
+        // 重新加载会话列表
+        loadSessionsList();
+        // 显示切换提示
+        const msg = document.createElement('div');
+        msg.className = 'msg-group';
+        msg.innerHTML = `
+          <div class="msg" style="justify-content:center;padding:16px 0">
+            <span style="color:var(--text-dim);font-size:13px">📂 已切换到会话 ${sid.slice(0, 8)}...</span>
+          </div>
+        `;
+        messagesEl.appendChild(msg);
+        scrollToBottom();
+      }
+    })
+    .catch(err => showError('切换会话失败: ' + err.message));
+}
+
+function deleteSession(sid, btnEl) {
+  if (!confirm(`确定删除会话 ${sid.slice(0, 12)}... 吗？此操作不可恢复。`)) return;
+  
+  // 禁用按钮防重复点击
+  btnEl.disabled = true;
+  btnEl.style.opacity = '0.3';
+  
+  authFetch(`/api/sessions/${sid}`, { method: 'DELETE' })
+    .then(r => r.json())
+    .then(data => {
+      if (data.status === 'deleted') {
+        // 从列表中移除该行
+        const item = btnEl.closest('.session-item');
+        if (item) item.style.transition = 'opacity 0.3s';
+        if (item) item.style.opacity = '0';
+        setTimeout(() => {
+          if (item) item.remove();
+          const list = document.getElementById('sessionsList');
+          if (list && list.children.length === 0) {
+            list.innerHTML = '<div class="no-sessions">暂无历史会话</div>';
+          }
+        }, 300);
+      } else {
+        btnEl.disabled = false;
+        btnEl.style.opacity = '';
+        showError('删除失败: ' + (data.detail || '未知错误'));
+      }
+    })
+    .catch(err => {
+      btnEl.disabled = false;
+      btnEl.style.opacity = '';
+      showError('删除会话失败: ' + err.message);
+    });
+}
+
+function clearSession() {
+  if (!confirm('确定要清空当前会话吗？')) return;
+  
+  authFetch('/api/sessions/clear', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (data.status === 'cleared') {
+        clearUI();
+        sessionLabel.textContent = '📄 新会话';
+        scrollToBottom();
+      }
+    })
+    .catch(err => showError('清空失败: ' + err.message));
+}
+
+function newSession() {
+  /** 创建新会话并切换到它 */
+  if (processing) {
+    showError('正在处理中，请等待完成');
+    return;
+  }
+
+  authFetch('/api/sessions', { method: 'POST' })
+    .then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    })
+    .then(data => {
+      if (data.status === 'created') {
+        // 清空 UI
+        clearUI();
+        // 更新会话标签
+        sessionLabel.textContent = '📄 ' + data.session_id.slice(0, 12) + '...';
+        // 重新加载会话列表浮层（如果打开中）
+        loadSessionsList();
+        // 刷新模型/会话信息
+        fetch('/api/health')
+          .then(r => r.json())
+          .then(h => {
+            modelBadge.textContent = h.agent || '—';
+          })
+          .catch(() => {});
+        // 显示提示
+        const msg = document.createElement('div');
+        msg.className = 'msg-group';
+        msg.innerHTML = `
+          <div class="msg" style="justify-content:center;padding:16px 0">
+            <span style="color:var(--text-dim);font-size:13px">🆕 已创建新会话 ${data.session_id.slice(0, 8)}...</span>
+          </div>
+        `;
+        messagesEl.appendChild(msg);
+        scrollToBottom();
+      }
+    })
+    .catch(err => showError('新建会话失败: ' + err.message));
+}
+
+// ── 会话历史回看 + 回溯 ──
+
+let historyIndexMap = {};  // sid → [{index, role, content}, ...] 缓存已获取的历史
+let _pendingBacktrack = false;  // 标记是否刚发起了回溯
+let liveMsgIndex = 0;          // 当前会话最新消息的 index（用于回溯按钮）
+
+function renderHistoryMessages(sid, messages) {
+  /** 在聊天区域顶部渲染历史消息（只读），每条附带回溯按钮 */
+  const container = document.getElementById('messagesContainer');
+
+  // 分隔线：历史记录 vs 新对话
+  const sep = document.createElement('div');
+  sep.className = 'history-separator';
+  sep.textContent = '📜 历史记录';
+  container.appendChild(sep);
+
+  messages.forEach(msg => {
+    const group = document.createElement('div');
+    group.className = 'msg-group';
+    group.style.borderBottom = 'none';
+    group.style.padding = '2px 0';
+
+    const msgDiv = document.createElement('div');
+    msgDiv.className = 'msg history';
+
+    const avatar = msg.role === 'user'
+      ? '<div class="msg-avatar user">👤</div>'
+      : '<div class="msg-avatar assistant">🪨</div>';
+
+    const author = msg.role === 'user' ? '你' : 'Five Pebbles';
+    const authorCls = msg.role === 'user' ? 'user' : 'assistant';
+
+    // 截断过长的内容避免撑爆界面
+    const displayContent = msg.content.length > 300
+      ? msg.content.slice(0, 300) + '...'
+      : msg.content;
+
+    msgDiv.innerHTML = `
+      ${avatar}
+      <div class="msg-body">
+        <div class="msg-header">
+          <span class="msg-author ${authorCls}">${author}</span>
+          <span class="msg-time">#${msg.index}</span>
+        </div>
+        <div class="msg-content">${escapeHtml(displayContent)}</div>
+      </div>
+      <button class="backtrack-btn" title="回溯到此位置" data-index="${msg.index}">↩ 回溯至此</button>
+    `;
+    group.appendChild(msgDiv);
+    container.appendChild(group);
+
+    // 如果消息有 tool_calls，也渲染
+    if (msg.tool_calls && msg.tool_calls.length > 0) {
+      msg.tool_calls.forEach(tc => {
+        const tcDiv = document.createElement('div');
+        tcDiv.className = 'tool-card';
+        tcDiv.style.marginLeft = '44px';
+        tcDiv.style.opacity = '0.7';
+        const argsStr = typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args, null, 2);
+        tcDiv.innerHTML = `
+          <div class="tool-card-header">
+            <span class="icon">▼</span>
+            <span>🛠️ ${escapeHtml(tc.name || 'tool')}</span>
+          </div>
+          <div class="tool-card-body">${escapeHtml(argsStr)}</div>
+        `;
+        group.appendChild(tcDiv);
+      });
+    }
+  });
+
+  scrollToBottom();
+}
+
+function fetchSessionHistory(sid) {
+  /** 从后端获取会话历史并渲染 */
+  authFetch(`/api/sessions/${sid}/messages`)
+    .then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    })
+    .then(data => {
+      const msgs = data.messages || [];
+      historyIndexMap[sid] = msgs;
+      // 设置 liveMsgIndex 为历史最后一条的 index（后续新消息从 +1 开始）
+      if (msgs.length > 0) {
+        liveMsgIndex = msgs[msgs.length - 1].index;
+      }
+      if (msgs.length > 0) {
+        renderHistoryMessages(sid, msgs);
+      }
+    })
+    .catch(err => {
+      console.warn('[History] 加载历史失败:', err.message);
+    });
+}
+
+function backtrackTo(sid, index) {
+  /** 发送 /back <index> 命令到服务器，回退到指定历史位置 */
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    showError('WebSocket 未连接');
+    return;
+  }
+  if (processing) {
+    showError('正在处理中，请等待完成');
+    return;
+  }
+
+  // 标记：done 事件后要重新加载历史
+  _pendingBacktrack = true;
+
+  // 清空 UI
+  clearUI();
+
+  // 发送回溯命令
+  setProcessing(true);
+  ws.send(JSON.stringify({ type: 'message', content: `/back ${index} 2` }));
+}
+
+// ── 修改 switchSession 以加载历史 ──
+const _origSwitchSession = switchSession;
+switchSession = function(sid) {
+  authFetch(`/api/sessions/${sid}/switch`, { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (data.status === 'switched') {
+        clearUI();
+        sessionLabel.textContent = '📄 ' + sid.slice(0, 12) + '...';
+        closeSessions();
+        loadSessionsList();
+        // 加载并显示历史消息
+        fetchSessionHistory(sid);
+        // 显示切换提示
+        const msg = document.createElement('div');
+        msg.className = 'msg-group';
+        msg.style.borderBottom = 'none';
+        msg.innerHTML = `
+          <div class="msg" style="justify-content:center;padding:8px 0">
+            <span style="color:var(--text-dim);font-size:12px">📂 已切换到 ${sid.slice(0, 8)}... 可发送消息继续对话</span>
+          </div>
+        `;
+        document.getElementById('messagesContainer').appendChild(msg);
+        scrollToBottom();
+      }
+    })
+    .catch(err => showError('切换会话失败: ' + err.message));
+};
+
+// ── 初始化和登录流程 ──
+
+function initApp() {
+  /** 登录成功后初始化 WebSocket 和 UI */
+  connectWebSocket();
+  inputEl.focus();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  if (isAuthed()) {
+    initApp();
+  } else {
+    showLogin();
+  }
+  
+  // 点击模态框外部关闭
+  document.getElementById('sessionsModal').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeSessions();
+  });
+  
+  // ESC 关闭模态框
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeSessions();
+  });
+});
+</script>
+</body>
+</html>
