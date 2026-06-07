@@ -228,6 +228,19 @@ class SessionManager:
         self._context.clear()
         return self._session_id
 
+    def delete_session(self, sid: str) -> bool:
+        """删除指定会话文件。不能删除当前会话。返回是否成功。"""
+        if sid == self._session_id:
+            return False  # 不允许删除当前会话
+        path = _session_path(sid)
+        if not os.path.exists(path):
+            return False
+        try:
+            os.remove(path)
+            return True
+        except Exception:
+            return False
+
     def resume_latest(self) -> bool:
         """尝试续最近会话。成功返回 True，否则创建新会话。"""
         latest = _find_latest_session()
