@@ -281,6 +281,7 @@ class WeatherPlugin(Plugin):
 
 - [📖 用户手册](docs/用户手册.md) — 安装、配置、CLI 命令、技能使用
 - [🔧 开发手册](docs/开发手册.md) — 架构设计、API 参考、插件/技能/工具开发指南
+- [🌐 WebUI 手册](docs/WebUI手册.md) — Web 界面启动、API 文档、WebSocket 协议
 - [📋 更新日志](CHANGELOG.md) — 版本历史
 - [🤝 贡献指南](CONTRIBUTING.md) — PR 流程、代码规范
 
