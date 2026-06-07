@@ -32,6 +32,7 @@ from core import session
 from prompts.agent import load_agent_prompt
 from skills.loader import skill_loader
 from commands import execute as execute_command, get_all_commands
+from core.io import IOChannel, CLIIO
 
 
 @dataclass
@@ -63,8 +64,12 @@ class Agent:
     - 上下文压缩
     """
     
-    def __init__(self, enable_log: bool = False, resume: Optional[str] = None):
+    def __init__(self, enable_log: bool = False, resume: Optional[str] = None,
+                 io: Optional[IOChannel] = None):
         self.enable_log = enable_log
+        
+        # IO 通道（默认 CLI）
+        self.io = io or CLIIO()
         
         # 检查配置
         if not config.check_llm_config():
@@ -368,6 +373,49 @@ class Agent:
         self._context.extend([{"role": "system", "content": self._system_prompt}])
         self.session.clear_context(self._system_prompt)
     
+    def delete_session(self, sid: str) -> bool:
+        """删除指定会话（不能是当前会话）。返回是否成功。"""
+        return self.session.delete_session(sid)
+    
+    async def _summarize_session_bg(self, old_sid: str, old_context: List[Dict]):
+        """后台异步任务：为已保存的旧会话用 LLM 生成摘要并更新 meta。
+        注意：此方法在后台 fire-and-forget，不影响主流程。"""
+        try:
+            history_msgs = [m for m in old_context if m["role"] != "system"]
+            if len(history_msgs) < 2:
+                return  # 消息太少，不值得总结
+            
+            summary_msgs = old_context + [
+                {"role": "user", "content": "请总结一下，给这次对话起一个5到10个汉字的名字。不要添加任何多余的文字。"}
+            ]
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=summary_msgs,
+                tools=tools.TOOL_DEFINITIONS,
+                stream=False,
+                temperature=0.3,
+                max_tokens=32,
+                extra_body={"enable_thinking": False},
+            )
+            summary = response.choices[0].message.content or ""
+            summary = summary.strip().strip('"').strip("'").strip('「」『』')
+            
+            if not summary or len(summary) > 50:
+                # 回退：取首条用户消息
+                for m in history_msgs:
+                    if m["role"] == "user":
+                        text = m.get("content", "").strip()
+                        if text:
+                            summary = text.split("\n")[0].strip()[:50]
+                            break
+            if not summary:
+                summary = "empty_session"
+            
+            # 更新旧会话的 meta
+            self.session.update_meta(old_sid, summary=summary)
+        except Exception:
+            pass  # 后台任务，静默容错
+    
     # ============ 中断机制 ============
     
     def cancel(self):
@@ -626,17 +674,50 @@ class Agent:
         
         display.info(f" ✅\n📦 已压缩 {len(to_compact)} 条消息为摘要")
     
-    async def _cmd_back(self):
-        """回退到对话的某个历史时刻（异步）"""
+    async def _cmd_back(self, target_idx: int = None, mode: int = None) -> str:
+        """
+        回退到对话的某个历史时刻（异步）
+        
+        参数：
+            target_idx: 目标消息序号（1-based，从第一条非 system 消息开始）
+                        为 None 时进入交互模式
+            mode:       1=保留后续消息，2=删除后续消息（默认）
+        
+        返回状态信息（用于 Response.content）
+        """
         history_msgs = [m for m in self._context if m["role"] != "system"]
         
         if not history_msgs:
-            display.info("没有历史记录可以回退")
-            return
+            msg = "没有历史记录可以回退"
+            self.io.info(msg)
+            return msg
         
+        # ── 有参数：直接回溯 ──
+        if target_idx is not None:
+            if target_idx < 1 or target_idx > len(history_msgs):
+                msg = f"❌ 无效索引：{target_idx}，有效范围 1~{len(history_msgs)}"
+                self.io.error(msg)
+                return msg
+            
+            idx_in_history = target_idx - 1  # 转为 0-based
+            sys_count = sum(1 for m in self._context if m["role"] == "system")
+            
+            if mode is None or mode == 2:
+                # 删除后续消息
+                del self._context[sys_count + idx_in_history + 1:]
+                self.session.save_context(self._context)
+                msg = f"⏪ 已回退到第 {target_idx} 条消息，后续消息已删除"
+                self.io.info(msg)
+                return msg
+            else:  # mode == 1，保留后续消息
+                self.session.save_context(self._context)
+                msg = f"⏪ 已回退到第 {target_idx} 条消息，后续消息已保留"
+                self.io.info(msg)
+                return msg
+        
+        # ── 无参数：交互模式（原有逻辑） ──
         roles_zh = {"user": "👤 用户", "assistant": "🤖 AI", "tool": "🔧 工具"}
-        display.info(f"\n📜 对话历史（共 {len(history_msgs)} 条消息）:")
-        print()
+        lines = [f"📜 对话历史（共 {len(history_msgs)} 条消息）:"]
         
         for i, msg in enumerate(history_msgs):
             role = roles_zh.get(msg["role"], msg["role"])
@@ -646,39 +727,40 @@ class Agent:
             else:
                 content = content[:120] + "..." if len(content) > 120 else content
             content = content.replace("\n", " ")
-            display.item(f"  [{i+1:3d}] {role}: {content}")
+            lines.append(f"  [{i+1:3d}] {role}: {content}")
         
-        print()
-        display.hint(f"  输入 1~{len(history_msgs)} 回退到对应位置")
-        display.hint(f"  输入 q 取消")
-        print()
+        prompt_hint = f"输入 1~{len(history_msgs)} 回退到对应位置，输入 q 取消"
         
-        loop = asyncio.get_running_loop()
-        try:
-            choice = await loop.run_in_executor(None, lambda: input("AI <- 选择: ").strip())
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return
+        self.io.info(lines[0])
+        for l in lines[1:]:
+            self.io.item(l)
+        self.io.hint(prompt_hint)
         
-        if choice.lower() == "q":
-            display.info("已取消")
-            return
+        choice = await self.io.ask("AI <- 选择: ")
+        
+        if not choice or choice.lower() == "q":
+            msg = "已取消"
+            self.io.info(msg)
+            return msg
         
         try:
-            idx = int(choice) - 1
-            if idx < 0 or idx >= len(history_msgs):
-                display.error(f"❌ 无效选择，请输入 1~{len(history_msgs)}")
-                return
+            idx_in_history = int(choice) - 1
+            if idx_in_history < 0 or idx_in_history >= len(history_msgs):
+                msg = f"❌ 无效选择，请输入 1~{len(history_msgs)}"
+                self.io.error(msg)
+                return msg
         except ValueError:
-            display.error("❌ 请输入数字")
-            return
+            msg = "❌ 请输入数字"
+            self.io.error(msg)
+            return msg
         
-        keep_in_context = idx + 1
-        del self._context[keep_in_context + 1:]
-        
+        sys_count = sum(1 for m in self._context if m["role"] == "system")
+        del self._context[sys_count + idx_in_history + 1:]
         self.session.save_context(self._context)
         
-        display.info(f"⏪ 已回退到第 {choice} 条消息位置")
+        msg = f"⏪ 已回退到第 {choice} 条消息位置"
+        self.io.info(msg)
+        return msg
     
     def _cmd_fork(self):
         """基于当前上下文新建会话"""
@@ -741,10 +823,10 @@ class Agent:
         cmds = get_all_commands()
         return {f"/{name}": desc for name, desc in cmds.items()}
     
-    async def handle_command(self, cmd_line: str) -> bool:
-        """处理斜杠命令"""
+    async def handle_command(self, cmd_line: str) -> tuple[bool, str]:
+        """处理斜杠命令，返回 (已处理, 输出文本)"""
         if not cmd_line.strip().startswith("/"):
-            return False
+            return (False, "")
         
         parts = cmd_line.strip().split(maxsplit=1)
         cmd = parts[0].lstrip("/").lower()
@@ -754,19 +836,37 @@ class Agent:
     
     # ============ 主处理流程（全异步） ============
     
-    async def process(self, user_input: str) -> Response:
+    async def process(self, user_input: str,
+                      io: Optional[IOChannel] = None) -> Response:
         """
         处理用户输入（全异步）
+        
+        io: 可选 IO 通道覆盖。WebUI 模式传入 WebSocketIO，
+            此时命令内部的 self.io 暂时被替换。
         """
         await self._ensure_initialized()
         
         if not user_input.strip():
             return Response(content="")
         
+        # 临时替换 IO 通道
+        old_io = self.io
+        if io is not None:
+            self.io = io
+        
+        try:
+            return await self._process_inner(user_input)
+        finally:
+            self.io = old_io
+    
+    async def _process_inner(self, user_input: str) -> Response:
+        """处理用户输入的核心逻辑（io 已在 process() 中设置好）"""
+        
         # 检查命令
         if user_input.strip().startswith("/"):
-            if await self.handle_command(user_input):
-                return Response(content="")
+            handled, output = await self.handle_command(user_input)
+            if handled:
+                return Response(content=output)
         
         # 添加用户消息
         self._context.append({"role": "user", "content": user_input})
