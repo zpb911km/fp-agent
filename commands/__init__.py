@@ -20,9 +20,11 @@ class CommandModule:
     name: str
     aliases: list[str]
     description: str
-    # execute 可以是同步或异步，由 commands/__init__.py 的 execute() 自动适配
-    def execute(agent, arg: str) -> bool: ...
-    async def execute(agent, arg: str) -> bool: ...
+    # execute 返回 (已处理, 输出文本)；
+    # 兼容旧版：也可只返回 bool（自动转为 ("", False/True)）
+    # 同步或异步均可，由 execute() 自动适配
+    def execute(agent, arg: str) -> tuple[bool, str]: ...
+    async def execute(agent, arg: str) -> tuple[bool, str]: ...
 
 
 def _discover_commands():
@@ -88,14 +90,28 @@ def get_all_commands() -> dict[str, str]:
     return result
 
 
-async def execute(agent, cmd_name: str, arg: str) -> bool:
-    """执行命令，返回 True 表示已处理。
+async def execute(agent, cmd_name: str, arg: str) -> tuple[bool, str]:
+    """执行命令，返回 (是否已处理, 输出文本)。
     
-    自动适配同步/异步的 execute 方法。
+    兼容旧版只返回 bool 的命令（自动补为 ("", False/True)）。
+    新版命令可返回 tuple[bool, str] 或 tuple[bool, str, str]。
     """
     mod = get_command(cmd_name)
     if mod is None:
-        return False
+        return (False, "")
+    
+    # 执行命令（自动适配同步/异步）
     if asyncio.iscoroutinefunction(mod.execute):
-        return await mod.execute(agent, arg)
-    return mod.execute(agent, arg)
+        result = await mod.execute(agent, arg)
+    else:
+        result = mod.execute(agent, arg)
+    
+    # 兼容旧版：只返回 bool
+    if isinstance(result, bool):
+        return (result, "")
+    
+    # 新版：返回 (handled, output)
+    if isinstance(result, tuple):
+        return result
+    
+    return (True, str(result))
