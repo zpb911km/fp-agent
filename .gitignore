@@ -80,6 +80,8 @@ tools_backup_for_ref.py
 *.gif
 *.ico
 
+!app/webui/static/favicon.png
+
 # ─── 文档生成 ───────────────────────────
 site/
 _build/
