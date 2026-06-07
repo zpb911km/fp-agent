@@ -8,6 +8,7 @@ aliases = []
 description = "列出所有技能"
 
 
-def execute(agent, arg: str) -> bool:
-    display.info(agent.list_skills())
-    return True
+def execute(agent, arg: str) -> tuple[bool, str]:
+    output = agent.list_skills()
+    display.info(output)
+    return (True, output)

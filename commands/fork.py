@@ -8,6 +8,6 @@ aliases = []
 description = "基于当前上下文新建会话"
 
 
-def execute(agent, arg: str) -> bool:
+def execute(agent, arg: str) -> tuple[bool, str]:
     agent._cmd_fork()
-    return True
+    return (True, "🍴 已 fork 新会话")

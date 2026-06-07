@@ -8,7 +8,8 @@ aliases = []
 description = "热重载技能"
 
 
-def execute(agent, arg: str) -> bool:
+def execute(agent, arg: str) -> tuple[bool, str]:
     if agent.reload_skills():
         agent._context[0]["content"] = agent._system_prompt
-    return True
+        return (True, "✅ 技能重载完成")
+    return (True, "❌ 技能重载失败")

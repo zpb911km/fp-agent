@@ -8,6 +8,6 @@ aliases = []
 description = "压缩对话历史"
 
 
-async def execute(agent, arg: str) -> bool:
+async def execute(agent, arg: str) -> tuple[bool, str]:
     await agent._compact_context()
-    return True
+    return (True, "📦 历史已压缩")

@@ -8,7 +8,8 @@ aliases = []
 description = "清空当前会话"
 
 
-def execute(agent, arg: str) -> bool:
+def execute(agent, arg: str) -> tuple[bool, str]:
     agent.clear_session()
-    display.info("🧹 当前会话已清空")
-    return True
+    msg = "🧹 当前会话已清空"
+    display.info(msg)
+    return (True, msg)

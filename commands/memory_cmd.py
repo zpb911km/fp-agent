@@ -11,7 +11,7 @@ aliases = []
 description = "查看持久化记忆"
 
 
-def execute(agent, arg: str) -> bool:
+def execute(agent, arg: str) -> tuple[bool, str]:
     lines = ["📋 记忆列表:", ""]
     memory_dir = config.MEMORY_DIR
     if os.path.isdir(memory_dir):
@@ -21,6 +21,12 @@ def execute(agent, arg: str) -> bool:
                 lines.append(f"  • {name}")
     if len(lines) == 2:
         lines.append("  （暂无记忆）")
-    display.info("\n".join(lines))
-    display.hint("💡 使用 memory_read / memory_save 工具管理记忆")
-    return True
+    output = "\n".join(lines)
+    hint = "💡 使用 memory_read / memory_save 工具管理记忆"
+    
+    # CLI 模式：保持着色
+    display.info(output)
+    display.hint(hint)
+    
+    # WebUI 模式：通过返回值传递
+    return (True, output + "\n" + hint)
