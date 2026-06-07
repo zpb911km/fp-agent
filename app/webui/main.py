@@ -271,7 +271,6 @@ class WebUIPlugin(Plugin):
 _agent: Optional[Agent] = None
 _agent_lock = asyncio.Lock()
 
-
 async def get_agent() -> Agent:
     """获取或创建全局 Agent 实例（延迟初始化）"""
     global _agent
@@ -405,6 +404,92 @@ async def list_sessions():
     return {"sessions": result}
 
 
+# ════════════════════════════════════════════════════════════
+# 4a. 新建 Agent（shutdown 旧实例，创建全新实例）
+# ════════════════════════════════════════════════════════════
+
+@app.post("/api/agent/new")
+async def new_agent():
+    """
+    创建全新 Agent 实例。
+    
+    流程：
+      1. shutdown 旧 Agent（保存当前会话后优雅退出）
+      2. 创建新 Agent 实例
+      3. 注册 WebUIPlugin 桥接插件
+      4. 创建全新的会话（清空上下文）
+      5. 通过 EventBus 通知前端刷新
+    
+    这是真正的"重置"——所有内存状态被清空，所有模块被重新加载，
+    相当于 Agent 刚启动时的状态。
+    """
+    global _agent
+
+    # ── 检查是否正在处理 ──
+    if _agent is not None and getattr(_agent, '_processing', False):
+        raise HTTPException(status_code=409, detail="Agent 正在处理请求，请稍后重试")
+
+    async with _agent_lock:
+        # ── 保存旧会话并 shutdown 旧 Agent ──
+        if _agent is not None:
+            try:
+                _agent.session.save_context(_agent._context)
+                await _agent.shutdown()
+            except Exception as e:
+                display.warning(f"[WebUI] ⚠️ 旧 Agent shutdown 时发生异常: {e}")
+            _agent = None
+
+        # ── 通知前端准备重连 ──
+        await event_bus.publish({
+            "type": "reload",
+            "message": "🔄 新建 Agent 中，连接即将断开",
+        })
+
+        # ── 重新导入 Agent 类（确保获取最新代码） ──
+        from core.agent import Agent as NewAgent
+
+        # ── 创建新 Agent ──
+        try:
+            _agent = NewAgent(enable_log=False)
+            webui_plugin = WebUIPlugin()
+            _agent.plugins.register(webui_plugin)
+            await _agent._ensure_initialized()
+        except Exception as e:
+            display.error(f"[WebUI] ❌ 新 Agent 创建失败: {e}")
+            _agent = None
+            raise HTTPException(status_code=500, detail=f"新 Agent 创建失败: {e}")
+
+        # ── 使用 Agent 构造函数已创建的新会话 ──
+        # NewAgent() 的 SessionManager(resume=None) 中已调用 _init_session()
+        # 生成了全新会话，此处只需重建 context 即可
+        try:
+            _agent._context = _agent._build_context()
+            new_sid = _agent.session.session_id
+            display.info(f"[WebUI] 🆕 已使用新会话: {new_sid}")
+        except Exception as e:
+            display.error(f"[WebUI] ❌ 新会话初始化失败: {e}")
+            raise HTTPException(status_code=500, detail=f"新会话初始化失败: {e}")
+
+        display.info(
+            f"[WebUI] 🆕 Agent 新建完成 "
+            f"(model={_agent.model}, session={_agent.session.session_id})"
+        )
+
+        # ── 稍等片刻，让前端收到 reload 事件后再推送 done ──
+        await asyncio.sleep(0.3)
+        await event_bus.publish({
+            "type": "reload_done",
+            "session_id": _agent.session.session_id,
+            "model": _agent.model,
+        })
+
+    return {
+        "status": "ok",
+        "session_id": _agent.session.session_id,
+        "model": _agent.model,
+    }
+
+
 @app.post("/api/sessions")
 async def create_new_session():
     """创建新会话并切换到它"""
@@ -423,8 +508,36 @@ async def create_new_session():
     # 重建 agent 上下文（加载 system prompt 到新会话）
     agent._context = agent._build_context()
     
-    # 后台异步生成旧会话摘要（不阻塞返回）
-    asyncio.create_task(agent._summarize_session_bg(old_sid, old_context))
+    # 同步生成旧会话摘要（不传 tools，确保 LLM 返回纯文本标题）
+    history_msgs = [m for m in old_context if m["role"] != "system"]
+    if len(history_msgs) >= 2:
+        try:
+            summary_msgs = old_context + [
+                {"role": "user", "content": "请总结一下，给这次对话起一个5到10个汉字的名字。不要添加任何多余的文字。"}
+            ]
+            response = await agent.client.chat.completions.create(
+                model=agent.model,
+                messages=summary_msgs,
+                stream=False,
+                temperature=0.3,
+                max_tokens=32,
+                extra_body={"enable_thinking": False},
+            )
+            summary = response.choices[0].message.content or ""
+            summary = summary.strip().strip('"').strip("'").strip('「」『』')
+            if not summary or len(summary) > 50:
+                # 回退：取首条用户消息
+                for m in history_msgs:
+                    if m["role"] == "user":
+                        text = m.get("content", "").strip()
+                        if text:
+                            summary = text.split("\n")[0].strip()[:50]
+                            break
+            if not summary:
+                summary = "empty_session"
+            agent.session.update_meta(old_sid, summary=summary)
+        except Exception:
+            pass
     
     return {"session_id": new_sid, "status": "created"}
 
@@ -538,8 +651,35 @@ async def switch_session_endpoint(session_id: str):
     if not agent.switch_session(session_id):
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
     
-    # 后台异步生成旧会话摘要
-    asyncio.create_task(agent._summarize_session_bg(old_sid, old_context))
+    # 同步生成旧会话摘要（不传 tools）
+    history_msgs = [m for m in old_context if m["role"] != "system"]
+    if len(history_msgs) >= 2:
+        try:
+            summary_msgs = old_context + [
+                {"role": "user", "content": "请总结一下，给这次对话起一个5到10个汉字的名字。不要添加任何多余的文字。"}
+            ]
+            response = await agent.client.chat.completions.create(
+                model=agent.model,
+                messages=summary_msgs,
+                stream=False,
+                temperature=0.3,
+                max_tokens=32,
+                extra_body={"enable_thinking": False},
+            )
+            summary = response.choices[0].message.content or ""
+            summary = summary.strip().strip('"').strip("'").strip('「」『』')
+            if not summary or len(summary) > 50:
+                for m in history_msgs:
+                    if m["role"] == "user":
+                        text = m.get("content", "").strip()
+                        if text:
+                            summary = text.split("\n")[0].strip()[:50]
+                            break
+            if not summary:
+                summary = "empty_session"
+            agent.session.update_meta(old_sid, summary=summary)
+        except Exception:
+            pass
     
     return {
         "session_id": session_id,
@@ -553,6 +693,154 @@ async def clear_current_session():
     agent = await get_agent()
     agent.clear_session()
     return {"status": "cleared"}
+
+
+# ════════════════════════════════════════════════════════════
+# 4b. 热重载 Agent
+# ════════════════════════════════════════════════════════════
+
+# ── 需要热重载的模块列表（按依赖顺序，子模块由父模块自动重新导入）─
+_RELOAD_MODULES = [
+    # 第 1 层：无项目内部依赖
+    'config',
+    'display',
+    # 第 2 层：依赖 config
+    'core.io',
+    'core.lifecycle',
+    'core.session',
+    'core.llm_client',
+    # 第 3 层：依赖 core.*
+    'plugins.base.plugin',
+    'prompts.agent',
+    'skills.loader',
+    # 第 4 层：工具和命令（含全局注册表状态）
+    'commands',        # _discover_commands() 重新扫描
+    'tools',           # ToolRegistry 全局实例重建
+    # 第 5 层：Agent 主干（依赖以上所有）
+    'core.agent',
+]
+
+
+def _reload_modules():
+    """按顺序 reload 所有核心模块，返回是否成功。"""
+    import importlib
+
+    # ── 先 reload tools 和 commands 的子模块 ──
+    # tools/commands 的父模块 reload 时会重新扫描子模块，
+    # 但子模块本身的代码可能被用户修改，所以需要先 reload 子模块
+    for prefix in ('tools.', 'commands.', 'core.'):
+        for mod_name in list(sys.modules.keys()):
+            if mod_name.startswith(prefix) and mod_name in sys.modules:
+                if mod_name not in _RELOAD_MODULES:  # 父模块由主列表处理
+                    importlib.reload(sys.modules[mod_name])
+
+    # ── 按依赖顺序 reload 主模块 ──
+    for mod_name in _RELOAD_MODULES:
+        if mod_name in sys.modules:
+            try:
+                importlib.reload(sys.modules[mod_name])
+            except Exception as e:
+                raise RuntimeError(f"重载模块 {mod_name} 失败: {e}") from e
+
+    importlib.invalidate_caches()
+
+
+@app.post("/api/reload")
+async def reload_agent():
+    """
+    热重载 Agent：在不重启服务器的前提下，刷新所有核心代码并创建新 Agent。
+
+    流程：
+      1. 保存当前会话上下文到文件
+      2. 关闭旧 Agent（释放 LLM 客户端连接）
+      3. importlib.reload 所有关键模块（按依赖顺序）
+      4. 创建新 Agent 实例
+      5. 注册 WebUIPlugin 桥接插件
+      6. 恢复原会话上下文
+      7. 替换全局 _agent 引用
+      8. 通过 EventBus 通知各 WebSocket 客户端重连
+    
+    安全保证：
+      - 如果 Agent 正在处理请求，返回 409 拒绝重载
+      - 重载期间 _agent 被设为 None，get_agent() 会等待锁
+      - 如果重载过程中任何模块 reload 失败，_agent 保持为 None，get_agent() 自动创建新实例
+      - 活跃的 WebSocket 连接保有旧的 agent 对象引用，仍可继续工作
+    """
+    global _agent
+
+    # ── 检查是否正在处理 ──
+    if _agent is not None and getattr(_agent, '_processing', False):
+        raise HTTPException(status_code=409, detail="Agent 正在处理请求，请稍后重试")
+
+    async with _agent_lock:
+        # ── 保存旧会话并关闭旧 Agent ──
+        old_sid: Optional[str] = None
+        if _agent is not None:
+            _agent.session.save_context(_agent._context)
+            old_sid = _agent.session.session_id
+            try:
+                await _agent.shutdown()
+            except Exception:
+                pass  # 静默容错
+            _agent = None
+
+        # ── 通知前端准备重连 ──
+        await event_bus.publish({
+            "type": "reload",
+            "message": "🔄 Agent 正在重载，连接即将断开",
+        })
+
+        # ── 热重载所有模块 ──
+        try:
+            _reload_modules()
+        except RuntimeError as e:
+            display.error(f"[WebUI] ❌ 模块重载失败: {e}")
+            # _agent 保持 None，后续请求会通过 get_agent() 自动创建
+            raise HTTPException(status_code=500, detail=f"模块重载失败: {e}")
+
+        # ── 重新导入 Agent 类 ──
+        # 注意：main.py 顶部 from core.agent import Agent 是旧引用，
+        # 必须重新 import 才能获得重载后的类
+        from core.agent import Agent as NewAgent
+
+        # ── 创建新 Agent ──
+        try:
+            _agent = NewAgent(enable_log=False)
+            webui_plugin = WebUIPlugin()
+            _agent.plugins.register(webui_plugin)
+            await _agent._ensure_initialized()
+        except Exception as e:
+            display.error(f"[WebUI] ❌ 新 Agent 创建失败: {e}")
+            _agent = None
+            raise HTTPException(status_code=500, detail=f"新 Agent 创建失败: {e}")
+
+        # ── 恢复旧会话 ──
+        if old_sid:
+            try:
+                _agent.session.switch_session(old_sid)
+                _agent._context = _agent._build_context()
+                display.info(f"[WebUI] 🔄 已恢复会话: {old_sid}")
+            except Exception as e:
+                display.warning(f"[WebUI] ⚠️ 会话恢复失败: {e}")
+
+        display.info(
+            f"[WebUI] 🔄 Agent 重载完成 "
+            f"(model={_agent.model}, session={_agent.session.session_id})"
+        )
+
+        # ── 稍等片刻，让前端收到 reload 事件后再推送 done ──
+        await asyncio.sleep(0.3)
+        await event_bus.publish({
+            "type": "reload_done",
+            "session_id": _agent.session.session_id,
+            "model": _agent.model,
+        })
+
+    return {
+        "status": "ok",
+        "session_id": _agent.session.session_id,
+        "model": _agent.model,
+    }
 
 
 # ════════════════════════════════════════════════════════════
@@ -594,6 +882,10 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(None
     # 当前连接的 IO 通道（用于交互式命令）
     current_io: Optional[WebSocketIO] = None
     
+    # 后台任务跟踪（初始化后供 finally 安全清理）
+    push_task: Optional[asyncio.Task] = None
+    process_tasks: list[asyncio.Task] = []
+    
     try:
         # 发送连接确认
         await websocket.send_json({"type": "connected", "sub_id": sub_id})
@@ -616,11 +908,23 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(None
         push_task = asyncio.create_task(push_events())
         
         # 主循环：接收客户端消息
+        # 首次获取 Agent 引用（后续每次消息前检查是否已被重载）
         agent = await get_agent()
+        # process_tasks 已在函数顶部初始化
         
         while True:
             raw = await websocket.receive_text()
             data = json.loads(raw)
+            
+            # ── 检测 Agent 是否已被重载（热替换）──
+            # 如果 get_agent() 返回了不同的对象，说明发生了 reload/new_agent
+            # 旧 WS 连接透明切换到新 Agent 引用，避免断开重连导致消息丢失。
+            # push_events 任务已通过 EventBus 收到 reload/reload_done 事件，
+            # 前端此时已显示"已重载"状态，无需再发额外通知。
+            current_agent = await get_agent()
+            if current_agent is not agent:
+                display.info("[WebUI] ↻ 旧 WS 透明切换到新 Agent（reload 后无缝续传）")
+                agent = current_agent
             
             if data.get("type") == "message":
                 content = data.get("content", "").strip()
@@ -657,13 +961,13 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(None
                     except asyncio.CancelledError:
                         await event_bus.publish({"type": "cancelled"})
                     except Exception as e:
-                        import traceback
                         await event_bus.publish({"type": "error", "error": str(e)})
                         await event_bus.publish({"type": "done", "error": str(e)})
                     finally:
                         io.is_running = False
                 
-                asyncio.create_task(process_and_notify(content, ws_io))
+                task = asyncio.create_task(process_and_notify(content, ws_io))
+                process_tasks.append(task)
             
             elif data.get("type") == "ping":
                 await websocket.send_json({"type": "pong"})
@@ -676,6 +980,12 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(None
         except Exception:
             pass
     finally:
+        # ── 清理后台任务：取消事件推送和处理任务 ──
+        # 防止在 Agent 重载后孤立任务继续使用已关闭的客户端
+        if push_task is not None:
+            push_task.cancel()
+        for t in process_tasks:
+            t.cancel()
         event_bus.unsubscribe(sub_id)
 
 

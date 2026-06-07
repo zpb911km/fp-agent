@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" width="500" height="500">
+  <defs>
+    <!-- 背景网格 -->
+    <pattern id="grid" width="25" height="25" patternUnits="userSpaceOnUse">
+      <path d="M 25 0 L 0 0 0 25" fill="none" stroke="#1a3a3a" stroke-width="0.5"/>
+    </pattern>
+
+    <!-- 光环渐变 -->
+    <radialGradient id="haloGrad1" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#0a0a0a"/>
+      <stop offset="100%" stop-color="#1a1a1a"/>
+    </radialGradient>
+
+    <radialGradient id="haloGrad2" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#1a1a1a"/>
+      <stop offset="100%" stop-color="#2d3d3d"/>
+    </radialGradient>
+
+    <radialGradient id="haloGrad3" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#2d3d3d"/>
+      <stop offset="100%" stop-color="#3d5050"/>
+    </radialGradient>
+
+    <radialGradient id="haloGrad4" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#3d5050"/>
+      <stop offset="100%" stop-color="#4a6565"/>
+    </radialGradient>
+
+    <!-- 发光滤镜 -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="glowStrong" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- 背景 -->
+  <rect width="500" height="500" fill="#0d2626"/>
+  <rect width="500" height="500" fill="url(#grid)"/>
+
+  <!-- 中心点 -->
+  <circle cx="250" cy="250" r="8" fill="#111" filter="url(#glow)"/>
+
+  <!-- 第一层光环（最内圈，深色） -->
+  <circle cx="250" cy="250" r="45" fill="url(#haloGrad1)" stroke="#1a1a1a" stroke-width="2" filter="url(#glow)"/>
+
+  <!-- 第二层光环 -->
+  <circle cx="250" cy="250" r="70" fill="none" stroke="#2d3d3d" stroke-width="18" opacity="0.9" filter="url(#glow)"/>
+
+  <!-- 第三层光环 -->
+  <circle cx="250" cy="250" r="95" fill="none" stroke="#3d5555" stroke-width="15" opacity="0.8" filter="url(#glow)"/>
+
+  <!-- 第四层光环 -->
+  <circle cx="250" cy="250" r="118" fill="none" stroke="#4a6a6a" stroke-width="12" opacity="0.7" filter="url(#glow)"/>
+
+  <!-- 第五层光环（较亮） -->
+  <circle cx="250" cy="250" r="140" fill="none" stroke="#5a8080" stroke-width="8" opacity="0.6" filter="url(#glowStrong)"/>
+
+  <!-- 第六层光环（最外圈，带刻度） -->
+  <circle cx="250" cy="250" r="165" fill="none" stroke="#6a9595" stroke-width="4" opacity="0.5" filter="url(#glow)"/>
+
+  <!-- 外圈刻度标记（虚线环） -->
+  <circle cx="250" cy="250" r="180" fill="none" stroke="#8ab0b0" stroke-width="2"
+          stroke-dasharray="4 8" opacity="0.7" filter="url(#glow)"/>
+
+  <!-- 更外层的虚线刻度 -->
+  <circle cx="250" cy="250" r="195" fill="none" stroke="#7aa0a0" stroke-width="1.5"
+          stroke-dasharray="2 12" opacity="0.5"/>
+
+  <!-- 刻度短线（模拟仪表盘刻度） -->
+  <g stroke="#9ac0c0" stroke-width="2" opacity="0.8" filter="url(#glow)">
+    <!-- 12个主要刻度 -->
+    <line x1="250" y1="60" x2="250" y2="72" transform="rotate(0 250 250)"/>
+    <line x1="250" y1="60" x2="250" y2="72" transform="rotate(30 250 250)"/>
+    <line x1="250" y1="60" x2="250" y2="72" transform="rotate(60 250 250)"/>
+    <line x1="250" y1="60" x2="250" y2="72" transform="rotate(90 250 250)"/>
+    <line x1="250" y1="60" x2="250" y2="72" transform="rotate(120 250 250)"/>
+    <line x1="250" y1="60" x2="250" y2="72" transform="rotate(150 250 250)"/>
+    <line x1="250" y1="60" x2="250" y2="72" transform="rotate(180 250 250)"/>
+    <line x1="250" y1="60" x2="250" y2="72" transform="rotate(210 250 250)"/>
+    <line x1="250" y1="60" x2="250" y2="72" transform="rotate(240 250 250)"/>
+    <line x1="250" y1="60" x2="250" y2="72" transform="rotate(270 250 250)"/>
+    <line x1="250" y1="60" x2="250" y2="72" transform="rotate(300 250 250)"/>
+    <line x1="250" y1="60" x2="250" y2="72" transform="rotate(330 250 250)"/>
+  </g>
+
+  <!-- 小刻度 -->
+  <g stroke="#7aa0a0" stroke-width="1" opacity="0.5">
+    <line x1="250" y1="65" x2="250" y2="72" transform="rotate(15 250 250)"/>
+    <line x1="250" y1="65" x2="250" y2="72" transform="rotate(45 250 250)"/>
+    <line x1="250" y1="65" x2="250" y2="72" transform="rotate(75 250 250)"/>
+    <line x1="250" y1="65" x2="250" y2="72" transform="rotate(105 250 250)"/>
+    <line x1="250" y1="65" x2="250" y2="72" transform="rotate(135 250 250)"/>
+    <line x1="250" y1="65" x2="250" y2="72" transform="rotate(165 250 250)"/>
+    <line x1="250" y1="65" x2="250" y2="72" transform="rotate(195 250 250)"/>
+    <line x1="250" y1="65" x2="250" y2="72" transform="rotate(225 250 250)"/>
+    <line x1="250" y1="65" x2="250" y2="72" transform="rotate(255 250 250)"/>
+    <line x1="250" y1="65" x2="250" y2="72" transform="rotate(285 250 250)"/>
+    <line x1="250" y1="65" x2="250" y2="72" transform="rotate(315 250 250)"/>
+    <line x1="250" y1="65" x2="250" y2="72" transform="rotate(345 250 250)"/>
+  </g>
+
+  <!-- 中心发光效果 -->
+  <circle cx="250" cy="250" r="30" fill="none" stroke="#5a8a8a" stroke-width="1" opacity="0.4" filter="url(#glowStrong)"/>
+</svg>
