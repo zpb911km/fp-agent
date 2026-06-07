@@ -377,45 +377,6 @@ class Agent:
         """删除指定会话（不能是当前会话）。返回是否成功。"""
         return self.session.delete_session(sid)
     
-    async def _summarize_session_bg(self, old_sid: str, old_context: List[Dict]):
-        """后台异步任务：为已保存的旧会话用 LLM 生成摘要并更新 meta。
-        注意：此方法在后台 fire-and-forget，不影响主流程。"""
-        try:
-            history_msgs = [m for m in old_context if m["role"] != "system"]
-            if len(history_msgs) < 2:
-                return  # 消息太少，不值得总结
-            
-            summary_msgs = old_context + [
-                {"role": "user", "content": "请总结一下，给这次对话起一个5到10个汉字的名字。不要添加任何多余的文字。"}
-            ]
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=summary_msgs,
-                tools=tools.TOOL_DEFINITIONS,
-                stream=False,
-                temperature=0.3,
-                max_tokens=32,
-                extra_body={"enable_thinking": False},
-            )
-            summary = response.choices[0].message.content or ""
-            summary = summary.strip().strip('"').strip("'").strip('「」『』')
-            
-            if not summary or len(summary) > 50:
-                # 回退：取首条用户消息
-                for m in history_msgs:
-                    if m["role"] == "user":
-                        text = m.get("content", "").strip()
-                        if text:
-                            summary = text.split("\n")[0].strip()[:50]
-                            break
-            if not summary:
-                summary = "empty_session"
-            
-            # 更新旧会话的 meta
-            self.session.update_meta(old_sid, summary=summary)
-        except Exception:
-            pass  # 后台任务，静默容错
-    
     # ============ 中断机制 ============
     
     def cancel(self):
@@ -528,32 +489,6 @@ class Agent:
         """估算 token 数量"""
         return len(text) // 3
     
-    def _trim_context(self, context: List[Dict]):
-        """超出 token 限制时裁剪上下文"""
-        if len(context) <= 1:
-            return context
-        
-        system = context[0]
-        rest = context[1:]
-        total = sum(self._estimate_tokens(m.get("content", "")) for m in rest)
-        
-        while total > config.MAX_CONTEXT_TOKENS and len(rest) > 2:
-            removed = rest.pop(0)
-            total -= self._estimate_tokens(removed.get("content", ""))
-            
-            if rest and rest[0].get("role") == "assistant":
-                assistant = rest.pop(0)
-                total -= self._estimate_tokens(assistant.get("content", ""))
-                
-                if assistant.get("tool_calls"):
-                    tool_ids = {tc["id"] for tc in assistant["tool_calls"] if tc.get("id")}
-                    while rest and rest[0].get("role") == "tool" and rest[0].get("tool_call_id") in tool_ids:
-                        removed_tool = rest.pop(0)
-                        total -= self._estimate_tokens(removed_tool.get("content", ""))
-                        tool_ids.discard(removed_tool.get("tool_call_id"))
-        
-        return [system] + rest
-    
     @staticmethod
     def _repair_tool_ordering(messages: List[Dict]) -> List[Dict]:
         """修复 tool 消息顺序 — 不丢弃信息，转为合成消息保留"""
@@ -634,24 +569,49 @@ class Agent:
         return result
     
     async def _compact_context(self):
-        """压缩上下文（异步）"""
+        """压缩上下文（异步）- 智能保留最近有意义消息
+
+        从尾部向前扫描，跳过 tool/tool_call，保留最近 4 条有意义的
+        (user/assistant)消息及其依附的 tool 消息，其余全部压缩为 1 条摘要。
+        """
         history_msgs = [m for m in self._context if m["role"] != "system"]
-        
+
         if len(history_msgs) <= 4:
             display.info("对话历史较短，无需压缩")
             return
-        
-        recent = history_msgs[-4:]
-        to_compact = history_msgs[:-4]
-        
-        # 格式化待压缩消息
+
+        # ── 从尾部向前扫描，找第 4 条有意义消息的位置 ──
+        keep_meaningful = 4
+        meaningful_found = 0
+        split_idx = 0  # 分割点：从该位置起（含）保留
+
+        for i in range(len(history_msgs) - 1, -1, -1):
+            role = history_msgs[i]["role"]
+            if role in ("user", "assistant"):
+                meaningful_found += 1
+                if meaningful_found == keep_meaningful:
+                    split_idx = i
+                    break
+
+        if meaningful_found < keep_meaningful:
+            display.info("对话历史较短，无需压缩")
+            return
+
+        to_compact = history_msgs[:split_idx]
+        recent = history_msgs[split_idx:]
+
+        if not to_compact:
+            display.info("无需压缩")
+            return
+
+        # ── 格式化待压缩消息（一次性让 LLM 压缩为 1 条摘要）──
         compact_text = ""
         for m in to_compact:
             role = "用户" if m["role"] == "user" else "AI" if m["role"] == "assistant" else "工具"
             content = m.get("content", "")[:300]
             compact_text += f"[{role}]: {content}\n\n"
-        
-        # 请求 LLM 压缩
+
+        # ── 请求 LLM 压缩 ──
         display.info("🔄 正在压缩对话历史...")
         try:
             compact_context = [
@@ -665,14 +625,14 @@ class Agent:
         except Exception as e:
             display.error(f" 压缩失败: {e}")
             return
-        
-        # 重建上下文
+
+        # ── 重建上下文：system + 1条摘要 + 保留的原始消息 ──
         system = self._context[0]
         self._context = [system]
         self._context.append({"role": "system", "content": f"以下是压缩后的对话历史摘要（省略了 {len(to_compact)} 条早期消息）：\n{summary}"})
         self._context.extend(recent)
-        
-        display.info(f" ✅\n📦 已压缩 {len(to_compact)} 条消息为摘要")
+
+        display.info(f" ✅\n📦 已压缩 {len(to_compact)} 条早期消息为摘要，保留 {len(recent)} 条（{meaningful_found} 条有意义消息）")
     
     async def _cmd_back(self, target_idx: int = None, mode: int = None) -> str:
         """
@@ -866,6 +826,8 @@ class Agent:
         if user_input.strip().startswith("/"):
             handled, output = await self.handle_command(user_input)
             if handled:
+                # 生命周期：返回响应前（让 WebUI 等插件能捕获命令输出）
+                await self.lifecycle.emit(LifecycleHook.ON_BEFORE_RESPONSE, content=output)
                 return Response(content=output)
         
         # 添加用户消息
@@ -1000,9 +962,6 @@ class Agent:
                 continue
             else:
                 break
-        
-        # 裁剪上下文
-        self._context = self._trim_context(self._context)
         
         # 生命周期：上下文已更新
         await self.lifecycle.emit(LifecycleHook.ON_CONTEXT_UPDATE, msg_count=len(self._context))

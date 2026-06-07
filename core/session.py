@@ -278,9 +278,9 @@ class SessionManager:
 
         lines = []
         msg_count = 0
-        for msg in context:
-            if msg.get("role") == "system":
-                continue
+        for i, msg in enumerate(context):
+            if msg.get("role") == "system" and i == 0:
+                continue  # 只跳过第一条 system prompt（后续由 load_context 重新加载）
             msg_count += 1
             save_msg = {"role": msg["role"], "content": msg.get("content", "")}
             for k in ("tool_calls", "tool_call_id", "reasoning_content"):

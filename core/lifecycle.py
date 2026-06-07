@@ -85,13 +85,14 @@ class LifecycleManager:
         name: Optional[str] = None
     ):
         """注册钩子函数"""
-        if hook not in self._hooks:
-            self._hooks[hook] = []
+        hook_name = hook.name  # 用字符串作 key，避免 reload 后 Enum 类不同导致 key 不匹配
+        if hook_name not in self._hooks:
+            self._hooks[hook_name] = []
         
         name = name or getattr(func, '__name__', str(id(func)))
         
         # 按优先级插入（小的先执行）
-        hooks_list = self._hooks[hook]
+        hooks_list = self._hooks[hook_name]
         inserted = False
         for i, (p, n, _) in enumerate(hooks_list):
             if priority < p:
@@ -106,10 +107,11 @@ class LifecycleManager:
     
     def unregister(self, hook: LifecycleHook, name: str) -> bool:
         """注销钩子"""
-        if hook in self._hooks:
-            for i, (p, n, f) in enumerate(self._hooks[hook]):
+        hook_name = hook.name
+        if hook_name in self._hooks:
+            for i, (p, n, f) in enumerate(self._hooks[hook_name]):
                 if n == name:
-                    self._hooks[hook].pop(i)
+                    self._hooks[hook_name].pop(i)
                     return True
         return False
     
@@ -136,10 +138,11 @@ class LifecycleManager:
         if self._enable_log:
             print(f"[Lifecycle] Emitting {hook.name}...")
         
-        if hook not in self._hooks or not self._hooks[hook]:
+        hook_name = hook.name
+        if hook_name not in self._hooks or not self._hooks[hook_name]:
             return context
         
-        for priority, name, func in self._hooks[hook]:
+        for priority, name, func in self._hooks[hook_name]:
             if context.stop_propagation:
                 break
             
