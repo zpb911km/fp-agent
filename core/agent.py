@@ -458,7 +458,7 @@ class Agent:
             return f"错误：工具参数 JSON 解析失败 - {e}"
         
         if not silent:
-            safe_args = {k: str(v)[:100] for k, v in args.items()}
+            safe_args = {k: str(v) for k, v in args.items()}
             display.llm_tool(f"  🛠️  {name}({json.dumps(safe_args, ensure_ascii=False)})")
         
         try:
@@ -469,7 +469,7 @@ class Agent:
             return f"❌ 工具执行失败 ({name}): {e}"
         
         if not silent:
-            display.llm_tool(f"  📋  {result.strip()[:200]}")
+            display.llm_tool(f"  📋  {result.strip()}")
         
         return result
     
