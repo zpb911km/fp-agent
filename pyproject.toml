@@ -31,7 +31,6 @@ dependencies = [
     "rich>=14.0.0",
     "wcwidth>=0.2.0",
     "pyyaml>=6.0",
-    "ddgs>=9.0.0",
 ]
 
 [project.urls]

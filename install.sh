@@ -23,7 +23,7 @@ cd "$SCRIPT_DIR"
 
 echo -e "${CYAN}"
 echo "  ╭──────────────────────────────────────╮"
-echo "  │  🪨  Five Pebbles Agent 安装程序      │"
+echo "  │  🪨  Five Pebbles Agent 安装程序     │"
 echo "  ╰──────────────────────────────────────╯"
 echo -e "${NC}"
 info "项目目录: $SCRIPT_DIR"

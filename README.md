@@ -10,7 +10,6 @@
 ![Code Size](https://img.shields.io/github/languages/code-size/zpb911km/fp-agent)
 ![Last Commit](https://img.shields.io/github/last-commit/zpb911km/fp-agent)
 
-> *"像卵石被水流打磨，通过反复迭代逼近最优解"* — **Five Pebbles**
 
 [🕹️ 快速开始](#-快速开始) •
 [📖 文档](#-文档) •
@@ -259,7 +258,7 @@ class WeatherPlugin(Plugin):
 | `rich` | 终端富文本显示 | ≥14.0.0 |
 | `wcwidth` | 中英文混排字符宽度计算 | ≥0.2.0 |
 | `PyYAML` | 技能 YAML 配置解析 | ≥6.0 |
-| `ddgs` | DuckDuckGo 搜索引擎封装 | ≥9.0.0 |
+| `httpx` | HTTP 客户端（搜索后端用） | ≥0.28.0 |
 
 ## 🧰 内置技能
 
