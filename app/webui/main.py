@@ -953,11 +953,20 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(None
                     """处理消息并通过 EventBus 推送结果"""
                     try:
                         response = await agent.process(msg, io=io)
-                        await event_bus.publish({
-                            "type": "done",
-                            "session_id": agent.session.session_id,
-                            "final_content": response.content,
-                        })
+                        # 检查是否被用户主动中断（工具执行中 task.cancel()）
+                        # agent._cancelled_by_user 在 agent._process_inner 的
+                        # except 块中被设为 True，process() 返回后检查此标记。
+                        # 用这种方式而非重新抛出 CancelledError，是为了不破坏
+                        # CLI 模式——CLI 的 except CancelledError: break 会退出程序。
+                        if getattr(agent, '_cancelled_by_user', False):
+                            agent._cancelled_by_user = False
+                            await event_bus.publish({"type": "cancelled"})
+                        else:
+                            await event_bus.publish({
+                                "type": "done",
+                                "session_id": agent.session.session_id,
+                                "final_content": response.content,
+                            })
                     except asyncio.CancelledError:
                         await event_bus.publish({"type": "cancelled"})
                     except Exception as e:
@@ -968,6 +977,18 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(None
                 
                 task = asyncio.create_task(process_and_notify(content, ws_io))
                 process_tasks.append(task)
+            
+            elif data.get("type") == "cancel":
+                # 用户请求中断 → 取消最近的处理任务
+                # task.cancel() 注入 CancelledError → agent._process_inner 的
+                # tool 执行 except 块捕获 → 标记 _cancelled_by_user = True
+                # → process() 正常返回 → process_and_notify 检查标记 → 发布 cancelled。
+                # 不重新抛出异常，避免 CLI 的 except CancelledError: break 误退出。
+                while process_tasks:
+                    task = process_tasks.pop()
+                    if not task.done():
+                        task.cancel()
+                        break
             
             elif data.get("type") == "ping":
                 await websocket.send_json({"type": "pong"})

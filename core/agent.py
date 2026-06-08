@@ -113,6 +113,7 @@ class Agent:
         # ESC/Ctrl+C 中断标记
         self._interrupted = False
         self._processing = False  # 是否正在处理请求（供信号处理器判断）
+        self._cancelled_by_user = False  # 用户主动中断标记（WebUI 侧检查用）
         
         # 循环检测器
         self._loop_detector = session.LoopDetector(
@@ -919,12 +920,12 @@ class Agent:
             
             # 处理工具调用
             tool_calls = assistant_msg.get("tool_calls", [])
+            tool_interrupted = False  # ← 提到 if 外面，确保后续引用时总是已定义
             if tool_calls:
                 # 生命周期：工具选择
                 sel_tool_names = [tc["function"]["name"] for tc in tool_calls]
                 await self.lifecycle.emit(LifecycleHook.ON_TOOL_SELECT, tools=sel_tool_names)
                 
-                tool_interrupted = False
                 for i, tc in enumerate(tool_calls):
                     try:
                         # 生命周期：工具调用（执行前）
@@ -939,6 +940,7 @@ class Agent:
                         await self.lifecycle.emit(LifecycleHook.ON_TOOL_RESULT, tool_name=tc["function"]["name"], result=result[:200])
                     except (KeyboardInterrupt, asyncio.CancelledError):
                         self._interrupted = False  # 重置，防止残留
+                        self._cancelled_by_user = True  # 标记：本次处理被用户主动中断
                         # 当前工具标记为调用失败
                         self._context.append({
                             "role": "tool",
@@ -979,6 +981,7 @@ class Agent:
         # 清理中断标志（防止状态残留）
         self._interrupted = False
         self._processing = False
+        self._cancelled_by_user = False
         
         # 生命周期：返回响应前
         await self.lifecycle.emit(LifecycleHook.ON_BEFORE_RESPONSE, content=final_content)

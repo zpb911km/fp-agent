@@ -1526,11 +1526,49 @@ function toggleToolBody(headerEl) {
 
 function setProcessing(state) {
   processing = state;
-  sendBtn.disabled = state;
   inputEl.disabled = state;
-  if (!state) {
+
+  if (state) {
+    // 处理中 → 按钮变为中断按钮 ⏹️
+    sendBtn.disabled = false;
+    sendBtn.textContent = '⏹️';
+    sendBtn.style.background = '#8b3a3a';
+    sendBtn.style.borderLeftColor = '#5a2a2a';
+    sendBtn.onclick = cancelMessage;
+    sendBtn.title = '中断 (Ctrl+Shift+C)';
+    sendBtn.setAttribute('aria-label', '中断');
+  } else {
+    // 空闲 → 恢复为发送按钮 ➤
+    sendBtn.disabled = false;
+    sendBtn.textContent = '➤';
+    sendBtn.style.background = '';
+    sendBtn.style.borderLeftColor = '';
+    sendBtn.onclick = sendMessage;
+    sendBtn.title = '发送 (Enter)';
+    sendBtn.setAttribute('aria-label', '发送消息');
     inputEl.focus();
   }
+}
+
+function cancelMessage() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!processing) return;
+
+  // 发送取消请求 → 后端 task.cancel() 注入 CancelledError
+  ws.send(JSON.stringify({ type: 'cancel' }));
+
+  // 按钮临时禁用，等待后端 cancelled 事件返回后再恢复
+  sendBtn.disabled = true;
+  sendBtn.textContent = '⏳';
+  sendBtn.style.background = '#555';
+  sendBtn.style.borderLeftColor = '#555';
+
+  // 安全网：5 秒后如果后端没响应，强制恢复
+  var cancelTimeout = setTimeout(function() {
+    if (processing) setProcessing(false);
+  }, 5000);
+  // 存储 timeout id 以便 cancelled 事件到达时清理
+  window._cancelTimeout = cancelTimeout;
 }
 
 function clearUI() {
@@ -1673,8 +1711,10 @@ function handleEvent(data) {
 
     case 'cancelled':
       removeThinking();
+      // 取消 5 秒安全网定时器
+      if (window._cancelTimeout) { clearTimeout(window._cancelTimeout); window._cancelTimeout = null; }
       setProcessing(false);
-      showError('请求被取消');
+      addSystemMessage('⏹️ 已中断');
       break;
 
     case 'shutdown':
@@ -1783,9 +1823,15 @@ function sendMessage() {
 }
 
 function handleKeyDown(event) {
+  // Enter 发送
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
     sendMessage();
+  }
+  // Ctrl+Shift+C 中断（浏览器中 Ctrl+C 默认是复制，不覆盖）
+  if (event.ctrlKey && event.shiftKey && (event.key === 'C' || event.key === 'c')) {
+    event.preventDefault();
+    if (processing) cancelMessage();
   }
 }
 
