@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<meta name="theme-color" content="#0d1117">
+<meta name="theme-color" content="#1a1a1a">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Five Pebbles · WebUI</title>
@@ -17,47 +17,70 @@
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js" defer></script>
 
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+    tailwind.config = {
+        theme: {
+            extend: {
+                colors: {
+                    concrete: '#2a2a2a',
+                    concreteDark: '#1a1a1a',
+                    concreteLight: '#3d3d3d',
+                    rust: '#8b3a3a',
+                    rustLight: '#a65e2e',
+                    terminal: '#4a6b4a',
+                    terminalBright: '#6b8c6b',
+                    warning: '#b58900'
+                },
+                fontFamily: {
+                    mono: ['"JetBrains Mono"', 'monospace'],
+                },
+                boxShadow: {
+                    'brutal': '6px 6px 0px 0px #0a0a0a',
+                    'brutal-sm': '3px 3px 0px 0px #0a0a0a',
+                    'inset': 'inset 4px 4px 8px 0px #0a0a0a',
+                }
+            }
+        }
+    }
+</script>
+
 <style>
   /* ═══════════════════════════════════════════════════════
      FIVE PEBBLES · WEBUI
-     深色赛博朋克主题 · 全端响应式
+     粗野主义（Brutalist）主题 · 混凝土 + 锈色 + 终端绿
      ═══════════════════════════════════════════════════════ */
 
   /* ── Reset ── */
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  
+
   /* ── Design Tokens ── */
   :root {
-    --bg-primary:       #0d1117;
-    --bg-secondary:     #161b22;
-    --bg-tertiary:      #1c2333;
-    --bg-hover:         #21262d;
-    --bg-glass:         rgba(22,27,34,0.72);
-    --text-primary:     #e6edf3;
-    --text-secondary:   #8b949e;
-    --text-dim:         #484f58;
-    --accent:           #58a6ff;
-    --accent-soft:      rgba(88,166,255,0.12);
-    --accent-glow:      #1f6feb;
-    --green:            #3fb950;
-    --green-soft:       rgba(63,185,80,0.12);
-    --yellow:           #d29922;
-    --yellow-soft:      rgba(210,153,34,0.12);
-    --red:              #f85149;
-    --red-soft:         rgba(248,81,73,0.12);
-    --purple:           #bc8cff;
-    --purple-soft:      rgba(188,140,255,0.12);
-    --cyan:             #39d2c0;
-    --orange:           #d4760c;
-    --border:           #30363d;
-    --radius-sm:        6px;
-    --radius:           10px;
-    --radius-lg:        16px;
-    --shadow-sm:        0 1px 3px rgba(0,0,0,0.3);
-    --shadow:           0 4px 16px rgba(0,0,0,0.4);
-    --shadow-lg:        0 12px 40px rgba(0,0,0,0.6);
-    --font-mono:        'JetBrains Mono','Fira Code','Cascadia Code','Consolas',monospace;
-    --font-sans:        -apple-system,'SF Pro','Segoe UI','Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif;
+    --bg-primary:       #1a1a1a;
+    --bg-secondary:     #2a2a2a;
+    --bg-tertiary:      #3d3d3d;
+    --bg-hover:         #4a4a4a;
+    --text-primary:     #d4d4d4;
+    --text-secondary:   #9e9e9e;
+    --text-dim:         #5a5a5a;
+    --accent:           #a65e2e;
+    --accent-soft:      rgba(166,94,46,0.15);
+    --accent-dark:      #8b3a3a;
+    --green:            #4a6b4a;
+    --green-bright:     #6b8c6b;
+    --green-soft:       rgba(74,107,74,0.15);
+    --yellow:           #b58900;
+    --yellow-soft:      rgba(181,137,0,0.15);
+    --red:              #c84242;
+    --red-soft:         rgba(200,66,66,0.15);
+    --purple:           #9b6b9b;
+    --border:           #3d3d3d;
+    --shadow-color:     #0a0a0a;
+    --font-mono:        'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
     --touch-min:        44px;
     --safe-top:         env(safe-area-inset-top, 0px);
     --safe-bottom:      env(safe-area-inset-bottom, 0px);
@@ -75,7 +98,7 @@
     height: 100dvh;
     background: var(--bg-primary);
     color: var(--text-primary);
-    font-family: var(--font-sans);
+    font-family: var(--font-mono);
     font-size: clamp(14px, 1.8vw, 16px);
     line-height: 1.5;
     overflow: hidden;
@@ -84,46 +107,83 @@
     overscroll-behavior: none;
   }
 
-  a { color: var(--accent); text-decoration: none; transition: opacity 0.15s; }
-  a:hover { opacity: 0.85; text-decoration: underline; }
-  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { color: var(--green-bright); text-decoration: underline; }
 
   code {
     font-family: var(--font-mono);
     font-size: 0.875em;
-    background: var(--bg-tertiary);
+    background: var(--bg-primary);
     padding: 0.15em 0.4em;
-    border-radius: 3px;
+    border-radius: 0;
   }
   pre {
     font-family: var(--font-mono);
     font-size: 0.85em;
-    background: #0d1117;
+    background: #0d0d0d;
     padding: clamp(8px, 1.5vw, 14px);
-    border-radius: var(--radius-sm);
+    border: 2px solid var(--border);
     overflow-x: auto;
     margin: 8px 0;
-    border: 1px solid var(--border);
-    -webkit-overflow-scrolling: touch;
   }
 
-  ::selection { background: var(--accent); color: #fff; }
-  
-  ::-webkit-scrollbar { width: 5px; height: 5px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--text-dim); border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+  ::selection { background: var(--accent-dark); color: #fff; }
 
-  /* ── Focus visible ── */
-  :focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
+  /* ── Brutalist Scrollbar ── */
+  ::-webkit-scrollbar { width: 12px; height: 12px; }
+  ::-webkit-scrollbar-track { background: var(--bg-primary); border-left: 2px solid var(--border); }
+  ::-webkit-scrollbar-thumb { background: var(--bg-tertiary); border: 2px solid var(--bg-primary); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--accent-dark); }
+
+  /* ── Concrete Noise Overlay ── */
+  .noise-bg {
+    position: fixed; top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none; z-index: 50;
+    opacity: 0.06;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
   }
-  button:focus-visible,
-  input:focus-visible,
-  textarea:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
+
+  /* ── Rust Gradient Overlay ── */
+  .rust-overlay {
+    position: fixed; top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none; z-index: 40;
+    background: radial-gradient(circle at 80% 20%, rgba(139,58,58,0.15) 0%, transparent 40%),
+                radial-gradient(circle at 20% 80%, rgba(166,94,46,0.10) 0%, transparent 40%);
+  }
+
+  /* ── Scanline Effect ── */
+  .scanlines {
+    background: linear-gradient(
+      to bottom,
+      rgba(255,255,255,0), rgba(255,255,255,0) 50%,
+      rgba(0,0,0,0.08) 50%, rgba(0,0,0,0.08)
+    );
+    background-size: 100% 4px;
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    pointer-events: none; z-index: 45;
+    opacity: 0.3;
+  }
+
+  /* ── CRT Flicker ── */
+  @keyframes flicker {
+    0% { opacity: 0.97; }
+    5% { opacity: 0.95; }
+    10% { opacity: 0.92; }
+    15% { opacity: 0.95; }
+    20% { opacity: 0.99; }
+    50% { opacity: 0.95; }
+    80% { opacity: 0.93; }
+    100% { opacity: 0.97; }
+  }
+
+  .crt-flicker { animation: flicker 4s infinite; }
+
+  /* ── Focus ── */
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
   }
 
   /* ═══════════════════════════════════════════════════════
@@ -138,29 +198,28 @@
   .msg-content.rendered blockquote {
     margin: 0.4em 0; padding: 0.3em 1em;
     border-left: 3px solid var(--accent);
-    background: var(--bg-tertiary);
-    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    background: var(--bg-primary);
     color: var(--text-secondary);
   }
-  .msg-content.rendered pre { margin: 0.4em 0; background: #0d1117; border: 1px solid var(--border); }
+  .msg-content.rendered pre { margin: 0.4em 0; background: #0d0d0d; border: 1px solid var(--border); }
   .msg-content.rendered pre code {
     background: transparent; padding: 0; border-radius: 0;
     font-size: 0.9em; color: var(--text-primary);
   }
   .msg-content.rendered h1, .msg-content.rendered h2,
   .msg-content.rendered h3, .msg-content.rendered h4 {
-    margin: 0.55em 0 0.25em; font-weight: 600; line-height: 1.35;
+    margin: 0.55em 0 0.25em; font-weight: 700; line-height: 1.35;
   }
-  .msg-content.rendered h1 { font-size: 1.35em; border-bottom: 1px solid var(--border); padding-bottom: 0.2em; }
+  .msg-content.rendered h1 { font-size: 1.35em; border-bottom: 2px solid var(--border); padding-bottom: 0.2em; }
   .msg-content.rendered h2 { font-size: 1.2em; border-bottom: 1px solid var(--border); padding-bottom: 0.15em; }
   .msg-content.rendered h3 { font-size: 1.1em; }
   .msg-content.rendered table { border-collapse: collapse; margin: 0.4em 0; width: 100%; font-size: 0.9em; }
   .msg-content.rendered th, .msg-content.rendered td {
     border: 1px solid var(--border); padding: 5px 8px; text-align: left;
   }
-  .msg-content.rendered th { background: var(--bg-tertiary); font-weight: 600; }
-  .msg-content.rendered hr { border: none; border-top: 1px solid var(--border); margin: 0.6em 0; }
-  .msg-content.rendered img { max-width: 100%; border-radius: var(--radius-sm); }
+  .msg-content.rendered th { background: var(--bg-secondary); font-weight: 700; }
+  .msg-content.rendered hr { border: none; border-top: 2px solid var(--border); margin: 0.6em 0; }
+  .msg-content.rendered img { max-width: 100%; }
   .katex { font-size: 1.1em; }
   .katex-display { margin: 0.6em 0; overflow-x: auto; overflow-y: hidden; }
 
@@ -184,26 +243,41 @@
     justify-content: space-between;
     padding: 8px 16px;
     padding-top: calc(8px + var(--safe-top));
-    border-bottom: 1px solid var(--border);
     background: var(--bg-secondary);
+    border-bottom: 4px solid var(--bg-tertiary);
     flex-shrink: 0;
     min-height: 52px;
     gap: 8px;
-    -webkit-backdrop-filter: blur(12px);
-    backdrop-filter: blur(12px);
+    position: relative;
     z-index: 10;
+    box-shadow: 0 4px 0 0 var(--shadow-color);
+  }
+  .topbar::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 3px;
+    background: linear-gradient(90deg, var(--accent-dark), var(--yellow), var(--accent-dark));
+    opacity: 0.5;
   }
   .topbar-left { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
   .topbar-left .logo-icon { flex-shrink: 0; display: flex; align-items: center; }
-  .logo { font-size: clamp(17px, 2.2vw, 22px); font-weight: 700; letter-spacing: -0.5px; white-space: nowrap; }
-  .logo span { color: var(--accent); }
+  .logo {
+    font-size: clamp(17px, 2.2vw, 22px);
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    white-space: nowrap;
+    color: var(--accent);
+  }
+  .logo span span { color: var(--text-primary); }
+  .logo-full { display: none; }
+  .logo-short { display: inline; }
   .model-badge {
     font-size: clamp(10px, 1.1vw, 12px);
-    background: var(--bg-tertiary);
-    color: var(--text-secondary);
+    background: var(--bg-primary);
+    color: var(--green-bright);
     padding: 2px clamp(6px, 1vw, 10px);
-    border-radius: 20px;
-    border: 1px solid var(--border);
+    border: 2px solid var(--bg-tertiary);
     font-family: var(--font-mono);
     white-space: nowrap;
     overflow: hidden;
@@ -213,15 +287,15 @@
   .status-dot {
     display: inline-block;
     width: 8px; height: 8px;
-    border-radius: 50%;
-    background: var(--green);
+    border-radius: 0;
+    background: var(--green-bright);
     animation: pulse 2s ease-in-out infinite;
     flex-shrink: 0;
   }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
   .session-label {
     font-size: clamp(11px, 1.1vw, 13px);
-    color: var(--text-secondary);
+    color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -233,25 +307,29 @@
     align-items: center;
     justify-content: center;
     gap: 4px;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border);
+    background: var(--bg-primary);
+    border: 2px solid var(--bg-tertiary);
     color: var(--text-secondary);
     min-width: var(--touch-min);
     min-height: var(--touch-min);
     padding: 6px 10px;
-    border-radius: var(--radius-sm);
     cursor: pointer;
     font-size: clamp(11px, 1.1vw, 13px);
-    font-family: var(--font-sans);
-    transition: all 0.18s ease;
+    font-family: var(--font-mono);
+    font-weight: 700;
+    transition: all 0.1s ease;
     user-select: none;
     -webkit-user-select: none;
     touch-action: manipulation;
+    box-shadow: 3px 3px 0px 0px var(--shadow-color);
   }
-  .topbar-btn:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--text-dim); }
-  .topbar-btn:active { transform: scale(0.95); }
-  .topbar-btn.danger:hover { border-color: var(--red); color: var(--red); background: var(--red-soft); }
-  .topbar-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none !important; }
+  .topbar-btn:hover { background: var(--bg-tertiary); color: var(--text-primary); border-color: var(--accent); }
+  .topbar-btn:active {
+    transform: translate(2px, 2px);
+    box-shadow: 1px 1px 0px 0px var(--shadow-color);
+  }
+  .topbar-btn.danger:hover { border-color: var(--red); color: var(--red); }
+  .topbar-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
 
   /* ── 消息区域 ──────────────────────────── */
   .messages-container {
@@ -265,6 +343,20 @@
     gap: 0;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
+    background: var(--bg-primary);
+    position: relative;
+  }
+  /* Grid background */
+  .messages-container::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    opacity: 0.08;
+    pointer-events: none;
+    background-image:
+      linear-gradient(var(--bg-tertiary) 1px, transparent 1px),
+      linear-gradient(90deg, var(--bg-tertiary) 1px, transparent 1px);
+    background-size: 40px 40px;
   }
   .messages-container:empty::after {
     content: '发送一条消息开始对话';
@@ -276,6 +368,8 @@
     font-size: clamp(13px, 1.5vw, 15px);
     user-select: none;
     letter-spacing: 0.3px;
+    position: relative;
+    z-index: 1;
   }
 
   /* ── 消息组 ────────────────────────────── */
@@ -284,14 +378,16 @@
     flex-direction: column;
     gap: 2px;
     padding: 8px 0;
-    border-bottom: 1px solid rgba(48,54,61,0.3);
+    border-bottom: 1px solid rgba(61,61,61,0.3);
+    position: relative;
+    z-index: 1;
   }
   .msg-group:last-child { border-bottom: none; }
 
   .msg {
     display: flex;
     gap: clamp(8px, 1.5vw, 14px);
-    padding: 4px 0;
+    padding: 6px 0;
     animation: msgFadeIn 0.3s ease-out;
   }
   @keyframes msgFadeIn {
@@ -302,25 +398,27 @@
   .msg-avatar {
     width: clamp(28px, 3vw, 36px);
     height: clamp(28px, 3vw, 36px);
-    border-radius: 50%;
     flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: clamp(14px, 1.5vw, 18px);
     margin-top: 3px;
-    box-shadow: 0 0 0 1px rgba(255,255,255,0.06);
+    border: 2px solid var(--bg-tertiary);
   }
   .msg-avatar.user {
-    background: linear-gradient(135deg, #1f6feb, #58a6ff);
-    color: #fff;
+    background: var(--bg-primary);
+    border-color: var(--accent);
+    color: var(--accent);
   }
   .msg-avatar.assistant {
-    background: url('/static/background.svg') center/cover no-repeat;
-    color: #fff;
+    background: var(--bg-primary);
+    border-color: var(--green-bright);
+    color: var(--green-bright);
   }
   .msg-avatar.tool {
-    background: var(--bg-tertiary);
+    background: var(--bg-primary);
+    border-color: var(--yellow);
     color: var(--yellow);
     font-size: clamp(12px, 1.2vw, 15px);
   }
@@ -340,12 +438,12 @@
   .tool-msg:not(.collapsed) .tool-msg-icon { transform: rotate(90deg); }
   .tool-msg .tool-msg-body {
     margin-top: 0.3em;
-    border-left: 2px solid var(--border);
+    border-left: 3px solid var(--yellow);
     padding-left: 0.8em;
     white-space: pre-wrap;
     word-break: break-all;
     font-size: 0.85em;
-    font-family: var(--font-mono, 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace);
+    font-family: var(--font-mono);
     color: var(--text-secondary);
   }
   .tool-msg.collapsed .tool-msg-body { display: none; }
@@ -368,9 +466,9 @@
     gap: 6px;
     margin-bottom: 3px;
   }
-  .msg-author { font-size: clamp(12px, 1.2vw, 14px); font-weight: 600; }
+  .msg-author { font-size: clamp(12px, 1.2vw, 14px); font-weight: 700; }
   .msg-author.user { color: var(--accent); }
-  .msg-author.assistant { color: var(--purple); }
+  .msg-author.assistant { color: var(--green-bright); }
   .msg-author.tool { color: var(--yellow); }
   .msg-time {
     font-size: clamp(10px, 1vw, 12px);
@@ -385,6 +483,10 @@
     white-space: pre-wrap;
   }
 
+  /* ── 消息左边界装饰 ── */
+  .msg.user-msg { border-left: 3px solid var(--accent); padding-left: 12px; background: var(--accent-soft); }
+  .msg.assistant-msg { border-left: 3px solid var(--green); padding-left: 12px; background: var(--green-soft); }
+
   /* ── 思考中动画 ───────────────────────── */
   .thinking-indicator {
     display: flex;
@@ -392,14 +494,15 @@
     gap: 8px;
     color: var(--text-secondary);
     font-size: clamp(12px, 1.2vw, 14px);
-    padding: 6px 0 6px calc(clamp(28px, 3vw, 36px) + clamp(8px, 1.5vw, 14px));
+    padding: 8px 0 8px calc(clamp(28px, 3vw, 36px) + clamp(8px, 1.5vw, 14px));
     animation: msgFadeIn 0.25s ease-out;
+    position: relative;
+    z-index: 1;
   }
   .thinking-dots span {
     display: inline-block;
     width: 5px; height: 5px;
     background: var(--accent);
-    border-radius: 50%;
     animation: dotBounce 1.4s ease-in-out infinite both;
     margin: 0 2px;
   }
@@ -415,17 +518,17 @@
     margin: 4px 0 4px calc(clamp(28px, 3vw, 36px) + clamp(8px, 1.5vw, 14px));
     height: 2px;
     background: var(--bg-tertiary);
-    border-radius: 2px;
     overflow: hidden;
     animation: msgFadeIn 0.2s ease-out;
+    position: relative;
+    z-index: 1;
   }
   .thinking-progress-bar {
     height: 100%;
     width: 100%;
-    background: linear-gradient(90deg, var(--accent), var(--purple), var(--accent));
+    background: linear-gradient(90deg, var(--accent-dark), var(--accent), var(--accent-dark));
     background-size: 200% 100%;
     animation: progressSlide 1.5s linear infinite;
-    border-radius: 2px;
   }
   @keyframes progressSlide {
     0%   { background-position: 200% 0; }
@@ -434,13 +537,15 @@
 
   /* ── 工具调用卡片 ─────────────────────── */
   .tool-card {
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    background: var(--bg-secondary);
+    border: 2px solid var(--border);
     padding: 8px 12px;
     margin: 4px 0 4px calc(clamp(28px, 3vw, 36px) + clamp(8px, 1.5vw, 14px));
     animation: toolSlideIn 0.2s ease-out;
     font-size: clamp(12px, 1.2vw, 14px);
+    box-shadow: 3px 3px 0px 0px var(--shadow-color);
+    position: relative;
+    z-index: 1;
   }
   @keyframes toolSlideIn {
     from { opacity: 0; transform: translateX(-8px); }
@@ -451,7 +556,7 @@
     align-items: center;
     gap: 6px;
     color: var(--yellow);
-    font-weight: 600;
+    font-weight: 700;
     font-family: var(--font-mono);
     font-size: clamp(11px, 1.1vw, 13px);
     cursor: pointer;
@@ -465,7 +570,6 @@
     margin-top: 6px;
     padding: 8px;
     background: rgba(0,0,0,0.3);
-    border-radius: 4px;
     font-family: var(--font-mono);
     font-size: clamp(11px, 1.1vw, 13px);
     color: var(--text-secondary);
@@ -476,31 +580,32 @@
     -webkit-overflow-scrolling: touch;
   }
   .tool-card-body.hidden { display: none; }
-  .tool-result-success { color: var(--green); }
+  .tool-result-success { color: var(--green-bright); }
   .tool-result-error { color: var(--red); }
 
   /* ── 输入区域 ─────────────────────────── */
   .input-area {
     padding: 10px 16px calc(12px + var(--safe-bottom));
     background: var(--bg-secondary);
-    border-top: 1px solid var(--border);
+    border-top: 4px solid var(--bg-tertiary);
     flex-shrink: 0;
-    -webkit-backdrop-filter: blur(12px);
-    backdrop-filter: blur(12px);
+    position: relative;
+    z-index: 10;
+    box-shadow: 0 -4px 0 0 var(--shadow-color);
   }
   .input-wrapper {
     display: flex;
-    gap: 8px;
+    gap: 0;
     align-items: flex-end;
-    background: var(--bg-tertiary);
-    border: 1.5px solid var(--border);
-    border-radius: var(--radius);
-    padding: 4px;
-    transition: border-color 0.2s, box-shadow 0.2s;
+    background: var(--bg-primary);
+    border: 2px solid var(--bg-tertiary);
+    padding: 0;
+    transition: border-color 0.2s;
+    box-shadow: inset 4px 4px 8px 0px var(--shadow-color);
   }
   .input-wrapper:focus-within {
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px var(--accent-soft);
+    box-shadow: inset 4px 4px 8px 0px var(--shadow-color), 0 0 0 2px var(--bg-primary), 0 0 0 4px var(--accent);
   }
   .input-wrapper textarea {
     flex: 1;
@@ -508,40 +613,41 @@
     border: none;
     outline: none;
     color: var(--text-primary);
-    font-family: var(--font-sans);
+    font-family: var(--font-mono);
     font-size: clamp(14px, 1.5vw, 16px);
     line-height: 1.45;
     padding: clamp(8px, 1.2vw, 12px);
     resize: none;
     min-height: 24px;
     max-height: 160px;
-    border-radius: 6px;
     -webkit-appearance: none;
   }
   .input-wrapper textarea::placeholder { color: var(--text-dim); }
-  /* iOS zoom prevention — font-size >= 16px */
   .input-wrapper textarea { font-size: 16px; }
 
   .send-btn {
     display: flex;
     align-items: center;
     justify-content: center;
-    background: var(--accent);
+    background: var(--accent-dark);
     border: none;
+    border-left: 2px solid var(--bg-tertiary);
     color: #fff;
     width: var(--touch-min);
     min-width: var(--touch-min);
     height: var(--touch-min);
-    border-radius: var(--radius-sm);
     cursor: pointer;
     font-size: 20px;
-    transition: all 0.18s ease;
+    transition: all 0.1s ease;
     flex-shrink: 0;
     touch-action: manipulation;
+    box-shadow: -2px 0 0 0 var(--shadow-color);
   }
-  .send-btn:hover { background: var(--accent-glow); transform: scale(1.05); }
-  .send-btn:active { transform: scale(0.92); }
-  .send-btn:disabled { background: var(--text-dim); cursor: not-allowed; transform: none !important; }
+  .send-btn:hover { background: var(--accent); }
+  .send-btn:active {
+    transform: scale(0.95);
+  }
+  .send-btn:disabled { background: var(--text-dim); cursor: not-allowed; transform: none !important; box-shadow: none !important; }
 
   .input-hint {
     display: flex;
@@ -552,24 +658,25 @@
     color: var(--text-dim);
   }
   .input-hint kbd {
-    background: var(--bg-tertiary);
+    background: var(--bg-primary);
     padding: 1px 5px;
-    border-radius: 3px;
+    border: 1px solid var(--border);
     font-family: var(--font-mono);
     font-size: 10px;
-    border: 1px solid var(--border);
   }
 
   /* ── 错误消息 ─────────────────────────── */
   .error-msg {
     color: var(--red);
     background: var(--red-soft);
-    border: 1px solid rgba(248,81,73,0.3);
+    border: 2px solid rgba(200,66,66,0.3);
     padding: 8px 12px;
-    border-radius: var(--radius-sm);
     margin: 4px 0;
     font-size: clamp(12px, 1.2vw, 14px);
     animation: msgFadeIn 0.2s ease-out;
+    font-weight: 700;
+    position: relative;
+    z-index: 1;
   }
 
   /* ── 回溯按钮 ─────────────────────────── */
@@ -580,20 +687,22 @@
     background: transparent;
     border: 1px solid var(--border);
     color: var(--text-dim);
-    font-size: clamp(10px, 1vw, 12px);
-    padding: 4px 8px;
-    min-height: var(--touch-min);
-    border-radius: 4px;
+    font-size: 10px;
+    padding: 1px 5px;
+    min-height: 20px;
+    margin-left: auto;
     cursor: pointer;
     transition: all 0.15s;
-    margin-left: auto;
     flex-shrink: 0;
-    font-family: var(--font-sans);
+    font-family: var(--font-mono);
     white-space: nowrap;
     touch-action: manipulation;
+    font-weight: 600;
+    line-height: 1;
+    opacity: 0.6;
   }
-  .backtrack-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
-  .backtrack-btn:active { transform: scale(0.95); }
+  .backtrack-btn:hover { opacity: 1; background: var(--accent-dark); color: #fff; border-color: var(--accent-dark); }
+  .backtrack-btn:active { transform: scale(0.92); }
 
   .history-separator {
     display: flex;
@@ -604,13 +713,15 @@
     color: var(--text-dim);
     font-size: clamp(11px, 1.1vw, 13px);
     user-select: none;
+    position: relative;
+    z-index: 1;
   }
   .history-separator::before,
   .history-separator::after {
     content: '';
     flex: 1;
     max-width: 80px;
-    height: 1px;
+    height: 2px;
     background: var(--border);
   }
 
@@ -621,21 +732,143 @@
     color: var(--text-dim);
     font-size: clamp(12px, 1.2vw, 14px);
     animation: msgFadeIn 0.25s ease-out;
+    position: relative;
+    z-index: 1;
   }
 
   /* ═══════════════════════════════════════════════════════
-     会话列表浮层
+     登录遮罩层（粗野主义风格）
+     ═══════════════════════════════════════════════════════ */
+  .auth-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.85);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: overlayFadeIn 0.3s ease-out;
+  }
+  @keyframes overlayFadeIn {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  .auth-box {
+    background: var(--bg-secondary);
+    border: 4px solid var(--bg-tertiary);
+    padding: clamp(28px, 5vw, 44px) clamp(24px, 4vw, 40px);
+    width: min(420px, 90vw);
+    text-align: center;
+    box-shadow: 6px 6px 0px 0px var(--shadow-color);
+    animation: msgFadeIn 0.35s ease-out;
+    position: relative;
+  }
+  /* Decorative corners */
+  .auth-box::before {
+    content: '';
+    position: absolute;
+    top: -8px; left: -8px;
+    width: 20px; height: 20px;
+    background: var(--accent-dark);
+    border: 2px solid var(--bg-tertiary);
+  }
+  .auth-box::after {
+    content: '';
+    position: absolute;
+    bottom: -8px; right: -8px;
+    width: 20px; height: 20px;
+    background: var(--accent-dark);
+    border: 2px solid var(--bg-tertiary);
+  }
+  .auth-box .logo-icon { margin-bottom: 10px; }
+  .auth-box h1 {
+    font-size: clamp(22px, 3.5vw, 28px);
+    margin-bottom: 6px;
+    letter-spacing: -0.5px;
+    font-weight: 800;
+    color: var(--accent);
+  }
+  .auth-box p {
+    color: var(--text-secondary);
+    font-size: clamp(13px, 1.3vw, 15px);
+    margin-bottom: 20px;
+  }
+  .auth-box .token-hint {
+    font-size: clamp(11px, 1vw, 12px);
+    color: var(--text-dim);
+    background: var(--bg-primary);
+    border: 2px solid var(--bg-tertiary);
+    padding: 10px 14px;
+    margin-bottom: 20px;
+    word-break: break-all;
+    font-family: var(--font-mono);
+    line-height: 1.5;
+    border-left: 3px solid var(--yellow);
+    text-align: left;
+  }
+  .auth-input {
+    width: 100%;
+    padding: clamp(10px, 1.5vw, 14px) 16px;
+    background: var(--bg-primary);
+    border: 2px solid var(--bg-tertiary);
+    color: var(--green-bright);
+    font-size: 16px;
+    font-family: var(--font-mono);
+    outline: none;
+    transition: border-color 0.2s;
+    text-align: center;
+    letter-spacing: 2px;
+    -webkit-appearance: none;
+    box-shadow: inset 4px 4px 8px 0px var(--shadow-color);
+  }
+  .auth-input:focus {
+    border-color: var(--accent);
+    box-shadow: inset 4px 4px 8px 0px var(--shadow-color), 0 0 0 2px var(--bg-primary), 0 0 0 4px var(--accent);
+  }
+  .auth-btn {
+    width: 100%;
+    margin-top: 12px;
+    padding: clamp(10px, 1.5vw, 14px);
+    min-height: var(--touch-min);
+    background: var(--accent-dark);
+    border: 2px solid var(--bg-tertiary);
+    color: #fff;
+    font-size: clamp(14px, 1.5vw, 16px);
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.1s ease;
+    touch-action: manipulation;
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    box-shadow: 3px 3px 0px 0px var(--shadow-color);
+  }
+  .auth-btn:hover { background: var(--accent); }
+  .auth-btn:active {
+    transform: translate(2px, 2px);
+    box-shadow: 1px 1px 0px 0px var(--shadow-color);
+  }
+  .auth-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+  .auth-error {
+    color: var(--red);
+    font-size: clamp(12px, 1.2vw, 14px);
+    margin-top: 10px;
+    display: none;
+    font-weight: 700;
+  }
+  .auth-error.show { display: block; }
+
+  /* ═══════════════════════════════════════════════════════
+     会话列表浮层（粗野主义风格）
      ═══════════════════════════════════════════════════════ */
   .modal-overlay {
     display: none;
     position: fixed;
     inset: 0;
-    background: rgba(0,0,0,0.55);
+    background: rgba(0,0,0,0.7);
     z-index: 100;
     align-items: flex-end;
     justify-content: center;
-    -webkit-backdrop-filter: blur(6px);
-    backdrop-filter: blur(6px);
     animation: overlayFadeIn 0.2s ease-out;
   }
   @keyframes overlayFadeIn {
@@ -646,15 +879,15 @@
 
   .modal {
     background: var(--bg-secondary);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    border: 4px solid var(--bg-tertiary);
+    border-bottom: none;
     padding: 20px 20px calc(20px + var(--safe-bottom));
     width: 100%;
     max-width: 680px;
     max-height: 75vh;
     display: flex;
     flex-direction: column;
-    box-shadow: 0 -8px 32px rgba(0,0,0,0.5);
+    box-shadow: 0 -6px 0px 0px var(--shadow-color);
     animation: modalSlideUp 0.3s ease-out;
   }
   @keyframes modalSlideUp {
@@ -668,27 +901,30 @@
     justify-content: space-between;
     margin-bottom: 16px;
     flex-shrink: 0;
+    border-bottom: 2px solid var(--border);
+    padding-bottom: 12px;
   }
   .modal-title {
     font-size: clamp(16px, 2vw, 20px);
-    font-weight: 700;
+    font-weight: 800;
+    color: var(--accent);
   }
   .modal-close {
     display: flex;
     align-items: center;
     justify-content: center;
     background: none;
-    border: none;
+    border: 2px solid var(--border);
     color: var(--text-secondary);
     cursor: pointer;
     width: var(--touch-min);
     height: var(--touch-min);
-    font-size: 22px;
-    border-radius: 50%;
-    transition: background 0.15s;
+    font-size: 18px;
+    transition: all 0.15s;
     touch-action: manipulation;
+    font-weight: 700;
   }
-  .modal-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+  .modal-close:hover { background: var(--accent-dark); color: #fff; border-color: var(--accent-dark); }
 
   .modal-body {
     flex: 1;
@@ -703,20 +939,19 @@
     gap: 8px;
     padding: 12px;
     min-height: 56px;
-    border-radius: var(--radius-sm);
     cursor: pointer;
     transition: background 0.15s;
-    border: 1px solid transparent;
+    border: 2px solid transparent;
     margin-bottom: 4px;
     touch-action: manipulation;
   }
-  .session-item:hover { background: var(--bg-hover); }
+  .session-item:hover { background: var(--bg-primary); }
   .session-item:active { background: var(--bg-tertiary); }
-  .session-item.current { border-color: var(--accent); background: var(--accent-soft); }
+  .session-item.current { border-color: var(--green-bright); background: var(--green-soft); }
   .session-item-info { flex: 1; min-width: 0; }
   .session-item-summary {
     font-size: clamp(13px, 1.3vw, 15px);
-    font-weight: 500;
+    font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -728,41 +963,47 @@
   }
   .session-item-badge {
     font-size: 10px;
-    color: var(--accent);
+    color: var(--green-bright);
     flex-shrink: 0;
+    font-weight: 700;
   }
   .session-load-btn {
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border);
+    background: var(--bg-primary);
+    border: 2px solid var(--border);
     color: var(--text-primary);
     padding: 6px 12px;
     min-height: var(--touch-min);
-    border-radius: 4px;
     cursor: pointer;
     font-size: clamp(11px, 1.1vw, 13px);
     flex-shrink: 0;
     white-space: nowrap;
     transition: all 0.15s;
     touch-action: manipulation;
+    font-family: var(--font-mono);
+    font-weight: 700;
+    box-shadow: 2px 2px 0px 0px var(--shadow-color);
   }
-  .session-load-btn:hover { background: var(--bg-hover); border-color: var(--text-dim); }
+  .session-load-btn:hover { background: var(--bg-tertiary); border-color: var(--accent); }
+  .session-load-btn:active {
+    transform: translate(1px, 1px);
+    box-shadow: 1px 1px 0px 0px var(--shadow-color);
+  }
   .session-del-btn {
     display: flex;
     align-items: center;
     justify-content: center;
     background: transparent;
-    border: none;
+    border: 1px solid transparent;
     color: var(--text-dim);
     width: var(--touch-min);
     height: var(--touch-min);
-    border-radius: 4px;
     cursor: pointer;
     font-size: 16px;
     flex-shrink: 0;
     transition: all 0.15s;
     touch-action: manipulation;
   }
-  .session-del-btn:hover { color: var(--red); background: var(--red-soft); }
+  .session-del-btn:hover { color: var(--red); border-color: var(--red); }
 
   .no-sessions {
     text-align: center;
@@ -771,130 +1012,38 @@
     font-size: clamp(13px, 1.3vw, 15px);
   }
 
-  /* ── 模态框拖拽指示器（移动端） ───────── */
   .modal-drag-handle {
     display: none;
     width: 36px;
     height: 4px;
-    border-radius: 2px;
     background: var(--text-dim);
     margin: 0 auto 12px;
     flex-shrink: 0;
   }
 
   /* ═══════════════════════════════════════════════════════
-     登录遮罩层
-     ═══════════════════════════════════════════════════════ */
-  .auth-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.8);
-    -webkit-backdrop-filter: blur(12px);
-    backdrop-filter: blur(12px);
-    z-index: 9999;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    animation: overlayFadeIn 0.3s ease-out;
-  }
-  .auth-box {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    padding: clamp(28px, 5vw, 44px) clamp(24px, 4vw, 40px);
-    width: min(420px, 90vw);
-    text-align: center;
-    box-shadow: var(--shadow-lg);
-    animation: msgFadeIn 0.35s ease-out;
-  }
-  .auth-box .logo-icon { margin-bottom: 10px; }
-  .auth-box h1 {
-    font-size: clamp(22px, 3.5vw, 28px);
-    margin-bottom: 6px;
-    letter-spacing: -0.5px;
-  }
-  .auth-box p {
-    color: var(--text-secondary);
-    font-size: clamp(13px, 1.3vw, 15px);
-    margin-bottom: 20px;
-  }
-  .auth-box .token-hint {
-    font-size: clamp(11px, 1vw, 12px);
-    color: var(--text-dim);
-    background: var(--bg-tertiary);
-    padding: 10px 14px;
-    border-radius: var(--radius-sm);
-    margin-bottom: 20px;
-    word-break: break-all;
-    font-family: var(--font-mono);
-    line-height: 1.5;
-  }
-  .auth-input {
-    width: 100%;
-    padding: clamp(10px, 1.5vw, 14px) 16px;
-    background: var(--bg-tertiary);
-    border: 1.5px solid var(--border);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font-size: 16px;
-    font-family: var(--font-mono);
-    outline: none;
-    transition: border-color 0.2s, box-shadow 0.2s;
-    text-align: center;
-    letter-spacing: 2px;
-    -webkit-appearance: none;
-  }
-  .auth-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .auth-btn {
-    width: 100%;
-    margin-top: 12px;
-    padding: clamp(10px, 1.5vw, 14px);
-    min-height: var(--touch-min);
-    background: var(--accent);
-    border: none;
-    border-radius: var(--radius-sm);
-    color: #fff;
-    font-size: clamp(14px, 1.5vw, 16px);
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.2s, transform 0.15s;
-    touch-action: manipulation;
-  }
-  .auth-btn:hover { background: var(--accent-glow); }
-  .auth-btn:active { transform: scale(0.97); }
-  .auth-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none !important; }
-  .auth-error {
-    color: var(--red);
-    font-size: clamp(12px, 1.2vw, 14px);
-    margin-top: 10px;
-    display: none;
-  }
-  .auth-error.show { display: block; }
-
-  /* ═══════════════════════════════════════════════════════
      响应式断点
      ═══════════════════════════════════════════════════════ */
 
-  /* ── 平板及以上（> 768px） ─────────────── */
   @media (min-width: 769px) {
     .session-label { display: inline; }
     .modal-overlay { align-items: center; }
-    .modal { border-radius: var(--radius-lg); max-height: 80vh; }
+    .modal { border: 4px solid var(--bg-tertiary); border-radius: 0; max-height: 80vh; }
     .modal-drag-handle { display: none !important; }
     .topbar { padding: 10px 24px; min-height: 56px; }
     .messages-container { padding: 16px 24px; }
     .input-area { padding: 12px 24px 20px; }
+    .logo-full { display: inline; }
+    .logo-short { display: none; }
   }
 
-  /* ── 手机（≤ 768px） ──────────────────── */
   @media (max-width: 768px) {
     .topbar-btn .btn-label { display: none; }
     .topbar-btn { padding: 6px 8px; min-width: 40px; }
     .modal-drag-handle { display: block; }
-    .modal { padding: 12px 16px calc(16px + var(--safe-bottom)); border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+    .modal { padding: 12px 16px calc(16px + var(--safe-bottom)); border-left: none; border-right: none; }
   }
 
-  /* ── 小手机（≤ 420px） ────────────────── */
   @media (max-width: 420px) {
     .topbar { padding: 6px 10px; padding-top: calc(6px + var(--safe-top)); gap: 4px; }
     .topbar-right { gap: 4px; }
@@ -902,18 +1051,12 @@
     .model-badge { max-width: 80px; }
     .msg { gap: 8px; }
     .input-area { padding: 8px 10px calc(10px + var(--safe-bottom)); }
-    .input-wrapper { padding: 3px; }
+    .input-wrapper { padding: 0; }
     .send-btn { width: 40px; min-width: 40px; height: 40px; font-size: 18px; }
-    .backtrack-btn { font-size: 10px; padding: 3px 6px; }
+    .backtrack-btn { font-size: 9px; padding: 1px 4px; min-height: 18px; }
     .auth-box { padding: 24px 20px; }
   }
 
-  /* ── 深色模式偏好 ─────────────────────── */
-  @media (prefers-color-scheme: light) {
-    /* 保留深色主题作为 Five Pebbles 的风格特征 */
-  }
-
-  /* ── 减少动效偏好 ─────────────────────── */
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation-duration: 0.01ms !important;
@@ -922,106 +1065,113 @@
     }
   }
 
-  /* ── 打印样式 ─────────────────────────── */
   @media print {
     .topbar, .input-area { display: none; }
     .messages-container { overflow: visible; height: auto; }
   }
 </style>
 </head>
-<body>
+<body class="crt-flicker">
 
-<!-- ═══ 登录遮罩层 ═══ -->
-<div class="auth-overlay" id="authOverlay" role="dialog" aria-label="登录验证">
-  <div class="auth-box">
-    <div class="logo-icon">
-      <img src="/static/favicon.png" width="52" height="54" alt="Five Pebbles 图标" style="vertical-align:middle">
-    </div>
-    <h1>Five Pebbles</h1>
-    <p>请输入启动 Token 以连接</p>
-    <div class="token-hint">
-      Token 在服务器启动时打印在终端中<br>
-      或查看项目根目录的 <code>.webui_token</code> 文件
-    </div>
-    <input type="password" class="auth-input" id="authInput"
-           placeholder="粘贴 Token..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-           aria-label="Token 输入框"
-           onkeydown="if(event.key==='Enter') doLogin()">
-    <button class="auth-btn" id="authBtn" onclick="doLogin()" aria-label="连接">
-      🔓 连接
-    </button>
-    <div class="auth-error" id="authError" role="alert">Token 无效，请重试</div>
-  </div>
-</div>
+  <!-- ═══ 装饰层 ═══ -->
+  <div class="noise-bg"></div>
+  <div class="rust-overlay"></div>
+  <div class="scanlines"></div>
 
-<!-- ═══ 主应用 ═══ -->
-<div class="app-container">
-
-  <!-- ─── 顶栏 ─── -->
-  <header class="topbar" role="banner">
-    <div class="topbar-left">
-      <span class="logo-icon" aria-hidden="true">
-        <img src="/static/favicon.png" width="24" height="25" alt="" style="vertical-align:middle;margin-top:-3px">
-      </span>
-      <span class="logo"><span>Five</span> Pebbles</span>
-      <span class="model-badge" id="modelBadge" aria-label="当前模型">—</span>
-    </div>
-    <div class="topbar-right">
-      <span class="session-label" id="sessionLabel" title="当前会话" aria-label="当前会话">—</span>
-      <span class="status-dot" id="statusDot" aria-label="连接状态"></span>
-      <button class="topbar-btn" onclick="openSessions()" title="历史会话" aria-label="打开历史会话列表">
-        <span aria-hidden="true">📋</span><span class="btn-label"> 会话</span>
+  <!-- ═══ 登录遮罩层 ═══ -->
+  <div class="auth-overlay" id="authOverlay" role="dialog" aria-label="登录验证">
+    <div class="auth-box">
+      <div class="logo-icon">
+        <img src="/static/favicon.png" width="52" height="54" alt="Five Pebbles 图标" style="vertical-align:middle">
+      </div>
+      <h1>Five Pebbles</h1>
+      <p>请输入启动 Token 以连接</p>
+      <div class="token-hint">
+        ⚠ Token 在服务器启动时打印在终端中<br>
+        或查看项目根目录的 <code style="color:var(--yellow);background:transparent;padding:0">.webui_token</code> 文件
+      </div>
+      <input type="password" class="auth-input" id="authInput"
+             placeholder="ENTER_ACCESS_TOKEN..."
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+             aria-label="Token 输入框"
+             onkeydown="if(event.key==='Enter') doLogin()">
+      <button class="auth-btn" id="authBtn" onclick="doLogin()" aria-label="连接">
+        🔓 连接
       </button>
-      <button class="topbar-btn" onclick="newAgent()" title="新建 Agent（shutdown 旧实例，创建全新实例和会话）" aria-label="新建 Agent">
-        <span aria-hidden="true">🆕</span><span class="btn-label"> 新建</span>
-      </button>
-      <button class="topbar-btn" onclick="reloadAgent()" title="热重载 Agent（不重启服务器，加载修改后的代码）" aria-label="热重载 Agent">
-        <span aria-hidden="true">🔄</span><span class="btn-label"> 重载</span>
-      </button>
-      <button class="topbar-btn danger" onclick="clearSession()" title="清空当前会话" aria-label="清空当前会话">
-        <span aria-hidden="true">🗑️</span><span class="btn-label"> 清空</span>
-      </button>
-    </div>
-  </header>
-
-  <!-- ─── 消息列表 ─── -->
-  <main class="messages-container" id="messagesContainer" role="log" aria-label="聊天消息" aria-live="polite"></main>
-
-  <!-- ─── 输入区 ─── -->
-  <div class="input-area" role="form" aria-label="消息输入">
-    <div class="input-wrapper">
-      <textarea id="inputField" rows="1"
-                placeholder="向 Five Pebbles 提问..."
-                autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-                aria-label="输入消息"
-                onkeydown="handleKeyDown(event)"
-                oninput="autoResize(this)"
-                onfocus="handleInputFocus()"></textarea>
-      <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="发送 (Enter)" aria-label="发送消息">
-        ➤
-      </button>
-    </div>
-    <div class="input-hint">
-      <span><kbd>Enter</kbd> 发送 · <kbd>Shift+Enter</kbd> 换行</span>
-      <span id="connectionStatus" aria-live="polite">🟢 已连接</span>
+      <div class="auth-error" id="authError" role="alert">⛔ Token 无效，请重试</div>
     </div>
   </div>
-</div>
 
-<!-- ═══ 会话列表浮层 ═══ -->
-<div class="modal-overlay" id="sessionsModal" role="dialog" aria-label="历史会话列表">
-  <div class="modal">
-    <!-- 拖拽指示器（仅移动端可见） -->
-    <div class="modal-drag-handle" aria-hidden="true"></div>
-    <div class="modal-header">
-      <span class="modal-title">📋 历史会话</span>
-      <button class="modal-close" onclick="closeSessions()" aria-label="关闭会话列表">✕</button>
-    </div>
-    <div class="modal-body" id="sessionsList">
-      <div class="no-sessions">加载中...</div>
+  <!-- ═══ 主应用 ═══ -->
+  <div class="app-container">
+
+    <!-- ─── 顶栏 ─── -->
+    <header class="topbar" role="banner">
+      <div class="topbar-left">
+        <span class="logo-icon" aria-hidden="true">
+          <img src="/static/favicon.png" width="24" height="25" alt="" style="vertical-align:middle;margin-top:-3px">
+        </span>
+        <span class="logo">
+          <span class="logo-full"><span>Five</span> Pebbles</span>
+          <span class="logo-short"><span>F</span>P</span>
+        </span>
+        <span class="model-badge" id="modelBadge" aria-label="当前模型">—</span>
+      </div>
+      <div class="topbar-right">
+        <span class="session-label" id="sessionLabel" title="当前会话" aria-label="当前会话">—</span>
+        <span class="status-dot" id="statusDot" aria-label="连接状态"></span>
+        <button class="topbar-btn" onclick="openSessions()" title="历史会话" aria-label="打开历史会话列表">
+          <span aria-hidden="true">📋</span><span class="btn-label"> 会话</span>
+        </button>
+        <button class="topbar-btn" onclick="newAgent()" title="新建 Agent（shutdown 旧实例，创建全新实例和会话）" aria-label="新建 Agent">
+          <span aria-hidden="true">🆕</span><span class="btn-label"> 新建</span>
+        </button>
+        <button class="topbar-btn" onclick="reloadAgent()" title="热重载 Agent（不重启服务器，加载修改后的代码）" aria-label="热重载 Agent">
+          <span aria-hidden="true">🔄</span><span class="btn-label"> 重载</span>
+        </button>
+        <button class="topbar-btn danger" onclick="clearSession()" title="清空当前会话" aria-label="清空当前会话">
+          <span aria-hidden="true">🗑️</span><span class="btn-label"> 清空</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- ─── 消息列表 ─── -->
+    <main class="messages-container" id="messagesContainer" role="log" aria-label="聊天消息" aria-live="polite"></main>
+
+    <!-- ─── 输入区 ─── -->
+    <div class="input-area" role="form" aria-label="消息输入">
+      <div class="input-wrapper">
+        <textarea id="inputField" rows="1"
+                  placeholder="输入指令..."
+                  autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                  aria-label="输入消息"
+                  onkeydown="handleKeyDown(event)"
+                  oninput="autoResize(this)"
+                  onfocus="handleInputFocus()"></textarea>
+        <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="发送 (Enter)" aria-label="发送消息">
+          ➤
+        </button>
+      </div>
+      <div class="input-hint">
+        <span><kbd>Enter</kbd> 发送 · <kbd>Shift+Enter</kbd> 换行</span>
+        <span id="connectionStatus" aria-live="polite"><span style="color:var(--green-bright)">🟢</span> 已连接</span>
+      </div>
     </div>
   </div>
-</div>
+
+  <!-- ═══ 会话列表浮层 ═══ -->
+  <div class="modal-overlay" id="sessionsModal" role="dialog" aria-label="历史会话列表">
+    <div class="modal">
+      <div class="modal-drag-handle" aria-hidden="true"></div>
+      <div class="modal-header">
+        <span class="modal-title">📋 历史会话</span>
+        <button class="modal-close" onclick="closeSessions()" aria-label="关闭会话列表">✕</button>
+      </div>
+      <div class="modal-body" id="sessionsList">
+        <div class="no-sessions">加载中...</div>
+      </div>
+    </div>
+  </div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════
@@ -1100,11 +1250,11 @@ async function doLogin() {
       hideLogin();
       initApp();
     } else {
-      err.textContent = 'Token 无效，请重试';
+      err.textContent = '⛔ Token 无效，请重试';
       err.classList.add('show');
     }
   } catch (e) {
-    err.textContent = '服务器连接失败';
+    err.textContent = '❌ 服务器连接失败';
     err.classList.add('show');
   }
   btn.disabled = false;
@@ -1194,12 +1344,12 @@ function addUserMessage(content) {
     '<div class="msg-avatar user" aria-hidden="true">👤</div>' +
     '<div class="msg-body">' +
       '<div class="msg-header">' +
-        '<span class="msg-author user">你</span>' +
+        '<span class="msg-author user">OPERATOR</span>' +
         '<span class="msg-time">' + formatTime(Date.now()/1000) + '</span>' +
+        '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>' +
       '</div>' +
       '<div class="msg-content">' + escapeHtml(content) + '</div>' +
-    '</div>' +
-    '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>';
+    '</div>';
   group.appendChild(msg);
   scrollToBottom();
 }
@@ -1217,12 +1367,12 @@ function addAssistantMessage(content) {
     '</div>' +
     '<div class="msg-body">' +
       '<div class="msg-header">' +
-        '<span class="msg-author assistant">Five Pebbles</span>' +
+        '<span class="msg-author assistant">FIVE PEBBLES</span>' +
         '<span class="msg-time">' + formatTime(Date.now()/1000) + '</span>' +
+        '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>' +
       '</div>' +
       '<div class="msg-content rendered"></div>' +
-    '</div>' +
-    '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>';
+    '</div>';
   group.appendChild(msg);
 
   var contentEl = msg.querySelector('.msg-content');
@@ -1260,6 +1410,7 @@ function addToolCall(name, args) {
       '<div class="msg-header">' +
         '<span class="msg-author tool">Tool</span>' +
         '<span class="msg-time">' + formatTime(Date.now()/1000) + '</span>' +
+        '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>' +
       '</div>' +
       '<div class="msg-content rendered">' +
         '<div class="tool-msg-toggle">' +
@@ -1271,8 +1422,7 @@ function addToolCall(name, args) {
           '<pre style="font-size:0.85em;opacity:0.6;margin:0;white-space:pre-wrap;word-break:break-all">' + escapeHtml(prettyArgs) + '</pre>' +
         '</div>' +
       '</div>' +
-    '</div>' +
-    '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>';
+    '</div>';
 
   group.appendChild(msg);
   scrollToBottom();
@@ -1301,6 +1451,7 @@ function addToolResult(name, result, isError) {
         '<div class="msg-header">' +
           '<span class="msg-author tool">Tool</span>' +
           '<span class="msg-time">' + formatTime(Date.now()/1000) + '</span>' +
+          '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>' +
         '</div>' +
         '<div class="msg-content rendered">' +
           '<div class="tool-msg-toggle">' +
@@ -1309,8 +1460,7 @@ function addToolResult(name, result, isError) {
           '</div>' +
           '<div class="tool-msg-body"></div>' +
         '</div>' +
-      '</div>' +
-      '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>';
+      '</div>';
     group.appendChild(target);
   }
 
@@ -1875,6 +2025,7 @@ function renderHistoryMessages(sid, messages) {
           '<div class="msg-header">' +
             '<span class="msg-author tool">Tool</span>' +
             '<span class="msg-time">#' + msg.index + '</span>' +
+            '<button class="backtrack-btn" title="回溯到此位置" data-index="' + msg.index + '" aria-label="回溯到位置 ' + msg.index + '">↩ 回溯</button>' +
           '</div>' +
           '<div class="msg-content">' +
             '<div class="tool-msg-toggle">' +
@@ -1884,8 +2035,7 @@ function renderHistoryMessages(sid, messages) {
             '</div>' +
             '<div class="tool-msg-body"></div>' +
           '</div>' +
-        '</div>' +
-        '<button class="backtrack-btn" title="回溯到此位置" data-index="' + msg.index + '" aria-label="回溯到位置 ' + msg.index + '">↩ 回溯</button>';
+        '</div>';
 
       group.appendChild(msgDiv);
 
@@ -1901,9 +2051,9 @@ function renderHistoryMessages(sid, messages) {
 
       var roleConfig;
       if (msg.role === 'user') {
-        roleConfig = { avatar: '👤', author: '你', cls: 'user' };
+        roleConfig = { avatar: '👤', author: 'OPERATOR', cls: 'user' };
       } else {
-        roleConfig = { avatar: '<img src=\"/static/favicon.png\" width=\"18\" height=\"19\" alt=\"\" style=\"vertical-align:middle\">', author: 'Five Pebbles', cls: 'assistant' };
+        roleConfig = { avatar: '<img src=\"/static/favicon.png\" width=\"18\" height=\"19\" alt=\"\" style=\"vertical-align:middle\">', author: 'FIVE PEBBLES', cls: 'assistant' };
       }
 
       var avatarHtml = '<div class="msg-avatar ' + roleConfig.cls + '" aria-hidden="true">' + roleConfig.avatar + '</div>';
@@ -1914,10 +2064,10 @@ function renderHistoryMessages(sid, messages) {
           '<div class="msg-header">' +
             '<span class="msg-author ' + roleConfig.cls + '">' + roleConfig.author + '</span>' +
             '<span class="msg-time">#' + msg.index + '</span>' +
+            '<button class="backtrack-btn" title="回溯到此位置" data-index="' + msg.index + '" aria-label="回溯到位置 ' + msg.index + '">↩ 回溯</button>' +
           '</div>' +
           '<div class="msg-content rendered"></div>' +
-        '</div>' +
-        '<button class="backtrack-btn" title="回溯到此位置" data-index="' + msg.index + '" aria-label="回溯到位置 ' + msg.index + '">↩ 回溯</button>';
+        '</div>';
 
       group.appendChild(msgDiv);
 
