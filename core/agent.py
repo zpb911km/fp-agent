@@ -428,6 +428,14 @@ class Agent:
                 max_tokens=config.LLM_MAX_TOKENS,
                 extra_body={"enable_thinking": False},
             )
+        except asyncio.CancelledError:
+            # LLM 调用中被 Ctrl+C 中断
+            # CancelledError 由 _raw_sigint_handler 通过 all_tasks().cancel() 注入，
+            # 必须在此处捕获并返回中断标记，避免异常逃逸到
+            # _process_inner → cli.py 的 except CancelledError: break 导致退出。
+            self._cancelled_by_user = True
+            msg = {"role": "assistant", "content": "", "_interrupted": True}
+            return msg
         finally:
             if spinner:
                 await spinner.stop()
@@ -823,6 +831,10 @@ class Agent:
     async def _process_inner(self, user_input: str) -> Response:
         """处理用户输入的核心逻辑（io 已在 process() 中设置好）"""
         
+        # 每次处理前重置中断标记。调用方（如 process_and_notify）
+        # 在 process() 返回后检查此标记，因此不能在末尾重置。
+        self._cancelled_by_user = False
+        
         # 检查命令
         if user_input.strip().startswith("/"):
             handled, output = await self.handle_command(user_input)
@@ -981,7 +993,6 @@ class Agent:
         # 清理中断标志（防止状态残留）
         self._interrupted = False
         self._processing = False
-        self._cancelled_by_user = False
         
         # 生命周期：返回响应前
         await self.lifecycle.emit(LifecycleHook.ON_BEFORE_RESPONSE, content=final_content)
