@@ -13,12 +13,12 @@ description = "核弹级退出：删除当前会话、不留痕迹"
 
 def execute(agent, arg: str) -> bool:
     sid = agent.session.session_id
-    path = agent.session._session_path()
+    path = agent.session.get_session_path()
     
-    # 标记核弹退出，让 shutdown 跳过保存
-    agent._nuclear_exit = True
+    # 标记核弹退出 — shutdown 时会删除会话文件
+    agent.set_nuclear_exit()
     
-    # 删除会话文件
+    # 提前删除文件（shutdown 也会删，双重保险）
     if os.path.exists(path):
         try:
             os.remove(path)

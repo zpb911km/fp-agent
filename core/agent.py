@@ -29,7 +29,6 @@ _interrupted_flag = False
 from plugins.base.plugin import Plugin, PluginRegistry, PluginConfig
 
 import config
-import tools
 import display
 from core import session
 from commands import execute as execute_command, get_all_commands
@@ -174,6 +173,27 @@ class Agent:
             self._conv.replace_all(saved)
         return self._conv._messages
     
+    # ── 公共属性 ─────────────────────────────────────
+    
+    @property
+    def is_processing(self) -> bool:
+        """是否正在处理请求"""
+        return self._processing
+    
+    @property
+    def cancelled_by_user(self) -> bool:
+        """是否被用户主动取消"""
+        return self._cancelled_by_user
+    
+    def reset_cancelled(self):
+        """重置用户取消标记"""
+        self._cancelled_by_user = False
+    
+    @property
+    def model(self) -> str:
+        """当前模型名称"""
+        return self._llm.model
+    
     # ── 内置钩子 ─────────────────────────────────────
     
     def _register_builtin_hooks(self):
@@ -191,8 +211,40 @@ class Agent:
         return ctx
     
     async def _on_shutdown(self, ctx: HookContext, **kwargs) -> HookContext:
-        """关闭钩子 — 保存上下文"""
+        """关闭钩子 — 生成会话摘要 + 保存上下文 + 显示退出面板"""
+        summary = ""
+        if not self._nuclear_exit:
+            last_msgs = self._conv.get_non_system_messages()
+            if last_msgs:
+                last_user = next((m for m in reversed(last_msgs) if m["role"] == "user"), None)
+                if last_user:
+                    summary = last_user.get("content", "").strip().replace("\n", " ")[:20]
+                    self.session.update_meta(summary=summary)
+
         self.session.save_context(self._conv.messages)
+
+        # 显示退出面板
+        info = self.session.list_sessions().get(self.session.session_id, {})
+        msg_count = info.get("message_count", 0)
+        created = info.get("created", "?")
+        duration = ""
+        try:
+            delta = datetime.now() - datetime.strptime(created, "%Y-%m-%d %H:%M:%S")
+            h, r = divmod(int(delta.total_seconds()), 3600)
+            m, s = divmod(r, 60)
+            duration = f"{h}:{m:02d}:{s:02d}"
+        except Exception:
+            pass
+
+        display.shutdown_panel(
+            summary=summary,
+            file=f"{self.session.session_id}.jsonl",
+            model=self.model,
+            msg_count=msg_count,
+            created=created,
+            duration=duration,
+        )
+
         if self.enable_log:
             print("[Agent] Shutting down...")
         return ctx
@@ -341,18 +393,31 @@ class Agent:
         return False
     
     def clear_session(self):
-        """清空当前会话"""
+        """清空当前会话（重置上下文 + 清空会话文件）"""
         system_prompt = self._prompter.build_system_prompt()
         self._conv.reset(system_prompt)
-        # 重置 meta 并清空文件
-        from core.session import _default_meta
-        meta = _default_meta(self.session.session_id)
-        path = self.session._session_path()
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(meta, ensure_ascii=False) + "\n")
+        self.session.clear_session_file()
     
     def delete_session(self, sid: str) -> bool:
         return self.session.delete_session(sid)
+    
+    # ============ 公共 API：上下文与持久化 ============
+    
+    def get_messages(self) -> List[Dict]:
+        """获取当前消息列表的防御性拷贝"""
+        return self._conv.messages
+    
+    def save_context(self):
+        """将当前上下文保存到会话文件"""
+        self.session.save_context(self._conv.messages)
+    
+    def rebuild_context(self):
+        """重建上下文：重新加载 system prompt + 从会话文件恢复"""
+        self._build_context()
+    
+    async def ensure_initialized(self):
+        """确保已触发初始化钩子（公共 API）"""
+        await self._ensure_initialized()
     
     # ============ 中断机制 ============
     
@@ -370,6 +435,165 @@ class Agent:
             self._interrupted = False
             self._processing = False
             raise asyncio.CancelledError("用户中断")
+    
+    # ============ 公共 API：技能管理 ============
+    
+    def add_skill(self, filename: str):
+        """添加技能文件（公共 API）"""
+        return self._cmd_add_skill(filename)
+    
+    def remove_skill(self, skill_name: str):
+        """删除指定技能（公共 API）"""
+        return self._cmd_remove_skill(skill_name)
+    
+    # ============ 公共 API：会话管理 ============
+    
+    def resume_latest(self) -> bool:
+        """续最新会话并重建上下文"""
+        if self.session.resume_latest():
+            saved = self.session.load_context(self._conv.system_prompt)
+            self._conv.replace_all(saved)
+            return True
+        return False
+    
+    # ============ 公共 API：对话操作 ============
+    
+    async def back(self, target_idx: int = None, mode: int = None) -> str:
+        """回退到对话的某个历史时刻（公共 API）
+        
+        Args:
+            target_idx: 目标消息序号（1-based，从第一条非 system 开始）
+                        None 时进入交互模式
+            mode: 1=保留后续消息，2=删除后续消息（默认）
+            
+        Returns:
+            状态描述文本
+        """
+        history_msgs = self._conv.get_history_for_display()
+        
+        if not history_msgs:
+            msg = "没有历史记录可以回退"
+            self.io.info(msg)
+            return msg
+        
+        # 有参数：直接回溯
+        if target_idx is not None:
+            if target_idx < 1 or target_idx > len(history_msgs):
+                msg = f"❌ 无效索引：{target_idx}，有效范围 1~{len(history_msgs)}"
+                self.io.error(msg)
+                return msg
+            
+            deleted = self._conv.back(target_idx=target_idx, mode=mode)
+            self.session.save_context(self._conv.messages)
+            
+            if mode is None or mode == 2:
+                msg = f"⏪ 已回退到第 {target_idx} 条消息，后续消息已删除"
+            else:
+                msg = f"⏪ 已回退到第 {target_idx} 条消息，后续消息已保留"
+            self.io.info(msg)
+            return msg
+        
+        # 无参数：交互模式
+        roles_zh = {"user": "👤 用户", "assistant": "🤖 AI", "tool": "🔧 工具"}
+        lines = [f"📜 对话历史（共 {len(history_msgs)} 条消息）:"]
+        for i, msg in enumerate(history_msgs):
+            role = roles_zh.get(msg["role"], msg["role"])
+            content = msg.get("content", "")
+            if msg["role"] == "tool":
+                content = content[:60] + "..." if len(content) > 60 else content
+            else:
+                content = content[:120] + "..." if len(content) > 120 else content
+            content = content.replace("\n", " ")
+            lines.append(f"  [{i+1:3d}] {role}: {content}")
+        
+        prompt_hint = f"输入 1~{len(history_msgs)} 回退到对应位置，输入 q 取消"
+        self.io.info(lines[0])
+        for l in lines[1:]:
+            self.io.item(l)
+        self.io.hint(prompt_hint)
+        
+        choice = await self.io.ask("AI <- 选择: ")
+        if not choice or choice.lower() == "q":
+            msg = "已取消"
+            self.io.info(msg)
+            return msg
+        
+        try:
+            idx = int(choice)
+            if idx < 1 or idx > len(history_msgs):
+                msg = f"❌ 无效选择，请输入 1~{len(history_msgs)}"
+                self.io.error(msg)
+                return msg
+        except ValueError:
+            msg = "❌ 请输入数字"
+            self.io.error(msg)
+            return msg
+        
+        self._conv.back(target_idx=idx, mode=2)
+        self.session.save_context(self._conv.messages)
+        
+        msg = f"⏪ 已回退到第 {choice} 条消息位置"
+        self.io.info(msg)
+        return msg
+    
+    def fork(self):
+        """基于当前上下文新建会话（公共 API）"""
+        old_messages = self._conv.get_non_system_messages()
+        
+        if not old_messages:
+            display.info("当前会话没有消息，无法 fork")
+            return
+        
+        self.session.save_context(self._conv.messages)
+        
+        last_msg_content = old_messages[-1].get("content", "")[:50] if old_messages else ""
+        old_sid = self.session.session_id
+        new_sid = self.session.create_session()
+        
+        # 重建上下文：用当前 system prompt，复制旧消息
+        system_prompt = self._conv.system_prompt
+        self._conv.reset(system_prompt)
+        for m in old_messages:
+            self._conv._messages.append(dict(m))
+        self.session.save_context(self._conv.messages)
+        
+        # 更新旧会话摘要
+        self.session.update_meta(old_sid, summary=last_msg_content)
+        
+        display.info(f"🍴 已 fork：从 {old_sid} → {new_sid}")
+    
+    def history(self) -> str:
+        """查看当前对话历史（公共 API）"""
+        history_msgs = self._conv.get_history_for_display()
+        
+        if not history_msgs:
+            display.info("暂无对话历史")
+            return ""
+        
+        roles_zh = {"user": "👤 用户", "assistant": "🤖 AI", "tool": "🔧 工具"}
+        display.info(f"\n📜 对话历史（共 {len(history_msgs)} 条）:")
+        print()
+        
+        for i, msg in enumerate(history_msgs):
+            role = roles_zh.get(msg["role"], msg["role"])
+            content = msg.get("content", "")
+            if msg["role"] == "tool":
+                content = content[:80] + "..." if len(content) > 80 else content
+            else:
+                content = content[:120] + "..." if len(content) > 120 else content
+            content = content.replace("\n", " ")
+            display.item(f"  [{i+1:3d}] {role}: {content}")
+        
+        print()
+        return ""
+    
+    async def compact_context(self):
+        """压缩对话历史（公共 API）"""
+        await self._compact_context()
+    
+    def set_nuclear_exit(self):
+        """设置核弹退出标志"""
+        self._nuclear_exit = True
     
     # ============ LLM 调用（含 IO 展示） ============
     

@@ -193,6 +193,10 @@ class SessionManager:
     def session_id(self) -> str:
         return self._session_id
 
+    def get_session_path(self, sid: Optional[str] = None) -> str:
+        """获取指定会话的文件路径（公共 API）"""
+        return self._session_path(sid)
+
     def list_sessions(self) -> Dict[str, Dict[str, Any]]:
         """列出所有会话及其 meta。扫描 sessions 目录。"""
         sessions = {}
@@ -235,6 +239,13 @@ class SessionManager:
             return True
         except Exception:
             return False
+
+    def clear_session_file(self):
+        """清空当前会话文件（重置为默认 meta，删除历史消息）。"""
+        self._meta = _default_meta(self._session_id)
+        path = self._session_path()
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(self._meta, ensure_ascii=False) + "\n")
 
     def resume_latest(self) -> bool:
         """尝试续最近会话。成功返回 True，否则创建新会话。"""

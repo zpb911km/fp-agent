@@ -188,8 +188,7 @@ async def execute(agent, arg: str) -> tuple[bool, str]:
 
     # /resume latest
     if arg == "latest":
-        sid = agent.session.resume_latest()
-        agent._context = agent._build_context()
+        agent.resume_latest()
         msg = f"📂 已切换到最新会话: {agent.session.session_id}"
         agent.io.info(msg)
         return (True, msg)

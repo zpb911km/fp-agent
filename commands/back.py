@@ -39,5 +39,5 @@ async def execute(agent, arg: str) -> tuple[bool, str]:
             agent.io.error(msg)
             return (True, msg)
     
-    result = await agent._cmd_back(target_idx=index, mode=mode)
+    result = await agent.back(target_idx=index, mode=mode)
     return (True, result)

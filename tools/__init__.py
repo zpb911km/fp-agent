@@ -8,8 +8,6 @@ Tools 包 — 插件化工具系统（全异步版本）
 包导出:
 - ToolRegistry: 工具注册表类
 - registry: 全局注册表实例
-- TOOL_DEFINITIONS: 所有工具的 OpenAI schema（兼容旧代码）
-- TOOL_HANDLERS: 工具处理器映射（兼容旧代码）
 - dispatch(tool_name, **kwargs): 兼容旧代码的 async 工具调度函数
 - bash/read_file/write_file/edit_file/python/web_search: async 快捷函数
 """
@@ -115,10 +113,6 @@ async def execute_tool(tool_name: str, params: Dict[str, Any]) -> Any:
 # ═══════════════════════════════════════════════════════════════════
 # 兼容旧代码的导出
 # ═══════════════════════════════════════════════════════════════════
-
-TOOL_DEFINITIONS: List[dict] = get_tool_definitions()
-"""所有工具的 OpenAI schema 定义列表 — 兼容旧代码的 `tools.TOOL_DEFINITIONS`"""
-
 
 # TOOL_HANDLERS 不再维护同步映射，改用异步 dispatch 函数
 

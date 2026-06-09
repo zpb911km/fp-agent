@@ -281,7 +281,7 @@ async def get_agent() -> Agent:
                 # 注册 WebUI 桥接插件
                 webui_plugin = WebUIPlugin()
                 _agent.plugins.register(webui_plugin)
-                await _agent._ensure_initialized()
+                await _agent.ensure_initialized()
                 display.info(f"[WebUI] Agent 已初始化 (model={_agent.model})")
     return _agent
 
@@ -426,14 +426,14 @@ async def new_agent():
     global _agent
 
     # ── 检查是否正在处理 ──
-    if _agent is not None and getattr(_agent, '_processing', False):
+    if _agent is not None and _agent.is_processing:
         raise HTTPException(status_code=409, detail="Agent 正在处理请求，请稍后重试")
 
     async with _agent_lock:
         # ── 保存旧会话并 shutdown 旧 Agent ──
         if _agent is not None:
             try:
-                _agent.session.save_context(_agent._context)
+                _agent.save_context()
                 await _agent.shutdown()
             except Exception as e:
                 display.warning(f"[WebUI] ⚠️ 旧 Agent shutdown 时发生异常: {e}")
@@ -453,7 +453,7 @@ async def new_agent():
             _agent = NewAgent(enable_log=False)
             webui_plugin = WebUIPlugin()
             _agent.plugins.register(webui_plugin)
-            await _agent._ensure_initialized()
+            await _agent.ensure_initialized()
         except Exception as e:
             display.error(f"[WebUI] ❌ 新 Agent 创建失败: {e}")
             _agent = None
@@ -463,7 +463,7 @@ async def new_agent():
         # NewAgent() 的 SessionManager(resume=None) 中已调用 _init_session()
         # 生成了全新会话，此处只需重建 context 即可
         try:
-            _agent._context = _agent._build_context()
+            _agent.rebuild_context()
             new_sid = _agent.session.session_id
             display.info(f"[WebUI] 🆕 已使用新会话: {new_sid}")
         except Exception as e:
@@ -497,16 +497,16 @@ async def create_new_session():
     
     # 记录旧会话，用于后台生成摘要
     old_sid = agent.session.session_id
-    old_context = list(agent._context)  # 浅拷贝
+    old_context = agent.get_messages()  # 浅拷贝
     
     # 保存当前会话上下文
-    agent.session.save_context(agent._context)
+    agent.save_context()
     
     # 创建新会话（自动切换到新会话）
     new_sid = agent.session.create_session()
     
     # 重建 agent 上下文（加载 system prompt 到新会话）
-    agent._context = agent._build_context()
+    agent.rebuild_context()
     
     # 同步生成旧会话摘要（不传 tools，确保 LLM 返回纯文本标题）
     history_msgs = [m for m in old_context if m["role"] != "system"]
@@ -563,14 +563,14 @@ async def get_session(session_id: str):
     agent = await get_agent()
     
     # 保存当前会话
-    agent.session.save_context(agent._context)
+    agent.save_context()
     
     # 加载目标会话
     if not agent.switch_session(session_id):
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
     
     history = []
-    for msg in agent._context[1:]:  # 跳过 system
+    for msg in agent.get_messages()[1:]:  # 跳过 system
         entry = {
             "role": msg["role"],
             "content": msg.get("content", ""),
@@ -643,10 +643,10 @@ async def switch_session_endpoint(session_id: str):
     
     # 记录旧会话，用于后台生成摘要
     old_sid = agent.session.session_id
-    old_context = list(agent._context)  # 浅拷贝
+    old_context = agent.get_messages()  # 浅拷贝
     
     # 保存当前会话
-    agent.session.save_context(agent._context)
+    agent.save_context()
     
     if not agent.switch_session(session_id):
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
@@ -769,14 +769,14 @@ async def reload_agent():
     global _agent
 
     # ── 检查是否正在处理 ──
-    if _agent is not None and getattr(_agent, '_processing', False):
+    if _agent is not None and _agent.is_processing:
         raise HTTPException(status_code=409, detail="Agent 正在处理请求，请稍后重试")
 
     async with _agent_lock:
         # ── 保存旧会话并关闭旧 Agent ──
         old_sid: Optional[str] = None
         if _agent is not None:
-            _agent.session.save_context(_agent._context)
+            _agent.save_context()
             old_sid = _agent.session.session_id
             try:
                 await _agent.shutdown()
@@ -808,7 +808,7 @@ async def reload_agent():
             _agent = NewAgent(enable_log=False)
             webui_plugin = WebUIPlugin()
             _agent.plugins.register(webui_plugin)
-            await _agent._ensure_initialized()
+            await _agent.ensure_initialized()
         except Exception as e:
             display.error(f"[WebUI] ❌ 新 Agent 创建失败: {e}")
             _agent = None
@@ -818,7 +818,7 @@ async def reload_agent():
         if old_sid:
             try:
                 _agent.session.switch_session(old_sid)
-                _agent._context = _agent._build_context()
+                _agent.rebuild_context()
                 display.info(f"[WebUI] 🔄 已恢复会话: {old_sid}")
             except Exception as e:
                 display.warning(f"[WebUI] ⚠️ 会话恢复失败: {e}")
@@ -958,8 +958,8 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(None
                         # except 块中被设为 True，process() 返回后检查此标记。
                         # 用这种方式而非重新抛出 CancelledError，是为了不破坏
                         # CLI 模式——CLI 的 except CancelledError: break 会退出程序。
-                        if getattr(agent, '_cancelled_by_user', False):
-                            agent._cancelled_by_user = False
+                        if agent.cancelled_by_user:
+                            agent.reset_cancelled()
                             await event_bus.publish({"type": "cancelled"})
                         else:
                             await event_bus.publish({

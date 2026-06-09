@@ -176,14 +176,15 @@ class SkillLoader:
         return self.skills.get(name)
     
     def get_all_prompt_text(self) -> str:
-        """获取所有技能的提示词文本"""
+        """获取所有技能的提示词文本（仅注入标题+描述，不含正文）"""
         if not self.skills:
             return ""
         
         parts = ["\n\n## 可用技能\n"]
         for skill in sorted(self.skills.values(), key=lambda s: -s.priority):
-            parts.append(f"### {skill.title} ({skill.name})\n")
-            parts.append(f"{skill.content}\n\n")
+            desc = skill.description[:80] + "…" if len(skill.description) > 80 else skill.description
+            parts.append(f"- **{skill.title}** (`{skill.name}`): {desc}")
+        parts.append("\n需要使用时，我会主动加载完整技能内容。")
         
         return '\n'.join(parts)
     
@@ -192,5 +193,6 @@ class SkillLoader:
         self.load_all()
 
 
-# 全局单例
+# 全局单例（自动加载全部技能）
 skill_loader = SkillLoader()
+skill_loader.load_all()
