@@ -1388,8 +1388,6 @@ function addAssistantMessage(content) {
 function addToolCall(name, args) {
   removeThinking();
   var group = getOrCreateMsgGroup();
-  liveMsgIndex++;
-  var idx = liveMsgIndex;
 
   var prettyArgs = '';
   try {
@@ -1410,7 +1408,6 @@ function addToolCall(name, args) {
       '<div class="msg-header">' +
         '<span class="msg-author tool">Tool</span>' +
         '<span class="msg-time">' + formatTime(Date.now()/1000) + '</span>' +
-        '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>' +
       '</div>' +
       '<div class="msg-content rendered">' +
         '<div class="tool-msg-toggle">' +
@@ -1440,8 +1437,6 @@ function addToolResult(name, result, isError) {
 
   if (!target) {
     var group = getOrCreateMsgGroup();
-    liveMsgIndex++;
-    var idx = liveMsgIndex;
     target = document.createElement('div');
     target.className = 'msg tool-msg collapsed';
     target.onclick = toggleToolMsg;
@@ -1451,7 +1446,6 @@ function addToolResult(name, result, isError) {
         '<div class="msg-header">' +
           '<span class="msg-author tool">Tool</span>' +
           '<span class="msg-time">' + formatTime(Date.now()/1000) + '</span>' +
-          '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>' +
         '</div>' +
         '<div class="msg-content rendered">' +
           '<div class="tool-msg-toggle">' +
