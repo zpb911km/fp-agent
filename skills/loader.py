@@ -61,7 +61,7 @@ class SkillLoader:
             content = self._substitute_templates(content)
             
             # 解析 YAML frontmatter
-            skill = self._parse_skill(content)
+            skill = self._parse_skill(content, filepath)
             if skill:
                 skill.metadata["file"] = os.path.basename(filepath)
             
@@ -80,7 +80,7 @@ class SkillLoader:
             text = text.replace(placeholder, value)
         return text
     
-    def _parse_skill(self, content: str) -> Optional[Skill]:
+    def _parse_skill(self, content: str, filepath: str = "") -> Optional[Skill]:
         """解析技能内容（支持 YAML frontmatter）"""
         # 检查是否有 YAML frontmatter
         match = re.match(r'^---\n(.*?)\n---\n(.*)$', content, re.DOTALL)

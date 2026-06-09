@@ -124,11 +124,10 @@ def _find_latest_session() -> Optional[str]:
 # ── SessionManager ────────────────────────────────
 
 class SessionManager:
-    """会话管理器"""
+    """会话管理器 — 只负责持久化，不再持有 _context"""
 
     _session_id: str
     _meta: dict
-    _context: List[Dict[str, Any]]
 
     def __init__(self, resume: Optional[str] = None):
         """
@@ -145,13 +144,11 @@ class SessionManager:
             if latest and self._session_exists(latest):
                 self._session_id = latest
                 self._meta = self._load_meta_from_session()
-                self._context: List[Dict[str, Any]] = []
                 return
 
         # 默认：创建新会话
         self._session_id = self._init_session()
         self._meta = self._load_meta_from_session()
-        self._context: List[Dict[str, Any]] = []
 
     # ── 内部工具 ──────────────────────────────────
 
@@ -218,14 +215,12 @@ class SessionManager:
             return False
         self._session_id = sid
         self._meta = self._load_meta_from_session()
-        self._context.clear()
         return True
 
     def create_session(self) -> str:
         """创建新会话并切换过去。"""
         self._session_id = self._init_session()
         self._meta = self._load_meta_from_session()
-        self._context.clear()
         return self._session_id
 
     def delete_session(self, sid: str) -> bool:
@@ -247,12 +242,10 @@ class SessionManager:
         if latest and self._session_exists(latest):
             self._session_id = latest
             self._meta = self._load_meta_from_session()
-            self._context.clear()
             return True
         # 没有历史会话 → 创建新会话
         self._session_id = self._init_session()
         self._meta = self._load_meta_from_session()
-        self._context.clear()
         return False
 
     # ── 消息存储（正序，最新在文件末尾） ──────────
@@ -321,16 +314,7 @@ class SessionManager:
             except Exception:
                 pass
 
-        self._context = context
         return context
-
-    # ── 上下文管理 ──────────────────────────────
-
-    def get_context(self) -> List[Dict[str, Any]]:
-        return self._context
-
-    def set_context(self, context: List[Dict[str, Any]]):
-        self._context = context
 
     def update_meta(self, sid: Optional[str] = None, **kwargs):
         """更新指定会话的内嵌 meta 字段。"""
@@ -344,14 +328,6 @@ class SessionManager:
         _write_meta_to_file(path, meta)
         if sid == self._session_id:
             self._meta = meta
-
-    def clear_context(self, system_prompt: str):
-        """清空上下文（保留 system），重置 meta。"""
-        self._meta = _default_meta(self._session_id)
-        path = self._session_path()
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(self._meta, ensure_ascii=False) + "\n")
-        self._context = [{"role": "system", "content": system_prompt}]
 
 
 class LoopDetector:
