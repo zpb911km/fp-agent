@@ -18,7 +18,10 @@ PLUGIN_DEFINITION = {
     "type": "function",
     "function": {
         "name": "web_search",
-        "description": "搜索互联网获取最新信息。支持 Bing / DuckDuckGo 搜索引擎。",
+        "description": "快速搜索 - 直接爬取搜索引擎（Bing/DuckDuckGo）返回标题+链接+摘要列表。"
+                       "适合查简单事实、定义、时间、价格等可直接从摘要获取的信息。"
+                       "速度快（1~2秒），无需登录。但只返回结果列表，不做深度阅读和总结。"
+                       "如果需要综合分析多篇文章的内容，请用 smart_web_search。",
         "parameters": {
             "type": "object",
             "properties": {

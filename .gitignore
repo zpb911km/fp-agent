@@ -87,3 +87,7 @@ site/
 _build/
 
 .webui_token
+
+# ─── 自用 ───────────────────────────
+tools/plugins/smart_web_search_plugin.py
+tools/plugins/vision_plugin.py
