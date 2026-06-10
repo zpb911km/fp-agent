@@ -1397,6 +1397,12 @@ function addToolCall(name, args) {
   removeThinking();
   var group = getOrCreateMsgGroup();
 
+  // ⚠️ 关键修复：tool 消息在后端文件中也占一个索引位置，
+  // 所以 liveMsgIndex 必须递增，否则后续 user/assistant 消息的
+  // 回溯按钮 data-index 会与后端 /back 索引错位（偏差 = tool 消息数）。
+  liveMsgIndex++;
+  var idx = liveMsgIndex;
+
   var prettyArgs = '';
   try {
     var parsed = typeof args === 'string' ? JSON.parse(args) : args;
@@ -1408,6 +1414,7 @@ function addToolCall(name, args) {
   var msg = document.createElement('div');
   msg.className = 'msg tool-msg collapsed';
   msg.dataset.toolName = name;
+  msg.dataset.msgIndex = idx;
   msg.onclick = toggleToolMsg;
 
   msg.innerHTML =
@@ -1415,7 +1422,8 @@ function addToolCall(name, args) {
     '<div class="msg-body">' +
       '<div class="msg-header">' +
         '<span class="msg-author tool">Tool</span>' +
-        '<span class="msg-time">' + formatTime(Date.now()/1000) + '</span>' +
+        '<span class="msg-time">#' + idx + '</span>' +
+        '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>' +
       '</div>' +
       '<div class="msg-content rendered">' +
         '<div class="tool-msg-toggle">' +
@@ -1576,7 +1584,7 @@ function cancelMessage() {
 function clearUI() {
   messagesEl.innerHTML = '';
   lastGroupEl = null;
-  liveMsgIndex = 0;
+  liveMsgIndex = 0;  // 重置索引计数器，后续由 fetchSessionHistory 重新设置
   removeThinking();
 }
 
@@ -1698,6 +1706,12 @@ function handleEvent(data) {
     case 'done':
       removeThinking();
       setProcessing(false);
+      // ── 从后端获取权威索引计数，消除前端自增漂移 ──
+      // 每次 done 事件都校准 liveMsgIndex，之后新的消息从正确起点继续累加。
+      // 这样即使某条消息在保存过程中被跳过/压缩，索引也不会错位。
+      if (data.non_system_count != null) {
+        liveMsgIndex = data.non_system_count;
+      }
       if (data.session_id) {
         sessionId = data.session_id;
         sessionLabel.textContent = '📄 ' + data.session_id;
@@ -2059,8 +2073,26 @@ function renderHistoryMessages(sid, messages) {
 
     var msgDiv = document.createElement('div');
 
+    // ── system 消息（如 compact 摘要）：特殊渲染，不显示回溯按钮 ──
+    if (msg.role === 'system') {
+      msgDiv.className = 'msg';
+      msgDiv.innerHTML =
+        '<div class="msg-avatar tool" aria-hidden="true">📋</div>' +
+        '<div class="msg-body">' +
+          '<div class="msg-header">' +
+            '<span class="msg-author tool">System</span>' +
+          '</div>' +
+          '<div class="msg-content" style="font-size:0.85em;color:var(--text-dim);font-style:italic;white-space:pre-wrap">' +
+            escapeHtml(msg.content || '') +
+          '</div>' +
+        '</div>';
+      group.appendChild(msgDiv);
+      container.appendChild(group);
+      return;
+    }
+
     if (msg.role === 'tool') {
-      // ── tool 消息：可折叠 ──
+      // ── tool 消息：可折叠，显示回溯按钮 ──
       msgDiv.className = 'msg tool-msg collapsed';
       msgDiv.onclick = toggleToolMsg;
 
@@ -2072,8 +2104,8 @@ function renderHistoryMessages(sid, messages) {
         '<div class="msg-body">' +
           '<div class="msg-header">' +
             '<span class="msg-author tool">Tool</span>' +
-            '<span class="msg-time">#' + msg.index + '</span>' +
-            '<button class="backtrack-btn" title="回溯到此位置" data-index="' + msg.index + '" aria-label="回溯到位置 ' + msg.index + '">↩ 回溯</button>' +
+            '<span class="msg-time">#' + (msg.index || '?') + '</span>' +
+            (msg.index ? '<button class="backtrack-btn" title="回溯到此位置" data-index="' + msg.index + '" aria-label="回溯到位置 ' + msg.index + '">↩ 回溯</button>' : '') +
           '</div>' +
           '<div class="msg-content">' +
             '<div class="tool-msg-toggle">' +
@@ -2111,8 +2143,8 @@ function renderHistoryMessages(sid, messages) {
         '<div class="msg-body">' +
           '<div class="msg-header">' +
             '<span class="msg-author ' + roleConfig.cls + '">' + roleConfig.author + '</span>' +
-            '<span class="msg-time">#' + msg.index + '</span>' +
-            '<button class="backtrack-btn" title="回溯到此位置" data-index="' + msg.index + '" aria-label="回溯到位置 ' + msg.index + '">↩ 回溯</button>' +
+            '<span class="msg-time">#' + (msg.index || '?') + '</span>' +
+            (msg.index ? '<button class="backtrack-btn" title="回溯到此位置" data-index="' + msg.index + '" aria-label="回溯到位置 ' + msg.index + '">↩ 回溯</button>' : '') +
           '</div>' +
           '<div class="msg-content rendered"></div>' +
         '</div>';
@@ -2148,7 +2180,14 @@ function fetchSessionHistory(sid) {
       var msgs = data.messages || [];
       historyIndexMap[sid] = msgs;
       if (msgs.length > 0) {
-        liveMsgIndex = msgs[msgs.length - 1].index;
+        // 从尾部找最后一个有效 index（跳过 system 消息的 null index）
+        liveMsgIndex = 0;
+        for (var i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i].index != null) {
+            liveMsgIndex = msgs[i].index;
+            break;
+          }
+        }
       }
       if (msgs.length > 0) {
         renderHistoryMessages(sid, msgs);

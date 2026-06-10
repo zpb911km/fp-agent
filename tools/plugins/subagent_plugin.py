@@ -27,15 +27,22 @@ PLUGIN_DEFINITION = {
     "type": "function",
     "function": {
         "name": "subagent",
-        "description": "派遣一个子 agent 执行独立任务。子 agent 拥有完整工具链（bash/文件读写/搜索/记忆/Python等），"
-                       "但其思考和中间过程完全在独立上下文中完成，不占用当前对话的 token。"
+        "description": "🚀 派遣子 agent 执行独立任务 —— 这是节省 token 的核心武器！\n\n"
+                       "为什么用 subagent？\n"
+                       "1. 子 agent 有自己的独立上下文 → 中间步骤/工具结果/大段文件不占用主上下文\n"
+                       "2. 同子任务内 prefix 稳定 → API 缓存命中 → 半价\n"
+                       "3. 子 agent 执行完只返回结论 → 主上下文不膨胀\n\n"
+                       "⚠️ 经验法则：任何需要 ≥2 次工具调用或读取大文件的任务，都用 subagent！\n"
+                       "  单步简单操作（1个工具、结果 <200 token）可自己做。\n\n"
+                       "子 agent 拥有完整工具链（bash/文件读写/搜索/记忆/Python等），"
+                       "其思考和中间过程完全在独立上下文中完成，不消耗主上下文的 token。\n\n"
                        "适合：多步数据分析、文件批量处理、代码编写与调试、信息检索与整理等独立子任务。\n\n"
                        "参数说明：\n"
                        "- task: 任务描述，清晰完整的一句话或一段话\n"
                        "- context: 背景上下文（可选），如文件路径、数据摘要、关键变量等，"
                        "子 agent 没有当前对话历史，请在此提供必要背景\n"
                        "- store_result: 记忆键名（可选），若提供则自动将结果存入跨会话记忆\n"
-                       "- timeout: 超时秒数（可选，默认 300，最小 10，最大 600）\n"
+                       "- timeout: 超时秒数（可选，默认 300，最小 10，最大 900）\n"
                        "- constraints: 输出契约（可选），控制返回内容与格式，默认静默模式只输出结论",
         "parameters": {
             "type": "object",
@@ -58,8 +65,8 @@ PLUGIN_DEFINITION = {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "子任务超时秒数（可选，默认 300，范围 10~600）。"
-                                   "简单任务（如单次查询）可设为 30~60，复杂任务（如批量文件处理）可设为 300~600。"
+                    "description": "子任务超时秒数（可选，默认 300，范围 10~900）。"
+                                   "简单任务（如单次查询）可设为 30~60，复杂任务（如批量文件处理）可设为 300~900。"
                 },
                 "constraints": {
                     "type": "object",
@@ -113,8 +120,8 @@ async def execute(params: Dict[str, Any]) -> str:
     # 校验 timeout 合法性
     if not isinstance(timeout, (int, float)) or timeout < 10:
         timeout = 10
-    elif timeout > 600:
-        timeout = 600
+    elif timeout > 900:
+        timeout = 900
     timeout = int(timeout)
 
     if not task.strip():

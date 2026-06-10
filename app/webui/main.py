@@ -43,7 +43,8 @@ try:
     import uvicorn
 except ImportError as e:
     print(f"[WebUI] 缺少依赖: {e}")
-    print("  → 请安装: pip install 'fastapi[standard]' uvicorn")
+    print("  → 请安装: pip install -r app/webui/requirements.txt")
+    print("  → 或:     pip install .[webui]")
     sys.exit(1)
 
 # ── Agent 核心导入 ──────────────────────────────────────
@@ -586,7 +587,12 @@ async def get_session_messages(session_id: str):
     """
     获取指定会话的完整消息列表（直接读文件，不修改 Agent 状态）。
     
-    返回消息按 1-based 索引排列，与 /back 命令的编号一致。
+    ⚠️ index = 非 system 消息的 1-based 索引（与 /back 命令的索引体系一致）。
+    跳过 role=system 的消息（如 compact 产生的摘要），因为 /back 命令
+    使用的是 get_non_system_messages()，两类 system 消息不计入：
+      1. 原始 system prompt
+      2. compact 产生的摘要 system 消息
+      3. repair_tool_ordering 转化的孤儿 tool 消息
     """
     from core.session import _session_path
     
@@ -608,21 +614,153 @@ async def get_session_messages(session_id: str):
                 continue
             messages.append(msg)
     
-    # 在每条消息中注入 1-based 索引（用于 /back 命令）
+    # ── 只对非 system 消息编号（与 ConversationState.back() 的索引规则一致） ──
+    # ConversationState.get_non_system_messages() 只返回 role != "system" 的消息，
+    # 所以 compact 后产生的 system(摘要) 消息不计入索引。
+    # 如果按文件全部消息编号，compact/resume 后前端 data-index 与后端索引会错位。
     result = []
-    for i, msg in enumerate(messages):
+    non_system_idx = 0  # 只对非 system 消息的 1-based 索引
+    for msg in messages:
+        role = msg.get("role", "")
         entry = {
-            "index": i + 1,  # 1-based，与 /back 显示一致
-            "role": msg.get("role", ""),
+            "index": None,  # system 消息 index 为 None
+            "role": role,
             "content": msg.get("content", ""),
             "tool_calls": msg.get("tool_calls"),
+            "tool_call_id": msg.get("tool_call_id"),
         }
+        if role != "system":
+            non_system_idx += 1
+            entry["index"] = non_system_idx
         result.append(entry)
     
     return {
         "session_id": session_id,
         "total": len(result),
+        "non_system_count": non_system_idx,
         "messages": result,
+    }
+
+
+# ════════════════════════════════════════════════════════════
+# 4a. 文本搜索接口 — 通过内容片段定位消息
+# ════════════════════════════════════════════════════════════
+
+@app.post("/api/sessions/{session_id}/search")
+async def search_session_messages(session_id: str, body: dict):
+    """
+    通过文本内容片段搜索消息，返回消息的真实文件行号和非 system 索引。
+    
+    请求体:
+      {"query": "搜索关键词"}            ← 简单文本片段匹配
+      {"query": "...", "regex": true}    ← 正则表达式匹配
+      {"query": "...", "limit": 10}      ← 最多返回条数（默认 20）
+    
+    返回:
+      {
+        "session_id": "...",
+        "total_matches": 3,
+        "results": [
+          {
+            "index": 5,           # 非 system 索引（与 /back 一致）
+            "line_number": 7,     # 文件行号（从 1 开始，含 meta 行）
+            "role": "assistant",
+            "content_preview": "前 200 字符...",
+            "tool_calls": [...],
+            "tool_call_id": "..."
+          }
+        ]
+      }
+    
+    说明：
+      - index=null 表示 system 消息，不可用 /back 回溯
+      - line_number 可用于文件定位
+      - 匹配方式：简单子串匹配（默认）或正则表达式
+    """
+    from core.session import _session_path
+    
+    path = _session_path(session_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+    
+    query = body.get("query", "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="查询内容不能为空")
+    
+    use_regex = body.get("regex", False)
+    limit = min(body.get("limit", 20), 100)
+    
+    # ── 编译匹配模式 ──
+    if use_regex:
+        try:
+            import re
+            pattern = re.compile(query)
+        except re.error as e:
+            raise HTTPException(status_code=400, detail=f"正则表达式无效: {e}")
+    else:
+        query_lower = query.lower()
+    
+    # ── 逐行扫描文件 ──
+    results = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"读取会话文件失败: {e}")
+    
+    non_system_idx = 0
+    for line_no, line in enumerate(lines, 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if msg.get("__meta__"):
+            continue
+        
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        
+        # 计算非 system 索引（与 /back 一致）
+        is_system = (role == "system")
+        if not is_system:
+            non_system_idx += 1
+        
+        # ── 匹配检测 ──
+        matched = False
+        if use_regex:
+            if pattern.search(content):
+                matched = True
+        else:
+            if query_lower in content.lower():
+                matched = True
+        
+        if matched:
+            preview = content[:200]
+            if len(content) > 200:
+                preview += "..."
+            
+            results.append({
+                "index": non_system_idx if not is_system else None,
+                "line_number": line_no,
+                "role": role,
+                "content_preview": preview,
+                "content_length": len(content),
+                "tool_calls": msg.get("tool_calls"),
+                "tool_call_id": msg.get("tool_call_id"),
+                "file_line": line_no,
+            })
+            
+            if len(results) >= limit:
+                break
+    
+    return {
+        "session_id": session_id,
+        "query": query,
+        "total_matches": len(results),
+        "results": results,
     }
 
 
@@ -951,10 +1089,15 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(None
                             agent.reset_cancelled()
                             await event_bus.publish({"type": "cancelled"})
                         else:
+                            # 从后端获取权威的非 system 消息计数，传递给前端
+                            # 前端据此校准 liveMsgIndex，消除前端自增计数器漂移
+                            all_msgs = agent.get_messages()
+                            non_sys_count = sum(1 for m in all_msgs if m.get("role") != "system")
                             await event_bus.publish({
                                 "type": "done",
                                 "session_id": agent.session.session_id,
                                 "final_content": response.content,
+                                "non_system_count": non_sys_count,
                             })
                     except asyncio.CancelledError:
                         await event_bus.publish({"type": "cancelled"})
