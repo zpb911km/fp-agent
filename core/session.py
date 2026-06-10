@@ -131,10 +131,18 @@ class SessionManager:
 
     def __init__(self, resume: Optional[str] = None):
         """
-        resume=False → 创建新会话（默认）
-        resume=True  → 续上一个会话（找 updated 最新的）
+        resume=None/False → 创建新会话（默认）
+        resume=True       → 续最近会话
+        resume="auto"     → 续最近会话
+        resume="s_xxx"    → 续指定会话
         """
         os.makedirs(SESSIONS_DIR, exist_ok=True)
+
+        # 类型归一化：bool → str/None，统一进入后续分支
+        if resume is None or resume is False:
+            resume = None
+        elif resume is True:
+            resume = "auto"
 
         if resume is not None:
             if resume.startswith('s'):

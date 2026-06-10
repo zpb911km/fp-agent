@@ -49,7 +49,7 @@ except ImportError as e:
 # ── Agent 核心导入 ──────────────────────────────────────
 from core.agent import Agent
 from core.lifecycle import LifecycleHook, HookContext
-from core.io import WebSocketIO
+from core.io import RestIO, WebSocketIO
 from plugins.base.plugin import Plugin, PluginConfig, PluginRegistry
 
 import config as project_config
@@ -133,6 +133,7 @@ def _load_or_create_token() -> str:
     try:
         with open(_TOKEN_FILE, "w") as f:
             f.write(new_token)
+        os.chmod(_TOKEN_FILE, 0o600)
     except OSError:
         pass
     return new_token
@@ -337,9 +338,32 @@ async def auth_middleware(request: Request, call_next):
 # 4. REST API 端点
 # ════════════════════════════════════════════════════════════
 
+# ── 简单限流：每 IP 每 10 秒最多 5 次尝试 ──────────
+_AUTH_LIMIT_WINDOW = 10    # 窗口秒数
+_AUTH_LIMIT_MAX   = 5      # 窗口内最大尝试次数
+_auth_attempts: dict[str, list[float]] = {}  # ip → [时间戳列表]
+
+
+def _check_auth_rate_limit(client_ip: str) -> None:
+    """检查客户端认证频率，超限则抛 429"""
+    now = time.time()
+    window_start = now - _AUTH_LIMIT_WINDOW
+    records = _auth_attempts.get(client_ip, [])
+    # 清理过期记录
+    records = [t for t in records if t > window_start]
+    if len(records) >= _AUTH_LIMIT_MAX:
+        raise HTTPException(
+            status_code=429,
+            detail="认证尝试过于频繁，请稍后再试",
+        )
+    records.append(now)
+    _auth_attempts[client_ip] = records
+
+
 @app.post("/api/auth")
-async def auth_login(body: dict):
-    """验证 Token 并登录"""
+async def auth_login(request: Request, body: dict):
+    """验证 Token 并登录（每 IP 限频）"""
+    _check_auth_rate_limit(request.client.host)
     token = body.get("token", "").strip()
     if secrets.compare_digest(token, _WEBUI_TOKEN):
         return {"status": "ok", "message": "验证通过"}
@@ -377,7 +401,8 @@ async def send_message(body: dict):
     
     # 发送消息时启动一个独立的后台任务来处理
     # 前端通过 WebSocket 接收实时更新
-    response = await agent.process(message)
+    # 使用 RestIO 避免交互式命令（如 /back 无参数）阻塞
+    response = await agent.process(message, io=RestIO())
     
     return {
         "response": response.content,
@@ -518,7 +543,6 @@ async def create_new_session():
             response = await agent.client.chat.completions.create(
                 model=agent.model,
                 messages=summary_msgs,
-                stream=False,
                 temperature=0.3,
                 max_tokens=32,
                 extra_body={"enable_thinking": False},
@@ -555,40 +579,6 @@ async def delete_session_endpoint(session_id: str):
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在或删除失败")
     
     return {"status": "deleted", "session_id": session_id}
-
-
-@app.get("/api/sessions/{session_id}")
-async def get_session(session_id: str):
-    """获取指定会话的完整历史"""
-    agent = await get_agent()
-    
-    # 保存当前会话
-    agent.save_context()
-    
-    # 加载目标会话
-    if not agent.switch_session(session_id):
-        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
-    
-    history = []
-    for msg in agent.get_messages()[1:]:  # 跳过 system
-        entry = {
-            "role": msg["role"],
-            "content": msg.get("content", ""),
-        }
-        if msg.get("tool_calls"):
-            entry["tool_calls"] = [
-                {"name": tc["function"]["name"], "args": tc["function"]["arguments"]}
-                for tc in msg["tool_calls"]
-            ]
-        history.append(entry)
-    
-    # 切回原会话
-    agent.switch_session(agent.session.session_id)
-    
-    return {
-        "session_id": session_id,
-        "history": history,
-    }
 
 
 @app.get("/api/sessions/{session_id}/messages")
@@ -661,7 +651,6 @@ async def switch_session_endpoint(session_id: str):
             response = await agent.client.chat.completions.create(
                 model=agent.model,
                 messages=summary_msgs,
-                stream=False,
                 temperature=0.3,
                 max_tokens=32,
                 extra_body={"enable_thinking": False},
@@ -1057,22 +1046,30 @@ async def index():
 def main():
     """启动 WebUI 服务器"""
     parser = argparse.ArgumentParser(description="Five Pebbles WebUI")
-    parser.add_argument("--host", default="0.0.0.0", help="监听地址（默认 0.0.0.0）")
+    parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
     parser.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765）")
     parser.add_argument("--reload", action="store_true", help="启用热重载（开发用）")
+    parser.add_argument("--expose", action="store_true", help="监听 0.0.0.0，允许局域网设备访问")
     args = parser.parse_args()
+
+    if args.expose:
+        args.host = "0.0.0.0"
 
     print()
     display.print_logo()
     print()
+    if args.host == "0.0.0.0":
+        display.warning("  ⚠️  已监听 0.0.0.0，局域网设备可访问此服务")
+        display.warning("  ⚠️  请妥善保管 Token，建议使用 HTTPS 反向代理")
+        print()
     display.info(f"  🌐  WebUI: http://{args.host}:{args.port}")
     display.info(f"  🔌  WS:    ws://{args.host}:{args.port}/ws/chat")
     display.info(f"  📡  API:   http://{args.host}:{args.port}/api/health")
     print()
     # 显示 Token（从文件读，确保与文件一致）
     display_token = _load_or_create_token()
-    display.info(f"  🔑  启动 Token: {display_token}")
-    display.info(f"  📄  已写入: {_TOKEN_FILE}")
+    display.info(f"  🔑  启动 Token: ...{display_token[-4:]}")
+    display.info(f"  📄  Token 文件: {_TOKEN_FILE}  （cat 查看完整 Token）")
     print()
 
     uvicorn.run(

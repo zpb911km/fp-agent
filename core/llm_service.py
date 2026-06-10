@@ -67,7 +67,6 @@ class LLMService:
         kwargs = {
             "model": model,
             "messages": messages,
-            "stream": False,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }

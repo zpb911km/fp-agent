@@ -12,6 +12,8 @@
 
 <!-- Markdown 渲染 -->
 <script src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js" defer></script>
+<!-- DOMPurify HTML 清洗（防 XSS） -->
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js" defer></script>
 <!-- KaTeX 公式渲染 -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js" defer></script>
@@ -1296,7 +1298,13 @@ function renderMarkdown(content) {
     return escapeHtml(content).replace(/\n/g, '<br>');
   }
   try {
-    return marked.parse(content, { breaks: true, gfm: true });
+    var html = marked.parse(content, { breaks: true, gfm: true });
+    // DOMPurify 清洗 HTML，移除恶意标签/属性
+    if (typeof DOMPurify !== 'undefined') {
+      return DOMPurify.sanitize(html);
+    }
+    // DOMPurify 不可用时，降级到 escapeHtml（牺牲格式保安全）
+    return escapeHtml(content).replace(/\n/g, '<br>');
   } catch (e) {
     return escapeHtml(content);
   }

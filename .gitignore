@@ -123,4 +123,4 @@ commands/*
 !commands/resume.py
 !commands/session.py
 !commands/skills.py
-plugins/*.py
+plugins/*.py*

@@ -464,7 +464,7 @@ class Agent:
         Args:
             target_idx: 目标消息序号（1-based，从第一条非 system 开始）
                         None 时进入交互模式
-            mode: 1=保留后续消息，2=删除后续消息（默认）
+            mode: 2 或 None=删除后续消息（默认），1=暂不支持
             
         Returns:
             状态描述文本
@@ -483,13 +483,16 @@ class Agent:
                 self.io.error(msg)
                 return msg
             
+            if mode == 1:
+                msg = "❌ mode=1（保留后续消息）暂不支持，请使用 mode=2（删除后续消息）或 /fork"
+                self.io.error(msg)
+                return msg
+            
             deleted = self._conv.back(target_idx=target_idx, mode=mode)
             self.session.save_context(self._conv.messages)
             
             if mode is None or mode == 2:
                 msg = f"⏪ 已回退到第 {target_idx} 条消息，后续消息已删除"
-            else:
-                msg = f"⏪ 已回退到第 {target_idx} 条消息，后续消息已保留"
             self.io.info(msg)
             return msg
         
@@ -597,8 +600,8 @@ class Agent:
     
     # ============ LLM 调用（含 IO 展示） ============
     
-    async def _stream_chat(self, context: List[Dict], silent: bool = False) -> Dict:
-        """发起聊天请求（含 spinner 和流式展示）
+    async def _invoke_llm(self, context: List[Dict], silent: bool = False) -> Dict:
+        """发起聊天请求（含 spinner 和增量展示）
         
         实际 LLM 调用委托给 LLMService.chat()，
         此方法只负责 spinner/streamer 等 IO 展示。
@@ -784,7 +787,7 @@ class Agent:
             
             self._processing = True
             try:
-                assistant_msg = await self._stream_chat(messages_for_llm)
+                assistant_msg = await self._invoke_llm(messages_for_llm)
             except (asyncio.CancelledError, KeyboardInterrupt):
                 self._processing = False
                 raise
@@ -798,7 +801,7 @@ class Agent:
                     self._conv.repair_tool_ordering()
                     try:
                         self._processing = True
-                        assistant_msg = await self._stream_chat(self._conv.messages)
+                        assistant_msg = await self._invoke_llm(self._conv.messages)
                     except (asyncio.CancelledError, KeyboardInterrupt):
                         self._processing = False
                         raise

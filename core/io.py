@@ -147,3 +147,31 @@ class WebSocketIO(IOChannel):
 
     def item(self, text: str):
         self._pub("item", content=text)
+
+
+class RestIO(IOChannel):
+    """
+    REST 通道 — 无交互能力的静默通道。
+    
+    REST 请求是单次请求-响应模式，无法做多轮交互。
+    若命令触发了 ask()（如 /back 无参数交互模式），
+    直接返回空字符串触发"已取消"分支，不会阻塞。
+    """
+
+    async def ask(self, prompt: str) -> str:
+        return ""
+
+    def say(self, text: str):
+        pass
+
+    def info(self, text: str):
+        pass
+
+    def hint(self, text: str):
+        pass
+
+    def error(self, text: str):
+        pass
+
+    def item(self, text: str):
+        pass

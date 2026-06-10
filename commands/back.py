@@ -3,8 +3,8 @@
 支持参数传递：
   /back              → 交互模式，显示列表让用户选择
   /back <index>      → 直接回溯到指定位置，删除后续消息
-  /back <index> 1    → 直接回溯到指定位置，保留后续消息
   /back <index> 2    → 直接回溯到指定位置，删除后续消息
+  /back <index> 1    → ❌ 暂不支持（保留后续消息），请使用 /fork
 """
 
 
@@ -30,8 +30,8 @@ async def execute(agent, arg: str) -> tuple[bool, str]:
     if len(parts) >= 2:
         try:
             mode = int(parts[1])
-            if mode not in (1, 2):
-                msg = f"❌ 无效模式：{mode}，请输入 1（保留）或 2（删除）"
+            if mode != 2:
+                msg = "❌ mode=1（保留后续消息）暂不支持，请用 mode=2 或 /fork"
                 agent.io.error(msg)
                 return (True, msg)
         except ValueError:
