@@ -2,7 +2,6 @@
 
 import display
 
-
 name = "skills"
 aliases = []
 description = "列出所有技能"

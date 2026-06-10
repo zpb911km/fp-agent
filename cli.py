@@ -3,17 +3,17 @@
 """
 
 import asyncio
+import os
 import signal
 import sys
-import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from prompt_toolkit.completion import Completer as PtCompleter
 
 import config
 import display
 
-
-from prompt_toolkit.completion import Completer as PtCompleter
 
 class SlashCompleter(PtCompleter):
     """自定义补全器：仅在输入 "/" 前缀时匹配命令和工具名。
@@ -35,6 +35,7 @@ class SlashCompleter(PtCompleter):
         # 1. 命令名（带 / 前缀）
         try:
             from commands import get_all_commands
+
             for cmd_name, desc in get_all_commands().items():
                 word = f"/{cmd_name}"
                 words.add(word)
@@ -145,12 +146,13 @@ def _raw_sigint_handler(signum, frame):
             task.cancel()
     except (RuntimeError, ValueError):
         pass  # 无运行中的事件循环
-    
+
     # 方式 2（跨平台回退）：设置全局标志
     # Windows 上 Ctrl+C 在独立线程运行，all_tasks() 可能失败，
     # 此标志作为安全网，_check_interrupted() 会检查它
     try:
         import core.agent as _agent_mod
+
         _agent_mod._interrupted_flag = True
     except Exception:
         pass
@@ -162,7 +164,9 @@ async def main():
 
     parser = argparse.ArgumentParser(description="五块卵石 - AI Agent 命令行界面")
     parser.add_argument("-m", "--message", help="单次消息模式")
-    parser.add_argument("-r", "--resume", nargs="?", const="auto", default=None, metavar="SESSION_ID", help="恢复历史会话")
+    parser.add_argument(
+        "-r", "--resume", nargs="?", const="auto", default=None, metavar="SESSION_ID", help="恢复历史会话"
+    )
     parser.add_argument("--init", action="store_true", help="初始化配置文件")
 
     args = parser.parse_args()

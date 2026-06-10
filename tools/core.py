@@ -10,8 +10,7 @@
 
 import asyncio
 import os
-from typing import Any, Dict, Optional
-
+from typing import Any
 
 # ── 核心工具定义（OpenAI function calling schema） ──────────────────────
 
@@ -89,20 +88,20 @@ async def _execute_bash(command: str) -> str:
     """异步执行 shell 命令"""
     if not command:
         raise ValueError("bash 工具需要 command 参数")
-    
+
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        
+
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(),
                 timeout=300,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
             return "错误：命令执行超时（300秒）"
@@ -111,42 +110,42 @@ async def _execute_bash(command: str) -> str:
             proc.kill()
             await proc.wait()
             raise
-        
+
         output = stdout.decode("utf-8", errors="replace")
         if stderr:
             stderr_text = stderr.decode("utf-8", errors="replace")
             if stderr_text.strip():
                 output += f"\n[stderr]\n{stderr_text}"
-        
+
         # 截断 10000 字符
         if len(output) > 10000:
             output = output[:10000] + f"\n...（已截断，原文 {len(output)} 字符）"
-        
+
         return output
     except Exception as e:
         return f"错误：{e}"
 
 
-async def _execute_read_file(file_path: str, offset: Optional[int] = None, limit: Optional[int] = None) -> str:
+async def _execute_read_file(file_path: str, offset: int | None = None, limit: int | None = None) -> str:
     """异步读取文件"""
     if not file_path:
         raise ValueError("read_file 需要 file_path 参数")
-    
+
     try:
         loop = asyncio.get_running_loop()
-        
+
         def _read():
-            with open(file_path, "r", encoding="utf-8") as f:
+            with open(file_path, encoding="utf-8") as f:
                 if offset:
                     for _ in range(offset):
                         f.readline()
-                
+
                 content = f.read()
                 if limit:
                     lines = content.split("\n")
                     return "\n".join(lines[:limit])
                 return content
-        
+
         return await loop.run_in_executor(None, _read)
     except FileNotFoundError:
         return f"错误：文件不存在 {file_path}"
@@ -158,15 +157,15 @@ async def _execute_write_file(file_path: str, content: str) -> str:
     """异步写入文件"""
     if not file_path or content is None:
         raise ValueError("write_file 需要 file_path 和 content 参数")
-    
+
     try:
         loop = asyncio.get_running_loop()
-        
+
         def _write():
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(content)
-        
+
         await loop.run_in_executor(None, _write)
         return f"文件已写入: {file_path}"
     except Exception as e:
@@ -177,28 +176,28 @@ async def _execute_edit_file(file_path: str, old_string: str, new_string: str) -
     """异步编辑文件"""
     if not file_path or old_string is None or new_string is None:
         raise ValueError("edit_file 需要 file_path, old_string, new_string 参数")
-    
+
     try:
         loop = asyncio.get_running_loop()
-        
+
         def _edit():
-            with open(file_path, "r", encoding="utf-8") as f:
+            with open(file_path, encoding="utf-8") as f:
                 content = f.read()
-            
+
             if old_string not in content:
-                return f"错误：未找到要替换的文本"
-            
+                return "错误：未找到要替换的文本"
+
             # 检查唯一性
             if content.count(old_string) > 1:
-                return f"错误：存在多个匹配项，请指定更加明确的 old_string 参数"
-            
+                return "错误：存在多个匹配项，请指定更加明确的 old_string 参数"
+
             content = content.replace(old_string, new_string, 1)
-            
+
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(content)
-            
+
             return f"文件已修改: {file_path}"
-        
+
         return await loop.run_in_executor(None, _edit)
     except FileNotFoundError:
         return f"错误：文件不存在 {file_path}"
@@ -206,14 +205,14 @@ async def _execute_edit_file(file_path: str, old_string: str, new_string: str) -
         return f"错误：{e}"
 
 
-async def execute_core_tool(tool_name: str, params: Dict[str, Any]) -> Any:
+async def execute_core_tool(tool_name: str, params: dict[str, Any]) -> Any:
     """
     执行核心工具（异步）
-    
+
     Args:
         tool_name: bash / read_file / write_file / edit_file
         params: 参数字典
-        
+
     Returns:
         执行结果
     """

@@ -13,32 +13,32 @@ ConversationState — 上下文状态的唯一所有者
   SessionStore 只做持久化（不持有状态）
 """
 
-import json
-import re
-from typing import Any, Callable, Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
 class CompactConfig:
     """压缩配置"""
-    keep_meaningful: int = 4         # 保留的有意义（user/assistant）消息数
-    max_summary_tokens: int = 300    # 摘要最大 token 数
-    recent_margin: int = 20          # 保留的尾部消息数（fallback）
+
+    keep_meaningful: int = 4  # 保留的有意义（user/assistant）消息数
+    max_summary_tokens: int = 300  # 摘要最大 token 数
+    recent_margin: int = 20  # 保留的尾部消息数（fallback）
 
 
 class ConversationState:
     """上下文状态的唯一所有者"""
 
     def __init__(self, system_prompt: str = ""):
-        self._messages: List[Dict] = []
+        self._messages: list[dict] = []
         if system_prompt:
             self._messages.append({"role": "system", "content": system_prompt})
 
     # ── 只读属性 ─────────────────────────────────────
 
     @property
-    def messages(self) -> List[Dict]:
+    def messages(self) -> list[dict]:
         """返回消息列表的防御性拷贝"""
         return list(self._messages)
 
@@ -51,7 +51,7 @@ class ConversationState:
     def __len__(self) -> int:
         return len(self._messages)
 
-    def __getitem__(self, idx: int) -> Dict:
+    def __getitem__(self, idx: int) -> dict:
         return self._messages[idx]
 
     # ── 写操作 ───────────────────────────────────────
@@ -63,19 +63,19 @@ class ConversationState:
         else:
             self._messages.insert(0, {"role": "system", "content": prompt})
 
-    def append(self, message: Dict):
+    def append(self, message: dict):
         """追加一条消息"""
         self._messages.append(message)
 
-    def extend(self, messages: List[Dict]):
+    def extend(self, messages: list[dict]):
         """批量追加消息"""
         self._messages.extend(messages)
 
-    def replace_all(self, messages: List[Dict]):
+    def replace_all(self, messages: list[dict]):
         """替换整个消息列表"""
         self._messages = list(messages)
 
-    def insert(self, index: int, message: Dict):
+    def insert(self, index: int, message: dict):
         """在指定位置插入消息"""
         self._messages.insert(index, message)
 
@@ -90,29 +90,29 @@ class ConversationState:
 
     # ── 便捷添加方法 ─────────────────────────────────
 
-    def add_user_message(self, content: str) -> Dict:
+    def add_user_message(self, content: str) -> dict:
         msg = {"role": "user", "content": content}
         self._messages.append(msg)
         return msg
 
-    def add_assistant_message(self, msg: Dict) -> Dict:
+    def add_assistant_message(self, msg: dict) -> dict:
         msg = dict(msg)
         self._messages.append(msg)
         return msg
 
-    def add_tool_message(self, tool_call_id: str, content: str) -> Dict:
+    def add_tool_message(self, tool_call_id: str, content: str) -> dict:
         msg = {"role": "tool", "tool_call_id": tool_call_id, "content": content}
         self._messages.append(msg)
         return msg
 
-    def add_system_message(self, content: str) -> Dict:
+    def add_system_message(self, content: str) -> dict:
         msg = {"role": "system", "content": content}
         self._messages.append(msg)
         return msg
 
     # ── 查询方法 ─────────────────────────────────────
 
-    def get_non_system_messages(self) -> List[Dict]:
+    def get_non_system_messages(self) -> list[dict]:
         """返回所有非 system 消息"""
         return [m for m in self._messages if m["role"] != "system"]
 
@@ -122,7 +122,7 @@ class ConversationState:
     def get_system_count(self) -> int:
         return sum(1 for m in self._messages if m["role"] == "system")
 
-    def get_messages_for_llm(self) -> List[Dict]:
+    def get_messages_for_llm(self) -> list[dict]:
         """返回传给 LLM 的消息（含 tool ordering 修复）"""
         if len(self._messages) <= 1:
             return list(self._messages)
@@ -130,7 +130,7 @@ class ConversationState:
         repaired = self._repair_ordering(self._messages[1:])
         return [system] + repaired
 
-    def get_last_assistant_message(self) -> Optional[Dict]:
+    def get_last_assistant_message(self) -> dict | None:
         """获取最后一条 assistant 消息"""
         for m in reversed(self._messages):
             if m["role"] == "assistant":
@@ -145,15 +145,15 @@ class ConversationState:
     # ── 工具消息顺序修复 ────────────────────────────
 
     @staticmethod
-    def _repair_ordering(messages: List[Dict]) -> List[Dict]:
+    def _repair_ordering(messages: list[dict]) -> list[dict]:
         """
         修复 tool 消息顺序 — 不丢弃信息，转为合成消息保留。
-        
+
         当 tool_call 和 tool_result 不成对时（例如中断导致），
         将孤立的 tool 消息转为 system 消息保留信息。
         """
-        result: List[Dict] = []
-        buffer: List[Dict] = []
+        result: list[dict] = []
+        buffer: list[dict] = []
         active_tool_ids: set = set()
 
         for m in messages:
@@ -204,15 +204,15 @@ class ConversationState:
 
     # ── 回退 ─────────────────────────────────────────
 
-    def back(self, target_idx: Optional[int] = None, mode: Optional[int] = None) -> int:
+    def back(self, target_idx: int | None = None, mode: int | None = None) -> int:
         """
         回退到历史位置。
-        
+
         Args:
             target_idx: 回退到的消息序号（1-based，从第一条非 system 消息开始）
                         None=交互模式（由上层处理）
             mode: 1=保留后续消息，2=删除后续消息
-            
+
         Returns:
             删除的消息数量（0 表示未操作）
         """
@@ -229,19 +229,19 @@ class ConversationState:
         if mode is None or mode == 2:
             # 删除后续消息
             deleted_count = len(self._messages) - (sys_count + idx_in_history + 1)
-            del self._messages[sys_count + idx_in_history + 1:]
+            del self._messages[sys_count + idx_in_history + 1 :]
             return deleted_count
         else:
             # mode == 1，保留后续消息（仅查看，不删除）
             return 0
 
-    def get_history_for_display(self) -> List[Dict]:
+    def get_history_for_display(self) -> list[dict]:
         """获取用于显示的历史消息"""
         return self.get_non_system_messages()
 
     # ── Fork ─────────────────────────────────────────
 
-    def fork_snapshot(self) -> List[Dict]:
+    def fork_snapshot(self) -> list[dict]:
         """返回当前上下文的完整快照（包括 system prompt）"""
         return list(self._messages)
 
@@ -249,16 +249,16 @@ class ConversationState:
 
     async def compact(
         self,
-        summarizer: Optional[Callable[[str], Any]] = None,
-        config: Optional[CompactConfig] = None,
-    ) -> Tuple[bool, str]:
+        summarizer: Callable[[str], Any] | None = None,
+        config: CompactConfig | None = None,
+    ) -> tuple[bool, str]:
         """
         压缩上下文 — 压缩早期消息为摘要。
-        
+
         Args:
             summarizer: 异步函数，接收压缩文本，返回摘要字符串
             config: 压缩配置
-            
+
         Returns:
             (是否执行了压缩, 描述信息)
         """
@@ -314,7 +314,7 @@ class ConversationState:
         self._messages = [system]
         self._messages.append({
             "role": "system",
-            "content": f"以下是压缩后的对话历史摘要（省略了 {len(to_compact)} 条早期消息）：\n{summary}"
+            "content": f"以下是压缩后的对话历史摘要（省略了 {len(to_compact)} 条早期消息）：\n{summary}",
         })
         self._messages.extend(recent)
 
@@ -322,7 +322,7 @@ class ConversationState:
 
     # ── 序列化 ───────────────────────────────────────
 
-    def to_serializable(self) -> List[Dict]:
+    def to_serializable(self) -> list[dict]:
         """返回可序列化的消息列表（用于持久化，跳过首条 system）"""
         result = []
         for i, msg in enumerate(self._messages):
@@ -336,7 +336,7 @@ class ConversationState:
         return result
 
     @classmethod
-    def from_serialized(cls, system_prompt: str, serialized: List[Dict]) -> "ConversationState":
+    def from_serialized(cls, system_prompt: str, serialized: list[dict]) -> "ConversationState":
         """从持久化数据恢复上下文"""
         state = cls(system_prompt)
         for msg in serialized:

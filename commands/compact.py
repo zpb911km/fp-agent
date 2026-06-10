@@ -1,6 +1,5 @@
 """compact 命令 — 压缩对话历史（异步）"""
 
-
 name = "compact"
 aliases = []
 description = "压缩对话历史"

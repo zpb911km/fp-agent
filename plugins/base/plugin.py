@@ -8,40 +8,41 @@ import importlib.util
 import inspect
 import os
 import sys
-from typing import Optional, Dict, Any, List
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any
 
-from core.lifecycle import LifecycleHook, LifecycleManager
+from core.lifecycle import LifecycleManager
 
 
 @dataclass
 class PluginConfig:
     """插件配置基类"""
+
     enabled: bool = True
     priority: int = 100
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class Plugin(ABC):
     """
     插件基类
-    
+
     所有插件必须:
     1. 继承 Plugin 基类
     2. 实现 on_register() 方法注册自己的钩子
     3. 在适当的地方调用父类的 hook() 方法
     """
-    
+
     name: str = "base_plugin"
     version: str = "1.0.0"
-    
-    def __init__(self, config: Optional[PluginConfig] = None):
+
+    def __init__(self, config: PluginConfig | None = None):
         self.config = config or PluginConfig()
-        self._lifecycle: Optional[LifecycleManager] = None
+        self._lifecycle: LifecycleManager | None = None
         self._enabled = self.config.enabled
-        self._state: Dict[str, Any] = {}
-    
+        self._state: dict[str, Any] = {}
+
     @abstractmethod
     def on_register(self, lifecycle: LifecycleManager):
         """
@@ -49,31 +50,32 @@ class Plugin(ABC):
         子类实现此方法来注册自己的生命周期钩子
         """
         pass
-    
+
+    @abstractmethod
     def on_unregister(self):
         """插件卸载时调用"""
         pass
-    
+
     def enable(self):
         """启用插件"""
         self._enabled = True
-    
+
     def disable(self):
         """禁用插件"""
         self._enabled = False
-    
+
     @property
     def is_enabled(self) -> bool:
         return self._enabled
-    
+
     def get_state(self, key: str, default: Any = None) -> Any:
         """获取插件状态"""
         return self._state.get(key, default)
-    
+
     def set_state(self, key: str, value: Any):
         """设置插件状态"""
         self._state[key] = value
-    
+
     def __repr__(self):
         return f"<{self.__class__.__name__}(name={self.name}, enabled={self._enabled})>"
 
@@ -82,42 +84,42 @@ class PluginRegistry:
     """
     插件注册表
     管理所有插件的生命周期注册
-    
+
     支持自动扫描目录加载插件——文件即开关：
       name.py             ✅ 加载（有效插件）
       name.py.disabled    ❌ 跳过（停用标记）
       _name.py            ❌ 跳过（内部模块）
     """
-    
+
     SKIP_FILES = {"base.py", "setup.py"}
-    
-    def __init__(self, lifecycle: LifecycleManager, plugin_dir: Optional[str] = None):
+
+    def __init__(self, lifecycle: LifecycleManager, plugin_dir: str | None = None):
         self._lifecycle = lifecycle
-        self._plugins: Dict[str, Plugin] = {}
-        self._plugin_order: List[str] = []
-        
+        self._plugins: dict[str, Plugin] = {}
+        self._plugin_order: list[str] = []
+
         if plugin_dir is not None:
             self.scan(plugin_dir)
-    
-    def scan(self, plugin_dir: str) -> List[str]:
+
+    def scan(self, plugin_dir: str) -> list[str]:
         """
         扫描目录下的插件文件，按命名约定自动加载并注册。
-        
+
         返回已注册的插件名称列表。
         """
         if not os.path.isdir(plugin_dir):
             print(f"[PluginRegistry] 目录不存在，跳过扫描: {plugin_dir}")
             return []
-        
-        registered: List[str] = []
-        
+
+        registered: list[str] = []
+
         for entry in os.scandir(plugin_dir):
             # ── 跳过子目录 ────────────────────────
             if entry.is_dir():
                 continue
-            
+
             fname = entry.name
-            
+
             # ── 过滤：只取 name.py（无多余后缀） ───
             if not fname.endswith(".py"):
                 continue
@@ -125,12 +127,12 @@ class PluginRegistry:
                 continue
             if fname in self.SKIP_FILES:
                 continue
-            
+
             # ── 动态导入 ──────────────────────────
             module = self._import_module(entry.path)
             if module is None:
                 continue
-            
+
             # ── 提取 Plugin 子类 ───────────────────
             for _, obj in inspect.getmembers(module, inspect.isclass):
                 if obj is Plugin:
@@ -140,27 +142,27 @@ class PluginRegistry:
                 if obj.__module__ != module.__name__:
                     # 避免抓到 import 进来的其他模块的 Plugin 子类
                     continue
-                
+
                 # ── 自动实例化注册 ──────────────────
                 try:
                     instance = obj()
                 except Exception as e:
                     print(f"[PluginRegistry] 实例化 {obj.__name__} 失败: {e}")
                     continue
-                
+
                 if instance.name in self._plugins:
                     print(f"[PluginRegistry] 跳过重复: {instance.name}")
                     continue
-                
+
                 self._register_instance(instance)
                 registered.append(instance.name)
-        
+
         return registered
-    
+
     # ── 内部：动态导入 ─────────────────────────────
-    
+
     _import_counter = 0
-    
+
     @classmethod
     def _import_module(cls, filepath: str):
         """从文件路径导入模块"""
@@ -177,9 +179,9 @@ class PluginRegistry:
         except Exception as e:
             print(f"[PluginRegistry] 加载模块失败 {filepath}: {e}")
             return None
-    
+
     # ── 内部：注册实例 ─────────────────────────────
-    
+
     def _register_instance(self, plugin: Plugin):
         """注册插件实例"""
         self._plugins[plugin.name] = plugin
@@ -187,31 +189,31 @@ class PluginRegistry:
         plugin._lifecycle = self._lifecycle
         plugin.on_register(self._lifecycle)
         print(f"[PluginRegistry] 自动注册: {plugin}")
-    
+
     def register(self, plugin: Plugin) -> Plugin:
         """手动注册插件"""
         if plugin.name in self._plugins:
             raise ValueError(f"Plugin '{plugin.name}' already registered")
-        
+
         self._register_instance(plugin)
         return plugin
-    
-    def unregister(self, name: str) -> Optional[Plugin]:
+
+    def unregister(self, name: str) -> Plugin | None:
         """注销插件"""
         plugin = self._plugins.pop(name, None)
         if plugin:
             plugin.on_unregister()
             print(f"[PluginRegistry] Unregistered: {plugin}")
         return plugin
-    
-    def get(self, name: str) -> Optional[Plugin]:
+
+    def get(self, name: str) -> Plugin | None:
         """获取插件"""
         return self._plugins.get(name)
-    
-    def list_plugins(self) -> List[str]:
+
+    def list_plugins(self) -> list[str]:
         """列出所有已注册插件"""
         return self._plugin_order.copy()
-    
+
     def __iter__(self):
         for name in self._plugin_order:
             yield self._plugins[name]
@@ -219,8 +221,10 @@ class PluginRegistry:
 
 def plugin(name: str, priority: int = 100):
     """插件装饰器"""
+
     def decorator(cls):
         cls.name = name
         # 将 priority 存入配置
         return cls
+
     return decorator

@@ -5,10 +5,10 @@ Python 插件 — 执行 Python 代码（异步版本）
 """
 
 import asyncio
+import contextlib
 import os
 import tempfile
-from typing import Any, Dict
-
+from typing import Any
 
 # ── 插件定义（OpenAI function calling schema） ──────────────────────
 
@@ -28,53 +28,53 @@ PLUGIN_DEFINITION = {
 }
 
 
-async def execute(params: Dict[str, Any]) -> str:
+async def execute(params: dict[str, Any]) -> str:
     """
     执行 Python 代码（异步）
-    
+
     Args:
         params: 包含 'code' 键的字典
-        
+
     Returns:
         代码执行输出
     """
     code = params.get("code", "")
     if not code:
         raise ValueError("python 插件需要 code 参数")
-    
+
     tmp_path = None
     try:
         # 写入临时文件（同步文件 IO，用 run_in_executor）
         loop = asyncio.get_running_loop()
-        
+
         def _write_temp():
-            f = tempfile.NamedTemporaryFile(
+            with tempfile.NamedTemporaryFile(
                 mode="w",
                 suffix=".py",
                 prefix="agent_python_",
                 delete=False,
                 encoding="utf-8",
-            )
-            f.write(code)
-            path = f.name
-            f.close()
+            ) as f:
+                f.write(code)
+                path = f.name
             return path
-        
+
         tmp_path = await loop.run_in_executor(None, _write_temp)
-        
+
         # 异步执行
         proc = await asyncio.create_subprocess_exec(
-            "python3", tmp_path,
+            "python3",
+            tmp_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        
+
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(),
                 timeout=30,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
             return "错误：代码执行超时（30秒）"
@@ -82,7 +82,7 @@ async def execute(params: Dict[str, Any]) -> str:
             proc.kill()
             await proc.wait()
             raise
-        
+
         output = stdout.decode("utf-8", errors="replace")
         if stderr:
             stderr_text = stderr.decode("utf-8", errors="replace")
@@ -90,19 +90,17 @@ async def execute(params: Dict[str, Any]) -> str:
                 if output:
                     output += "\n"
                 output += stderr_text
-        
+
         # 截断
         if len(output) > 5000:
             output = output[:5000] + f"\n...（已截断，原文 {len(output)} 字符）"
-        
+
         return output if output else "（无输出）"
-    
+
     except Exception as e:
         return f"错误：{e}"
     finally:
         # 清理临时文件
         if tmp_path and os.path.exists(tmp_path):
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
-            except OSError:
-                pass

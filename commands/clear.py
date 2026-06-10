@@ -2,7 +2,6 @@
 
 import display
 
-
 name = "clear"
 aliases = []
 description = "清空当前会话"

@@ -1,8 +1,7 @@
 """model 命令 — 显示当前模型配置"""
 
-import display
 import config
-
+import display
 
 name = "model"
 aliases = []
@@ -17,10 +16,10 @@ def execute(agent, arg: str) -> tuple[bool, str]:
         f"会话目录: {config.SESSIONS_DIR}",
     ]
     output = "\n".join(lines)
-    
+
     # CLI 模式
     for line in lines:
         display.info(line)
-    
+
     # WebUI 模式
     return (True, output)

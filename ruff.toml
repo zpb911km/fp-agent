@@ -1,0 +1,56 @@
+# ruff 配置 — 参考: https://docs.astral.sh/ruff/settings/
+
+# 目标 Python 版本
+target-version = "py311"
+
+# 行宽（兼顾可读性与已有代码风格）
+line-length = 120
+
+# 包含/排除
+include = ["*.py", "*.pyi"]
+exclude = [
+    ".git",
+    "__pycache__",
+    "data",
+    "build",
+    "dist",
+    "*.egg-info",
+    "test_interrupt.py",
+]
+
+# ── 规则集 ──────────────────────────────────────────────
+# 第一阶段：核心规则，自动修复友好
+lint.select = [
+    "F",    # Pyflakes — 未定义/未使用导入、变量
+    "I",    # isort — 导入排序（自动修复）
+    "UP",   # pyupgrade — 现代 Python 语法（自动修复）
+    "SIM",  # flake8-simplify — 简化表达式（可自动修复）
+    "E",    # pycodestyle 错误
+    "W",    # pycodestyle 警告
+    "N",    # pep8-naming — 命名规范
+    "B",    # flake8-bugbear — bug 检测
+    "A",    # flake8-builtins — 屏蔽内置名检测
+]
+
+# 暂不启用的规则（以后逐步放开）
+# "D"     pydocstyle — 文档字符串
+# "ANN"   flake8-annotations — 类型注解
+# "PL"    pylint — 过于主观
+# "C4"    flake8-comprehensions
+
+# ── isort: 已知本地包 ──────────────────────────────────
+lint.isort.known-first-party = ["agent", "core", "app", "tools", "plugins", "commands", "skills", "prompts"]
+
+# ── per-file 忽略 ──────────────────────────────────────
+lint.per-file-ignores = { 
+    "__init__.py" = ["F401"],
+    # main.py: 条件导入（可选依赖检测）是合法模式
+    "app/webui/main.py" = ["E402"],
+    # session.py: sys.path 操作后导入本地模块
+    "core/session.py" = ["E402"],
+    # display.py: MIN_W/MAX_W/W 是终端宽度常量，大写表意更清晰
+    "display.py" = ["N806", "E741"],
+}
+
+# ── 格式化器 ────────────────────────────────────────────
+format.preview = true

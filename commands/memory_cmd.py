@@ -2,9 +2,8 @@
 
 import os
 
-import display
 import config
-
+import display
 
 name = "memory"
 aliases = []
@@ -23,10 +22,10 @@ def execute(agent, arg: str) -> tuple[bool, str]:
         lines.append("  （暂无记忆）")
     output = "\n".join(lines)
     hint = "💡 使用 memory_read / memory_save 工具管理记忆"
-    
+
     # CLI 模式：保持着色
     display.info(output)
     display.hint(hint)
-    
+
     # WebUI 模式：通过返回值传递
     return (True, output + "\n" + hint)

@@ -2,7 +2,6 @@
 
 import display
 
-
 name = "session"
 aliases = []
 description = "显示当前会话信息"

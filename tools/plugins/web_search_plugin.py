@@ -7,10 +7,10 @@ Web Search 插件 — 网络搜索（异步版本）
 """
 
 import asyncio
-import httpx
 from html.parser import HTMLParser
-from typing import Any, Dict, List, Optional
+from typing import Any
 
+import httpx
 
 # ── 插件定义 ───────────────────────────────────────────────────────
 
@@ -19,9 +19,9 @@ PLUGIN_DEFINITION = {
     "function": {
         "name": "web_search",
         "description": "快速搜索 - 直接爬取搜索引擎（Bing/DuckDuckGo）返回标题+链接+摘要列表。"
-                       "适合查简单事实、定义、时间、价格等可直接从摘要获取的信息。"
-                       "速度快（1~2秒），无需登录。但只返回结果列表，不做深度阅读和总结。"
-                       "如果需要综合分析多篇文章的内容，请用 smart_web_search。",
+        "适合查简单事实、定义、时间、价格等可直接从摘要获取的信息。"
+        "速度快（1~2秒），无需登录。但只返回结果列表，不做深度阅读和总结。"
+        "如果需要综合分析多篇文章的内容，请用 smart_web_search。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -40,15 +40,16 @@ PLUGIN_DEFINITION = {
 
 # ── HTML 解析器 ────────────────────────────────────────────────────
 
+
 class BingResultParser(HTMLParser):
     """解析 Bing <li class='b_algo'> 结构"""
 
     def __init__(self):
         super().__init__()
-        self.results: List[Dict[str, str]] = []
-        self._cur: Dict[str, str] = {}
+        self.results: list[dict[str, str]] = []
+        self._cur: dict[str, str] = {}
         self._in_algo = False
-        self._in_h2 = False       # 标题只在 <h2> 内捕获
+        self._in_h2 = False  # 标题只在 <h2> 内捕获
         self._in_title_link = False
         self._skip_depth = 0
 
@@ -104,8 +105,8 @@ class DuckDuckGoResultParser(HTMLParser):
 
     def __init__(self):
         super().__init__()
-        self.results: List[Dict[str, str]] = []
-        self._cur: Dict[str, str] = {}
+        self.results: list[dict[str, str]] = []
+        self._cur: dict[str, str] = {}
         self._in_result = False
         self._in_title = False
         self._in_snippet = False
@@ -169,7 +170,7 @@ HEADERS = {
 }
 
 
-def _search_bing_sync(query: str) -> List[Dict[str, str]]:
+def _search_bing_sync(query: str) -> list[dict[str, str]]:
     """Bing 搜索（同步，在 executor 中运行）"""
     with httpx.Client(timeout=15, follow_redirects=True) as client:
         resp = client.get(
@@ -183,7 +184,7 @@ def _search_bing_sync(query: str) -> List[Dict[str, str]]:
         return parser.results
 
 
-def _search_duckduckgo_sync(query: str) -> List[Dict[str, str]]:
+def _search_duckduckgo_sync(query: str) -> list[dict[str, str]]:
     """DuckDuckGo 搜索（同步，在 executor 中运行）"""
     with httpx.Client(timeout=15, follow_redirects=True) as client:
         resp = client.post(
@@ -199,7 +200,8 @@ def _search_duckduckgo_sync(query: str) -> List[Dict[str, str]]:
 
 # ── 结果格式化 ─────────────────────────────────────────────────────
 
-def _format_results(query: str, results: List[Dict[str, str]], backend: str) -> str:
+
+def _format_results(query: str, results: list[dict[str, str]], backend: str) -> str:
     if not results:
         return "未找到相关结果"
 
@@ -227,7 +229,7 @@ BACKENDS = {
 FALLBACK_ORDER = ["bing", "duckduckgo"]
 
 
-async def execute(params: Dict[str, Any]) -> str:
+async def execute(params: dict[str, Any]) -> str:
     query = params.get("query", "")
     preferred = params.get("backend", "").lower().strip()
 
@@ -235,10 +237,7 @@ async def execute(params: Dict[str, Any]) -> str:
         raise ValueError("web_search 插件需要 query 参数")
 
     # 确定后端尝试顺序
-    if preferred in BACKENDS:
-        order = [preferred] + [b for b in FALLBACK_ORDER if b != preferred]
-    else:
-        order = FALLBACK_ORDER
+    order = [preferred] + [b for b in FALLBACK_ORDER if b != preferred] if preferred in BACKENDS else FALLBACK_ORDER
 
     loop = asyncio.get_running_loop()
     last_error = None

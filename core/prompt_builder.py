@@ -9,13 +9,13 @@ PromptBuilder — 系统提示词构建器
 
 import os
 from datetime import datetime
-from typing import Optional, Any
+from typing import Any
 
 
 class PromptBuilder:
     """系统提示词构建器"""
 
-    def __init__(self, skill_loader: Optional[Any] = None):
+    def __init__(self, skill_loader: Any | None = None):
         """
         Args:
             skill_loader: SkillLoader 实例。None 时使用 skills.loader.skill_loader（全局单例）
@@ -24,6 +24,7 @@ class PromptBuilder:
             self._skill_loader = skill_loader
         else:
             from skills.loader import skill_loader as default_loader
+
             self._skill_loader = default_loader
 
     @property
@@ -36,6 +37,7 @@ class PromptBuilder:
 
         # 基础 Agent 提示词
         from prompts.agent import load_agent_prompt
+
         agent_prompt = load_agent_prompt()
         if agent_prompt:
             parts.append(agent_prompt)

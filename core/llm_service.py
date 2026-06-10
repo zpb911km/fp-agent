@@ -8,17 +8,17 @@ LLMService — 纯 LLM 调用层
 - 只做"消息→LLM→响应"的纯转换
 """
 
-from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
 
 @dataclass
 class LLMConfig:
     """LLM 配置"""
+
     model: str = ""
     temperature: float = 0.7
     max_tokens: int = 4096
-    extra_body: Dict = field(default_factory=lambda: {"enable_thinking": False})
+    extra_body: dict = field(default_factory=lambda: {"enable_thinking": False})
 
 
 class LLMService:
@@ -39,18 +39,18 @@ class LLMService:
 
     async def chat(
         self,
-        messages: List[Dict],
-        tools: Optional[List[Dict]] = None,
+        messages: list[dict],
+        tools: list[dict] | None = None,
         **overrides,
-    ) -> Dict:
+    ) -> dict:
         """
         调用 LLM 并返回 assistant message dict。
-        
+
         Args:
             messages: 消息列表
             tools: 工具定义列表（可选）
             **overrides: 覆盖 LLMConfig 中的字段（model, temperature, max_tokens 等）
-            
+
         Returns:
             assistant message dict:
             {
@@ -78,7 +78,7 @@ class LLMService:
         response = await self._client.chat.completions.create(**kwargs)
         message = response.choices[0].message
 
-        msg: Dict = {"role": "assistant", "content": message.content or ""}
+        msg: dict = {"role": "assistant", "content": message.content or ""}
         if message.tool_calls:
             msg["tool_calls"] = [
                 {

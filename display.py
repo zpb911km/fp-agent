@@ -7,16 +7,17 @@ display.py — Five Pebbles 显示模块
 """
 
 import asyncio
+import contextlib
 import os
 import sys
 
 from config import apply_style, truncate
 
-
 # ═══════════════════════════════════════════════════════════
 # A. 操作反馈 — 用户主动操作后的回应
 #   注册名称: "info", "item"
 # ═══════════════════════════════════════════════════════════
+
 
 def info(msg: str):
     """一般信息 / 操作成功的反馈（消息中应包含 emoji）"""
@@ -33,6 +34,7 @@ def item(msg: str):
 #   注册名称: "hint"
 # ═══════════════════════════════════════════════════════════
 
+
 def hint(msg: str):
     """引导 / 用法提示（消息中应包含 💡）"""
     print(apply_style(msg, "hint"))
@@ -43,6 +45,7 @@ def hint(msg: str):
 #   注册名称: "error", "warning"
 #   铁律: error() 调用方应在 msg 外再传 fix 参数给出解决指引。
 # ═══════════════════════════════════════════════════════════
+
 
 def error(msg: str, fix: str = ""):
     """错误（配色从配置），可带第二行解决指引"""
@@ -61,6 +64,7 @@ def warning(msg: str):
 #   注册名称: "llm_thought", "llm_tool", "llm_output"
 #   支持按名称截断：llm_thought / llm_tool 可配置 truncation
 # ═══════════════════════════════════════════════════════════
+
 
 def llm_thought(msg: str):
     """LLM 思考过程（支持按配置截断）"""
@@ -92,10 +96,10 @@ def llm_iteration(count: int):
 
 class LLMStreamer:
     """LLM 流式输出管理器
-    
+
     封装思考/回复切换的 ANSI 状态管理，调用方只需传入 token。
     自动处理思考标记、灰色着色、模式切换时的重置。
-    
+
     用法:
         stream = LLMStreamer(silent=False)
         for chunk in response:
@@ -105,7 +109,7 @@ class LLMStreamer:
                 stream.content(rendered_content)
         stream.end()
     """
-    
+
     def __init__(self, silent: bool = False):
         self.silent = silent
         self._thinking = False
@@ -113,7 +117,7 @@ class LLMStreamer:
         self._buffer = ""
         self.content = ""  # 最终内容
         self.thinking = ""  # 思考内容
-    
+
     def think(self, text: str):
         """输出思考 token（配色从配置），首次自动显示思考标记"""
         if self.silent:
@@ -125,11 +129,11 @@ class LLMStreamer:
             prefix = "\n" if self._has_content else ""
             print(apply_style(f"{prefix}思考: ", "llm_thought"), end="", flush=True)
             self._thinking = True
-        
+
         truncated = truncate(text, "llm_thought")
         print(apply_style(truncated, "llm_thought"), end="", flush=True)
         self.thinking += text
-    
+
     def write(self, text: str):
         """缓冲回复内容，等待 end() 时统一用 rich Markdown 渲染"""
         if self.silent:
@@ -144,7 +148,7 @@ class LLMStreamer:
             self._thinking = False
         self._buffer += text
         self._has_content = True
-    
+
     def end(self, interrupted: bool = False):
         """结束流式输出，用 rich 渲染完整的 Markdown 内容"""
         if self.silent:
@@ -160,13 +164,14 @@ class LLMStreamer:
             self._buffer = ""
         elif self._has_content:
             print()
-    
+
     @staticmethod
     def _render_markdown(text: str):
         """用 rich 渲染 Markdown，缺失时降级为纯文本"""
         try:
-            from rich.markdown import Markdown
             from rich.console import Console
+            from rich.markdown import Markdown
+
             Console().print(Markdown(text))
         except ImportError:
             print(text)
@@ -176,6 +181,7 @@ class LLMStreamer:
 # E. 系统日志 — 开发者调试用，默认隐藏
 #   注册名称: "debug"
 # ═══════════════════════════════════════════════════════════
+
 
 def debug(msg: str):
     """调试日志，仅 DEBUG=1 时可见"""
@@ -187,6 +193,7 @@ def debug(msg: str):
 # 🎨 仪式感 — 品牌记忆点
 #   注册名称: "startup", "shutdown_panel", "logo"
 # ═══════════════════════════════════════════════════════════
+
 
 def startup(model: str, resume: bool = False):
     """启动横幅"""
@@ -201,18 +208,17 @@ def _display_width(text: str) -> int:
     """返回字符串在终端中的实际显示宽度（全宽=2，半宽=1）"""
     try:
         from wcwidth import wcswidth
+
         w = wcswidth(text)
         return w if w >= 0 else len(text)
     except ImportError:
         return len(text)
 
 
-def shutdown_panel(summary: str, file: str, model: str,
-                   msg_count: int, created: str,
-                   duration: str = ""):
+def shutdown_panel(summary: str, file: str, model: str, msg_count: int, created: str, duration: str = ""):
     """退出时的统计面板（框线装饰），自动适应内容宽度"""
-    MIN_W = 48   # 最小宽度
-    MAX_W = 60   # 最大宽度，防止撑爆终端
+    MIN_W = 48  # 最小宽度
+    MAX_W = 60  # 最大宽度，防止撑爆终端
 
     # 先收集所有内容行（不含边框装饰），算出最大显示宽度
     entries: list[tuple[str, str]] = [
@@ -235,7 +241,7 @@ def shutdown_panel(summary: str, file: str, model: str,
     W = min(max(MIN_W, max_text_width + 6), MAX_W)
     text_w = W - 6  # 文本实际可用显示宽度
 
-    sep = "─" * (W - 2)          # ╔═...═╗ 中间的横线长度
+    sep = "─" * (W - 2)  # ╔═...═╗ 中间的横线长度
 
     def tb(text: str) -> str:
         """内容行：║ + 2空格 + 文本(左对齐，超长截断) + 2空格 + ║"""
@@ -269,7 +275,7 @@ def shutdown_panel(summary: str, file: str, model: str,
     print("👋  再见！")
 
 
-LOGO_ART = r'''
+LOGO_ART = r"""
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
@@ -302,7 +308,7 @@ LOGO_ART = r'''
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 ::::::::::::::::::::::::Five Pebbles::::::::::::::::::::::::
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-'''
+"""
 
 
 def print_logo():
@@ -316,12 +322,13 @@ def print_logo():
 #   用于非流式 LLM 调用期间的视觉反馈，避免终端假死感
 # ═══════════════════════════════════════════════════════════
 
+
 class Spinner:
     """异步 spinner 动画
-    
+
     在发起非流式 LLM 请求前启动，请求完成后停止。
     使用 asyncio 后台任务驱动字符旋转，支持中途取消。
-    
+
     用法:
         spinner = Spinner("思考中")
         await spinner.start()
@@ -330,16 +337,16 @@ class Spinner:
         finally:
             await spinner.stop()
     """
-    
+
     def __init__(self, message: str = "思考中"):
         self._message = message
         self._task = None
         self._chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    
+
     async def start(self):
         """启动 spinner（启动一个后台 asyncio 任务）"""
         self._task = asyncio.create_task(self._spin())
-    
+
     async def _spin(self):
         """后台旋转动画"""
         idx = 0
@@ -355,12 +362,10 @@ class Spinner:
             # 清除 spinner 行（覆盖空白后回到行首）
             sys.stdout.write("\r" + " " * (len(self._message) + 6) + "\r")
             sys.stdout.flush()
-    
+
     async def stop(self):
         """停止 spinner 并清除动画行"""
         if self._task and not self._task.done():
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass

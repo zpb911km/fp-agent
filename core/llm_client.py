@@ -7,7 +7,7 @@ OpenAI API HTTP 客户端替代模块
 Usage:
     import openai
     client = openai.Client(api_key="...", base_url="...")
-    
+
     response = await client.chat.completions.create(
         model="gpt-4",
         messages=[{"role": "user", "content": "Hello"}],
@@ -19,33 +19,34 @@ Usage:
     print(response.choices[0].message.content)
 """
 
+import contextlib
 import json
-import sys
-from typing import Any, Optional
+from typing import Any
 
 import httpx
-
 
 # ═══════════════════════════════════════════════════════════════
 # 异常类
 # ═══════════════════════════════════════════════════════════════
 
+
 class APIError(Exception):
     """OpenAI API 错误，兼容 openai.APIError"""
+
     def __init__(self, message: str, status_code: int = 0, body: Any = None):
         super().__init__(message)
         self.status_code = status_code
         self.body = body
 
 
-
 # ═══════════════════════════════════════════════════════════════
 # 非流式响应对象模型
 # ═══════════════════════════════════════════════════════════════
 
+
 class ToolCallFunction:
     __slots__ = ("name", "arguments")
-    
+
     def __init__(self, data: dict):
         self.name: str = data.get("name", "")
         self.arguments: str = data.get("arguments", "")
@@ -53,7 +54,7 @@ class ToolCallFunction:
 
 class ToolCall:
     __slots__ = ("id", "type", "function")
-    
+
     def __init__(self, data: dict):
         self.id: str = data.get("id", "")
         self.type: str = data.get("type", "function")
@@ -62,13 +63,14 @@ class ToolCall:
 
 class Message:
     """非流式响应中的 message"""
+
     __slots__ = ("role", "content", "tool_calls", "reasoning_content")
-    
+
     def __init__(self, data: dict):
         self.role: str = data.get("role", "assistant")
-        self.content: Optional[str] = data.get("content")
-        self.reasoning_content: Optional[str] = data.get("reasoning_content")
-        
+        self.content: str | None = data.get("content")
+        self.reasoning_content: str | None = data.get("reasoning_content")
+
         # 非流式场景下的 <think> 标签提取
         # 仅在原生无 reasoning_content 且 content 以 <think> 开头时触发
         if (
@@ -79,7 +81,7 @@ class Message:
         ):
             close_idx = self.content.index("</think>")
             self.reasoning_content = self.content[7:close_idx]
-            after = self.content[close_idx + 8:]
+            after = self.content[close_idx + 8 :]
             self.content = after if after else None
         raw_tool_calls = data.get("tool_calls")
         if raw_tool_calls:
@@ -90,17 +92,18 @@ class Message:
 
 class MessageChoice:
     __slots__ = ("index", "message", "finish_reason")
-    
+
     def __init__(self, data: dict):
         self.index: int = data.get("index", 0)
         self.message = Message(data.get("message", {}))
-        self.finish_reason: Optional[str] = data.get("finish_reason")
+        self.finish_reason: str | None = data.get("finish_reason")
 
 
 class CompletionResponse:
     """非流式完整响应"""
+
     __slots__ = ("id", "object", "created", "model", "choices", "usage")
-    
+
     def __init__(self, data: dict):
         self.id: str = data.get("id", "")
         self.object: str = data.get("object", "chat.completion")
@@ -115,20 +118,21 @@ class CompletionResponse:
 # 核心 Client（异步版本）
 # ═══════════════════════════════════════════════════════════════
 
+
 class Completions:
     """client.chat.completions"""
-    
+
     def __init__(self, client: "Client"):
         self._client = client
-    
+
     async def create(
         self,
         model: str,
         messages: list[dict],
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        tools: Optional[list[dict]] = None,
-        extra_body: Optional[dict] = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        tools: list[dict] | None = None,
+        extra_body: dict | None = None,
         **kwargs,
     ) -> "CompletionResponse":
         """
@@ -136,13 +140,13 @@ class Completions:
         """
         url = f"{self._client.base_url}/chat/completions"
         headers = self._client._headers()
-        
+
         # 构建请求体
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
         }
-        
+
         if temperature is not None:
             body["temperature"] = temperature
         if max_tokens is not None:
@@ -151,7 +155,7 @@ class Completions:
             body["tools"] = tools
         if extra_body:
             body.update(extra_body)
-        
+
         try:
             resp = await self._client._session.post(
                 url,
@@ -159,33 +163,31 @@ class Completions:
                 json=body,
             )
         except httpx.ConnectError as e:
-            raise APIError(f"连接失败: {e}", status_code=0)
+            raise APIError(f"连接失败: {e}", status_code=0) from None
         except httpx.TimeoutException as e:
-            raise APIError(f"请求超时: {e}", status_code=0)
-        
+            raise APIError(f"请求超时: {e}", status_code=0) from None
+
         # 处理 HTTP 错误
         if resp.status_code != 200:
             error_body = ""
-            try:
+            with contextlib.suppress(Exception):
                 error_body = resp.text
-            except Exception:
-                pass
             raise APIError(
                 f"API 返回 {resp.status_code}: {error_body}",
                 status_code=resp.status_code,
                 body=error_body,
             )
-        
+
         try:
             data = resp.json()
         except json.JSONDecodeError as e:
-            raise APIError(f"响应 JSON 解析失败: {e}", status_code=resp.status_code)
+            raise APIError(f"响应 JSON 解析失败: {e}", status_code=resp.status_code) from None
         return CompletionResponse(data)
 
 
 class Chat:
     """client.chat"""
-    
+
     def __init__(self, client: "Client"):
         self.completions = Completions(client)
 
@@ -193,12 +195,12 @@ class Chat:
 class Client:
     """
     OpenAI API 客户端（异步版本）。
-    
+
     用法:
         client = Client(api_key="sk-xxx", base_url="https://api.openai.com/v1")
         response = await client.chat.completions.create(model="...", messages=[...])
     """
-    
+
     def __init__(
         self,
         api_key: str,
@@ -213,14 +215,14 @@ class Client:
         )
         self._timeout = timeout
         self.chat = Chat(self)
-    
+
     def _headers(self) -> dict:
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-    
+
     async def close(self):
         """释放连接池"""
         await self._session.aclose()

@@ -5,7 +5,7 @@ Agent v2 配置管理
 
 import json
 import os
-from typing import Any, Optional
+from typing import Any
 
 # 项目根目录
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -17,7 +17,7 @@ def _load_json_config() -> dict:
     if not os.path.isfile(CONFIG_JSON):
         return {}
     try:
-        with open(CONFIG_JSON, "r", encoding="utf-8") as f:
+        with open(CONFIG_JSON, encoding="utf-8") as f:
             cfg = json.load(f)
         return cfg if isinstance(cfg, dict) else {}
     except (json.JSONDecodeError, OSError):
@@ -83,14 +83,22 @@ TASKS_FILE = os.path.join(DATA_DIR, "tasks.json")
 # ═══════════════════════════════════════════════════════════════
 
 ANSI_COLORS = {
-    "black": "\033[30m", "red": "\033[31m", "green": "\033[32m",
-    "yellow": "\033[33m", "blue": "\033[34m", "magenta": "\033[35m",
-    "cyan": "\033[36m", "white": "\033[37m",
-    "bright_red": "\033[91m", "bright_green": "\033[92m",
-    "bright_yellow": "\033[93m", "bright_cyan": "\033[96m",
+    "black": "\033[30m",
+    "red": "\033[31m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "blue": "\033[34m",
+    "magenta": "\033[35m",
+    "cyan": "\033[36m",
+    "white": "\033[37m",
+    "bright_red": "\033[91m",
+    "bright_green": "\033[92m",
+    "bright_yellow": "\033[93m",
+    "bright_cyan": "\033[96m",
     "bright_white": "\033[97m",
     "default": "",
 }
+
 
 def get_display_style(name: str) -> dict:
     """获取显示样式"""
@@ -111,6 +119,7 @@ def color_supported() -> bool:
     if os.environ.get("NO_COLOR"):
         return False
     import sys
+
     return sys.stdout.isatty()
 
 
@@ -153,6 +162,7 @@ def get_display_truncation(name: str) -> int:
 # 配置检查
 # ═══════════════════════════════════════════════════════════════
 
+
 def check_llm_config() -> bool:
     """检查 LLM 配置是否完整"""
     if not LLM_API_KEY:
@@ -182,17 +192,17 @@ def get_default_config() -> dict:
             "yellow_bold": {"color": "yellow", "bold": True},
             "llm_thought": {"color": "magenta", "dim": True},
             "llm_tool": {"color": "yellow"},
-        }
+        },
     }
 
 
-def init_config(path: Optional[str] = None):
+def init_config(path: str | None = None):
     """初始化配置文件（如果不存在）"""
     config_path = path or CONFIG_JSON
     if os.path.exists(config_path):
         print(f"[Config] {config_path} already exists")
         return
-    
+
     default_cfg = get_default_config()
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(default_cfg, f, indent=2, ensure_ascii=False)
@@ -210,6 +220,6 @@ if __name__ == "__main__":
     print(f"MAX_ITERATIONS: {MAX_ITERATIONS}")
     print()
     check_llm_config()
-    
+
     if "--init" in os.sys.argv:
         init_config()

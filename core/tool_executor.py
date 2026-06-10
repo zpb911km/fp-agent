@@ -10,13 +10,13 @@ ToolExecutor — 工具执行层
 """
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class ToolExecutor:
     """工具执行器"""
 
-    def __init__(self, registry: Optional[Any] = None):
+    def __init__(self, registry: Any | None = None):
         """
         Args:
             registry: ToolRegistry 实例。None 时使用 tools.registry（全局单例）
@@ -25,21 +25,22 @@ class ToolExecutor:
             self._registry = registry
         else:
             from tools import registry as default_registry
+
             self._registry = default_registry
 
-    def get_definitions(self) -> List[Dict]:
+    def get_definitions(self) -> list[dict]:
         """获取所有工具的 OpenAI function calling schema"""
         return self._registry.get_all_definitions()
 
-    async def execute(self, tool_call: Dict) -> str:
+    async def execute(self, tool_call: dict) -> str:
         """
         执行工具调用。
-        
+
         Args:
             tool_call: tool_call dict，格式:
                 {"id": "...", "type": "function",
                  "function": {"name": "...", "arguments": "..."}}
-                
+
         Returns:
             执行结果的字符串表示
         """

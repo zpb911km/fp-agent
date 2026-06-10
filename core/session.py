@@ -15,14 +15,16 @@ import os
 import re
 import sys
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Any
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+import contextlib
+
 import config
+
 SESSIONS_DIR = os.path.join(PROJECT_ROOT, "data", "sessions")
 
 
@@ -30,8 +32,10 @@ SESSIONS_DIR = os.path.join(PROJECT_ROOT, "data", "sessions")
 
 SID_PATTERN = re.compile(r"^s_\d{6}_\d{12,}.*\.jsonl$")  # 微秒级 sid
 
+
 def _is_session_file(filename: str) -> bool:
     return bool(SID_PATTERN.match(filename))
+
 
 def _extract_sid(filename: str) -> str:
     """从文件名提取原始 sid（去掉 summary 后缀）。"""
@@ -41,6 +45,7 @@ def _extract_sid(filename: str) -> str:
 
 
 # ── 会话文件（嵌入 meta） ─────────────────────────
+
 
 def _default_meta(sid: str) -> dict:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -53,6 +58,7 @@ def _default_meta(sid: str) -> dict:
         "message_count": 0,
     }
 
+
 def _generate_sid() -> str:
     """生成唯一会话 ID（微秒级 + 防冲突后缀）。"""
     base = datetime.now().strftime("s_%y%m%d_%H%M%S%f")  # 含微秒
@@ -64,18 +70,21 @@ def _generate_sid() -> str:
         sid = f"{base}_{i}"
     # 极端情况：加随机数
     import random
+
     return f"{base}_{random.randint(1000, 9999)}"
+
 
 def _session_path(sid: str) -> str:
     """返回 sid 对应的 .jsonl 文件路径（不含 summary 后缀的原始文件）。"""
     return os.path.join(SESSIONS_DIR, f"{sid}.jsonl")
 
-def _read_meta_from_file(path: str) -> Optional[dict]:
+
+def _read_meta_from_file(path: str) -> dict | None:
     """读取会话文件第一行中的 meta 信息。"""
     if not os.path.exists(path):
         return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             first = f.readline().strip()
             if first:
                 meta = json.loads(first)
@@ -85,13 +94,14 @@ def _read_meta_from_file(path: str) -> Optional[dict]:
         pass
     return None
 
+
 def _write_meta_to_file(path: str, meta: dict) -> bool:
     """重写会话文件的第一行（meta header）。"""
     if not os.path.exists(path):
         return False
     try:
         content = json.dumps(meta, ensure_ascii=False)
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             lines = f.readlines()
         with open(path, "w", encoding="utf-8") as f:
             f.write(content + "\n")
@@ -100,7 +110,8 @@ def _write_meta_to_file(path: str, meta: dict) -> bool:
     except Exception:
         return False
 
-def _find_latest_session() -> Optional[str]:
+
+def _find_latest_session() -> str | None:
     """扫描 sessions 目录，返回 updated 最新的会话 sid。
     若无任何会话，返回 None。"""
     latest_sid = None
@@ -123,13 +134,14 @@ def _find_latest_session() -> Optional[str]:
 
 # ── SessionManager ────────────────────────────────
 
+
 class SessionManager:
     """会话管理器 — 只负责持久化，不再持有 _context"""
 
     _session_id: str
     _meta: dict
 
-    def __init__(self, resume: Optional[str] = None):
+    def __init__(self, resume: str | None = None):
         """
         resume=None/False → 创建新会话（默认）
         resume=True       → 续最近会话
@@ -145,10 +157,7 @@ class SessionManager:
             resume = "auto"
 
         if resume is not None:
-            if resume.startswith('s'):
-                latest = resume
-            else:
-                latest = _find_latest_session()
+            latest = resume if resume.startswith("s") else _find_latest_session()
             if latest and self._session_exists(latest):
                 self._session_id = latest
                 self._meta = self._load_meta_from_session()
@@ -165,11 +174,11 @@ class SessionManager:
         path = _session_path(sid)
         return os.path.exists(path)
 
-    def _session_path(self, sid: Optional[str] = None) -> str:
+    def _session_path(self, sid: str | None = None) -> str:
         sid = sid or self._session_id
         return _session_path(sid)
 
-    def _load_meta_from_session(self, sid: Optional[str] = None) -> dict:
+    def _load_meta_from_session(self, sid: str | None = None) -> dict:
         """从会话文件读取 meta。"""
         sid = sid or self._session_id
         path = self._session_path(sid)
@@ -178,7 +187,7 @@ class SessionManager:
             meta = _default_meta(sid)
         return meta
 
-    def _write_meta(self, meta: Optional[dict] = None):
+    def _write_meta(self, meta: dict | None = None):
         """将 meta 写回文件第一行。"""
         if meta is None:
             meta = self._meta
@@ -201,11 +210,11 @@ class SessionManager:
     def session_id(self) -> str:
         return self._session_id
 
-    def get_session_path(self, sid: Optional[str] = None) -> str:
+    def get_session_path(self, sid: str | None = None) -> str:
         """获取指定会话的文件路径（公共 API）"""
         return self._session_path(sid)
 
-    def list_sessions(self) -> Dict[str, Dict[str, Any]]:
+    def list_sessions(self) -> dict[str, dict[str, Any]]:
         """列出所有会话及其 meta。扫描 sessions 目录。"""
         sessions = {}
         try:
@@ -284,7 +293,7 @@ class SessionManager:
         self._meta["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._write_meta(self._meta)
 
-    def save_context(self, context: List[Dict[str, Any]]):
+    def save_context(self, context: list[dict[str, Any]]):
         """将完整上下文写入文件（重写）。正序写入，最新在末尾。"""
         path = self._session_path()
 
@@ -311,19 +320,17 @@ class SessionManager:
                     f.write(line + "\n")
             os.replace(tmp, path)
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 os.remove(tmp)
-            except Exception:
-                pass
 
-    def load_context(self, system_prompt: str) -> List[Dict[str, Any]]:
+    def load_context(self, system_prompt: str) -> list[dict[str, Any]]:
         """加载上下文（system + 历史消息，正序）。"""
         context = [{"role": "system", "content": system_prompt}]
         path = self._session_path()
 
         if os.path.exists(path):
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     lines = f.readlines()
                 for line in lines[1:]:
                     line = line.strip()
@@ -335,7 +342,7 @@ class SessionManager:
 
         return context
 
-    def update_meta(self, sid: Optional[str] = None, **kwargs):
+    def update_meta(self, sid: str | None = None, **kwargs):
         """更新指定会话的内嵌 meta 字段。"""
         sid = sid or self._session_id
         path = _session_path(sid)
@@ -352,10 +359,10 @@ class SessionManager:
 class LoopDetector:
     """死循环检测器"""
 
-    def __init__(self, max_iterations: Optional[int] = None):
+    def __init__(self, max_iterations: int | None = None):
         self.max_iterations = max_iterations if max_iterations is not None else config.MAX_ITERATIONS
 
-    def check(self, iteration: int, response: str) -> Tuple[bool, str]:
+    def check(self, iteration: int, response: str) -> tuple[bool, str]:
         if iteration >= self.max_iterations:
             return True, f"达到最大迭代次数 ({self.max_iterations})"
         return False, ""

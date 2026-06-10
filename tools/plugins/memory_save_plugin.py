@@ -7,10 +7,9 @@ Memory Save 插件 — 保存长期记忆（异步版本）
 import asyncio
 import os
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any
 
 import config
-
 
 # ── 插件定义（OpenAI function calling schema） ──────────────────────
 
@@ -40,13 +39,13 @@ PLUGIN_DEFINITION = {
 VALID_TYPES = ["user", "project", "feedback", "reference"]
 
 
-async def execute(params: Dict[str, Any]) -> str:
+async def execute(params: dict[str, Any]) -> str:
     """
     保存记忆（异步）
-    
+
     Args:
         params: 包含 name, type, description, content 的字典
-        
+
     Returns:
         保存结果
     """
@@ -54,25 +53,25 @@ async def execute(params: Dict[str, Any]) -> str:
     mem_type = params.get("type", "")
     description = params.get("description", "")
     content = params.get("content", "")
-    
+
     # 验证必填参数
     if not all([name, mem_type, description, content]):
         raise ValueError("memory_save 需要以下参数：name, type, description, content")
-    
+
     # 验证类型
     if mem_type not in VALID_TYPES:
         raise ValueError(f"type 必须是 {VALID_TYPES} 之一")
-    
+
     memory_dir = config.MEMORY_DIR
-    
+
     # 安全文件名
     safe_name = name.replace(" ", "_").replace("/", "_")
-    
+
     path = os.path.join(memory_dir, f"{safe_name}.md")
     date = datetime.now().strftime("%Y-%m-%d %H:%M")
-    
+
     loop = asyncio.get_running_loop()
-    
+
     def _write():
         os.makedirs(memory_dir, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
@@ -83,7 +82,7 @@ async def execute(params: Dict[str, Any]) -> str:
             f.write(f"created: {date}\n")
             f.write("---\n\n")
             f.write(content + "\n")
-    
+
     await loop.run_in_executor(None, _write)
-    
+
     return f"✅ 记忆已保存：{safe_name} ({mem_type})"

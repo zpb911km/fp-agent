@@ -1,0 +1,23 @@
+# pre-commit 配置
+# 安装: pre-commit install
+# 手动运行: pre-commit run --all-files
+# 跳过钩子提交: git commit --no-verify
+#
+# 注意: 使用 repo: local + language: system 避免 GitHub 网络依赖
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: ruff check --fix --exit-non-zero-on-fix
+        language: system
+        types: [python]
+        require_serial: true
+
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format
+        language: system
+        types: [python]
+        require_serial: true

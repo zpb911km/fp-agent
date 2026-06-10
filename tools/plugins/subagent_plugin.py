@@ -18,8 +18,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, Optional
-
+from typing import Any
 
 # ── 插件定义（OpenAI function calling schema） ──────────────────────
 
@@ -28,45 +27,45 @@ PLUGIN_DEFINITION = {
     "function": {
         "name": "subagent",
         "description": "🚀 派遣子 agent 执行独立任务 —— 这是节省 token 的核心武器！\n\n"
-                       "为什么用 subagent？\n"
-                       "1. 子 agent 有自己的独立上下文 → 中间步骤/工具结果/大段文件不占用主上下文\n"
-                       "2. 同子任务内 prefix 稳定 → API 缓存命中 → 半价\n"
-                       "3. 子 agent 执行完只返回结论 → 主上下文不膨胀\n\n"
-                       "⚠️ 经验法则：任何需要 ≥2 次工具调用或读取大文件的任务，都用 subagent！\n"
-                       "  单步简单操作（1个工具、结果 <200 token）可自己做。\n\n"
-                       "子 agent 拥有完整工具链（bash/文件读写/搜索/记忆/Python等），"
-                       "其思考和中间过程完全在独立上下文中完成，不消耗主上下文的 token。\n\n"
-                       "适合：多步数据分析、文件批量处理、代码编写与调试、信息检索与整理等独立子任务。\n\n"
-                       "参数说明：\n"
-                       "- task: 任务描述，清晰完整的一句话或一段话\n"
-                       "- context: 背景上下文（可选），如文件路径、数据摘要、关键变量等，"
-                       "子 agent 没有当前对话历史，请在此提供必要背景\n"
-                       "- store_result: 记忆键名（可选），若提供则自动将结果存入跨会话记忆\n"
-                       "- timeout: 超时秒数（可选，默认 300，最小 10，最大 900）\n"
-                       "- constraints: 输出契约（可选），控制返回内容与格式，默认静默模式只输出结论",
+        "为什么用 subagent？\n"
+        "1. 子 agent 有自己的独立上下文 → 中间步骤/工具结果/大段文件不占用主上下文\n"
+        "2. 同子任务内 prefix 稳定 → API 缓存命中 → 半价\n"
+        "3. 子 agent 执行完只返回结论 → 主上下文不膨胀\n\n"
+        "⚠️ 经验法则：任何需要 ≥2 次工具调用或读取大文件的任务，都用 subagent！\n"
+        "  单步简单操作（1个工具、结果 <200 token）可自己做。\n\n"
+        "子 agent 拥有完整工具链（bash/文件读写/搜索/记忆/Python等），"
+        "其思考和中间过程完全在独立上下文中完成，不消耗主上下文的 token。\n\n"
+        "适合：多步数据分析、文件批量处理、代码编写与调试、信息检索与整理等独立子任务。\n\n"
+        "参数说明：\n"
+        "- task: 任务描述，清晰完整的一句话或一段话\n"
+        "- context: 背景上下文（可选），如文件路径、数据摘要、关键变量等，"
+        "子 agent 没有当前对话历史，请在此提供必要背景\n"
+        "- store_result: 记忆键名（可选），若提供则自动将结果存入跨会话记忆\n"
+        "- timeout: 超时秒数（可选，默认 300，最小 10，最大 900）\n"
+        "- constraints: 输出契约（可选），控制返回内容与格式，默认静默模式只输出结论",
         "parameters": {
             "type": "object",
             "properties": {
                 "task": {
                     "type": "string",
                     "description": "需要子 agent 执行的具体任务描述。应当清晰、完整、自包含，"
-                                   "包含所有必要的信息让子 agent 能独立完成任务。"
+                    "包含所有必要的信息让子 agent 能独立完成任务。",
                 },
                 "context": {
                     "type": "string",
                     "description": "传递给子 agent 的背景上下文。可以包含：文件路径、关键代码片段、"
-                                   "数据摘要、变量值、前置分析结论等。子 agent 没有当前会话历史，"
-                                   "所有需要的信息都必须通过此参数传递。"
+                    "数据摘要、变量值、前置分析结论等。子 agent 没有当前会话历史，"
+                    "所有需要的信息都必须通过此参数传递。",
                 },
                 "store_result": {
                     "type": "string",
                     "description": "可选。若提供，子 agent 的最终回复将自动存入跨会话记忆。"
-                                   "之后可通过 memory_read 读取。例如：'draft_content', 'analysis_report'"
+                    "之后可通过 memory_read 读取。例如：'draft_content', 'analysis_report'",
                 },
                 "timeout": {
                     "type": "integer",
                     "description": "子任务超时秒数（可选，默认 300，范围 10~900）。"
-                                   "简单任务（如单次查询）可设为 30~60，复杂任务（如批量文件处理）可设为 300~900。"
+                    "简单任务（如单次查询）可设为 30~60，复杂任务（如批量文件处理）可设为 300~900。",
                 },
                 "constraints": {
                     "type": "object",
@@ -75,34 +74,34 @@ PLUGIN_DEFINITION = {
                         "verbose": {
                             "type": "boolean",
                             "description": "false（默认）= 静默模式，subagent 只输出最终结论，"
-                                           "思考链/工具日志均不进入主上下文，token 最省。"
-                                           "true = 调试模式，输出完整推理过程。"
+                            "思考链/工具日志均不进入主上下文，token 最省。"
+                            "true = 调试模式，输出完整推理过程。",
                         },
                         "output_format": {
                             "type": "string",
                             "enum": ["text", "json", "markdown"],
-                            "description": "输出格式。text（默认）= 纯文本，json = 结构化数据，markdown = 格式化文本。"
+                            "description": "输出格式。text（默认）= 纯文本，json = 结构化数据，markdown = 格式化文本。",
                         },
                         "max_length": {
                             "type": "integer",
-                            "description": "结果最大字符数（可选，默认不限制）。超过则截断并标注。"
-                        }
-                    }
-                }
+                            "description": "结果最大字符数（可选，默认不限制）。超过则截断并标注。",
+                        },
+                    },
+                },
             },
-            "required": ["task"]
-        }
-    }
+            "required": ["task"],
+        },
+    },
 }
 
 
-async def execute(params: Dict[str, Any]) -> str:
+async def execute(params: dict[str, Any]) -> str:
     """
     执行子 agent 任务（异步）
-    
+
     Args:
         params: 包含 task, context, store_result, timeout, constraints 的字典
-        
+
     Returns:
         JSON 格式的执行结果
     """
@@ -125,28 +124,33 @@ async def execute(params: Dict[str, Any]) -> str:
     timeout = int(timeout)
 
     if not task.strip():
-        return json.dumps({
-            "status": "error",
-            "result": "task 参数不能为空",
-        }, ensure_ascii=False, indent=2)
+        return json.dumps(
+            {
+                "status": "error",
+                "result": "task 参数不能为空",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
 
     # ═══════════════════════════════════════════════════════════
     # 防递归守卫：子 agent 不可再次创建子 agent
     # ═══════════════════════════════════════════════════════════
     if os.environ.get("FP_IS_SUBAGENT") == "1":
-        return json.dumps({
-            "status": "error",
-            "result": "递归调用被拒绝：当前进程已是子 agent（FP_IS_SUBAGENT=1），"
-                      "不可再次创建子 agent。请直接在当前上下文中完成任务。",
-        }, ensure_ascii=False, indent=2)
+        return json.dumps(
+            {
+                "status": "error",
+                "result": "递归调用被拒绝：当前进程已是子 agent（FP_IS_SUBAGENT=1），"
+                "不可再次创建子 agent。请直接在当前上下文中完成任务。",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
 
     # ═══════════════════════════════════════════════════════════
     # 构造查询
     # ═══════════════════════════════════════════════════════════
-    if context:
-        query = f"[背景信息]\n{context}\n\n[任务]\n{task}"
-    else:
-        query = task
+    query = f"[背景信息]\n{context}\n\n[任务]\n{task}" if context else task
 
     # ═══════════════════════════════════════════════════════════
     # 定位入口脚本
@@ -155,10 +159,14 @@ async def execute(params: Dict[str, Any]) -> str:
     cli_py = os.path.join(agent_dir, "cli.py")
 
     if not os.path.exists(cli_py):
-        return json.dumps({
-            "status": "error",
-            "result": f"找不到 cli.py（预期：{cli_py}）",
-        }, ensure_ascii=False, indent=2)
+        return json.dumps(
+            {
+                "status": "error",
+                "result": f"找不到 cli.py（预期：{cli_py}）",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
 
     # ═══════════════════════════════════════════════════════════
     # 启动子进程（异步）
@@ -173,41 +181,52 @@ async def execute(params: Dict[str, Any]) -> str:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, cli_py, "-m", query,
+            sys.executable,
+            cli_py,
+            "-m",
+            query,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
             cwd=agent_dir,
         )
-        
+
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
             duration = time.time() - start_time
-            return json.dumps({
-                "status": "error",
-                "result": f"子任务超时（{timeout}秒）",
-                "duration": f">{timeout}s",
-                "estimated_tokens": 0,
-            }, ensure_ascii=False, indent=2)
+            return json.dumps(
+                {
+                    "status": "error",
+                    "result": f"子任务超时（{timeout}秒）",
+                    "duration": f">{timeout}s",
+                    "estimated_tokens": 0,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
         except (KeyboardInterrupt, asyncio.CancelledError):
             proc.kill()
             await proc.wait()
             raise
-        
+
     except Exception as e:
         duration = time.time() - start_time
-        return json.dumps({
-            "status": "error",
-            "result": f"子任务启动失败: {e}",
-            "duration": f"{duration:.1f}s",
-            "estimated_tokens": 0,
-        }, ensure_ascii=False, indent=2)
+        return json.dumps(
+            {
+                "status": "error",
+                "result": f"子任务启动失败: {e}",
+                "duration": f"{duration:.1f}s",
+                "estimated_tokens": 0,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
 
     duration = time.time() - start_time
     duration_str = f"{duration:.1f}s"
@@ -216,19 +235,23 @@ async def execute(params: Dict[str, Any]) -> str:
     # 错误处理
     # ═══════════════════════════════════════════════════════════
     output = stdout.decode("utf-8", errors="replace").strip()
-    stderr_text = stderr.decode("utf-8", errors="replace").strip()
+    stderr.decode("utf-8", errors="replace").strip()
 
     # ═══════════════════════════════════════════════════════════
     # 提取子 agent 的实际回复（在 stdout 中寻找 handle_command 的结果）
     # ═══════════════════════════════════════════════════════════
 
     if not output:
-        return json.dumps({
-            "status": "warning",
-            "result": "子任务完成但无输出文本",
-            "duration": duration_str,
-            "estimated_tokens": 0,
-        }, ensure_ascii=False, indent=2)
+        return json.dumps(
+            {
+                "status": "warning",
+                "result": "子任务完成但无输出文本",
+                "duration": duration_str,
+                "estimated_tokens": 0,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
 
     # ═══════════════════════════════════════════════════════════
     # 后处理：按约束转换输出
@@ -256,6 +279,7 @@ async def execute(params: Dict[str, Any]) -> str:
     if store_result:
         try:
             from .memory_save_plugin import execute as memory_save
+
             await memory_save({
                 "name": store_result,
                 "type": "reference",

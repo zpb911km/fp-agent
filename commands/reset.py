@@ -2,7 +2,6 @@
 
 import display
 
-
 name = "reset"
 aliases = []
 description = "重置上下文（保留系统提示）"

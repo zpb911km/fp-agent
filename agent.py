@@ -13,7 +13,7 @@ __author__ = "zpb"
 __description__ = "基于生命周期钩子的插件化 Agent 框架"
 
 from core.agent import Agent, Message, Response
-from core.lifecycle import LifecycleManager, LifecycleHook, HookContext
+from core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 from plugins.base.plugin import Plugin, PluginConfig, PluginRegistry
 
 __all__ = [

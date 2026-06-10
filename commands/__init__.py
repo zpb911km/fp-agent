@@ -15,16 +15,17 @@ import display
 # 缓存：命令名 → 模块对象
 _commands: dict[str, "CommandModule"] = {}
 
+
 # 类型标注
 class CommandModule:
     name: str
     aliases: list[str]
     description: str
+
     # execute 返回 (已处理, 输出文本)；
     # 兼容旧版：也可只返回 bool（自动转为 ("", False/True)）
     # 同步或异步均可，由 execute() 自动适配
-    def execute(agent, arg: str) -> tuple[bool, str]: ...
-    async def execute(agent, arg: str) -> tuple[bool, str]: ...
+    async def execute(self, arg: str) -> tuple[bool, str]: ...
 
 
 def _discover_commands():
@@ -92,26 +93,26 @@ def get_all_commands() -> dict[str, str]:
 
 async def execute(agent, cmd_name: str, arg: str) -> tuple[bool, str]:
     """执行命令，返回 (是否已处理, 输出文本)。
-    
+
     兼容旧版只返回 bool 的命令（自动补为 ("", False/True)）。
     新版命令可返回 tuple[bool, str] 或 tuple[bool, str, str]。
     """
     mod = get_command(cmd_name)
     if mod is None:
         return (False, "")
-    
+
     # 执行命令（自动适配同步/异步）
     if asyncio.iscoroutinefunction(mod.execute):
         result = await mod.execute(agent, arg)
     else:
         result = mod.execute(agent, arg)
-    
+
     # 兼容旧版：只返回 bool
     if isinstance(result, bool):
         return (result, "")
-    
+
     # 新版：返回 (handled, output)
     if isinstance(result, tuple):
         return result
-    
+
     return (True, str(result))

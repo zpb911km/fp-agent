@@ -7,7 +7,6 @@
   /back <index> 1    → ❌ 暂不支持（保留后续消息），请使用 /fork
 """
 
-
 name = "back"
 aliases = []
 description = "回退到对话的某个历史时刻"
@@ -18,7 +17,7 @@ async def execute(agent, arg: str) -> tuple[bool, str]:
     parts = arg.strip().split()
     index = None
     mode = None
-    
+
     if parts:
         try:
             index = int(parts[0])
@@ -26,7 +25,7 @@ async def execute(agent, arg: str) -> tuple[bool, str]:
             msg = f"❌ 无效参数：'{parts[0]}' 不是数字"
             agent.io.error(msg)
             return (True, msg)
-    
+
     if len(parts) >= 2:
         try:
             mode = int(parts[1])
@@ -38,6 +37,6 @@ async def execute(agent, arg: str) -> tuple[bool, str]:
             msg = f"❌ 无效参数：'{parts[1]}' 不是数字"
             agent.io.error(msg)
             return (True, msg)
-    
+
     result = await agent.back(target_idx=index, mode=mode)
     return (True, result)
