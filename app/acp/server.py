@@ -141,6 +141,9 @@ class ACPServer:
 
         self._session_id: str | None = None
 
+        # ── 编辑上下文缓存（用于生成 diff） ──
+        self._last_edit_args: dict | None = None
+
         # ── "Follow Agent" 跟踪注册 ──
         self._register_follow_hooks()
 
@@ -233,88 +236,151 @@ class ACPServer:
             return "other"
 
     async def _on_tool_call(self, context, tool_name="", tool_args="", **kwargs):
-        """工具调用前 — 通知 IDE 关注文件"""
+        """工具调用前 — 发送带 input 详情的 tool_call 通知
 
-        # ── 提取文件路径，优先发带文件信息的通知 ──
+        ACP 规范支持 input 字段显示工具原始参数。
+        bash 命令显示完整命令，edit_file 显示 old→new 摘要，read_file 显示文件路径。
+        """
+        # ── 解析参数 ──
+        args_dict = {}
+        with contextlib.suppress(json.JSONDecodeError, TypeError):
+            args_dict = json.loads(tool_args) if isinstance(tool_args, str) else {}
+
+        # ── 构建通知 ──
+        kind = self._get_tool_kind(tool_name)
         file_path = self._extract_file_path(tool_name, tool_args)
-        if file_path:
-            self._log(f"📂 跟踪文件: {file_path}")
-            self._send_file_follow_notification(file_path, tool_name, "in_progress")
-        else:
-            self._send_tool_call_notification(tool_name, "in_progress")
+        title = self._build_tool_title(tool_name, args_dict, kind)
+        input_text = self._build_tool_input(tool_name, args_dict)
+
+        notification: dict = {
+            "sessionId": self._session_id,
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": self._tool_call_id(tool_name),
+                "title": title,
+                "kind": kind,
+                "status": "in_progress",
+            },
+        }
+
+        # 有 input 就加上
+        if input_text:
+            notification["update"]["input"] = {"type": "text", "text": input_text}
+
+        # 有文件路径就加上 content (resource)
+        if file_path and os.path.isfile(file_path):
+            notification["update"]["content"] = [
+                {
+                    "type": "resource",
+                    "resource": {
+                        "uri": f"file://{file_path}",
+                        "mimeType": self._guess_mime(file_path),
+                    },
+                }
+            ]
+
+        self._send_notification("session/update", notification)
+
+    # ── 工具标题和 input 构建 ────────────────────────────
+
+    def _build_tool_title(self, tool_name: str, args: dict, kind: str) -> str:
+        """构建人类可读的工具标题，Zed 在 tool_call 面板展示"""
+        if tool_name == "bash":
+            cmd = args.get("command", "")
+            return cmd.split("\n")[0][:80] if cmd else "bash"
+        elif tool_name == "read_file":
+            return f"read: {os.path.basename(args.get('file_path', '?'))}"
+        elif tool_name == "write_file":
+            return f"write: {os.path.basename(args.get('file_path', '?'))}"
+        elif tool_name == "edit_file":
+            return f"edit: {os.path.basename(args.get('file_path', '?'))}"
+        elif tool_name == "python":
+            code = args.get("code", "")
+            return code.split("\n")[0][:60] if code else "python"
+        elif tool_name == "web_search":
+            return f"search: {args.get('query', '?')}"
+        elif tool_name == "subagent":
+            task = args.get("task", "")
+            return task[:60] + "..." if len(task) > 60 else task
+        return tool_name
+
+    def _build_tool_input(self, tool_name: str, args: dict) -> str | None:
+        """构建工具 input 文本（显示在 Zed 的 tool_call 详情中）"""
+        if tool_name == "bash":
+            return args.get("command", "")
+        elif tool_name == "read_file":
+            fp = args.get("file_path", "")
+            off = args.get("offset")
+            lim = args.get("limit")
+            parts = [fp]
+            if off is not None:
+                parts.append(f"offset={off}")
+            if lim is not None:
+                parts.append(f"limit={lim}")
+            return " ".join(parts)
+        elif tool_name == "edit_file":
+            old = args.get("old_string", "")
+            new = args.get("new_string", "")
+            old_short = old[:60] + "..." if len(old) > 60 else old
+            new_short = new[:60] + "..." if len(new) > 60 else new
+            return f"{args.get('file_path', '?')}\n- {old_short}\n+ {new_short}"
+        elif tool_name == "write_file":
+            return args.get("file_path", "")
+        elif tool_name == "python":
+            return args.get("code", "")[:200]
+        elif tool_name == "web_search":
+            return args.get("query", "")
+        elif tool_name == "subagent":
+            task = args.get("task", "")
+            ctx = args.get("context", "")
+            if ctx:
+                return f"{task}\n[context] {ctx[:100]}"
+            return task
+        return None
 
     async def _on_tool_result(self, context, tool_name="", result="", **kwargs):
-        """工具完成后 — 发送 tool_call_update 通知"""
+        """工具完成后 — 发送 tool_call_update，包含 output 和可能的 diff"""
         status = "failed" if "❌" in str(result)[:10] else "completed"
-        self._send_tool_call_update(tool_name, status)
+        result_str = str(result)
 
-    def _send_file_follow_notification(self, file_path: str, tool_name: str, status: str):
-        """
-        通知 IDE 打开并关注某个文件。
-
-        使用 'workspace/didChangeTextDocument' 风格的 LSP 通知，
-        以及 session/update 中的 tool_call 信息。
-        """
-        file_uri = f"file://{file_path}"
-        kind = self._get_tool_kind(tool_name)
-
-        self._send_notification(
-            "session/update",
-            {
-                "sessionId": self._session_id,
-                "update": {
-                    "sessionUpdate": "tool_call",
-                    "toolCallId": self._tool_call_id(tool_name, status),
-                    "title": f"{kind}: {os.path.basename(file_path)}",
-                    "kind": kind,
-                    "status": status,
-                    "content": [
-                        {
-                            "type": "resource",
-                            "resource": {
-                                "uri": file_uri,
-                                "mimeType": self._guess_mime(file_path),
-                            },
-                        }
-                    ],
-                },
+        notification: dict = {
+            "sessionId": self._session_id,
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": self._tool_call_id(tool_name),
+                "status": status,
             },
-        )
+        }
 
-    def _send_tool_call_notification(self, tool_name: str, status: str):
-        """发送通用 tool_call 通知（初始状态）"""
-        self._send_notification(
-            "session/update",
-            {
-                "sessionId": self._session_id,
-                "update": {
-                    "sessionUpdate": "tool_call",
-                    "toolCallId": self._tool_call_id(tool_name, status),
-                    "title": tool_name,
-                    "kind": self._get_tool_kind(tool_name),
-                    "status": status,
-                },
-            },
-        )
+        # ── output：bash 显示命令输出摘要 ──
+        if tool_name == "bash" and result_str:
+            notification["update"]["output"] = {"type": "text", "text": result_str[:500]}
 
-    def _send_tool_call_update(self, tool_name: str, status: str):
-        """发送 tool_call 状态更新（完成/失败）"""
-        self._send_notification(
-            "session/update",
-            {
-                "sessionId": self._session_id,
-                "update": {
-                    "sessionUpdate": "tool_call_update",
-                    "toolCallId": self._tool_call_id(tool_name, "in_progress"),
-                    "status": status,
-                },
-            },
-        )
+        # ── diff：edit_file 构建 diff 内容块 ──
+        if tool_name == "edit_file" and status == "completed" and self._last_edit_args:
+            args = self._last_edit_args
+            old_text = args.get("old_string", "")
+            new_text = args.get("new_string", "")
+            file_path = args.get("file_path", "")
+            if old_text and new_text and file_path:
+                notification["update"]["content"] = [
+                    {
+                        "type": "diff",
+                        "path": file_path,
+                        "oldText": old_text,
+                        "newText": new_text,
+                    }
+                ]
+
+        # ── 错误时显示错误信息 ──
+        if status == "failed":
+            notification["update"]["output"] = {"type": "text", "text": result_str[:300]}
+
+        self._send_notification("session/update", notification)
 
     @staticmethod
-    def _tool_call_id(tool_name: str, status: str) -> str:
-        """生成可关联的 toolCallId：同一工具名+时间窗内 ID 一致"""
-        # 用工具名哈希 + 当前秒，确保 in_progress 和 completed 用相同 ID
+    def _tool_call_id(tool_name: str) -> str:
+        """生成唯一的 toolCallId"""
         return f"fp_{tool_name}_{int(time.time())}"
 
     @staticmethod
@@ -714,7 +780,7 @@ class ACPServer:
                     header += f" ({mime})"
                 parts.append(f"{header}\n{text}")
 
-        return "\n\n".join(parts)
+        return "\n".join(parts)
 
     def _build_messages_text(self, messages: list[dict]) -> str:
         """
