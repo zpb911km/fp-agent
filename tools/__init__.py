@@ -120,11 +120,6 @@ class ToolRegistry:
 registry = ToolRegistry()
 
 
-def get_tool_definitions() -> list[dict]:
-    """获取所有工具的 OpenAI schema 定义"""
-    return registry.get_all_definitions()
-
-
 async def execute_tool(tool_name: str, params: dict[str, Any]) -> Any:
     """执行指定工具（异步）"""
     return await registry.execute(tool_name, params)

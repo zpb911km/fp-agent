@@ -366,7 +366,6 @@ class ACPServer:
             fp = args.get("file_path", "?")
             return f"{emoji} ELF: {os.path.basename(fp)}"
         return f"{emoji} {tool_name}"
-        return tool_name
 
     def _build_tool_input(self, tool_name: str, args: dict) -> str | None:
         """构建工具 input 文本（显示在 Zed 的 tool_call 详情中）"""

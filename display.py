@@ -83,11 +83,6 @@ def llm_output(text: str):
     print(text, end="", flush=True)
 
 
-def llm_newline():
-    """LLM 回复结束后的换行"""
-    print()
-
-
 def llm_iteration(count: int):
     """打印迭代次数统计"""
     print(apply_style(f"📊 本次交互共迭代 {count} 次", "llm_iteration"))

@@ -142,31 +142,9 @@ class Agent:
         # 触发初始化生命周期
         # （init 在 _ensure_initialized 中触发）
 
-    # ── 兼容旧代码：_context 桥接属性 ──
-    # 过渡期：命令和 WebUI 尚未完全迁移时，_context 仍可读写
-    # 长期目标：所有代码通过 ConversationState 公共 API 操作
-
-    @property
-    def _context(self) -> list[dict]:
-        """兼容旧代码 — 返回内部列表引用（过渡期桥接）"""
-        return self._conv._messages
-
-    @_context.setter
-    def _context(self, value: list[dict]):
-        self._conv.replace_all(value)
-
     @property
     def _system_prompt(self) -> str:
         return self._conv.system_prompt
-
-    def _build_context(self) -> list[dict]:
-        """兼容旧代码 — 构建新版上下文并返回"""
-        prompt = self._prompter.build_system_prompt()
-        self._conv.set_system_prompt(prompt)
-        saved = self.session.load_context(prompt)
-        if len(saved) > 1:
-            self._conv.replace_all(saved)
-        return self._conv._messages
 
     # ── 公共属性 ─────────────────────────────────────
 
@@ -240,144 +218,7 @@ class Agent:
             print("[Agent] Shutting down...")
         return ctx
 
-    # ── 技能系统 ─────────────────────────────────────
-
-    def reload_skills(self) -> bool:
-        """热重载技能"""
-        try:
-            display.info("🔄 正在重新加载技能...")
-            count = self._prompter.reload_skills()
-            self._conv.set_system_prompt(self._prompter.build_system_prompt())
-            display.info(f"✅ 技能重载完成！当前可用技能数：{count}")
-
-            from skills.loader import skill_loader
-
-            for name, skill in sorted(skill_loader.skills.items()):
-                title = skill.title if hasattr(skill, "title") else name
-                display.item(f"   • {title} ({name})")
-
-            return True
-        except Exception as e:
-            display.error(f"❌ 技能重载失败：{e}")
-            return False
-
-    # ── 命令辅助：添加/删除技能 ─────────────────────
-
-    def _cmd_add_skill(self, filename: str):
-        if not filename:
-            display.info("❌ 用法：/add_skill <filename>")
-            display.item("   示例：/add_skill my_new_skill.md")
-            display.info("\n技能文件格式要求:")
-            display.item("  1. 文件必须位于 skills/ 目录")
-            display.item("  2. 使用 YAML frontmatter 格式:")
-            display.item("     ---")
-            display.item("     name: skill_name")
-            display.item("     title: 技能标题")
-            display.item("     description: 技能描述")
-            display.item("     category: 分类 (可选)")
-            display.item("     version: 版本号 (可选)")
-            display.item("     priority: 优先级 1-10 (可选)")
-            display.item("     ---")
-            display.item("     # 技能正文内容")
-            return
-
-        if not filename.endswith(".md"):
-            display.error("❌ 错误：技能文件必须是 .md 格式")
-            return
-
-        from skills.loader import skill_loader as sl
-
-        skill_file = os.path.join(config.SKILLS_DIR, filename)
-
-        if not os.path.exists(skill_file):
-            display.error(f"❌ 错误：文件不存在 {skill_file}")
-            return
-
-        try:
-            skill = sl._load_skill_file(skill_file)
-            if skill is None:
-                display.error(f"❌ 错误：无法加载技能文件 {skill_file}")
-                return
-
-            if skill.name in sl.skills:
-                display.warning(f"⚠️ 警告：技能 '{skill.name}' 已存在！")
-                display.hint("   如需更新，请先删除旧版本或使用 /reload_skills")
-                return
-
-            sl.skills[skill.name] = skill
-            self._conv.set_system_prompt(self._prompter.build_system_prompt())
-
-            # 重建上下文
-            saved = self.session.load_context(self._conv.system_prompt)
-            if len(saved) > 1:
-                self._conv.replace_all(saved)
-
-            display.success(f"✅ 技能 '{skill.name}' 已添加")
-            display.item(f"   标题: {skill.title}")
-            display.item(f"   描述: {skill.description}")
-        except Exception as e:
-            display.error(f"❌ 添加技能失败：{e}")
-
-    def _cmd_remove_skill(self, skill_name: str):
-        from skills.loader import skill_loader as sl
-
-        if not skill_name:
-            display.info("❌ 用法：/remove_skill <skill_name>")
-            display.item("   示例：/remove_skill web_search")
-            return
-
-        skill_name = skill_name.lower().replace(" ", "_")
-        if skill_name not in sl.skills:
-            all_names = ", ".join(sorted(sl.skills.keys()))
-            display.error(f"❌ 未找到技能 '{skill_name}'")
-            display.hint(f"   可用技能: {all_names}")
-            return
-
-        skill = sl.skills.pop(skill_name)
-        self._conv.set_system_prompt(self._prompter.build_system_prompt())
-
-        # 重建上下文
-        saved = self.session.load_context(self._conv.system_prompt)
-        if len(saved) > 1:
-            self._conv.replace_all(saved)
-
-        display.success(f"✅ 技能 '{skill.title}' 已移除")
-
-    def list_skills(self) -> str:
-        """列出所有技能"""
-        from skills.loader import skill_loader
-
-        if not skill_loader.skills:
-            skill_loader.load_all()
-
-        lines = ["📚 当前可用技能:", ""]
-        for name, skill in sorted(skill_loader.skills.items()):
-            title = skill.title
-            desc = skill.description[:60] + "..." if len(skill.description) > 60 else skill.description
-            lines.append(f"  • {title} ({name})")
-            lines.append(f"    {desc}")
-            lines.append("")
-
-        return "\n".join(lines)
-
     # ============ 会话管理 ============
-
-    def list_sessions(self) -> str:
-        sessions = self.session.list_sessions()
-        if not sessions:
-            return "暂无历史会话"
-
-        lines = ["📋 历史会话:", ""]
-        current = self.session.session_id
-
-        for sid in sorted(sessions.keys(), reverse=True):
-            info = sessions[sid]
-            marker = " ← 当前" if sid == current else ""
-            cnt = info.get("message_count", 0)
-            created = info.get("created", "?")
-            lines.append(f"  {sid}{marker}  ({cnt}条, {created})")
-
-        return "\n".join(lines)
 
     def switch_session(self, sid: str) -> bool:
         """切换会话"""
@@ -408,7 +249,11 @@ class Agent:
 
     def rebuild_context(self):
         """重建上下文：重新加载 system prompt + 从会话文件恢复"""
-        self._build_context()
+        prompt = self._prompter.build_system_prompt()
+        self._conv.set_system_prompt(prompt)
+        saved = self.session.load_context(prompt)
+        if len(saved) > 1:
+            self._conv.replace_all(saved)
 
     async def ensure_initialized(self):
         """确保已触发初始化钩子（公共 API）"""
@@ -430,16 +275,6 @@ class Agent:
             self._interrupted = False
             self._processing = False
             raise asyncio.CancelledError("用户中断")
-
-    # ============ 公共 API：技能管理 ============
-
-    def add_skill(self, filename: str):
-        """添加技能文件（公共 API）"""
-        return self._cmd_add_skill(filename)
-
-    def remove_skill(self, skill_name: str):
-        """删除指定技能（公共 API）"""
-        return self._cmd_remove_skill(skill_name)
 
     # ============ 公共 API：会话管理 ============
 
@@ -464,46 +299,40 @@ class Agent:
             状态描述文本
         """
         if target_idx is None:
-            msg = "❌ 请指定要回退到的消息序号。使用 /back list 查看列表，/back <N> 直接回退"
-            self.io.error(msg)
-            return msg
+            return "❌ 请指定要回退到的消息序号。使用 /back list 查看列表，/back <N> 直接回退"
 
         history_msgs = self._conv.get_history_for_display()
 
         if not history_msgs:
-            msg = "没有历史记录可以回退"
-            self.io.info(msg)
-            return msg
+            return "没有历史记录可以回退"
 
         if target_idx < 1 or target_idx > len(history_msgs):
-            msg = f"❌ 无效索引：{target_idx}，有效范围 1~{len(history_msgs)}"
-            self.io.error(msg)
-            return msg
+            return f"❌ 无效索引：{target_idx}，有效范围 1~{len(history_msgs)}"
 
         if mode == 1:
-            msg = "❌ mode=1（保留后续消息）暂不支持，请使用 mode=2（删除后续消息）或 /fork"
-            self.io.error(msg)
-            return msg
+            return "❌ mode=1（保留后续消息）暂不支持，请使用 mode=2（删除后续消息）或 /fork"
 
         self._conv.back(target_idx=target_idx, mode=mode)
         self.session.save_context(self._conv.messages)
 
         if mode is None or mode == 2:
-            msg = f"⏪ 已回退到第 {target_idx} 条消息，后续消息已删除"
-        self.io.info(msg)
-        return msg
+            return f"⏪ 已回退到第 {target_idx} 条消息，后续消息已删除"
+        return "已回退"
 
     def get_history_for_display(self) -> list[dict]:
         """获取用于显示的历史消息列表（仅非 system 消息）"""
         return self._conv.get_history_for_display()
 
-    def fork(self):
-        """基于当前上下文新建会话（公共 API）"""
+    def fork(self) -> str:
+        """基于当前上下文新建会话（公共 API）
+
+        Returns:
+            fork 结果描述，空字符串表示无可 fork 内容
+        """
         old_messages = self._conv.get_non_system_messages()
 
         if not old_messages:
-            display.info("当前会话没有消息，无法 fork")
-            return
+            return ""
 
         self.session.save_context(self._conv.messages)
 
@@ -521,32 +350,11 @@ class Agent:
         # 更新旧会话摘要
         self.session.update_meta(old_sid, summary=last_msg_content)
 
-        display.info(f"🍴 已 fork：从 {old_sid} → {new_sid}")
+        return f"🍴 已 fork：从 {old_sid} → {new_sid}"
 
-    def history(self) -> str:
-        """查看当前对话历史（公共 API）"""
-        history_msgs = self._conv.get_history_for_display()
-
-        if not history_msgs:
-            display.info("暂无对话历史")
-            return ""
-
-        roles_zh = {"user": "👤 用户", "assistant": "🤖 AI", "tool": "🔧 工具"}
-        display.info(f"\n📜 对话历史（共 {len(history_msgs)} 条）:")
-        print()
-
-        for i, msg in enumerate(history_msgs):
-            role = roles_zh.get(msg["role"], msg["role"])
-            content = msg.get("content", "")
-            if msg["role"] == "tool":
-                content = content[:80] + "..." if len(content) > 80 else content
-            else:
-                content = content[:120] + "..." if len(content) > 120 else content
-            content = content.replace("\n", " ")
-            display.item(f"  [{i + 1:3d}] {role}: {content}")
-
-        print()
-        return ""
+    def history(self) -> list[dict]:
+        """获取当前对话历史（仅非 system 消息）"""
+        return self._conv.get_history_for_display()
 
     async def compact_context(self):
         """压缩对话历史（公共 API）"""

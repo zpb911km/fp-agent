@@ -66,11 +66,6 @@ class SlashCompleter(PtCompleter):
                     display_meta=desc,
                 )
 
-    async def get_completions_async(self, document, complete_event):
-        """prompt_toolkit 要求的异步补全接口"""
-        for completion in self.get_completions(document, complete_event):
-            yield completion
-
 
 class InputHandler:
     """交互式输入（prompt_toolkit 封装，支持历史/斜杠补全）"""
