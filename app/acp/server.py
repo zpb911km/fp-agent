@@ -33,6 +33,7 @@ import time
 import traceback
 from typing import Any
 
+from core.io import IOChannel
 from core.lifecycle import LifecycleHook
 
 # ── 路径修复 ─────────────────────────────────────────────
@@ -51,7 +52,7 @@ ACP_PROTOCOL_VERSION = 1
 # ═══════════════════════════════════════════════════════════
 
 
-class ACPIO:
+class ACPIO(IOChannel):
     """
     ACP IO 通道 — 缓冲所有输出后一次性发送。
 
@@ -151,15 +152,6 @@ class ACPServer:
     # "Follow Agent" — 让 IDE 跟踪 Agent 文件操作
     # ═══════════════════════════════════════════════════════
 
-    # 定义哪些工具涉及文件操作
-    _FILE_TOOLS = frozenset({
-        "read_file",
-        "write_file",
-        "edit_file",
-        "file_fingerprint",
-        "elf_analysis",
-    })
-
     # bash 命令中的文件路径匹配模式
     _FILE_PATH_PATTERN = re.compile(
         r"(?:cat|less|more|head|tail|vim|nano|code|xdg-open|less|grep|rg|sed|awk)\s+"
@@ -168,7 +160,6 @@ class ACPServer:
 
     def _register_follow_hooks(self):
         """注册生命周期钩子，在工具调用时通知 IDE 关注文件"""
-        from core.lifecycle import LifecycleHook
 
         mgr = self._agent.lifecycle
 
@@ -188,7 +179,7 @@ class ACPServer:
             priority=1000,
         )
 
-    def _extract_file_path(self, tool_name: str, args_str: str) -> str | None:
+    def _extract_file_path(self, tool_name: str, args: dict) -> str | None:
         """
         从工具调用参数中提取文件路径。
 
@@ -196,12 +187,9 @@ class ACPServer:
           read_file/write_file/edit_file → file_path 参数
           file_fingerprint/elf_analysis  → file_path 参数
           bash                           → 从命令中猜测文件路径
-        """
-        try:
-            args = json.loads(args_str) if isinstance(args_str, str) else args_str
-        except json.JSONDecodeError:
-            return None
 
+        参数 args 应为已解析为 dict 的参数字典，由调用方保证。
+        """
         if not isinstance(args, dict):
             return None
 
@@ -246,9 +234,13 @@ class ACPServer:
         with contextlib.suppress(json.JSONDecodeError, TypeError):
             args_dict = json.loads(tool_args) if isinstance(tool_args, str) else {}
 
+        # ── 缓存 edit_file 参数供 _on_tool_result 构建 diff ──
+        if tool_name == "edit_file":
+            self._last_edit_args = args_dict
+
         # ── 构建通知 ──
         kind = self._get_tool_kind(tool_name)
-        file_path = self._extract_file_path(tool_name, tool_args)
+        file_path = self._extract_file_path(tool_name, args_dict)
         title = self._build_tool_title(tool_name, args_dict, kind)
         input_text = self._build_tool_input(tool_name, args_dict)
 
@@ -491,6 +483,11 @@ class ACPServer:
                 result = await handler(params)
 
             self._send_result(req_id, result)
+
+            # session/new 和 session/load 之后，IDE 已拿到 sessionId，
+            # 此时发送 available_commands_update 确保 IDE 能关联到正确的会话。
+            if method in ("session/new", "session/load"):
+                self._send_available_commands()
         except asyncio.CancelledError:
             self._send_result(req_id, None)
         except Exception as e:
@@ -506,6 +503,7 @@ class ACPServer:
             "session/load": self._handle_session_load,
             "session/prompt": self._handle_session_prompt,
             "session/list": self._handle_session_list,
+            "session/commands": self._handle_session_commands,
             "session/set_mode": self._handle_session_set_mode,
         }
         return handlers.get(method)
@@ -517,6 +515,8 @@ class ACPServer:
             self._agent.cancel()
         elif method == "initialized":
             self._log("客户端已初始化")
+            # 不在此处注册命令——此时只有默认 sessionId（IDE 不认识它），
+            # 命令由 session/new 和 session/load handler 在正确的会话中注册。
         else:
             pass
 
@@ -573,9 +573,8 @@ class ACPServer:
         self._session_id = new_sid
         self._log(f"创建新会话: {new_sid}")
 
-        # ── 注册所有斜杠命令（让 Zed 不拦截它们） ──
-        self._send_available_commands()
-
+        # 注意：命令注册通知在 _dispatch 中响应之后发送，
+        # 以确保 IDE 先拿到 sessionId 再处理命令列表。
         return {"sessionId": new_sid}
 
     async def _handle_session_load(self, params: dict) -> dict:
@@ -594,9 +593,7 @@ class ACPServer:
             self._session_id = session_id
             self._log(f"恢复会话: {session_id}")
 
-            # ── 注册斜杠命令 ──
-            self._send_available_commands()
-
+            # 注意：命令注册通知在 _dispatch 中响应之后发送
             return {"sessionId": session_id}
         else:
             self._log(f"会话不存在: {session_id}")
@@ -656,32 +653,16 @@ class ACPServer:
         # ── 发送 plan 通知 ──
         self._send_plan_notification()
 
-        # ── 注册工具调用钩子（实时通知 Zed 工具执行状态） ──
-        # 生命周期钩子的签名是 func(context, **kwargs)，与 _on_tool_call 匹配
-        self._agent.lifecycle.register(
-            LifecycleHook.ON_TOOL_CALL,
-            self._on_tool_call,
-            priority=50,
-            name="acp_tool_call",
-        )
-        self._agent.lifecycle.register(
-            LifecycleHook.ON_TOOL_RESULT,
-            self._on_tool_result,
-            priority=50,
-            name="acp_tool_result",
-        )
-
         # ── 调用 Agent 核心 ──
         # 使用 ACPIO 缓冲所有命令输出（info/item/error/hint），
         # 避免每条发一条 agent_message_chunk 导致 Zed 显示多条消息。
+        #
+        # 工具调用通知由 __init__ 中注册的永久钩子
+        # (acp_follow_tool_call / acp_follow_tool_result) 自动发送。
         acp_io = ACPIO()
 
         self._log(f"发送给 Agent: {user_prompt[:120]}")
         response = await self._agent.process(user_prompt, io=acp_io)
-
-        # ── 注销工具调用钩子 ──
-        self._agent.lifecycle.unregister(LifecycleHook.ON_TOOL_CALL, "acp_tool_call")
-        self._agent.lifecycle.unregister(LifecycleHook.ON_TOOL_RESULT, "acp_tool_result")
 
         # ── 合并缓冲区 + response.content，一次性发送 ──
         # 命令（如 /help）将输出写入 ACPIO 缓冲区的同时还返回内容到 response.content，
@@ -710,6 +691,26 @@ class ACPServer:
         """切换 Agent 模式（预留）"""
         mode = params.get("mode", "normal")
         return {"mode": mode}
+
+    async def _handle_session_commands(self, params: dict) -> dict:
+        """
+        返回可用斜杠命令列表（作为 session/commands 请求的 fallback）。
+
+        标准 ACP v1 通过 available_commands_update 通知注册命令，
+        此 handler 作为补充，覆盖 IDE 通过请求方式查询命令的场景。
+
+        命令名不带 '/' 前缀（ACP v1 约定），IDE 端会自行添加。
+        """
+        try:
+            from commands import get_all_commands
+
+            cmds = get_all_commands()
+            # ACP v1 协议中命令名不带 '/' 前缀
+            commands = [{"name": name, "description": desc} for name, desc in sorted(cmds.items())]
+            return {"commands": commands}
+        except Exception as e:
+            self._log(f"获取命令列表失败: {e}")
+            return {"commands": []}
 
     # ═══════════════════════════════════════════════════════
     # 辅助方法
@@ -809,18 +810,19 @@ class ACPServer:
         Zed 的聊天面板维护一个白名单，只有注册过的 / 命令才会发给 Agent，
         未注册的直接在 UI 报错"is not a recognized command"。
 
-        参考: https://agentclientprotocol.com/protocol/v1/slash-commands
+        命令名不含 '/' 前缀（ACP v1 规范），IDE 端在匹配用户输入时会自行添加。
+        官方规范参考: https://agentclientprotocol.com/protocol/slash-commands
+
+        调用时机：由 _dispatch 在 session/new 和 session/load 的响应之后发送，
+        确保 IDE 先拿到 sessionId 再处理命令列表。
         """
         try:
             from commands import get_all_commands
 
             cmds = get_all_commands()
-            available = []
-            for name, desc in sorted(cmds.items()):
-                available.append({
-                    "name": name,
-                    "description": desc,
-                })
+            # ACP v1 规范: name 字段不包含 '/' 前缀
+            # 示例: {"name": "help", "description": "显示此帮助"}
+            available = [{"name": name, "description": desc} for name, desc in sorted(cmds.items())]
 
             if available:
                 self._send_notification(

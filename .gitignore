@@ -124,3 +124,6 @@ commands/*
 !commands/session.py
 !commands/skills.py
 plugins/*.py*
+
+#
+app/acp/docs/*

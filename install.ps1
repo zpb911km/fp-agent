@@ -6,7 +6,7 @@
 #>
 
 $ErrorActionPreference = "Stop"
-$Host.UI.RawUI.WindowTitle = "🪨 Five Pebbles Agent — Installer"
+$Host.UI.RawUI.WindowTitle = " Five Pebbles Agent — Installer"
 
 function Write-Info  { Write-Host "ℹ️  " -ForegroundColor Cyan -NoNewline; Write-Host $args }
 function Write-Ok    { Write-Host "✅ " -ForegroundColor Green -NoNewline; Write-Host $args }
@@ -18,7 +18,7 @@ $ScriptDir = (Get-Item $PSScriptRoot).FullName
 Set-Location $ScriptDir
 
 Write-Host "╭──────────────────────────────────────╮" -ForegroundColor Cyan
-Write-Host "│  🪨  Five Pebbles Agent 安装程序      │" -ForegroundColor Cyan
+Write-Host "│    Five Pebbles Agent 安装程序      │" -ForegroundColor Cyan
 Write-Host "╰──────────────────────────────────────╯" -ForegroundColor Cyan
 Write-Info "项目目录: $ScriptDir"
 
@@ -93,7 +93,7 @@ if (Test-Path $ConfigPath) {
     if ($ConfigContent -match "YOUR_API_KEY") {
         Write-Warn "config.json 中的 LLM_API_KEY 仍为占位符"
         Write-Warn "请编辑 config.json 填入你的 API Key"
-        
+
         $EditChoice = Read-Host "是否现在用记事本编辑？[y/N]"
         if ($EditChoice -eq "y" -or $EditChoice -eq "Y") {
             notepad.exe $ConfigPath
@@ -106,7 +106,7 @@ if (Test-Path $ConfigPath) {
 # ─── 7. 完成 ──────────────────────────────────────
 Write-Host ""
 Write-Host "╔══════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║         🪨  安装完成！                       ║" -ForegroundColor Green
+Write-Host "║           安装完成！                       ║" -ForegroundColor Green
 Write-Host "╠══════════════════════════════════════════════╣" -ForegroundColor Green
 Write-Host "║  运行 fp     启动交互式 CLI                  ║" -ForegroundColor Green
 Write-Host "║  如果 fp 不可用，用 python cli.py 代替       ║" -ForegroundColor Green

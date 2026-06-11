@@ -23,7 +23,7 @@ cd "$SCRIPT_DIR"
 
 echo -e "${CYAN}"
 echo "  ╭──────────────────────────────────────╮"
-echo "  │  🪨  Five Pebbles Agent 安装程序     │"
+echo "  │    Five Pebbles Agent 安装程序     │"
 echo "  ╰──────────────────────────────────────╯"
 echo -e "${NC}"
 info "项目目录: $SCRIPT_DIR"
@@ -115,7 +115,7 @@ fi
 # ─── 8. 完成 ─────────────────────────────────────────
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║         🪨  安装完成！                       ║${NC}"
+echo -e "${GREEN}║           安装完成！                       ║${NC}"
 echo -e "${GREEN}╠══════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║  运行 fp     启动交互式 CLI                  ║${NC}"
 echo -e "${GREEN}║  运行 fp -c  一次性问答                       ║${NC}"

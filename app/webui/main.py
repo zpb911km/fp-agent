@@ -212,7 +212,7 @@ class WebUIPlugin(Plugin):
 
     async def _emit(self, event_type: str, **data):
         """向 EventBus 发布事件"""
-        await event_bus.publish({"type": type, "ts": time.time(), **data})
+        await event_bus.publish({"type": event_type, "ts": time.time(), **data})
 
     async def _on_before_llm(self, ctx: HookContext, **kwargs):
         """LLM 调用开始 → 前端显示"思考中"状态"""
@@ -263,6 +263,12 @@ class WebUIPlugin(Plugin):
     async def _on_shutdown(self, ctx: HookContext, **kwargs):
         """Agent 关闭 → 前端显示关闭通知"""
         await self._emit("shutdown")
+
+    def on_unregister(self):
+        """卸载插件时清理资源"""
+        # WebUIPlugin 是桥接插件，随 Agent 生命周期自动管理，
+        # EventBus 由 WebUI 服务器全局管理，此处无需额外清理
+        pass
 
 
 # ════════════════════════════════════════════════════════════
@@ -366,7 +372,8 @@ def _check_auth_rate_limit(client_ip: str) -> None:
 @app.post("/api/auth")
 async def auth_login(request: Request, body: dict):
     """验证 Token 并登录（每 IP 限频）"""
-    _check_auth_rate_limit(request.client.host)
+    client_ip = request.client.host if request.client else request.headers.get("x-forwarded-for", "unknown")
+    _check_auth_rate_limit(client_ip)
     token = body.get("token", "").strip()
     if secrets.compare_digest(token, _WEBUI_TOKEN):
         return {"status": "ok", "message": "验证通过"}
@@ -688,14 +695,16 @@ async def search_session_messages(session_id: str, body: dict):
     if not query:
         raise HTTPException(status_code=400, detail="查询内容不能为空")
 
+    import re
+
     use_regex = body.get("regex", False)
     limit = min(body.get("limit", 20), 100)
 
     # ── 编译匹配模式 ──
+    pattern: re.Pattern | None = None
+    query_lower: str | None = None
     if use_regex:
         try:
-            import re
-
             pattern = re.compile(query)
         except re.error as e:
             raise HTTPException(status_code=400, detail=f"正则表达式无效: {e}") from e
@@ -731,13 +740,9 @@ async def search_session_messages(session_id: str, body: dict):
             non_system_idx += 1
 
         # ── 匹配检测 ──
-        matched = False
-        if use_regex:
-            if pattern.search(content):
-                matched = True
-        else:
-            if query_lower in content.lower():
-                matched = True
+        matched = (use_regex and pattern is not None and pattern.search(content)) or (
+            not use_regex and query_lower is not None and query_lower in content.lower()
+        )
 
         if matched:
             preview = content[:200]
@@ -1170,7 +1175,7 @@ async def index():
     <body style="background:#1a1a2e;color:#e0e0e0;font-family:sans-serif;
           display:flex;align-items:center;justify-content:center;height:100vh;">
       <div style="text-align:center">
-        <h1>🪨 Five Pebbles WebUI</h1>
+        <h1> Five Pebbles WebUI</h1>
         <p>API 服务器已启动。</p>
         <p>访问 <a href="/api/health" style="color:#00bcd4">/api/health</a> 检查状态</p>
         <p>前端文件位于: <code>app/static/index.html</code></p>

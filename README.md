@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🪨 Five Pebbles Agent
+#  Five Pebbles Agent
 
 **基于生命周期钩子的插件化 Agent 框架**
 
@@ -70,7 +70,7 @@ python -m agent
 $ python cli.py
 
   ╭──────────────────────────────────────────╮
-  │  🪨  Five Pebbles Agent  v2.0.0          │
+  │    Five Pebbles Agent  v2.0.0          │
   │  输入 /help 查看命令列表                  │
   │  Ctrl+C 中断  |  Ctrl+D 保存退出          │
   ╰──────────────────────────────────────────╯
@@ -108,11 +108,11 @@ from agent import Agent
 
 async def main():
     agent = Agent()
-    
+
     # 处理消息（自动调用 LLM + 工具循环）
     response = await agent.process("帮我搜索 Python 异步编程教程")
     print(response.content)
-    
+
     await agent.shutdown()
 
 asyncio.run(main())
@@ -317,5 +317,5 @@ echo "运行 ls -la" | python3 cli.py
 ---
 
 <div align="center">
-  <sub>Built with 🪨 by Five Pebbles</sub>
+  <sub>Built by Five Pebbles</sub>
 </div>
