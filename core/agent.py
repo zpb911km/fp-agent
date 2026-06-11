@@ -457,13 +457,17 @@ class Agent:
         """回退到对话的某个历史时刻（公共 API）
 
         Args:
-            target_idx: 目标消息序号（1-based，从第一条非 system 开始）
-                        None 时进入交互模式
+            target_idx: 目标消息序号（1-based，从第一条非 system 开始），必填
             mode: 2 或 None=删除后续消息（默认），1=暂不支持
 
         Returns:
             状态描述文本
         """
+        if target_idx is None:
+            msg = "❌ 请指定要回退到的消息序号。使用 /back list 查看列表，/back <N> 直接回退"
+            self.io.error(msg)
+            return msg
+
         history_msgs = self._conv.get_history_for_display()
 
         if not history_msgs:
@@ -471,68 +475,27 @@ class Agent:
             self.io.info(msg)
             return msg
 
-        # 有参数：直接回溯
-        if target_idx is not None:
-            if target_idx < 1 or target_idx > len(history_msgs):
-                msg = f"❌ 无效索引：{target_idx}，有效范围 1~{len(history_msgs)}"
-                self.io.error(msg)
-                return msg
-
-            if mode == 1:
-                msg = "❌ mode=1（保留后续消息）暂不支持，请使用 mode=2（删除后续消息）或 /fork"
-                self.io.error(msg)
-                return msg
-
-            self._conv.back(target_idx=target_idx, mode=mode)
-            self.session.save_context(self._conv.messages)
-
-            if mode is None or mode == 2:
-                msg = f"⏪ 已回退到第 {target_idx} 条消息，后续消息已删除"
-            self.io.info(msg)
-            return msg
-
-        # 无参数：交互模式
-        roles_zh = {"user": "👤 用户", "assistant": "🤖 AI", "tool": "🔧 工具"}
-        lines = [f"📜 对话历史（共 {len(history_msgs)} 条消息）:"]
-        for i, msg in enumerate(history_msgs):
-            role = roles_zh.get(msg["role"], msg["role"])
-            content = msg.get("content", "")
-            if msg["role"] == "tool":
-                content = content[:60] + "..." if len(content) > 60 else content
-            else:
-                content = content[:120] + "..." if len(content) > 120 else content
-            content = content.replace("\n", " ")
-            lines.append(f"  [{i + 1:3d}] {role}: {content}")
-
-        prompt_hint = f"输入 1~{len(history_msgs)} 回退到对应位置，输入 q 取消"
-        self.io.info(lines[0])
-        for line in lines[1:]:
-            self.io.item(line)
-        self.io.hint(prompt_hint)
-
-        choice = await self.io.ask("AI <- 选择: ")
-        if not choice or choice.lower() == "q":
-            msg = "已取消"
-            self.io.info(msg)
-            return msg
-
-        try:
-            idx = int(choice)
-            if idx < 1 or idx > len(history_msgs):
-                msg = f"❌ 无效选择，请输入 1~{len(history_msgs)}"
-                self.io.error(msg)
-                return msg
-        except ValueError:
-            msg = "❌ 请输入数字"
+        if target_idx < 1 or target_idx > len(history_msgs):
+            msg = f"❌ 无效索引：{target_idx}，有效范围 1~{len(history_msgs)}"
             self.io.error(msg)
             return msg
 
-        self._conv.back(target_idx=idx, mode=2)
+        if mode == 1:
+            msg = "❌ mode=1（保留后续消息）暂不支持，请使用 mode=2（删除后续消息）或 /fork"
+            self.io.error(msg)
+            return msg
+
+        self._conv.back(target_idx=target_idx, mode=mode)
         self.session.save_context(self._conv.messages)
 
-        msg = f"⏪ 已回退到第 {choice} 条消息位置"
+        if mode is None or mode == 2:
+            msg = f"⏪ 已回退到第 {target_idx} 条消息，后续消息已删除"
         self.io.info(msg)
         return msg
+
+    def get_history_for_display(self) -> list[dict]:
+        """获取用于显示的历史消息列表（仅非 system 消息）"""
+        return self._conv.get_history_for_display()
 
     def fork(self):
         """基于当前上下文新建会话（公共 API）"""
