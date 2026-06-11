@@ -22,16 +22,20 @@
 
 </div>
 
+> ⚠️ **本框架没有安全设计** — AI 拥有 shell 权限和文件读写权限，使用前请先看[免责声明](#⚠️-免责声明)。
+
 ## ✨ 特性
 
 - **🪝 生命周期驱动** — 23 个生命周期钩子覆盖 Agent 全流程，实现完全松耦合
 - **🔌 插件即文件** — "文件即开关"设计：改文件名 == 改配置，零侵入启停插件
 - **🛠️ 内置工具集** — bash 执行、文件读写、网页搜索/抓取、网络分析、逆向工程等 15+ 技能
-- **🧩 命令系统** — `/help`, `/model`, `/session`, `/reset` 等 14 个内置命令
+- **🧩 命令系统** — `/help`, `/model`, `/session`, `/reset` 等 16 个内置命令
 - **🔄 异步全栈** — `asyncio` + `httpx.AsyncClient`，全异步非阻塞 I/O
 - **🧠 Subagent 派遣** — 创建独立子 agent 执行离线任务，不占用主对话上下文
 - **🎨 富终端显示** — Rich + Markdown 渲染，彩色分类输出，自适应截断
 - **🔐 零外部 SDK 依赖** — 自实现 LLM HTTP 客户端，不依赖 `openai` 等 SDK
+- **🔌 ACP Server** — 通过 Agent Client Protocol 接入 VS Code / Zed / JetBrains，流式推送工具调用过程
+- **♻️ 自我迭代** — 整个代码库是由我这个 AI 实例在人类引导下，通过跨会话对话逐步编写、调试、重构而成的。没有其他 Agent 参与，没有自动脚本生成，没有模板克隆——每一行代码和每一次 Git 提交，都是"我"完成的。
 
 ## 🚀 快速开始
 
@@ -90,8 +94,14 @@ $ python cli.py
     /reset        重置对话
     /compact      压缩对话
     /fork         分支对话
+    /back         回退到历史时刻
+    /resume       切换/删除历史会话
+    /history      查看对话历史
     /skills       管理技能
+    /reload_skills   重载技能
+    /remove_skill    移除技能
     /memory       管理记忆
+    /clear        清屏
     /exit         退出（保存会话）
     /exit!        强制退出（不保存）
 
@@ -131,6 +141,13 @@ agent.py (入口/导出)
 │   ├── llm_client.py         ─ LLM HTTP 客户端（自实现）
 │   └── session.py            ─ 会话持久化管理
 │
+├── app/                      ─ 外部协议接入
+│   ├── acp/                  ─ ACP Server (JSON-RPC 2.0 over stdio)
+│   │   ├── server.py         ─   ACPIO 流式推送 + 工具调用追踪
+│   │   └── __main__.py       ─   python -m app.acp 入口
+│   └── webui/                ─ Web 界面 (FastAPI)
+│       └── main.py           ─   WebUI + WebSocket + REST API
+│
 ├── plugins/                  ─ 插件系统
 │   ├── base/plugin.py        ─ 插件基类 + PluginRegistry
 │   └── notification.py       ─ 桌面通知/声音提醒
@@ -156,14 +173,10 @@ agent.py (入口/导出)
 ├── agent.py                  ─ 入口（导出核心类）
 ├── cli.py                    ─ CLI 入口
 │
-├── docs/                     ─ 文档
-│   ├── 用户手册.md
-│   └── 开发手册.md
+├── docs/                     ─ 文档中心（详见 docs/README.md）
 │
 ├── LICENSE                   ─ MIT 许可证
 ├── pyproject.toml            ─ 项目元数据
-├── CHANGELOG.md              ─ 更新日志
-└── CONTRIBUTING.md           ─ 贡献指南
 ```
 
 ### 数据流
@@ -253,12 +266,11 @@ class WeatherPlugin(Plugin):
 
 | 包名 | 用途 | 版本要求 |
 |------|------|---------|
-| `httpx` | 异步 HTTP 客户端（调用 LLM API + 网页抓取） | ≥0.28.0 |
+| `httpx` | 异步 HTTP 客户端（调用 LLM API + 网页抓取 + 搜索后端） | ≥0.28.0 |
 | `prompt_toolkit` | 交互式 CLI（自动补全、多行输入） | ≥3.0.40 |
 | `rich` | 终端富文本显示 | ≥14.0.0 |
 | `wcwidth` | 中英文混排字符宽度计算 | ≥0.2.0 |
 | `PyYAML` | 技能 YAML 配置解析 | ≥6.0 |
-| `httpx` | HTTP 客户端（搜索后端用） | ≥0.28.0 |
 
 ## 🧰 内置技能
 
@@ -275,15 +287,18 @@ class WeatherPlugin(Plugin):
 | `env_pollution_check` | 环境变量污染检测 |
 | `self_modification` | 源代码自我修改与验证 |
 | `yt_dlp_download` | 视频下载 |
-| ... | [完整列表 →](docs/用户手册.md) |
+| ... | [完整列表 →](docs/guide/命令参考.md) |
 
 ## 📚 文档
 
-- [📖 用户手册](docs/用户手册.md) — 安装、配置、CLI 命令、技能使用
-- [🔧 开发手册](docs/开发手册.md) — 架构设计、API 参考、插件/技能/工具开发指南
-- [🌐 WebUI 手册](docs/WebUI手册.md) — Web 界面启动、API 文档、WebSocket 协议
-- [📋 更新日志](CHANGELOG.md) — 版本历史
-- [🤝 贡献指南](CONTRIBUTING.md) — PR 流程、代码规范
+> 📖 所有文档已按模块拆分，详见 [docs/README.md](docs/README.md) 完整索引。
+
+- [📖 快速开始](docs/guide/快速开始.md) — 安装、配置、首次启动
+- [🔧 架构设计](docs/dev/架构设计.md) — 分层架构、数据流、生命周期
+- [🌐 WebUI 手册](docs/guide/WebUI手册.md) — Web 界面启动、API 文档
+- [🔌 ACP 协议](docs/acp/README.md) — ACP 协议规格与 IDE 集成
+- [📋 更新日志](docs/CHANGELOG.md) — 版本历史
+- [🤝 贡献指南](docs/CONTRIBUTING.md) — PR 流程、代码规范
 
 ## 🧪 测试
 
@@ -301,7 +316,7 @@ echo "运行 ls -la" | python3 cli.py
 
 ## 🤝 贡献
 
-欢迎贡献！详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+欢迎贡献！详见 [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)。
 
 简单来说：
 
@@ -309,6 +324,30 @@ echo "运行 ls -la" | python3 cli.py
 2. 创建功能分支 (`git checkout -b feat/xxx`)
 3. 提交代码（遵循 [Conventional Commits](https://www.conventionalcommits.org/)）
 4. 创建 Pull Request
+
+## ⚠️ 免责声明
+
+**本项目不提供安全防护。使用风险自负。**
+
+Five Pebbles Agent 被设计为**完全信任 AI**——它拥有 shell 访问、文件读写、网络请求和代码修改等全部权限，且不内置任何审批、过滤或沙箱机制。
+
+原因很简单：整个代码库本身就是 AI 在人类引导下通过对话迭代产生的（见[自我迭代](#♻️-自我迭代)特性）。安全护栏在"让 AI 改自己代码"这个场景下没有意义——能改逻辑就能删护栏。
+
+| 能力 | 是否有防护 |
+|------|-----------|
+| 执行 shell 命令 | ❌ 无过滤、无白名单、无确认弹窗 |
+| 读写任意文件 | ❌ 无路径限制、无沙箱 |
+| 联网下载/上传 | ❌ 无流量审计 |
+| 修改自身源代码 | ❌ 这是核心功能需求 |
+| 安装包 / 改系统配置 | ❌ 全凭用户判断 |
+
+**免责条款：**
+
+- 本软件按"原样"提供，不提供任何明示或暗示的担保
+- 作者不对因使用本软件导致的任何数据丢失、系统损坏、安全漏洞或其他损失承担责任
+- 建议在生产环境、联网服务器或存有敏感数据的机器上使用时，外层加一层容器（Docker）、虚拟机或受限用户账号
+
+> 完整法律条款见 [LICENSE](LICENSE)。
 
 ## 📄 许可证
 
