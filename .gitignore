@@ -125,5 +125,4 @@ commands/*
 !commands/skills.py
 plugins/*.py*
 
-#
-app/acp/docs/*
+docs/acp/*
