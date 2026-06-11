@@ -29,7 +29,6 @@ import json
 import os
 import re
 import sys
-import time
 import traceback
 from typing import Any
 
@@ -54,28 +53,57 @@ ACP_PROTOCOL_VERSION = 1
 
 class ACPIO(IOChannel):
     """
-    ACP IO 通道 — 缓冲所有输出后一次性发送。
+    ACP IO 通道 — 带流式推送的缓冲输出。
 
     核心设计:
-      - 所有 info/item/error/hint/say 调用都写入缓冲区
+      - 所有 info/item/error/hint/say 调用累积到缓冲区
+      - 每累积约 300 字符或显式调用 partial_flush() 时，
+        通过 send_chunk 回调推送一条 agent_message_chunk
+      - process() 结束后调用 flush_text() 获取剩余文本
       - 每次 ask() 先 flush 缓冲区，然后返回 "q" 取消交互
-      - handler 在 process() 完成后调用 flush() 发送最终合并的消息
 
-    为何缓冲？
-      命令如 /help、/back、/resume 会调用多次 io.info() / io.item()，
-      每条发一条 agent_message_chunk 会导致 Zed 将它们显示为多条独立消息。
-      缓冲后合并为一条消息，格式正确、视觉统一。
+    为何需要流式？
+      长时间运行的 Agent 任务（如代码生成、多步工具调用）中，
+      用户需要看到渐进式反馈，而不是静默等待后突然弹出完整回复。
     """
 
-    def __init__(self):
+    _STREAM_THRESHOLD = 300
+
+    def __init__(self, send_chunk=None):
+        """
+        Args:
+            send_chunk: 可选的回调函数，接收 (text: str)，
+                        在缓冲达到阈值时自动推送 agent_message_chunk。
+                        同步调用，直接写入 stdout。
+        """
         self._buffer: list[str] = []
+        self._send_chunk = send_chunk
+        self._char_count = 0
+
+    def _accumulate(self, text: str):
+        """写入缓冲区，超过阈值时自动推送流式块"""
+        self._buffer.append(str(text))
+        self._char_count += len(str(text))
+        if self._send_chunk and self._char_count >= self._STREAM_THRESHOLD:
+            self._partial_flush()
+
+    def _partial_flush(self):
+        """推送当前缓冲区作为一条 agent_message_chunk，不清除全部"""
+        if not self._buffer or not self._send_chunk:
+            return
+        text = "\n".join(self._buffer)
+        # 标记：非最终块，由 send_chunk 决定如何处理
+        self._send_chunk(text)
+        self._buffer.clear()
+        self._char_count = 0
 
     def flush_text(self) -> str:
-        """返回缓冲区合并后的文本并清空缓冲区"""
+        """返回缓冲区剩余文本并清空（process 结束后调用）"""
         if not self._buffer:
             return ""
         merged = "\n".join(self._buffer)
         self._buffer.clear()
+        self._char_count = 0
         return merged
 
     async def ask(self, prompt: str) -> str:
@@ -83,19 +111,19 @@ class ACPIO(IOChannel):
         return "q"
 
     def say(self, text: str):
-        self._buffer.append(str(text))
+        self._accumulate(text)
 
     def info(self, text: str):
-        self._buffer.append(str(text))
+        self._accumulate(text)
 
     def hint(self, text: str):
-        self._buffer.append(str(text))
+        self._accumulate(text)
 
     def error(self, text: str):
-        self._buffer.append(str(text))
+        self._accumulate(text)
 
     def item(self, text: str):
-        self._buffer.append(str(text))
+        self._accumulate(text)
 
 
 class ACPServer:
@@ -141,6 +169,10 @@ class ACPServer:
                 self._agent = Agent(enable_log=False)
 
         self._session_id: str | None = None
+
+        # ── 工具调用追踪（配对 call ↔ result 通知） ──
+        self._tool_call_counter = 0
+        self._active_tool_call_ids: dict[str, str] = {}
 
         # ── 编辑上下文缓存（用于生成 diff） ──
         self._last_edit_args: dict | None = None
@@ -229,6 +261,10 @@ class ACPServer:
         ACP 规范支持 input 字段显示工具原始参数。
         bash 命令显示完整命令，edit_file 显示 old→new 摘要，read_file 显示文件路径。
         """
+        # ── 会话未就绪时跳过（start() 之前触发的钩子） ──
+        if self._session_id is None:
+            return
+
         # ── 解析参数 ──
         args_dict = {}
         with contextlib.suppress(json.JSONDecodeError, TypeError):
@@ -332,6 +368,10 @@ class ACPServer:
 
     async def _on_tool_result(self, context, tool_name="", result="", **kwargs):
         """工具完成后 — 发送 tool_call_update，包含 output 和可能的 diff"""
+        # ── 会话未就绪时跳过 ──
+        if self._session_id is None:
+            return
+
         status = "failed" if "❌" in str(result)[:10] else "completed"
         result_str = str(result)
 
@@ -339,7 +379,7 @@ class ACPServer:
             "sessionId": self._session_id,
             "update": {
                 "sessionUpdate": "tool_call_update",
-                "toolCallId": self._tool_call_id(tool_name),
+                "toolCallId": self._tool_call_id_for_result(tool_name),
                 "status": status,
             },
         }
@@ -370,10 +410,16 @@ class ACPServer:
 
         self._send_notification("session/update", notification)
 
-    @staticmethod
-    def _tool_call_id(tool_name: str) -> str:
-        """生成唯一的 toolCallId"""
-        return f"fp_{tool_name}_{int(time.time())}"
+    def _tool_call_id(self, tool_name: str) -> str:
+        """生成唯一的 toolCallId，并记录到活跃表供 result 阶段回查"""
+        self._tool_call_counter += 1
+        call_id = f"fp_{tool_name}_{self._tool_call_counter}"
+        self._active_tool_call_ids[tool_name] = call_id
+        return call_id
+
+    def _tool_call_id_for_result(self, tool_name: str) -> str:
+        """取最近一次同名 tool_call 的 ID，用于配对 tool_call_update"""
+        return self._active_tool_call_ids.get(tool_name, f"fp_{tool_name}_unknown")
 
     @staticmethod
     def _guess_mime(file_path: str) -> str:
@@ -654,33 +700,27 @@ class ACPServer:
         self._send_plan_notification()
 
         # ── 调用 Agent 核心 ──
-        # 使用 ACPIO 缓冲所有命令输出（info/item/error/hint），
-        # 避免每条发一条 agent_message_chunk 导致 Zed 显示多条消息。
+        # 使用 ACPIO 缓冲输出，并在累积到阈值时自动推送 agent_message_chunk，
+        # 让用户在长时间任务中看到渐进式反馈。
         #
         # 工具调用通知由 __init__ 中注册的永久钩子
         # (acp_follow_tool_call / acp_follow_tool_result) 自动发送。
-        acp_io = ACPIO()
+        acp_io = ACPIO(send_chunk=self._send_message_notification)
 
         self._log(f"发送给 Agent: {user_prompt[:120]}")
         response = await self._agent.process(user_prompt, io=acp_io)
 
-        # ── 合并缓冲区 + response.content，一次性发送 ──
-        # 命令（如 /help）将输出写入 ACPIO 缓冲区的同时还返回内容到 response.content，
-        # 两者可能重复。前端优先展示缓冲区内容，跳过冗余的 response.content。
+        # ── 处理剩余文本（流式推送后缓冲区可能已空） ──
         buf = acp_io.flush_text()
         reply_text = response.content or ""
 
-        # 合并并去重（如果缓存区已包含 reply_text，就不重复发）
-        final_text = buf
-        if reply_text and reply_text not in buf:
-            if final_text:
-                final_text += "\n"
-            final_text += reply_text
+        if buf.strip():
+            # 有缓冲区残留（最终块）
+            self._send_message_notification(buf)
 
-        if final_text.strip():
-            # 美化：检测常见模式，应用更好的 Markdown 格式
-            formatted = self._format_for_acp(final_text)
-            self._send_message_notification(formatted)
+        if reply_text and reply_text not in buf:
+            # response.content 有新内容且未在流式推送中出现过
+            self._send_message_notification(reply_text)
 
         # ── ACP v1 响应只包含 stopReason ──
         return {
@@ -785,24 +825,16 @@ class ACPServer:
 
     def _build_messages_text(self, messages: list[dict]) -> str:
         """
-        将 OpenAI 格式的 messages 转换为单个文本字符串。
+        从 OpenAI 格式的 messages 中提取最后一条 user 消息。
 
-        只取最后一条消息的内容，但会附带角色前缀以提供上下文。
+        Agent 自己管理对话历史（self._conv.messages），
+        不需要外部拼接历史轮次。只提取最新用户输入。
         """
-        # 简单情况：只有一条消息
-        if len(messages) == 1:
-            return messages[0].get("content", "")
-
-        # 多条消息：拼接最近的对话轮次（最多保留3轮）
-        recent = messages[-4:]  # 保留最近 4 条
-        parts = []
-        for msg in recent:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            if content:
-                parts.append(f"[{role}]\n{content}")
-
-        return "\n\n".join(parts)
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                return content if isinstance(content, str) else str(content)
+        return ""
 
     def _send_available_commands(self):
         """注册所有斜杠命令到 Zed（通过 available_commands_update 通知）
@@ -857,44 +889,6 @@ class ACPServer:
                 },
             },
         )
-
-    @staticmethod
-    def _format_for_acp(text: str) -> str:
-        """美化 ACP 输出文本的 Markdown 格式
-
-        规则：
-        - 命令列表（多行，每行以 "  /" 开头）→ 代码块，保留单换行
-        - 其他文本 → \n 替换为 \n\n（Markdown 段落）
-        """
-        lines = text.split("\n")
-
-        # ── 检测：命令列表（至少 2 行以 "  /" 开头）──
-        cmd_lines = [line for line in lines if line.strip().startswith("/") and len(line.strip()) > 3]
-        if len(cmd_lines) >= 2:
-            # 是否大部分行都是命令行
-            non_empty = [line for line in lines if line.strip()]
-            if len(cmd_lines) / max(len(non_empty), 1) > 0.3:
-                formatted = "**可用命令:**\n\n```\n"
-                for line in lines:
-                    stripped = line.strip()
-                    if (
-                        stripped.startswith("/")
-                        or stripped == "可用命令:"
-                        or stripped
-                        and not stripped.startswith("```")
-                    ):
-                        formatted += line.strip() + "\n"
-                formatted += "```"
-                return formatted
-
-        # ── 序号列表（多行以 "  [N]" 或 "[N]" 开头）→ 保持原样 ──
-        indexed = [line for line in lines if line.strip().startswith("[") and "]" in line[:10]]
-        if len(indexed) >= 3:
-            # 保留原格式，但用单个 \n 连接（紧凑），段落用 \n\n
-            return text
-
-        # ── 默认：\n → \n\n（Markdown 段落分隔）──
-        return text.replace("\n", "\n\n")
 
     def _send_message_notification(self, text: str):
         """通过 agent_message_chunk 通知发送回复内容"""
