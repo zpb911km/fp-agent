@@ -633,9 +633,11 @@ class ACPServer:
 
             self._send_result(req_id, result)
 
-            # session/new 和 session/load 之后，IDE 已拿到 sessionId，
-            # 此时发送 available_commands_update 确保 IDE 能关联到正确的会话。
+            # session/new 和 session/load 之后，等待 IDE 完全消化响应并注册 sessionId，
+            # 然后再发送 available_commands_update 通知。直接连续发送会导致 Zed
+            # 在处理通知时 session 尚未注册，报 "unknown session" 并丢弃命令列表。
             if method in ("session/new", "session/load"):
+                await asyncio.sleep(0.05)
                 self._send_available_commands()
         except asyncio.CancelledError:
             self._send_result(req_id, None)
