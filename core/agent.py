@@ -851,14 +851,14 @@ class Agent:
                         await self.lifecycle.emit(
                             LifecycleHook.ON_TOOL_CALL,
                             tool_name=tc["function"]["name"],
-                            tool_args=tc["function"]["arguments"][:200],
+                            tool_args=tc["function"]["arguments"][:5000],
                         )
                         result = await self._execute_tool(tc)
                         self._conv.add_tool_message(tc["id"], result)
                         await self.lifecycle.emit(
                             LifecycleHook.ON_TOOL_RESULT,
                             tool_name=tc["function"]["name"],
-                            result=result[:200],
+                            result=result[:5000],
                         )
                     except (KeyboardInterrupt, asyncio.CancelledError):
                         self._interrupted = False

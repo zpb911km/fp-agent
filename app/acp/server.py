@@ -174,8 +174,9 @@ class ACPServer:
         self._tool_call_counter = 0
         self._active_tool_call_ids: dict[str, str] = {}
 
-        # ── 编辑上下文缓存（用于生成 diff） ──
-        self._last_edit_args: dict | None = None
+        # ── 工具参数缓存（call → result 阶段共享） ──
+        self._last_edit_args: dict | None = None  # edit_file 参数，用于构建 diff
+        self._last_read_path: str | None = None  # read_file 路径，用于 result 的 resource URI
 
         # ── "Follow Agent" 跟踪注册 ──
         self._register_follow_hooks()
@@ -274,6 +275,11 @@ class ACPServer:
         if tool_name == "edit_file":
             self._last_edit_args = args_dict
 
+        # ── 缓存 read_file 路径供 _on_tool_result 构建 resource URI ──
+        if tool_name == "read_file":
+            fp = args_dict.get("file_path", "")
+            self._last_read_path = fp if isinstance(fp, str) else None
+
         # ── 构建通知 ──
         kind = self._get_tool_kind(tool_name)
         file_path = self._extract_file_path(tool_name, args_dict)
@@ -311,25 +317,55 @@ class ACPServer:
 
     # ── 工具标题和 input 构建 ────────────────────────────
 
+    # Emoji 分类，让 IDE 的 tool_call 面板一目了然
+    _TOOL_EMOJI: dict[str, str] = {
+        "read": "📖",
+        "edit": "✏️",
+        "bash": "🖥️",
+        "analyze": "🔍",
+        "other": "🔧",
+    }
+
     def _build_tool_title(self, tool_name: str, args: dict, kind: str) -> str:
-        """构建人类可读的工具标题，Zed 在 tool_call 面板展示"""
+        """构建一目了然的工具标题，含 emoji 和关键参数"""
+        emoji = self._TOOL_EMOJI.get(kind, "🔧")
+
         if tool_name == "bash":
             cmd = args.get("command", "")
-            return cmd.split("\n")[0][:80] if cmd else "bash"
+            first_line = cmd.split("\n")[0] if cmd else ""
+            if len(first_line) > 100:
+                first_line = first_line[:100] + "…"
+            return f"{emoji} {first_line}" if first_line else f"{emoji} bash"
         elif tool_name == "read_file":
-            return f"read: {os.path.basename(args.get('file_path', '?'))}"
+            fp = args.get("file_path", "?")
+            return f"{emoji} {fp}"
         elif tool_name == "write_file":
-            return f"write: {os.path.basename(args.get('file_path', '?'))}"
+            fp = args.get("file_path", "?")
+            return f"{emoji} 写入 {os.path.basename(fp)}"
         elif tool_name == "edit_file":
-            return f"edit: {os.path.basename(args.get('file_path', '?'))}"
+            fp = args.get("file_path", "?")
+            return f"{emoji} 编辑 {os.path.basename(fp)}"
         elif tool_name == "python":
             code = args.get("code", "")
-            return code.split("\n")[0][:60] if code else "python"
+            first_line = code.split("\n")[0][:70] if code else ""
+            return f"{emoji} 🐍 {first_line}" if first_line else f"{emoji} 🐍 python"
         elif tool_name == "web_search":
-            return f"search: {args.get('query', '?')}"
+            q = args.get("query", "?")
+            return f"{emoji} 搜索: {q[:60]}{'…' if len(q) > 60 else ''}"
         elif tool_name == "subagent":
             task = args.get("task", "")
-            return task[:60] + "..." if len(task) > 60 else task
+            summary = task[:60] + "…" if len(task) > 60 else task
+            return f"{emoji} 子任务: {summary}"
+        elif tool_name == "web_fetch":
+            url = args.get("url", "?")
+            return f"{emoji} 抓取: {url[:60]}"
+        elif tool_name == "file_fingerprint":
+            fp = args.get("file_path", "?")
+            return f"{emoji} 指纹: {os.path.basename(fp)}"
+        elif tool_name == "elf_analysis":
+            fp = args.get("file_path", "?")
+            return f"{emoji} ELF: {os.path.basename(fp)}"
+        return f"{emoji} {tool_name}"
         return tool_name
 
     def _build_tool_input(self, tool_name: str, args: dict) -> str | None:
@@ -366,6 +402,41 @@ class ACPServer:
             return task
         return None
 
+    # ── 结果摘要 ────────────────────────────────────────
+
+    @staticmethod
+    def _summarize_result(tool_name: str, result_str: str) -> str:
+        """
+        按工具类型对结果分级截断，返回适合展示的摘要文本。
+
+        策略：
+          read_file   → 全文（用户就是想看文件内容）
+          edit_file   → 仅 diff（不发完整文本，由 diff 结构承载）
+          write_file  → 500 字（确认写入了什么）
+          bash        → 2000 字（可能包含错误栈）
+          python      → 2000 字（代码计算结果）
+          web_search  → 800 字（搜索结果摘要）
+          subagent    → 1500 字（子任务结论）
+          其他        → 300 字
+        """
+        limits: dict[str, int] = {
+            "read_file": 0,  # 0 = 不限
+            "edit_file": 0,  # 纯 diff，不发 output 文本
+            "write_file": 500,
+            "bash": 2000,
+            "python": 2000,
+            "web_search": 800,
+            "subagent": 1500,
+        }
+        limit = limits.get(tool_name, 300)
+
+        if limit == 0 or len(result_str) <= limit:
+            return result_str
+
+        truncated = result_str[:limit]
+        truncated += f"\n\n**...(已截断，共 {len(result_str)} 字符)**"
+        return truncated
+
     async def _on_tool_result(self, context, tool_name="", result="", **kwargs):
         """工具完成后 — 发送 tool_call_update，包含 output 和可能的 diff"""
         # ── 会话未就绪时跳过 ──
@@ -384,9 +455,39 @@ class ACPServer:
             },
         }
 
-        # ── output：bash 显示命令输出摘要 ──
-        if tool_name == "bash" and result_str:
-            notification["update"]["output"] = {"type": "text", "text": result_str[:500]}
+        # ── output：所有工具都发结果摘要（分级截断） ──
+        if result_str and status != "failed":
+            summarized = self._summarize_result(tool_name, result_str)
+            if summarized:
+                if tool_name == "read_file":
+                    # read_file：用 resource 类型发，让 IDE 渲染为代码块
+                    read_path = self._last_read_path or "(inline)"
+                    notification["update"]["output"] = {
+                        "type": "resource",
+                        "resource": {
+                            "uri": f"file://{read_path}",
+                            "mimeType": self._guess_mime(read_path) if read_path != "(inline)" else "text/plain",
+                            "text": summarized,
+                        },
+                    }
+                elif tool_name == "edit_file":
+                    # edit_file：有 diff 块时不重复发 output 文本
+                    has_diff = (
+                        status == "completed"
+                        and self._last_edit_args
+                        and self._last_edit_args.get("old_string")
+                        and self._last_edit_args.get("new_string")
+                    )
+                    if not has_diff:
+                        notification["update"]["output"] = {
+                            "type": "text",
+                            "text": summarized,
+                        }
+                else:
+                    notification["update"]["output"] = {
+                        "type": "text",
+                        "text": summarized,
+                    }
 
         # ── diff：edit_file 构建 diff 内容块 ──
         if tool_name == "edit_file" and status == "completed" and self._last_edit_args:
@@ -406,7 +507,10 @@ class ACPServer:
 
         # ── 错误时显示错误信息 ──
         if status == "failed":
-            notification["update"]["output"] = {"type": "text", "text": result_str[:300]}
+            notification["update"]["output"] = {
+                "type": "text",
+                "text": self._summarize_result(tool_name, result_str),
+            }
 
         self._send_notification("session/update", notification)
 
