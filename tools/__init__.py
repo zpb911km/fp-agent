@@ -27,7 +27,7 @@ class ToolRegistry:
 
     def __init__(self):
         self._core_defs: list[dict] = []
-        self._core_executor: Callable = None
+        self._core_executor: Callable | None = None
         self._plugins: dict[str, dict] = {}  # {name: {definition, executor}}
         self._load_core()
         self._load_plugins()
@@ -104,6 +104,8 @@ class ToolRegistry:
         # 核心工具
         core_names = {"bash", "read_file", "write_file", "edit_file"}
         if tool_name in core_names:
+            if self._core_executor is None:
+                raise RuntimeError("核心工具未初始化，请先调用 _load_core()")
             return await self._core_executor(tool_name, params)
 
         # 插件工具（按定义中的 name 匹配）

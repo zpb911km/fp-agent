@@ -288,7 +288,7 @@ class Agent:
 
     # ============ 公共 API：对话操作 ============
 
-    async def back(self, target_idx: int = None, mode: int = None) -> str:
+    async def back(self, target_idx: int | None = None, mode: int | None = None) -> str:
         """回退到对话的某个历史时刻（公共 API）
 
         Args:
