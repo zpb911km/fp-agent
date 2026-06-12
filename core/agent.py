@@ -9,6 +9,7 @@ Agent 主干类（全异步版本 — 重构版）
 """
 
 import asyncio
+import contextvars
 import json
 import os
 from dataclasses import dataclass, field
@@ -28,8 +29,8 @@ from core.prompt_builder import PromptBuilder
 from core.tool_executor import ToolExecutor
 from plugins.base.plugin import PluginRegistry
 
-# ── 跨平台中断标志 ─────────────────────────────────────
-_interrupted_flag = False
+# ── 上下文 local IO 通道（防并发竞态） ─────────────────
+_current_io: contextvars.ContextVar["IOChannel | None"] = contextvars.ContextVar("_current_io", default=None)
 
 
 @dataclass
@@ -70,7 +71,7 @@ class Agent:
         self.enable_log = enable_log
 
         # IO 通道（默认 CLI）
-        self.io = io or CLIIO()
+        self._default_io = io or CLIIO()
 
         # 检查配置
         if not config.check_llm_config():
@@ -133,6 +134,9 @@ class Agent:
         self._processing = False
         self._cancelled_by_user = False
 
+        # 初始化锁（防竞态）
+        self._init_lock = asyncio.Lock()
+
         # 循环检测器
         self._loop_detector = session.LoopDetector(max_iterations=config.MAX_ITERATIONS)
 
@@ -145,6 +149,16 @@ class Agent:
     @property
     def _system_prompt(self) -> str:
         return self._conv.system_prompt
+
+    @property
+    def io(self) -> "IOChannel":
+        """获取当前异步上下文的 IO 通道（context-local，防并发竞态）
+
+        1. 优先返回 process() 的 context var 覆盖值（如 WebSocketIO）
+        2. 无覆盖时退回到 __init__ 注入的默认通道（CLIIO）
+        """
+        ctx_io: IOChannel | None = _current_io.get()
+        return ctx_io if ctx_io is not None else self._default_io
 
     # ── 公共属性 ─────────────────────────────────────
 
@@ -262,15 +276,21 @@ class Agent:
     # ============ 中断机制 ============
 
     def cancel(self):
+        """请求中断当前处理
+
+        设置中断标记，在下一个循环检查点生效。
+        注意：不会立即中断正在进行的 LLM 请求，
+        请求完成后会检测标记并停止。
+        跨线程安全（GIL 保护原子赋值）。
+        """
         self._interrupted = True
 
     def _check_interrupted(self):
-        global _interrupted_flag
-        if _interrupted_flag:
-            _interrupted_flag = False
-            self._interrupted = False
-            self._processing = False
-            raise asyncio.CancelledError("用户中断")
+        """检查中断标记（纯实例方案）
+
+        信号处理器通过 agent.cancel() 设置 self._interrupted，
+        也可直接调用 cancel() 中断正在进行的处理。
+        """
         if self._interrupted:
             self._interrupted = False
             self._processing = False
@@ -481,14 +501,13 @@ class Agent:
         if not user_input.strip():
             return Response(content="")
 
-        old_io = self.io
-        if io is not None:
-            self.io = io
-
+        # 使用 contextvars 设置 IO 通道（不修改实例变量，防并发竞态）
+        token = _current_io.set(io) if io is not None else None
         try:
             return await self._process_inner(user_input)
         finally:
-            self.io = old_io
+            if token is not None:
+                _current_io.reset(token)
 
     async def _process_inner(self, user_input: str) -> Response:
         """处理用户输入的核心逻辑"""
@@ -523,6 +542,9 @@ class Agent:
 
         while True:
             iteration += 1
+
+            # ── 中断检查（支持 signal handler 和 cancel() 两种途径） ──
+            self._check_interrupted()
 
             # 循环检测
             loop, reason = self._loop_detector.check(iteration, last_text)
@@ -676,8 +698,10 @@ class Agent:
     # ============ 生命周期管理 ============
 
     async def _ensure_initialized(self):
-        """确保已触发初始化钩子"""
-        if not hasattr(self, "_initialized"):
+        """确保已触发初始化钩子（线程安全，asyncio.Lock 保护）"""
+        async with self._init_lock:
+            if hasattr(self, "_initialized") and self._initialized:
+                return
             self._initialized = True
             await self.lifecycle.emit(LifecycleHook.ON_INIT)
 

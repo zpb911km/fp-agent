@@ -14,6 +14,9 @@ from prompt_toolkit.completion import Completer as PtCompleter
 import config
 import display
 
+# ── 信号处理器可访问的当前 agent 实例（跨线程安全） ──
+_current_agent = None
+
 
 class SlashCompleter(PtCompleter):
     """自定义补全器：仅在输入 "/" 前缀时匹配命令和工具名。
@@ -133,24 +136,20 @@ class InputHandler:
 
 
 def _raw_sigint_handler(signum, frame):
-    """跨平台 SIGINT 处理器：取消 asyncio 任务 + 设置全局标志"""
+    """跨平台 SIGINT 处理器：取消 asyncio 任务 + 通知 agent 实例"""
     # 方式 1（Unix 主线程）：直接取消所有 asyncio 任务
-    # 在 Unix 上，signal handler 在主线程运行，all_tasks() 可用
     try:
         for task in asyncio.all_tasks():
             task.cancel()
     except (RuntimeError, ValueError):
-        pass  # 无运行中的事件循环
-
-    # 方式 2（跨平台回退）：设置全局标志
-    # Windows 上 Ctrl+C 在独立线程运行，all_tasks() 可能失败，
-    # 此标志作为安全网，_check_interrupted() 会检查它
-    try:
-        import core.agent as _agent_mod
-
-        _agent_mod._interrupted_flag = True
-    except Exception:
         pass
+
+    # 方式 2（跨平台回退）：通知 agent 实例
+    # Windows 上 Ctrl+C 在独立线程运行，asyncio.all_tasks().cancel()
+    # 可能不立即生效，agent.cancel() 设置实例级中断标记作为安全网，
+    # _check_interrupted() 会在下一个循环检查点检测到它。
+    if _current_agent is not None:
+        _current_agent.cancel()
 
 
 async def main():
@@ -176,6 +175,10 @@ async def main():
     from core.agent import Agent
 
     agent = Agent(resume=args.resume)
+
+    # ── 挂接到模块变量，供信号处理器跨线程访问 ──────────
+    global _current_agent
+    _current_agent = agent
 
     # ── 安装 SIGINT 处理器 ────────────────────────────────
     #
