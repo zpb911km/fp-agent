@@ -23,7 +23,7 @@
 | | [dev/架构设计.md](dev/架构设计.md) | 分层架构、数据流、生命周期系统 |
 | | [dev/引擎.md](dev/引擎.md) | Agent 主干类 API、LifecycleManager |
 | | [dev/LLM通信.md](dev/LLM通信.md) | LLM Client、流式、think 标签提取 |
-| | [dev/会话模块.md](dev/会话模块.md) | SessionManager API、LoopDetector |
+| | [dev/会话模块.md](dev/会话模块.md) | SessionManager API |
 | | [dev/配置系统.md](dev/配置系统.md) | 三级优先级、配置项一览 |
 | | [dev/显示层.md](dev/显示层.md) | 6 类输出、LLMStreamer、Spinner |
 | | [dev/命令系统.md](dev/命令系统.md) | 命令格式、自动发现、开发指南 |

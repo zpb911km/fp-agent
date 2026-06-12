@@ -137,9 +137,6 @@ class Agent:
         # 初始化锁（防竞态）
         self._init_lock = asyncio.Lock()
 
-        # 循环检测器
-        self._loop_detector = session.LoopDetector(max_iterations=config.MAX_ITERATIONS)
-
         # 内置钩子
         self._register_builtin_hooks()
 
@@ -537,21 +534,9 @@ class Agent:
         # ── 生命周期：消息已接收 ──
         await self.lifecycle.emit(LifecycleHook.ON_MESSAGE_RECEIVED, content=filtered_input)
 
-        iteration = 0
-        last_text = ""
-
         while True:
-            iteration += 1
-
             # ── 中断检查（支持 signal handler 和 cancel() 两种途径） ──
             self._check_interrupted()
-
-            # 循环检测
-            loop, reason = self._loop_detector.check(iteration, last_text)
-            if loop:
-                display.warning(f"\n⚠️  {reason}，强制跳出循环\n")
-                self._conv.add_system_message(f"系统提示：{reason}。请停止操作并总结。")
-                break
 
             # 修复 tool ordering
             self._conv.repair_tool_ordering()
@@ -624,13 +609,6 @@ class Agent:
             if interrupted:
                 display.info("⏹️ 已中断（保留了已生成的内容）")
                 break
-
-            text_content = assistant_msg.get("content", "")
-            if not text_content:
-                tool_names = [tc["function"]["name"] for tc in assistant_msg.get("tool_calls", [])]
-                text_content = f"[调用了工具: {', '.join(tool_names)}]"
-            else:
-                last_text = text_content
 
             # ── 处理工具调用 ──
             tool_calls = assistant_msg.get("tool_calls", [])

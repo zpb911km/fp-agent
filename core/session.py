@@ -23,8 +23,6 @@ if PROJECT_ROOT not in sys.path:
 
 import contextlib
 
-import config
-
 SESSIONS_DIR = os.path.join(PROJECT_ROOT, "data", "sessions")
 
 
@@ -354,18 +352,3 @@ class SessionManager:
         _write_meta_to_file(path, meta)
         if sid == self._session_id:
             self._meta = meta
-
-
-class LoopDetector:
-    """死循环检测器"""
-
-    def __init__(self, max_iterations: int | None = None):
-        self.max_iterations = max_iterations if max_iterations is not None else config.MAX_ITERATIONS
-
-    def check(self, iteration: int, response: str) -> tuple[bool, str]:
-        if iteration >= self.max_iterations:
-            return True, f"达到最大迭代次数 ({self.max_iterations})"
-        return False, ""
-
-    def reset(self):
-        pass
