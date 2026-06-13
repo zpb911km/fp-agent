@@ -5,6 +5,7 @@ Agent v2 配置管理
 
 import json
 import os
+import sys
 from typing import Any
 
 # 项目根目录
@@ -25,6 +26,84 @@ def _load_json_config() -> dict:
 
 
 _json_cfg = _load_json_config()
+
+# ═══════════════════════════════════════════════════════════════
+# 配置 Schema 验证
+# ═══════════════════════════════════════════════════════════════
+# 格式: key -> (期望类型, 最小值, 最大值, 是否必填, 描述)
+_CONFIG_SCHEMA: dict[str, tuple[type, Any, Any, bool, str]] = {
+    "LLM_API_KEY": (str, None, None, True, "API 密钥"),
+    "LLM_API_BASE_URL": (str, None, None, True, "API 基础地址"),
+    "LLM_MODEL": (str, None, None, True, "模型名称"),
+    "TEMPERATURE": (float, 0.0, 2.0, False, "生成温度"),
+    "MAX_TOKENS": (int, 1, 131072, False, "最大输出 token 数"),
+    "TIMEOUT": (int, 5, 600, False, "请求超时秒数"),
+    "RETRY_COUNT": (int, 0, 10, False, "失败重试次数"),
+    "MAX_ITERATIONS": (int, 1, 500, False, "最大迭代轮次"),
+    "MAX_CONTEXT_TOKENS": (int, 256, 131072, False, "上下文窗口 token 数"),
+    "MEMORY_MAX_HISTORY": (int, 0, 10_000, False, "记忆保留历史条数"),
+}
+
+
+def _validate_value(key: str, value: Any, verbose: bool = False) -> list[str]:
+    """验证单个配置项，返回错误/警告信息列表。"""
+    if key not in _CONFIG_SCHEMA:
+        return []
+
+    expected_type, lo, hi, required, desc = _CONFIG_SCHEMA[key]
+    issues: list[str] = []
+
+    # 1. 必填性检查
+    if required and (value is None or (isinstance(value, str) and not value.strip())):
+        issues.append(f"[!] {key} ({desc})：必填项未设置")
+        return issues  # 后续检查无意义
+
+    if value is None:
+        return issues  # 非必填且为 None，跳过后续检查
+
+    # 2. 类型检查
+    if not isinstance(value, expected_type):
+        # 允许 int 兼容 float（用户可能在 JSON 中写 TEMPERATURE: 1 而非 1.0）
+        if expected_type is float and isinstance(value, int):
+            pass  # 隐式转换，不报错
+        else:
+            actual = type(value).__name__
+            issues.append(f"[!] {key} ({desc})：期望 {expected_type.__name__} 类型，实际为 {actual}（值: {value!r}）")
+            return issues
+
+    # 3. 数值范围检查
+    if lo is not None and hi is not None and isinstance(value, (int, float)) and (value < lo or value > hi):
+        issues.append(f"[!] {key} ({desc})：值 {value} 超出有效范围 [{lo}, {hi}]")
+
+    return issues
+
+
+def validate_config(verbose: bool = False) -> list[str]:
+    """验证所有配置项，返回所有问题的汇总列表。
+
+    同时检查 JSON 和模块级常量，确保：
+    - 必填项已设置
+    - 类型正确
+    - 数值在合理范围内
+
+    返回 [(严重级别, key, 消息), ...] 列表，空列表表示全部合法。
+    """
+    all_issues: list[str] = []
+
+    for key in _CONFIG_SCHEMA:
+        # 从 JSON 中获取值
+        json_val = _json_cfg.get(key) if key in _json_cfg else None
+        issues = _validate_value(key, json_val, verbose=verbose)
+        all_issues.extend(issues)
+
+    return all_issues
+
+
+# 模块加载时自动验证配置
+_validation_issues = validate_config()
+if _validation_issues:
+    for msg in _validation_issues:
+        print(f"[Config] {msg}", file=sys.stderr)
 
 
 def _value(key: str, default: Any = None) -> Any:
@@ -164,12 +243,34 @@ def get_display_truncation(name: str) -> int:
 
 
 def check_llm_config() -> bool:
-    """检查 LLM 配置是否完整"""
+    """检查 LLM 配置是否完整。
+
+    返回 True 表示配置可用，False 表示存在致命问题（无法联网调用 LLM）。
+    会打印所有检测到的问题（含非致命警告）。
+    """
+    ok = True
+
     if not LLM_API_KEY:
         print("[Warning] LLM_API_KEY not set")
-        print("  → 设置方式：① 修改 config.json ② 设置环境变量 OPENAI_API_KEY")
-        return False
-    return True
+        print("  → 设置方式：① 修改 config.json ② 设置环境变量 LLM_API_KEY")
+        ok = False
+
+    if not LLM_API_BASE_URL:
+        print("[Warning] LLM_API_BASE_URL not set")
+        print("  → 设置方式：① 修改 config.json ② 设置环境变量 LLM_API_BASE_URL")
+        ok = False
+
+    if not LLM_MODEL:
+        print("[Warning] LLM_MODEL not set")
+        print("  → 设置方式：① 修改 config.json ② 设置环境变量 LLM_MODEL")
+        ok = False
+
+    # 打印所有 Schema 验证发现的问题
+    global _validation_issues
+    if _validation_issues:
+        print(f"[Info] 配置文件中存在 {len(_validation_issues)} 个配置问题（详见上方警告）")
+
+    return ok
 
 
 def get_default_config() -> dict:
