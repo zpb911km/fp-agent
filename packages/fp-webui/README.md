@@ -8,7 +8,7 @@
 
 **fp-webui** 是五块卵石（Five Pebbles）Agent 框架的 Web 图形界面。基于 FastAPI + Uvicorn 构建，提供浏览器端的 Agent 交互体验，支持实时流式对话、会话管理、配置调整等。
 
-> 通过 `pip install fp[webui]` 或 `pip install fp-webui` 安装。
+> 通过 `pip install fp-agent[webui]` 或 `pip install fp-webui` 安装。
 
 ---
 
@@ -45,7 +45,7 @@ fp-webui
 或使用主包：
 
 ```bash
-pip install fp[webui]
+pip install fp-agent[webui]
 fp --webui
 ```
 

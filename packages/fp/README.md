@@ -27,7 +27,7 @@
 ### 基本安装（核心 + CLI）
 
 ```bash
-pip install fp
+pip install fp-agent
 ```
 
 安装后即可使用终端 REPL：
@@ -39,17 +39,17 @@ fp
 ### 安装所有组件
 
 ```bash
-pip install fp[all]
+pip install fp-agent[all]
 ```
 
 ### 选择性安装
 
 ```bash
 # 核心 + Web 界面
-pip install fp[webui]
+pip install fp-agent[webui]
 
 # 核心 + ACP 协议
-pip install fp[acp]
+pip install fp-agent[acp]
 ```
 
 要求 Python >= 3.11。
@@ -73,7 +73,7 @@ fp
 ### Web 界面
 
 ```bash
-pip install fp[webui]
+pip install fp-agent[webui]
 fp --webui
 ```
 
@@ -82,7 +82,7 @@ fp --webui
 ### ACP 远程调用
 
 ```bash
-pip install fp[acp]
+pip install fp-agent[acp]
 fp --acp
 ```
 

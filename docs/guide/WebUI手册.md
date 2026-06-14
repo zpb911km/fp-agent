@@ -57,7 +57,7 @@ cd /media/zpb/data/codes/AI/agent
 python3 -m app.webui.main
 
 # 方式二：直接启动
-pip install fp[webui]
+pip install fp-agent[webui]
 fp-webui
 ```
 

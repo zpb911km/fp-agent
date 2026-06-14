@@ -3,7 +3,7 @@ requires = ["setuptools>=64.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fp"
+name = "fp-agent"
 dynamic = ["version"]
 description = "五块卵石 - 基于生命周期钩子的插件化 Agent 框架"
 readme = "README.md"
@@ -28,7 +28,7 @@ dependencies = [
 [project.optional-dependencies]
 webui = ["fp-webui>=0.0.0"]
 acp = ["fp-acp>=0.0.0"]
-all = ["fp[webui,acp]"]
+all = ["fp-agent[webui,acp]"]
 
 [project.scripts]
 fp = "fp.main:main"

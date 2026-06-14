@@ -8,7 +8,7 @@
 
 **fp-acp** 实现了五块卵石（Five Pebbles）的 Agent Communication Protocol（ACP），一个基于 **JSON-RPC 2.0** 的通信协议。它允许外部进程（IDE 插件、其他 Agent、自动化脚本）通过标准化的 API 与 Agent 交互。
 
-> 通过 `pip install fp[acp]` 或 `pip install fp-acp` 安装。
+> 通过 `pip install fp-agent[acp]` 或 `pip install fp-acp` 安装。
 
 ---
 

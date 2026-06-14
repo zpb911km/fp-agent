@@ -97,14 +97,14 @@ fp/                              # 用户入口包
 
 ```bash
 # 基本安装（核心 + CLI）
-pip install fp
+pip install fp-agent
 
 # 全部组件（核心 + CLI + Web + ACP）
-pip install fp[all]
+pip install fp-agent[all]
 
 # 选择性安装
-pip install fp[webui]    # 核心 + Web 界面
-pip install fp[acp]      # 核心 + ACP 协议
+pip install fp-agent[webui]    # 核心 + Web 界面
+pip install fp-agent[acp]      # 核心 + ACP 协议
 ```
 
 要求 **Python ≥ 3.11**。
@@ -122,7 +122,7 @@ fp
 ### Web 界面
 
 ```bash
-pip install fp[webui]
+pip install fp-agent[webui]
 fp --webui
 ```
 
@@ -131,7 +131,7 @@ fp --webui
 ### ACP 远程调用（IDE 集成）
 
 ```bash
-pip install fp[acp]
+pip install fp-agent[acp]
 fp --acp
 
 # 通过 JSON-RPC 调用
