@@ -28,7 +28,7 @@
 **这是这个项目最核心、最独特的事实：**
 
 > **本项目 100% 的代码和文件，均由「五块卵石」(这个 AI Agent 系统) 自己编写。**
-> 从 `fp-core` 的引擎逻辑到 `fp-cli` 的终端界面，从 `fp-webui` 的 Web 服务到 `fp-acp` 的协议实现，从项目结构到这份文档——
+> 从 `fp-core` 的引擎逻辑到 `fp-terminal` 的终端界面，从 `fp-webui` 的 Web 服务到 `fp-acp` 的协议实现，从项目结构到这份文档——
 > **每一行 Python、每一份配置文件、每一篇 Markdown 文档，都是 AI Agent 产出。** 这是一个**自举（self-bootstrapping）** 系统：它编写自己的代码、修改自身的行为、优化自己的架构。人类只给出了需求，剩下的由它自己完成。
 
 这意味着：**这个系统从根上就没有安全设计。**
@@ -86,7 +86,7 @@ fp/                              # 用户入口包
 │   ├── skills/                  # 技能定义文件（.md）
 │   ├── tools/                   # 工具注册与执行
 │   └── prompts/                 # 系统提示词
-├── fp-cli/                      # 🖥️ 终端 REPL
+├── fp-terminal/                 # 🖥️ 终端 REPL
 ├── fp-webui/                    # 🌐 Web 界面
 └── fp-acp/                      # 🔗 ACP 协议服务器
 ```
@@ -193,7 +193,7 @@ source .venv/bin/activate
 
 # 安装所有子包（开发模式）
 pip install -e packages/fp-core
-pip install -e packages/fp-cli
+pip install -e packages/fp-terminal
 pip install -e packages/fp-webui
 pip install -e packages/fp-acp
 pip install -e packages/fp

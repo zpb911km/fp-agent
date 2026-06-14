@@ -39,3 +39,4 @@ include = ["fp_webui*"]
 
 [tool.setuptools_scm]
 root = "../.."
+local_scheme = "no-local-version"

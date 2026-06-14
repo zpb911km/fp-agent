@@ -91,7 +91,7 @@ jobs:
         run: |
           echo "检查所有子包版本配置..."
           errors=0
-          for pkg in fp-core fp-cli fp-webui fp-acp fp; do
+          for pkg in fp-core fp-terminal fp-webui fp-acp fp; do
             file="packages/$pkg/pyproject.toml"
             if grep -q 'dynamic = \["version"\]' "$file"; then
               echo "  ✅ $pkg: dynamic version"
@@ -115,7 +115,7 @@ jobs:
       - name: 📦 构建 fp-core
         run: python -m build packages/fp-core
 
-      - name: 📦 构建 fp-cli
+      - name: 📦 构建 fp-terminal
         run: python -m build packages/fp-cli
 
       - name: 📦 构建 fp-webui

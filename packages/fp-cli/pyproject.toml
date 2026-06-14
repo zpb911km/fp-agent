@@ -3,7 +3,7 @@ requires = ["setuptools>=64.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fp-cli"
+name = "fp-terminal"
 dynamic = ["version"]
 description = "五块卵石 - 终端 REPL"
 readme = "README.md"
@@ -31,3 +31,4 @@ include = ["fp_cli*"]
 
 [tool.setuptools_scm]
 root = "../.."
+local_scheme = "no-local-version"

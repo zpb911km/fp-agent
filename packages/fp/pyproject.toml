@@ -22,7 +22,7 @@ classifiers = [
 
 dependencies = [
     "fp-core>=0.0.0",
-    "fp-cli>=0.0.0",
+    "fp-terminal>=0.0.0",
 ]
 
 [project.optional-dependencies]
@@ -44,3 +44,4 @@ Documentation = "https://github.com/zpb911km/fp-agent/tree/main/docs"
 
 [tool.setuptools_scm]
 root = "../.."
+local_scheme = "no-local-version"

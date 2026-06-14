@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 # 空，根目录不含 Python 包
 
 [tool.setuptools_scm]
+local_scheme = "no-local-version"
 
 [tool.ruff]
 line-length = 120

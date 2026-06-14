@@ -36,3 +36,4 @@ include = ["fp_core*"]
 
 [tool.setuptools_scm]
 root = "../.."
+local_scheme = "no-local-version"

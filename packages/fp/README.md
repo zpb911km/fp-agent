@@ -145,7 +145,7 @@ cli:
 ```
 fp                          # 主包（用户入口）
 ├── fp-core                 # 核心引擎（Agent 逻辑、LLM 交互、插件系统）
-├── fp-cli                  # 终端 REPL 界面
+├── fp-terminal              # 终端 REPL 界面
 ├── fp-webui                # Web 界面
 └── fp-acp                  # ACP 通信协议（JSON-RPC 2.0）
 ```
@@ -167,7 +167,7 @@ fp                          # 主包（用户入口）
 | 依赖 | 版本 | 说明 |
 |------|------|------|
 | `fp-core` | >= 0.1.0 | Agent 核心引擎（必装） |
-| `fp-cli` | >= 0.1.0 | 终端 REPL（必装） |
+| `fp-terminal` | >= 0.1.0 | 终端 REPL（必装） |
 | `fp-webui` | >= 0.1.0 | Web 界面（可选） |
 | `fp-acp` | >= 0.1.0 | ACP 协议（可选） |
 

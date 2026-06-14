@@ -1,12 +1,12 @@
-# fp-cli — 五块卵石终端 REPL
+# fp-terminal — 五块卵石终端 REPL
 
-[![PyPI](https://img.shields.io/pypi/v/fp-cli)](https://pypi.org/project/fp-cli/)
-[![Python](https://img.shields.io/pypi/pyversions/fp-cli)](https://pypi.org/project/fp-cli/)
-[![License](https://img.shields.io/pypi/l/fp-cli)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/fp-terminal)](https://pypi.org/project/fp-terminal/)
+[![Python](https://img.shields.io/pypi/pyversions/fp-terminal)](https://pypi.org/project/fp-terminal/)
+[![License](https://img.shields.io/pypi/l/fp-terminal)](LICENSE)
 
 ## 简介
 
-**fp-cli** 是五块卵石（Five Pebbles）Agent 框架的交互式命令行界面。它基于 `prompt-toolkit` 构建，提供了语法高亮、自动补全、多行编辑、历史记录等现代终端体验。
+**fp-terminal** 是五块卵石（Five Pebbles）Agent 框架的交互式命令行界面。它基于 `prompt-toolkit` 构建，提供了语法高亮、自动补全、多行编辑、历史记录等现代终端体验。
 
 > 通常通过主包 `fp` 安装，无需单独安装。
 
@@ -27,7 +27,7 @@
 ## 安装
 
 ```bash
-pip install fp-cli
+pip install fp-terminal
 ```
 
 要求 Python >= 3.11。
