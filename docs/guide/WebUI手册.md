@@ -1,7 +1,7 @@
 # Five Pebbles WebUI 使用手册
 
 > **版本**: 1.0.0  
-> **文件**: `app/webui/main.py` + `app/webui/static/index.html`  
+> **文件**: `fp_webui/main.py` + `fp_webui/static/index.html`  
 > **端口**: 8765（默认）
 
 ---
@@ -23,7 +23,7 @@
 
 ## 1. 概述
 
-WebUI 是 Five Pebbles 的**浏览器界面**，以插件模式运行在 Agent 核心之上，**不修改** `core/` 中的任何代码。
+WebUI 是 Five Pebbles 的**浏览器界面**，以插件模式运行在 Agent 核心之上，**不修改** `fp_core/core/` 中的任何代码。
 
 它提供了：
 
@@ -57,7 +57,8 @@ cd /media/zpb/data/codes/AI/agent
 python3 -m app.webui.main
 
 # 方式二：直接启动
-python3 app/webui/main.py
+pip install fp[webui]
+fp-webui
 ```
 
 ### 2.3 启动参数
@@ -341,7 +342,7 @@ FastAPI 的 `@app.middleware("http")`，拦截所有 `/api/*` 请求（白名单
 
 **流程**：
 1. shutdown 旧 Agent（保存会话后优雅退出）
-2. 重新 `from core.agent import Agent` 获取最新类
+2. 重新 `from fp_core.core.agent import Agent` 获取最新类
 3. 创建新 Agent，注册 WebUIPlugin
 4. 创建全新会话（清空上下文）
 5. 通过 EventBus 推送 `reload` / `reload_done` 事件通知前端
@@ -517,7 +518,7 @@ ws://host:port/ws/chat?token=your_token
 
 ### 9.1 适用场景
 
-- **修改了核心代码**（`core/`、`prompts/`、`tools/` 等模块）
+- **修改了核心代码**（`fp_core/core/`、`fp_core/prompts/`、`fp_core/tools/` 等模块）
 - **想在不重启 WebUI 服务器的前提下测试变更**
 - 点击顶栏「🔄 重载」按钮或 `POST /api/reload`
 
@@ -549,9 +550,7 @@ ws://host:port/ws/chat?token=your_token
 ### 10.1 目录结构
 
 ```
-app/webui/
-├── __init__.py           # 空
-├── main.py               # 后端服务器（FastAPI + WebSocket）
+```
 └── static/
     ├── index.html         # 前端页面（单页应用）
     ├── background.svg     # 背景图
@@ -562,7 +561,8 @@ app/webui/
 
 ```bash
 # 方式一：使用 uvicorn reload（修改 .py 文件自动重启）
-python3 app/webui/main.py --reload
+# 方式一：热重载
+fp-webui --reload
 
 # 方式二：仅启动后端，前端用其他工具调试
 python3 -c "
@@ -636,12 +636,12 @@ ss -tlnp | grep 8765
 
 | 文件 | 用途 |
 |------|------|
-| `app/webui/main.py` | WebUI 后端服务器 |
-| `app/webui/static/index.html` | 前端单页应用 |
+| `fp_webui/main.py` | WebUI 后端服务器 |
+| `fp_webui/static/index.html` | 前端单页应用 |
 | `.webui_token` | 自动生成的认证 Token |
-| `core/agent.py` | Agent 核心类 |
-| `core/lifecycle.py` | 生命周期钩子系统 |
-| `core/io.py` | `WebSocketIO` 通道类 |
+| `fp_core/core/agent.py` | Agent 核心类 |
+| `fp_core/core/lifecycle.py` | 生命周期钩子系统 |
+| `fp_core/core/io.py` | `WebSocketIO` 通道类 |
 
 ---
 

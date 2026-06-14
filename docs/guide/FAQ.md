@@ -31,7 +31,7 @@ python3 cli.py
 
 1. **网络问题**：检查网络连接是否正常，能否访问 API 服务
 2. **API 服务负载**：如果服务端负载过高，响应会变慢，可稍后重试
-3. **URL 配置错误**：检查 `config.json` 中的 `llm_api_url` 是否正确
+3. **URL 配置错误**：检查 `~/.config/fp/config.json` 中的 `llm_api_url` 是否正确
 4. **超时时间过短**：在配置中增大超时时间
 
 ```json
@@ -183,9 +183,9 @@ pip install --upgrade prompt_toolkit
 
 | 数据 | 路径 | 说明 |
 |------|------|------|
-| 会话记录 | `data/sessions/` | 所有历史对话 |
-| 长期记忆 | `data/memory/` | 跨会话持久化记忆 |
-| 任务状态 | `data/tasks.json` | 任务管理系统状态 |
+| 会话记录 | `~/.local/share/fp/sessions/` | 所有历史对话 |
+| 长期记忆 | `~/.local/share/fp/memory/` | 跨会话持久化记忆 |
+| 任务状态 | `~/.local/share/fp/tasks.json` | 任务管理系统状态 |
 
 **一键备份**
 

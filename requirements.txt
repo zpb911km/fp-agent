@@ -1,8 +1,0 @@
-# Five Pebbles Agent 依赖
-# 安装: pip install -r requirements.txt
-
-httpx>=0.28.0
-prompt-toolkit>=3.0.40
-rich>=14.0.0
-wcwidth>=0.2.0
-pyyaml>=6.0

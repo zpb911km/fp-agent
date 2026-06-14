@@ -54,8 +54,8 @@ mv old_plugin.py old_plugin.py.v2
 快速开始：
 
 ```python
-from plugins.base.plugin import Plugin, PluginConfig, PluginRegistry
-from core.lifecycle import LifecycleHook
+from fp_core.plugins.base.plugin import Plugin, PluginConfig, PluginRegistry
+from fp_core.core.lifecycle import LifecycleHook
 
 class MyPlugin(Plugin):
     name = "my_plugin"

@@ -32,7 +32,7 @@
 
 #### 重构
 
-- **LLM 客户端重构**：外置 `llm/` 模块移至 `core/llm_client.py`
+- **LLM 客户端重构**：外置 `llm/` 模块移至 `fp_core/core/llm_client.py`
 - **`_stream_chat` 逻辑重构**：移除流式中间态，统一为整体返回
 - **工具系统增强**：改进异常处理和字符串替换验证
 
@@ -65,7 +65,7 @@
 ### 变更
 
 - 任务系统完全解耦为自包含插件
-- 颜色/样式/截断配置移至 `config.json`
+- 颜色/样式/截断配置移至 `~/.config/fp/config.json`
 
 ## [1.0.0] — 2026-05-28
 
@@ -73,7 +73,7 @@
 
 #### 新增
 
-- **自实现 HTTP 客户端** (`core/llm_client.py`)：替换 `openai` SDK，减少外部依赖
+- **自实现 HTTP 客户端** (`fp_core/core/llm_client.py`)：替换 `openai` SDK，减少外部依赖
 - **`display.py` 显示模块**：6 类输出函数 + Spinner + LLMStreamer
 - **`<think>` 标签提取**：自动从 LLM 响应中提取 reasoning_content
 - **配置管理系统**：三级优先级（JSON > 环境变量 > 默认值）
@@ -83,7 +83,7 @@
 #### 变更
 
 - 全部 `print()` 替换为分类输出函数
-- 配置从硬编码迁移至 `config.json` 文件管理
+- 配置从硬编码迁移至 `~/.config/fp/config.json` 文件管理
 
 #### 修复
 
@@ -98,9 +98,9 @@
 - 基于 openai SDK 的 LLM 客户端
 - 基础对话历史管理
 - 记忆管理模块 (`memory.py`)
-- 技能系统 (`skills/`)
-- 工具调用系统 (`tools/`)
-- 命令系统 (`commands/`)
+- 技能系统 (`fp_core/skills/`)
+- 工具调用系统 (`fp_core/tools/`)
+- 命令系统 (`fp_core/commands/`)
 - 对话修复与智能压缩
 
 ---

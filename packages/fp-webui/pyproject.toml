@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fp-webui"
+version = "0.1.0"
+description = "五块卵石 - Web 界面"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "zpb"}]
+keywords = ["agent", "webui", "fastapi"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Environment :: Web Environment",
+    "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
+]
+
+dependencies = [
+    "fp-core>=2.0.0",
+    "fastapi>=0.122.0",
+    "uvicorn>=0.38.0",
+]
+
+[project.scripts]
+fp-webui = "fp_webui.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["fp_webui*"]
+
+[tool.setuptools.package-data]
+"fp_webui" = ["static/*"]

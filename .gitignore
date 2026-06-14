@@ -1,13 +1,4 @@
-# ─── 编辑器 / IDE ─────────────────────────
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-Thumbs.db
-
-# ─── Python ───────────────────────────────
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
@@ -22,22 +13,29 @@ build/
 *.manifest
 *.spec
 
-# ─── 虚拟环境 ────────────────────────────
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# 虚拟环境
 .venv/
 venv/
 env/
 .conda/
 .python-version
 
-# ─── 测试 / 临时文件 ─────────────────────
-test_fp.sh
-test_interrupt.py
+# 测试 / 临时
 *.log
 *.tmp
 *.bak
 *.backup
 
-# ─── 配置文件（含敏感信息） ──────────────
+# 配置文件（含敏感信息）
 config.json
 .env
 .env.*
@@ -46,28 +44,16 @@ config.json
 *.crt
 **/secrets/
 
-# ─── 数据文件 ────────────────────────────
+# 运行时数据
 data/**
-data.zip
-legacy/
-legacy.zip
+.webui_token
 
-# ─── 技能文件（用户自定义） ───────────────
-skills/*.md
-
-# ─── AI 辅助文件 ─────────────────────────
+# AI 辅助
 CLAUDE.md
-CLAUDE*
 .cursorrules
 .windsurfrules
 
-# ─── 项目备份 ────────────────────────────
-tools_backup_for_ref.py
-
-# ─── mmd 图表 ─────────────────────────────
-*.mmd
-
-# ─── 大文件 / 媒体 ──────────────────────
+# 大文件
 *.wav
 *.mp3
 *.mp4
@@ -80,49 +66,19 @@ tools_backup_for_ref.py
 *.gif
 *.ico
 
-!app/webui/static/favicon.png
-
-# ─── 文档生成 ───────────────────────────
+# 文档生成
 site/
 _build/
 
-.webui_token
+# mmd 图表
+*.mmd
 
-# ─── 自用 ───────────────────────────
-# ── tools/plugins 白名单模式 ──
-# 默认忽略 plugins 下所有文件，以下列出的才被跟踪
-tools/plugins/*
-!tools/plugins/file_fingerprint_plugin.py
-!tools/plugins/memory_read_plugin.py
-!tools/plugins/memory_save_plugin.py
-!tools/plugins/python_plugin.py
-!tools/plugins/subagent_plugin.py
-!tools/plugins/task_clear_plugin.py
-!tools/plugins/task_create_plugin.py
-!tools/plugins/task_list_plugin.py
-!tools/plugins/task_update_plugin.py
-!tools/plugins/web_fetch_plugin.py
-!tools/plugins/web_search_plugin.py
+# 项目备份
+*.backup
 
-# ── commands 白名单模式 ──
-commands/*
-!commands/__init__.py
-!commands/back.py
-!commands/clear.py
-!commands/compact.py
-!commands/exit_bang.py
-!commands/exit_cmd.py
-!commands/fork.py
-!commands/help.py
-!commands/history.py
-!commands/memory_cmd.py
-!commands/model.py
-!commands/reload_skills.py
-!commands/remove_skill.py
-!commands/reset.py
-!commands/resume.py
-!commands/session.py
-!commands/skills.py
-plugins/*.py*
+# 发布产物（各子包独立构建时不互相干扰）
+packages/*/dist/
+packages/*/*.egg-info/
 
-docs/acp/*
+# 内置默认配置应被跟踪，不忽略
+!packages/fp-core/src/fp_core/config.default.json

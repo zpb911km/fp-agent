@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fp"
+version = "0.1.0"
+description = "五块卵石 - 基于生命周期钩子的插件化 Agent 框架"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "zpb"}]
+keywords = ["agent", "llm", "lifecycle", "plugin", "ai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "fp-core>=2.0.0",
+    "fp-cli>=2.0.0",
+]
+
+[project.optional-dependencies]
+webui = ["fp-webui>=2.0.0"]
+acp = ["fp-acp>=2.0.0"]
+all = ["fp[webui,acp]"]
+
+[project.scripts]
+fp = "fp.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["fp*"]
+
+[project.urls]
+Homepage = "https://github.com/zpb/agent"
+Repository = "https://github.com/zpb/agent"
+Documentation = "https://github.com/zpb/agent/tree/main/docs"

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fp-acp"
+version = "0.1.0"
+description = "五块卵石 - ACP Server (JSON-RPC 2.0)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "zpb"}]
+keywords = ["agent", "acp", "ide"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Communications",
+]
+
+dependencies = [
+    "fp-core>=2.0.0",
+]
+
+[project.scripts]
+fp-acp = "fp_acp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["fp_acp*"]

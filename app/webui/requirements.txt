@@ -1,6 +1,0 @@
-# Five Pebbles — WebUI 独立依赖
-# 安装: pip install -r app/webui/requirements.txt
-# 或:   pip install .[webui]              （从项目根）
-
-fastapi>=0.122.0
-uvicorn>=0.38.0

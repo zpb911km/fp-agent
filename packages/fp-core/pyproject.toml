@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fp-core"
+version = "0.1.0"
+description = "五块卵石 Agent 引擎 - 基于生命周期钩子的插件化 Agent 核心"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "zpb"}]
+keywords = ["agent", "llm", "lifecycle", "plugin", "ai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "httpx>=0.28.0",
+    "rich>=14.0.0",
+    "wcwidth>=0.2.0",
+    "pyyaml>=6.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["fp_core*"]
+
+[tool.setuptools.package-data]
+"fp_core" = ["*.md", "*.json", "*.yaml", "*.yml"]

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fp-cli"
+version = "0.1.0"
+description = "五块卵石 - 终端 REPL"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "zpb"}]
+keywords = ["agent", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+]
+
+dependencies = [
+    "fp-core>=2.0.0",
+    "prompt-toolkit>=3.0.40",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["fp_cli*"]

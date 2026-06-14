@@ -22,7 +22,7 @@ python3 cli.py
 | `-m <msg>` | `--message <msg>` | 单次消息模式。发送一条消息后直接退出，不进入交互循环 |
 | `-r` | `--resume` | 恢复最新会话。不加参数值则自动恢复最新的历史会话 |
 | `-r <SID>` | `--resume <SID>` | 恢复指定 ID 的会话 |
-| `--init` | — | 初始化配置文件。生成默认 `config.json` 后退出 |
+| `--init` | — | 初始化配置文件。生成默认 `~/.config/fp/config.json` 后退出 |
 
 ---
 
@@ -70,7 +70,7 @@ python3 cli.py -r session_abc123
 python3 cli.py --init
 ```
 
-在项目根目录生成默认 `config.json`。
+在项目根目录生成默认 `~/.config/fp/config.json`。
 
 ---
 
