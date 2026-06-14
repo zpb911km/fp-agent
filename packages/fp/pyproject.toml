@@ -21,13 +21,13 @@ classifiers = [
 ]
 
 dependencies = [
-    "fp-core>=2.0.0",
-    "fp-cli>=2.0.0",
+    "fp-core>=0.0.0",
+    "fp-cli>=0.0.0",
 ]
 
 [project.optional-dependencies]
-webui = ["fp-webui>=2.0.0"]
-acp = ["fp-acp>=2.0.0"]
+webui = ["fp-webui>=0.0.0"]
+acp = ["fp-acp>=0.0.0"]
 all = ["fp[webui,acp]"]
 
 [project.scripts]
