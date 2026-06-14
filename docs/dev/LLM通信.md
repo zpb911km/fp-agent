@@ -2,7 +2,7 @@
 
 ---
 
-## LLM Client (`fp_core/core/llm_client.py`)
+## LLM Client (`packages/fp-core/src/fp_core/core/llm_client.py`)
 
 自实现的 OpenAI HTTP 客户端，使用 `httpx.AsyncClient` 直调 OpenAI 格式 API，**无需安装 openai SDK**。
 
