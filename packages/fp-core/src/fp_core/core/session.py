@@ -157,8 +157,8 @@ class SessionManager:
                 self._meta = self._load_meta_from_session()
                 return
 
-        # 默认：创建新会话
-        self._session_id = self._init_session()
+        # 默认：分配新会话 ID（惰性文件创建，首次写入时自动生成文件）
+        self._session_id = self._allocate_session()
         self._meta = self._load_meta_from_session()
 
     # ── 内部工具 ──────────────────────────────────
@@ -190,14 +190,16 @@ class SessionManager:
 
     # ── 会话生命周期 ──────────────────────────────
 
-    def _init_session(self) -> str:
-        """创建新会话。"""
+    def _allocate_session(self) -> str:
+        """分配新会话 ID（惰性文件创建）。
+
+        只在内存中分配 ID 和 meta，不写入磁盘。
+        首次通过 save_message() / save_context() / clear_session_file()
+        写入数据时，文件会被自动创建。
+        避免每次 Agent 实例化都产生空会话文件。
+        """
         sid = _generate_sid()
-        meta = _default_meta(sid)
-        path = _session_path(sid)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(meta, ensure_ascii=False) + "\n")
-        self._meta = meta
+        self._meta = _default_meta(sid)
         return sid
 
     @property
@@ -233,8 +235,8 @@ class SessionManager:
         return True
 
     def create_session(self) -> str:
-        """创建新会话并切换过去。"""
-        self._session_id = self._init_session()
+        """创建新会话并切换过去（惰性文件创建）。"""
+        self._session_id = self._allocate_session()
         self._meta = self._load_meta_from_session()
         return self._session_id
 
@@ -265,15 +267,32 @@ class SessionManager:
             self._session_id = latest
             self._meta = self._load_meta_from_session()
             return True
-        # 没有历史会话 → 创建新会话
-        self._session_id = self._init_session()
+        # 没有历史会话 → 分配新会话 ID（惰性文件创建）
+        self._session_id = self._allocate_session()
         self._meta = self._load_meta_from_session()
         return False
+
+    # ── 惰性文件创建 ──────────────────────────────
+
+    def _ensure_file(self):
+        """确保会话文件存在（惰性文件创建的核心）。
+
+        如果文件不存在，用当前 meta 创建文件并写入首行。
+        由 save_message() / save_context() 在首次写入前调用。
+        """
+        path = self._session_path()
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(self._meta, ensure_ascii=False) + "\n")
 
     # ── 消息存储（正序，最新在文件末尾） ──────────
 
     def save_message(self, role: str, content: str, **kwargs):
-        """追加一条消息到文件末尾，并更新文件内嵌的 meta。"""
+        """追加一条消息到文件末尾，并更新文件内嵌的 meta。
+
+        首次调用时自动创建会话文件（惰性文件创建）。
+        """
+        self._ensure_file()
         msg = {"role": role, "content": content}
         for k, v in kwargs.items():
             if v:
