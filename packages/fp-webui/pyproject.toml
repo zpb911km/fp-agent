@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=64.0"]
+requires = ["setuptools>=64.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "fp-webui"
-version = "0.1.0"
+dynamic = ["version"]
 description = "五块卵石 - Web 界面"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -36,3 +36,6 @@ include = ["fp_webui*"]
 
 [tool.setuptools.package-data]
 "fp_webui" = ["static/*"]
+
+[tool.setuptools_scm]
+root = "../.."

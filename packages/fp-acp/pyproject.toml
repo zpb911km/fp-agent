@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=64.0"]
+requires = ["setuptools>=64.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "fp-acp"
-version = "0.1.0"
+dynamic = ["version"]
 description = "五块卵石 - ACP Server (JSON-RPC 2.0)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,3 +30,6 @@ fp-acp = "fp_acp.server:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["fp_acp*"]
+
+[tool.setuptools_scm]
+root = "../.."

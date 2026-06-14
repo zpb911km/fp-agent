@@ -5,6 +5,8 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 # 空，根目录不含 Python 包
 
+[tool.setuptools_scm]
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"

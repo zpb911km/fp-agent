@@ -154,11 +154,11 @@ fp                          # 主包（用户入口）
 
 ## 文档
 
-- [快速开始](https://github.com/zpb/agent/tree/main/docs/quickstart.md)
-- [配置指南](https://github.com/zpb/agent/tree/main/docs/configuration.md)
-- [插件开发](https://github.com/zpb/agent/tree/main/docs/plugin-development.md)
-- [ACP 协议规范](https://github.com/zpb/agent/tree/main/docs/acp.md)
-- [API 参考](https://github.com/zpb/agent/tree/main/docs/api.md)
+- [快速开始](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/快速开始.md)
+- [配置指南](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/配置指南.md)
+- [插件开发](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/插件系统.md)
+- [ACP 协议规范](https://github.com/zpb911km/fp-agent/blob/main/packages/fp-acp/README.md)
+- [命令参考](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/命令参考.md)
 
 ---
 
