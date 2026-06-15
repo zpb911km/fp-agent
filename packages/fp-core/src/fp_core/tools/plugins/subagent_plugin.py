@@ -181,7 +181,7 @@ async def execute(params: dict[str, Any]) -> str:
 
     # ═══════════════════════════════════════════════════════════
     # 定位入口 — 通过 python -m fp_cli.main 启动子进程
-    # （不依赖文件系统路径，fp-cli 必须已安装）
+    # （不依赖文件系统路径，fp-terminal 必须已安装）
     # ═══════════════════════════════════════════════════════════
     entry = [sys.executable, "-m", "fp_cli.main", "-m"]
 

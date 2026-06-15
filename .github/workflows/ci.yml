@@ -116,7 +116,7 @@ jobs:
         run: python -m build packages/fp-core
 
       - name: 📦 构建 fp-terminal
-        run: python -m build packages/fp-cli
+        run: python -m build packages/fp-terminal
 
       - name: 📦 构建 fp-webui
         run: python -m build packages/fp-webui
