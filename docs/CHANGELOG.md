@@ -8,6 +8,22 @@
 > 现已统一修正为 `0.1.0`，与 `pyproject.toml` 保持一致。
 > 以下版本号保留原始记录以供追溯，实际发布包版本均为 `0.1.0`。
 
+## [0.1.3] — 2026-06-15
+
+### Added
+
+- **跨平台兼容框架**: 新增 `fp_core/platform_utils.py` 模块，统一检测平台类型、定位 Git Bash、适配路径格式
+- **Windows 自动路由**: `tools/core.py` 在 Windows 上优先使用 Git Bash 执行命令，无 Git Bash 降级为 `cmd.exe` 并通知 LLM
+
+### Changed
+
+- **路径系统**: 替换全部 6 处硬编码 XDG 路径引用，使用 `platform_utils` 动态适配 Linux/macOS/Windows
+- **文档**: 更新 6 份文档，要求 Windows 用户安装 Git for Windows
+
+### Fixed
+
+- **webui**: 修复 `os.chmod` 在 Windows 上不支持的兼容性问题
+
 ## [0.1.2] — 2026-06-15
 
 ### Fixed
@@ -119,6 +135,8 @@
 ---
 
 ## 发布历史
+
+| 0.1.3 | 2026-06-15 | 待补充 |
 
 | 0.1.2 | 2026-06-15 | 待补充 |
 
