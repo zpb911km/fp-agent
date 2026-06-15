@@ -106,9 +106,9 @@ class TestSkillLoader:
         )
 
         # 创建同名用户技能
-        import fp_core.config as cfg
+        from fp_core.skills.loader import USER_SKILLS_DIR
 
-        user_dir = os.path.join(cfg._XDG_DATA_HOME, "fp", "skills")
+        user_dir = USER_SKILLS_DIR
         os.makedirs(user_dir, exist_ok=True)
         user_file = os.path.join(user_dir, f"{builtin_name}.md")
         with open(user_file, "w", encoding="utf-8") as f:

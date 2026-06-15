@@ -105,6 +105,8 @@ pip install fp-agent fp-webui fp-acp
 
 要求 **Python ≥ 3.11**。
 
+> **Windows 用户**：推荐安装 [Git for Windows](https://git-scm.com)（安装时勾选"Git Bash"并添加到 PATH），以获得完整的 Unix 命令支持（`ls`/`grep`/`awk`/`sed` 等）。未安装时会自动降级到 cmd.exe，仅支持 Windows 原生命令（`dir`/`type`/`findstr`）。
+
 ---
 
 ## 🚀 快速使用

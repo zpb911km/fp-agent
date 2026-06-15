@@ -11,6 +11,8 @@ import os
 from datetime import datetime
 from typing import Any
 
+from fp_core.platform_utils import check_git_bash, is_windows, platform
+
 
 class PromptBuilder:
     """系统提示词构建器"""
@@ -55,12 +57,21 @@ class PromptBuilder:
         except Exception:
             current_user = "unknown"
 
-        state_info = f"""
-## 当前时间,路径等状态信息
-当前时间: {current_time}
-当前路径: {current_path}
-当前用户: {current_user}
-"""
+        # ── 运行时环境信息 ──
+        runtime_parts = [
+            f"当前时间: {current_time}",
+            f"当前路径: {current_path}",
+            f"当前用户: {current_user}",
+            f"当前平台: {platform()}",
+        ]
+        if is_windows():
+            git_ok, git_msg = check_git_bash()
+            if git_ok:
+                runtime_parts.append("Git Bash: 可用 ✓（写 Unix 命令：ls/grep/awk）")
+            else:
+                runtime_parts.append("Git Bash: 不可用 ✗（使用 cmd.exe 回退，写 Windows 命令：dir/type/findstr）")
+        runtime_info = "\n".join(runtime_parts)
+        state_info = f"\n## 当前时间,路径等状态信息\n{runtime_info}\n"
         parts.append(state_info)
 
         # 长期记忆索引（name + type 摘要，不含正文）

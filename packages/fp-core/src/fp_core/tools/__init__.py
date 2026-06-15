@@ -18,6 +18,8 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from fp_core.platform_utils import get_data_dir
+
 
 class ToolRegistry:
     """工具注册表，管理所有核心工具和插件"""
@@ -41,9 +43,8 @@ class ToolRegistry:
         builtin_dir = os.path.join(os.path.dirname(__file__), "plugins")
         self._load_from_dir(builtin_dir, "fp_core.tools.plugins")
 
-        # 用户工具目录
-        _xdg_data = os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share"))
-        user_dir = os.path.join(_xdg_data, "fp", "tools", "plugins")
+        # 用户工具目录（跨平台：Linux ~/.local/share/fp/tools/plugins, Windows %LOCALAPPDATA%/fp/tools/plugins）
+        user_dir = os.path.join(get_data_dir(), "tools", "plugins")
         self._load_from_dir(user_dir)
 
     def _load_from_dir(self, directory: str, package_prefix: str | None = None):

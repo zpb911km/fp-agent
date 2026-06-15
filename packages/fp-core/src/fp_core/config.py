@@ -8,9 +8,10 @@ import os
 import sys
 from typing import Any
 
-# 用户配置（XDG 标准）
-_XDG_CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME", os.path.join(os.path.expanduser("~"), ".config"))
-USER_CONFIG_PATH = os.path.join(_XDG_CONFIG_HOME, "fp", "config.json")
+from fp_core.platform_utils import get_config_dir, get_data_dir, is_windows
+
+# 用户配置（跨平台：Linux XDG 标准 / Windows %APPDATA%）
+USER_CONFIG_PATH = os.path.join(get_config_dir(), "config.json")
 
 
 def _load_json_config() -> dict:
@@ -147,15 +148,14 @@ MEMORY_MAX_HISTORY: int = _value("MEMORY_MAX_HISTORY", 100)
 
 
 # ═══════════════════════════════════════════════════════════════
-# 路径配置（XDG 标准）
+# 路径配置（跨平台：Linux XDG 标准 / Windows %APPDATA%）
 # ═══════════════════════════════════════════════════════════════
 
-_XDG_DATA_HOME = os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share"))
-_XDG_DATA_FP = os.path.join(_XDG_DATA_HOME, "fp")
+_FP_DATA_DIR = get_data_dir()
 
-SESSIONS_DIR = os.path.join(_XDG_DATA_FP, "sessions")
-MEMORY_DIR = os.path.join(_XDG_DATA_FP, "memory")
-TASKS_FILE = os.path.join(_XDG_DATA_FP, "tasks.json")
+SESSIONS_DIR = os.path.join(_FP_DATA_DIR, "sessions")
+MEMORY_DIR = os.path.join(_FP_DATA_DIR, "memory")
+TASKS_FILE = os.path.join(_FP_DATA_DIR, "tasks.json")
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 SKILLS_DIR = os.path.join(os.path.dirname(__file__), "skills")
 
@@ -200,7 +200,12 @@ def color_supported() -> bool:
         return True
     if os.environ.get("NO_COLOR"):
         return False
-    import sys
+
+    if is_windows():
+        # Windows 上委托 platform_utils 做更精细的检测
+        from fp_core.platform_utils import ansi_supported
+
+        return ansi_supported()
 
     return sys.stdout.isatty()
 
@@ -301,7 +306,7 @@ def get_default_config() -> dict:
 
 
 def init_config(path: str | None = None):
-    """初始化用户配置文件（写入 ~/.config/fp/config.json）"""
+    """初始化用户配置文件（跨平台：Linux ~/.config/fp/，Windows %APPDATA%/fp/）"""
     config_path = path or USER_CONFIG_PATH
     if os.path.exists(config_path):
         print(f"[Config] {config_path} already exists")
