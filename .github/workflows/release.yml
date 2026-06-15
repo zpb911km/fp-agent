@@ -1,7 +1,7 @@
 # Release — 五块卵石发布到 PyPI
 #
 # 触发方式：
-#   1. 自动：推送 v* 标签时（如 git tag v0.2.0 && git push --tags）
+#   1. 自动：推送版本标签时（如 git tag 0.2.0 && git push --tags）
 #   2. 手动：GitHub Actions 页面 → workflow_dispatch
 #
 # 前置条件（OIDC Trusted Publishing — 已在 PyPI 配置完成）：
@@ -14,7 +14,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "[0-9]*"
   workflow_dispatch:
     inputs:
       dry_run:

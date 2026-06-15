@@ -172,7 +172,7 @@ def main() -> None:
     print(f"   - CHANGELOG: {'✅ 已更新' if True else '❌'}")
     print(f"   - 文档引用: {count} 处已更新")
     print("\n📝 接下来: 编辑 CHANGELOG.md 补充版本变更内容后提交")
-    print(f"   git tag v{version} && git push --tags")
+    print(f"   git tag {version} && git push --tags")
 
 
 if __name__ == "__main__":
