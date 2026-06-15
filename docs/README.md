@@ -37,7 +37,7 @@
 | 🔌 **ACP 协议** | [acp/README.md](acp/README.md) | ACP 协议索引 |
 | | [acp/使用指南.md](acp/使用指南.md) | IDE 集成指南 |
 | | [acp/00-OVERVIEW.md](acp/00-OVERVIEW.md) ~ [07-IMPLEMENTATION.md](acp/07-IMPLEMENTATION.md) | 协议规范全集 |
-| 📋 **项目信息** | [CHANGELOG.md](CHANGELOG.md) | 版本历史：v0.1.0（迭代记录见 CHANGELOG） |
+| 📋 **项目信息** | [CHANGELOG.md](CHANGELOG.md) | 版本历史：0.1.2（迭代记录见 CHANGELOG） |
 | | [CONTRIBUTING.md](CONTRIBUTING.md) | PR 流程、代码风格、Commit 规范 |
 
 ---
