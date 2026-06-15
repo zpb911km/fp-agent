@@ -40,6 +40,11 @@ from fp_core.core.lifecycle import LifecycleHook
 # ═══════════════════════════════════════════════════════════
 ACP_PROTOCOL_VERSION = 1
 
+# ── ACP 模式下禁止暴露给 IDE 的毁灭性命令 ──
+# 这些命令（exit/exit!/quit）会 raise SystemExit() 终止整个进程，
+# IDE 环境中误触会导致 ACP 会话直接断开。
+_DESTRUCTIVE_COMMANDS = {"exit", "exit!", "quit"}
+
 
 # ═══════════════════════════════════════════════════════════
 # ACPIO — ACP 专用的 IO 通道
@@ -172,6 +177,9 @@ class ACPServer:
         # ── 工具参数缓存（call → result 阶段共享） ──
         self._last_edit_args: dict | None = None  # edit_file 参数，用于构建 diff
         self._last_read_path: str | None = None  # read_file 路径，用于 result 的 resource URI
+
+        # ── 当前 prompt 处理 task（用于取消） ──
+        self._current_task: asyncio.Task | None = None
 
         # ── "Follow Agent" 跟踪注册 ──
         self._register_follow_hooks()
@@ -586,11 +594,20 @@ class ACPServer:
     # ═══════════════════════════════════════════════════════
 
     async def _read_loop(self, reader: asyncio.StreamReader):
-        """从 stdin 逐行读取 JSON-RPC 消息"""
+        """从 stdin 逐行读取 JSON-RPC 消息（全异步派发）
+
+        关键设计：所有请求/通知都通过 create_task 异步派发，不阻塞 stdin 读取循环。
+        这样 session/cancel 通知可以在 prompt 处理期间被读取和派发，
+        实现对正在运行的 agent 真正中断。
+        """
+        active_tasks: set[asyncio.Task] = set()
+
         while True:
             line = await reader.readline()
             if not line:
-                self._log("stdin 已关闭 (EOF)，优雅退出")
+                self._log("stdin 已关闭 (EOF)，等待活跃任务完成...")
+                if active_tasks:
+                    await asyncio.gather(*active_tasks, return_exceptions=True)
                 break
 
             text = line.decode("utf-8").strip()
@@ -603,7 +620,10 @@ class ACPServer:
                 self._log(f"⚠️  JSON 解析失败: {e}")
                 continue
 
-            await self._dispatch(request)
+            # 创建独立 task 派发，不阻塞 stdin 读取
+            task = asyncio.create_task(self._dispatch(request))
+            active_tasks.add(task)
+            task.add_done_callback(active_tasks.discard)
 
     async def _dispatch(self, request: dict):
         """分发 JSON-RPC 请求到对应的处理器"""
@@ -657,8 +677,13 @@ class ACPServer:
     async def _handle_notification(self, method: str, params: dict):
         """处理通知（无 id 的请求）"""
         if method == "session/cancel":
-            self._log("收到取消通知")
+            self._log("⏹️  收到取消通知，正在中断 agent...")
             self._agent.cancel()
+            # 主动取消当前正在执行的 prompt task，让 agent 立即停止
+            # 而不是等到下一个中断检查点（可能在 LLM 调用或工具执行中，会等很久）
+            if self._current_task is not None and not self._current_task.done():
+                self._current_task.cancel()
+                self._log("  → 已取消当前处理 task")
         elif method == "initialized":
             self._log("客户端已初始化")
             # 不在此处注册命令——此时只有默认 sessionId（IDE 不认识它），
@@ -727,6 +752,8 @@ class ACPServer:
         """
         ACP v1 恢复已有会话。
 
+        如果会话不存在，自动创建新的空会话返回（而不是报错让 IDE 崩溃）。
+
         参考: https://agentclientprotocol.com/protocol/v1/session-setup#loading-sessions
         """
         # ACP v1 使用 camelCase
@@ -742,8 +769,11 @@ class ACPServer:
             # 注意：命令注册通知在 _dispatch 中响应之后发送
             return {"sessionId": session_id}
         else:
-            self._log(f"会话不存在: {session_id}")
-            raise ValueError(f"Session not found: {session_id}")
+            self._log(f"会话不存在: {session_id}，自动创建新会话")
+            new_sid = self._agent.session.create_session()
+            self._agent.rebuild_context()
+            self._session_id = new_sid
+            return {"sessionId": new_sid}
 
     async def _handle_session_list(self, params: dict) -> dict:
         """
@@ -805,10 +835,25 @@ class ACPServer:
         #
         # 工具调用通知由 __init__ 中注册的永久钩子
         # (acp_follow_tool_call / acp_follow_tool_result) 自动发送。
+        #
+        # 关键设计：用 asyncio.create_task 包装 agent.process 调用，
+        # 这样 session/cancel 通知能通过 self._current_task.cancel()
+        # 真正中断正在进行的 LLM 调用或工具执行，而不是仅设置标记后干等。
         acp_io = ACPIO(send_chunk=self._send_message_notification)
 
         self._log(f"发送给 Agent: {user_prompt[:120]}")
-        response = await self._agent.process(user_prompt, io=acp_io)
+        self._current_task = asyncio.create_task(self._agent.process(user_prompt, io=acp_io))
+        try:
+            response = await self._current_task
+        except asyncio.CancelledError:
+            self._log("⏹️  Agent 处理已被用户取消")
+            # 取消后仍然 flush 缓冲区，确保用户看到已生成的内容
+            buf = acp_io.flush_text()
+            if buf.strip():
+                self._send_message_notification(buf)
+            return {"stopReason": "cancelled"}
+        finally:
+            self._current_task = None
 
         # ── 处理剩余文本（流式推送后缓冲区可能已空） ──
         buf = acp_io.flush_text()
@@ -845,6 +890,8 @@ class ACPServer:
             from fp_core.commands import get_all_commands
 
             cmds = get_all_commands()
+            # 过滤掉毁灭性命令（exit/exit!/quit 等会 raise SystemExit 的命令）
+            cmds = {k: v for k, v in cmds.items() if k not in _DESTRUCTIVE_COMMANDS}
             # ACP v1 协议中命令名不带 '/' 前缀
             commands = [{"name": name, "description": desc} for name, desc in sorted(cmds.items())]
             return {"commands": commands}
@@ -952,6 +999,8 @@ class ACPServer:
             from fp_core.commands import get_all_commands
 
             cmds = get_all_commands()
+            # 过滤掉毁灭性命令（exit/exit!/quit 等会 raise SystemExit 的命令）
+            cmds = {k: v for k, v in cmds.items() if k not in _DESTRUCTIVE_COMMANDS}
             # ACP v1 规范: name 字段不包含 '/' 前缀
             # 示例: {"name": "help", "description": "显示此帮助"}
             available = [{"name": name, "description": desc} for name, desc in sorted(cmds.items())]
