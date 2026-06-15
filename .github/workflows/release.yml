@@ -46,16 +46,20 @@ jobs:
 
       - name: 📦 构建所有子包
         run: |
+          mkdir -p dist
           for pkg in fp-core fp-terminal fp-webui fp-acp fp; do
             echo "=== 构建 packages/$pkg ==="
             python -m build "packages/$pkg"
+            cp "packages/$pkg/dist/"* dist/
           done
+          echo "=== 汇总产物 ==="
+          ls -la dist/
 
       - name: 📦 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: dist
-          path: packages/*/dist/*
+          path: dist/
 
   publish:
     name: 发布到 PyPI
