@@ -8,6 +8,19 @@
 > 现已统一修正为 `0.1.0`，与 `pyproject.toml` 保持一致。
 > 以下版本号保留原始记录以供追溯，实际发布包版本均为 `0.1.0`。
 
+## [0.1.4] — 2026-06-16
+
+### Changed
+
+- **docs**: 快速开始文档初始化方式从"自动生成"改为显式 `fp --init` 命令，CLI 参数列表补全 `--init` 条目
+
+### Fixed
+
+- **config**: `init_config()` 写入 `config.json` 前递归创建父目录，修复配置目录不存在时 `FileNotFoundError` 崩溃（"爷目录不存在"问题）
+- **platform_utils**: `find_bash()` 加模块级缓存避免重复扫描 PATH；WSL 空壳 bash 启动器检测（文件大小 + FileDescription）；`BASH_PATH` 配置优先级提升（`config.json` > PATH）；`ansi_supported()` 替换 `colorama` 为 Win32 `GetConsoleMode` API
+- **tools/core**: cmd.exe 回退降级时先 `chcp 65001` 切换 UTF-8 代码页；UTF-8 解码出现 `\ufffd`（替换字符）时以 locale 编码重试
+- **tools/python_plugin**: 子进程设置 `PYTHONIOENCODING=utf-8` 环境变量，防止 GBK/cp936 locale 下 Unicode 字符解码崩溃
+
 ## [0.1.3] — 2026-06-15
 
 ### Added
@@ -135,6 +148,8 @@
 ---
 
 ## 发布历史
+
+| 0.1.4 | 2026-06-16 | 待补充 |
 
 | 0.1.3 | 2026-06-15 | 待补充 |
 

@@ -148,6 +148,18 @@ MEMORY_MAX_HISTORY: int = _value("MEMORY_MAX_HISTORY", 100)
 
 
 # ═══════════════════════════════════════════════════════════════
+# Shell 配置
+# ═══════════════════════════════════════════════════════════════
+
+BASH_PATH: str = _value("BASH_PATH", "")
+"""用户显式指定的 bash 路径（Windows 专用）。
+
+优先级：config.json > 环境变量 > 空字符串（自动检测）。
+示例：BASH_PATH = "G:\\Git\\bin\\bash.exe"
+"""
+
+
+# ═══════════════════════════════════════════════════════════════
 # 路径配置（跨平台：Linux XDG 标准 / Windows %APPDATA%）
 # ═══════════════════════════════════════════════════════════════
 
@@ -294,6 +306,7 @@ def get_default_config() -> dict:
         "MAX_ITERATIONS": 50,
         "MAX_CONTEXT_TOKENS": 8000,
         "MEMORY_MAX_HISTORY": 100,
+        "BASH_PATH": "",
         "display_styles": {
             "info": {"color": "green"},
             "error": {"color": "bright_red", "bold": True},
@@ -311,6 +324,10 @@ def init_config(path: str | None = None):
     if os.path.exists(config_path):
         print(f"[Config] {config_path} already exists")
         return
+
+    # 确保父目录存在（首次运行配置目录可能不存在）
+    parent = os.path.dirname(config_path)
+    os.makedirs(parent, exist_ok=True)
 
     default_cfg = get_default_config()
     with open(config_path, "w", encoding="utf-8") as f:

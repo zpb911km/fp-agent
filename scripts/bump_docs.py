@@ -103,6 +103,7 @@ def update_changelog(version: str, release_date: str) -> bool:
     # 查找表格位置（从前往后扫描行）
     lines = content.split("\n")
     table_start = None
+    i = 0  # 预初始化，防止 lines 为空时静态检查器报 i 未绑定
     for i, line in enumerate(lines):
         if line.strip().startswith("|") and line.count("|") >= 3:
             if table_start is None:

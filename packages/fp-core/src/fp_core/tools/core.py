@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import locale
 import os
 from typing import Any
 
@@ -117,8 +118,10 @@ async def _execute_bash(command: str) -> str:
                 )
             else:
                 # Git Bash 不可用 → 降级到 cmd.exe，Windows 命令
+                # 先切换代码页到 UTF-8，防止 GBK 无法编码 Unicode 字符
+                cmd = f"chcp 65001 >nul & {command}"
                 proc = await asyncio.create_subprocess_shell(
-                    command,
+                    cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -157,6 +160,15 @@ async def _execute_bash(command: str) -> str:
 
         # cmd.exe 回退模式下加前缀告知 LLM
         if cmd_prefix and output.strip():
+            # cmd.exe 的输出可能是系统 locale 编码（如 GBK），
+            # 若 UTF-8 解码后出现大量替换字符（\ufffd），则用 locale 编码重试
+            if "\ufffd" in output:
+                enc = locale.getpreferredencoding()
+                output = stdout.decode(enc, errors="replace")
+                if stderr:
+                    stderr_text = stderr.decode(enc, errors="replace")
+                    if stderr_text.strip():
+                        output += f"\n[stderr]\n{stderr_text}"
             output = cmd_prefix + output.lstrip()
 
         return output

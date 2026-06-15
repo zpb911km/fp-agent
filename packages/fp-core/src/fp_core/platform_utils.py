@@ -9,7 +9,7 @@ platform_utils.py - 跨平台工具集
 """
 
 import os
-import shutil
+import subprocess
 import sys
 
 # ═══════════════════════════════════════════════════════════════
@@ -85,38 +85,95 @@ def get_data_dir() -> str:
 # ═══════════════════════════════════════════════════════════════
 
 
-def find_bash() -> str | None:
-    """在 Windows 上找到 Git Bash 的 bash.exe，找不到返回 None
+class _UnsetType:
+    """哨兵类型，表示「尚未查找过」状态"""
 
-    搜索路径优先级：
-      1. PATH 中的 bash（Git Bash 安装时默认添加）
-      2. 常见安装路径
-      3. Git for Windows SDK 路径
+    pass
+
+
+_UNSET = _UnsetType()
+"""哨兵值，区分「未查找过」和「查找结果为 None（没找到）」"""
+
+_bash_cache: str | None | _UnsetType = _UNSET
+"""模块级缓存：避免每次调用都走一遍检测流程"""
+
+
+def _is_wsl_bash_stub(path: str) -> bool:
+    """检测是否为 WSL 空壳启动器（Microsoft Bash Launcher）
+
+    WSL 的空壳 bash.exe（C:\\Windows\\System32\\bash.exe）只有 ~84KB，
+    真正的 Git Bash 约 1MB。利用这个差异做快速过滤，减少 PowerShell 调用。
+    """
+    # 快速路径：文件大小 >= 200KB 不可能是 84KB 的 WSL 空壳
+    try:
+        if os.path.getsize(path) >= 200 * 1024:
+            return False
+    except OSError:
+        return True  # 无法读取 → 保守跳过
+
+    # 精确验证：检查文件描述
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", f"(Get-Item '{path}').VersionInfo.FileDescription"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return "Microsoft Bash Launcher" in result.stdout
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return False  # 无法确认则放行（允许执行）
+
+
+def find_bash() -> str | None:
+    """在 Windows 上找到真正的 Git Bash，找不到返回 None
+
+    搜索路径优先级（逐级降级）：
+      0. 模块级缓存                 → 避免重复扫描
+      1. 用户配置 BASH_PATH         → config.json / 环境变量
+      2. PATH 中的 bash（跳过 WSL 空壳）
+      3. 返回 None                  → 降级 cmd.exe
 
     Linux/macOS 上始终返回 "bash"（系统自带）。
     """
+    global _bash_cache
+
     if not is_windows():
         return "bash"  # Unix 系统直接用系统 bash
 
-    # 1. PATH 中查找
-    resolved = shutil.which("bash")
-    if resolved:
-        return resolved
+    # ── 0. 缓存命中 ──
+    if not isinstance(_bash_cache, _UnsetType):
+        # isinstance 收窄后：_bash_cache 是 str | None
+        return _bash_cache
 
-    # 2. 常见安装路径
-    common_paths = [
-        os.path.join("C:", os.sep, "Program Files", "Git", "bin", "bash.exe"),
-        os.path.join("C:", os.sep, "Program Files (x86)", "Git", "bin", "bash.exe"),
-        os.path.join(os.path.expanduser("~"), "AppData", "Local", "Programs", "Git", "bin", "bash.exe"),
-        # MSYS2
-        os.path.join("C:", os.sep, "msys64", "usr", "bin", "bash.exe"),
-        os.path.join("C:", os.sep, "msys32", "usr", "bin", "bash.exe"),
-    ]
-    for path in common_paths:
-        if os.path.isfile(path):
-            return path
+    # ── 1. 用户配置（最高优先级，不缓存校验失败的结果） ──
+    try:
+        from fp_core.config import BASH_PATH  # lazy import 避免循环导入
 
+        if BASH_PATH and os.path.isfile(BASH_PATH) and not _is_wsl_bash_stub(BASH_PATH):
+            _bash_cache = BASH_PATH
+            return _bash_cache
+    except ImportError:
+        pass  # config 不可用时正常 fallthrough
+
+    # ── 2. PATH 中逐个查找，跳过 WSL 空壳 ──
+    for p in os.environ.get("PATH", "").split(os.pathsep):
+        p = p.strip('"')
+        if not p:
+            continue
+        full = os.path.join(p, "bash.exe")
+        if os.path.isfile(full) and not _is_wsl_bash_stub(full):
+            _bash_cache = full
+            return _bash_cache
+
+    # ── 3. 全部失败 ──
+    _bash_cache = None
     return None
+
+
+def clear_bash_cache() -> None:
+    """清除 bash 缓存，强制下次调用重新检测"""
+    global _bash_cache
+    _bash_cache = _UNSET
 
 
 def check_git_bash() -> tuple[bool, str]:
@@ -130,7 +187,10 @@ def check_git_bash() -> tuple[bool, str]:
     bash_path = find_bash()
     if bash_path:
         return True, f"已找到 Git Bash: {bash_path}"
-    return False, "未找到 Git Bash。请安装 Git for Windows (https://git-scm.com) 并确保将 Git Bash 添加到 PATH"
+    return False, (
+        "未找到 Git Bash。请安装 Git for Windows (https://git-scm.com)，"
+        "或在 config.json 中设置 BASH_PATH 为 bash.exe 的完整路径。"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -164,12 +224,21 @@ def ansi_supported() -> bool:
         # 检查 ConEmu / Cmder
         if os.environ.get("CONEMUANSI") == "ON":
             return True
-        # 兜底：使用 colorama 的 stream 检测
+        # 兜底：通过 Windows API 查询控制台是否已启用虚拟终端处理
         try:
-            import colorama.ansitowin32  # type: ignore[import-untyped]
+            import ctypes
+            from ctypes import wintypes
 
-            return colorama.ansitowin32.is_ansi_enabled()
-        except ImportError:
-            return False
+            kernel32 = ctypes.windll.kernel32
+            # STD_OUTPUT_HANDLE = -11
+            h = kernel32.GetStdHandle(-11)
+            mode = wintypes.DWORD()
+            if kernel32.GetConsoleMode(h, ctypes.byref(mode)):
+                # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+                return bool(mode.value & 0x0004)
+        except Exception:
+            pass
+        # 实在无法检测时，保守假设不支持
+        return False
 
     return True
