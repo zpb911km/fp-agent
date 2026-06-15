@@ -32,13 +32,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TARGETS: list[dict] = [
     {
         "path": "docs/README.md",
-        "pattern": r"(版本历史：)v[\d.]+",
-        "replacement": r"\g<1>v{version}",
+        "pattern": r"(版本历史：)v?[\d.]+",
+        "replacement": r"\g<1>{version}",
     },
     {
         "path": "docs/guide/快速开始.md",
-        "pattern": r"(Five Pebbles Agent  )v[\d.]+",
-        "replacement": r"\g<1>v{version}",
+        "pattern": r"(Five Pebbles Agent  )v?[\d.]+",
+        "replacement": r"\g<1>{version}",
     },
     {
         "path": "docs/CONTRIBUTING.md",
