@@ -1,18 +1,13 @@
 # Release — 五块卵石发布到 PyPI
 #
 # 触发方式：
-#   1. 自动：推送 v* 标签时（如 git tag v0.1.0 && git push --tags）
+#   1. 自动：推送 v* 标签时（如 git tag v0.2.0 && git push --tags）
 #   2. 手动：GitHub Actions 页面 → workflow_dispatch
 #
-# 前置条件：
-#   1. 在 PyPI 上创建 5 个项目：fp-agent, fp-core, fp-terminal, fp-webui, fp-acp
-#   2. 每个项目生成一个 API token（Scope: Entire project）
-#   3. 在 GitHub 仓库 Settings → Secrets → Actions 中添加：
-#      - PYPI_API_TOKEN_AGENT  → PyPI 上 fp-agent 的 token
-#      - PYPI_API_TOKEN_CORE   → PyPI 上 fp-core 的 token
-#      - PYPI_API_TOKEN_CLI    → PyPI 上 fp-terminal 的 token
-#      - PYPI_API_TOKEN_WEBUI  → PyPI 上 fp-webui 的 token
-#      - PYPI_API_TOKEN_ACP    → PyPI 上 fp-acp 的 token
+# 前置条件（OIDC Trusted Publishing — 已在 PyPI 配置完成）：
+#   - fp-agent, fp-core, fp-terminal, fp-webui, fp-acp
+#   - 全部指向 zpb911km/fp-agent 仓库的 release.yml
+#   - 无需管理任何 token
 
 name: Release
 
@@ -27,6 +22,10 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+  id-token: write  # 用于 OIDC Trusted Publishing
+
 jobs:
   build:
     name: 构建所有子包
@@ -34,6 +33,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 需要完整历史以获取 git tag 版本号
 
       - name: 安装 Python 3.12
         uses: actions/setup-python@v5
@@ -41,9 +42,7 @@ jobs:
           python-version: "3.12"
 
       - name: 安装构建工具
-        run: |
-          python -m pip install --upgrade pip
-          pip install build
+        run: pip install build
 
       - name: 📦 构建所有子包
         run: |
@@ -64,25 +63,6 @@ jobs:
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
 
-    strategy:
-      matrix:
-        include:
-          - pkg: fp-agent
-            prefix: fp_agent
-            secret: PYPI_API_TOKEN_AGENT
-          - pkg: fp-core
-            prefix: fp_core
-            secret: PYPI_API_TOKEN_CORE
-          - pkg: fp-terminal
-            prefix: fp_cli
-            secret: PYPI_API_TOKEN_CLI
-          - pkg: fp-webui
-            prefix: fp_webui
-            secret: PYPI_API_TOKEN_WEBUI
-          - pkg: fp-acp
-            prefix: fp_acp
-            secret: PYPI_API_TOKEN_ACP
-
     steps:
       - name: 下载构建产物
         uses: actions/download-artifact@v4
@@ -90,18 +70,20 @@ jobs:
           name: dist
           path: dist
 
-      - name: 筛选 ${{ matrix.pkg }} 的构建产物
-        run: |
-          mkdir -p "dist_${{ matrix.pkg }}"
-          cp dist/${{ matrix.prefix }}-* "dist_${{ matrix.pkg }}/"
+      - name: 查看构建产物
+        run: ls -la dist/
 
-      - name: 📤 发布 ${{ matrix.pkg }}
+      - name: 📤 发布全部子包到 PyPI（OIDC）
         uses: pypa/gh-action-pypi-publish@v1.12.4
         with:
-          packages-dir: "dist_${{ matrix.pkg }}"
-          password: >
-            ${{ secrets[matrix.secret] &&
-            format('__token__:{0}', secrets[matrix.secret]) }}
+          packages-dir: dist
 
-      - name: ✅ ${{ matrix.pkg }} 发布完成
-        run: echo "✅ ${{ matrix.pkg }} 已发布"
+      - name: ✅ 发布完成
+        run: |
+          echo "✅ 已发布到 PyPI:"
+          ls -la dist/
+          echo ""
+          echo "包列表："
+          for f in dist/*.whl; do
+            basename "$f" | sed 's/-py3.*//' | sed 's/_/-/g'
+          done | sort -u
