@@ -1,6 +1,6 @@
 """fp-core - 五块卵石 Agent 引擎"""
 
-__version__ = "0.1.0"
+__version__ = "0.1.2"
 __license__ = "MIT"
 __author__ = "zpb"
 
