@@ -112,6 +112,33 @@ jobs:
           fi
           echo "✅ 全部子包版本配置一致"
 
+      - name: 📋 文档版本与 tag 一致性检查
+        run: |
+          CURRENT_TAG=$(git describe --tags --exact-match 2>/dev/null || true)
+          if [ -n "$CURRENT_TAG" ]; then
+            echo "当前 tag: $CURRENT_TAG"
+            errors=0
+            if ! grep -q "\\[$CURRENT_TAG\\]" docs/CHANGELOG.md; then
+              echo "  ❌ docs/CHANGELOG.md 缺少 [$CURRENT_TAG] 条目"
+              echo "     → 忘记运行 python scripts/bump_docs.py $CURRENT_TAG ... 了？"
+              errors=$((errors + 1))
+            else
+              echo "  ✅ docs/CHANGELOG.md"
+            fi
+            for doc in docs/README.md docs/guide/快速开始.md docs/CONTRIBUTING.md .github/ISSUE_TEMPLATE/bug_report.md; do
+              if [ -f "$doc" ] && ! grep -q "$CURRENT_TAG" "$doc" 2>/dev/null; then
+                echo "  ⚠️  $doc 未包含版本 $CURRENT_TAG（可能是旧引用）"
+              fi
+            done
+            if [ "$errors" -gt 0 ]; then
+              echo "❌ 文档版本不匹配，请运行: python scripts/bump_docs.py $CURRENT_TAG YYYY-MM-DD"
+              exit 1
+            fi
+            echo "✅ 文档版本与 git tag 一致"
+          else
+            echo "无 git tag，跳过文档版本检查"
+          fi
+
       - name: 📦 构建 fp-core
         run: python -m build packages/fp-core
 
