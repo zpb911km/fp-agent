@@ -62,12 +62,15 @@ async def execute(params: dict[str, Any]) -> str:
 
         tmp_path = await loop.run_in_executor(None, _write_temp)
 
-        # 异步执行
+        # 异步执行（强制 UTF-8 编码，防止 GBK/cp936 等 locale 解码失败）
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
             tmp_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
 
         try:
