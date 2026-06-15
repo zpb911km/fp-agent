@@ -2,7 +2,7 @@
 核心工具模块 — 不可插件化的基础工具（全异步版本）
 
 这些工具必须保持直接绑定，作为系统的基础设施：
-- bash: Shell 命令执行（使用 asyncio.create_subprocess_shell）
+- bash: Shell 命令执行（跨平台：Linux 用 bash，Windows 用 Git Bash）
 - read_file: 文件读取
 - write_file: 文件写入
 - edit_file: 精确文本替换
@@ -12,6 +12,8 @@ import asyncio
 import os
 from typing import Any
 
+from fp_core.platform_utils import find_bash, is_windows
+
 # ── 核心工具定义（OpenAI function calling schema） ──────────────────────
 
 CORE_TOOL_DEFINITIONS = [
@@ -19,7 +21,11 @@ CORE_TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "执行一条 shell 命令并获取输出。支持任意 bash 语法，可管道/重定向。超时 300 秒。",
+            "description": (
+                "执行 shell 命令，支持管道/重定向。"
+                "跨平台：Linux 原生执行，Windows 自动路由到 Git Bash 或降级 cmd.exe。"
+                "超时 300 秒。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -85,16 +91,45 @@ def get_core_definitions() -> list:
 
 
 async def _execute_bash(command: str) -> str:
-    """异步执行 shell 命令"""
+    """异步执行 shell 命令
+
+    跨平台策略：
+      - Linux/macOS:      使用 asyncio.create_subprocess_shell，由系统 shell 执行
+      - Windows + Git Bash: 使用 bash.exe -c，Unix 命令（ls/grep/awk）可用
+      - Windows + 无 Git Bash: 降级到 cmd.exe /c，Windows 命令（dir/type/findstr）可用
+    """
     if not command:
         raise ValueError("bash 工具需要 command 参数")
 
+    # ── 跨平台路由：选择正确的 shell 执行方式 ──
+    cmd_prefix = ""  # 输出前缀，cmd.exe 回退时标记
     try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        if is_windows():
+            bash_path = find_bash()
+            if bash_path:
+                # Git Bash 可用 → 走 bash.exe，Unix 命令
+                proc = await asyncio.create_subprocess_exec(
+                    bash_path,
+                    "-c",
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            else:
+                # Git Bash 不可用 → 降级到 cmd.exe，Windows 命令
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                cmd_prefix = "[cmd.exe 回退] "
+        else:
+            # Linux/macOS → 系统 shell
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
 
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -106,7 +141,6 @@ async def _execute_bash(command: str) -> str:
             await proc.wait()
             return "错误：命令执行超时（300秒）"
         except (KeyboardInterrupt, asyncio.CancelledError):
-            # 中断时 kill 子进程并重新抛出
             proc.kill()
             await proc.wait()
             raise
@@ -120,6 +154,10 @@ async def _execute_bash(command: str) -> str:
         # 截断 10000 字符
         if len(output) > 10000:
             output = output[:10000] + f"\n...（已截断，原文 {len(output)} 字符）"
+
+        # cmd.exe 回退模式下加前缀告知 LLM
+        if cmd_prefix and output.strip():
+            output = cmd_prefix + output.lstrip()
 
         return output
     except Exception as e:

@@ -11,6 +11,7 @@ import importlib.util
 import os
 
 from fp_core import display
+from fp_core.platform_utils import get_data_dir
 
 # 缓存：命令名 → 模块对象
 _commands: dict[str, "CommandModule"] = {}
@@ -36,9 +37,8 @@ def _discover_commands():
     builtin_dir = os.path.dirname(os.path.abspath(__file__))
     _scan_dir(builtin_dir, "fp_core.commands")
 
-    # 用户命令目录
-    _xdg_data = os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share"))
-    user_dir = os.path.join(_xdg_data, "fp", "commands")
+    # 用户命令目录（跨平台：Linux ~/.local/share/fp/commands, Windows %LOCALAPPDATA%/fp/commands）
+    user_dir = os.path.join(get_data_dir(), "commands")
     _scan_dir(user_dir)  # 直接 import 路径，通过 sys.path 解析
 
 

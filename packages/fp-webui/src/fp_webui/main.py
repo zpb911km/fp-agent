@@ -29,6 +29,8 @@ import sys
 import time
 from contextlib import asynccontextmanager, suppress
 
+from fp_core.platform_utils import get_data_dir
+
 # ── FastAPI / WebSocket ─────────────────────────────────
 try:
     import uvicorn
@@ -107,8 +109,7 @@ event_bus = EventBus()
 # ════════════════════════════════════════════════════════════
 
 _TOKEN_DIR: str = os.path.join(
-    os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share")),
-    "fp",
+    get_data_dir(),
 )
 _TOKENS_DIR: str = os.path.join(_TOKEN_DIR, "tokens")
 os.makedirs(_TOKENS_DIR, exist_ok=True)
@@ -134,6 +135,8 @@ def _load_or_create_token() -> str:
         with open(_TOKEN_FILE, "w") as f:
             f.write(new_token)
         os.chmod(_TOKEN_FILE, 0o600)
+    except PermissionError:
+        pass  # Windows 不支持 chmod，静默跳过
     except OSError:
         pass
     return new_token

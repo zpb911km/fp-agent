@@ -27,6 +27,7 @@ from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 from fp_core.core.llm_service import LLMConfig, LLMService
 from fp_core.core.prompt_builder import PromptBuilder
 from fp_core.core.tool_executor import ToolExecutor
+from fp_core.platform_utils import get_data_dir
 from fp_core.plugins.base.plugin import PluginRegistry
 
 # ── 上下文 local IO 通道（防并发竞态） ─────────────────
@@ -143,9 +144,8 @@ class Agent:
             plugin_dir=os.path.normpath(_builtin_plugin_dir),
         )
 
-        # 用户插件目录（XDG，同名覆盖）
-        _xdg_data = os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share"))
-        _user_plugin_dir = os.path.join(_xdg_data, "fp", "plugins")
+        # 用户插件目录（跨平台，同名覆盖）
+        _user_plugin_dir = os.path.join(get_data_dir(), "plugins")
         if os.path.isdir(_user_plugin_dir):
             self.plugins.scan(_user_plugin_dir)
 

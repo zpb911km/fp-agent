@@ -7,11 +7,12 @@ import os
 import re
 from dataclasses import dataclass, field
 
+from fp_core.platform_utils import get_data_dir
+
 BUILTIN_SKILLS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 用户技能目录（XDG 标准，可写，同名技能覆盖内置）
-_XDG_DATA_HOME = os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share"))
-USER_SKILLS_DIR = os.path.join(_XDG_DATA_HOME, "fp", "skills")
+# 用户技能目录（跨平台：Linux ~/.local/share/fp/skills, Windows %LOCALAPPDATA%/fp/skills, 同名技能覆盖内置）
+USER_SKILLS_DIR = os.path.join(get_data_dir(), "skills")
 
 # 模板变量：agent 主入口文件路径（用于自修改等技能）
 AGENT_ENTRY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cli.py")

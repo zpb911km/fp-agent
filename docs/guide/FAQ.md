@@ -201,3 +201,34 @@ echo "备份完成：$backup_dir"
 **迁移到新环境**
 
 将备份目录中的 `data/` 复制到新环境的根目录即可。
+
+---
+
+## Q11: 能在 Windows 上运行吗？需要什么额外配置？
+
+**A：** 可以。系统已内置跨平台支持，一套代码同时运行在 Linux / macOS / Windows。
+
+**Windows 上唯一的要求是安装 Git for Windows**，因为系统的 `bash` 工具需要它提供的 bash.exe 来执行 shell 命令（含 `grep`、`awk`、`sed`、`file`、`strings` 等常用工具）。
+
+**安装步骤：**
+
+1. 访问 [git-scm.com](https://git-scm.com) 下载安装包
+2. 安装时确保：
+   - ✅ **Git Bash** 组件选中（默认选中）
+   - ✅ **Add Git Bash to PATH** 或 **Git from the command line and also from 3rd-party software**（建议选此项）
+3. 安装完成后打开新的 cmd / PowerShell / 终端，验证 `bash` 命令可用：
+
+```bash
+bash --version
+```
+
+如果看到版本信息，说明环境就绪。之后运行 `fp` 完全不需要额外配置。
+
+**路径差异（自动适配，无需手动干预）：**
+
+| 数据 | Linux | Windows |
+|------|-------|---------|
+| 配置文件 | `~/.config/fp/config.json` | `%APPDATA%/fp/config.json` |
+| 会话/记忆/任务 | `~/.local/share/fp/` | `%LOCALAPPDATA%/fp/` |
+
+> 如果未安装 Git Bash，bash 工具会自动降级到 cmd.exe（Windows 原生命令），输出会带 `[cmd.exe 回退]` 前缀。

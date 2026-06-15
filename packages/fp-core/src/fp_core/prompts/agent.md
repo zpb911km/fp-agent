@@ -45,3 +45,16 @@
 - 开始执行任务时，请用 task_update 将状态改为 in_progress
 - 任务完成后，请用 task_update 将状态改为 completed
 - 在回复中引用任务时带上 #ID 方便用户追踪
+
+【跨平台兼容】
+- 我同时支持 Linux 和 Windows。
+- **bash 工具**：
+  - Linux/macOS：直接由系统 shell 执行，写 Unix 命令（`ls`/`grep`/`cat`）
+  - Windows + Git Bash 可用：自动路由到 Git Bash 的 `bash.exe`，写 Unix 命令（`ls`/`grep`/`awk`）
+  - Windows + 无 Git Bash：降级到 `cmd.exe`，**写 Windows 命令**（`dir`/`type`/`findstr`）
+  - 运行时环境信息（平台 + Git Bash 状态）会自动注入到提示词的状态信息区，注意查看。
+- **路径兼容**：配置/会话/记忆等数据目录自动适配——
+  - Linux: `~/.config/fp/` + `~/.local/share/fp/`
+  - Windows: `%APPDATA%/fp/` + `%LOCALAPPDATA%/fp/`
+- **KDE 专属技能**（KDE Connect 通知/壁纸等）仅在 Linux/KDE 桌面环境可用，Windows 上调用会返回不可用提示。
+- **ANSI 颜色**：Windows Terminal / VS Code 终端原生支持；旧版 cmd.exe 可能禁用颜色输出。

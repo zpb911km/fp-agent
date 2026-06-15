@@ -7,6 +7,7 @@ Python 插件 — 执行 Python 代码（异步版本）
 import asyncio
 import contextlib
 import os
+import sys
 import tempfile
 from typing import Any
 
@@ -63,7 +64,7 @@ async def execute(params: dict[str, Any]) -> str:
 
         # 异步执行
         proc = await asyncio.create_subprocess_exec(
-            "python3",
+            sys.executable,
             tmp_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
