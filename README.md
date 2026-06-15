@@ -96,15 +96,11 @@ fp/                              # 用户入口包
 ## 📦 快速安装
 
 ```bash
-# 基本安装（核心 + CLI）
+# 基础安装（核心引擎 + CLI 终端）
 pip install fp-agent
 
-# 全部组件（核心 + CLI + Web + ACP）
-pip install fp-agent[all]
-
-# 选择性安装
-pip install fp-agent[webui]    # 核心 + Web 界面
-pip install fp-agent[acp]      # 核心 + ACP 协议
+# 完整安装（核心 + CLI + Web 界面 + ACP 协议）
+pip install fp-agent fp-webui fp-acp
 ```
 
 要求 **Python ≥ 3.11**。
@@ -122,8 +118,8 @@ fp
 ### Web 界面
 
 ```bash
-pip install fp-agent[webui]
-fp --webui
+pip install fp-webui
+fp --mode webui
 ```
 
 浏览器访问 `http://localhost:7860`。
@@ -131,8 +127,8 @@ fp --webui
 ### ACP 远程调用（IDE 集成）
 
 ```bash
-pip install fp-agent[acp]
-fp --acp
+pip install fp-acp
+fp --mode acp
 
 # 通过 JSON-RPC 调用
 curl http://localhost:9090 \
@@ -152,11 +148,12 @@ echo "运行 ls -la" | fp
 
 | 分类 | 入口 |
 |------|------|
-| 📘 **快速开始** | [docs/guide/快速开始.md](docs/guide/快速开始.md) |
+| 📘 **快速开始**（安装→初始化→内置系统→外置系统） | [docs/guide/快速开始.md](docs/guide/快速开始.md) |
 | ⚙️ **配置指南** | [docs/guide/配置指南.md](docs/guide/配置指南.md) |
 | 🎮 **命令参考** | [docs/guide/命令参考.md](docs/guide/命令参考.md) |
-| 🧩 **插件开发** | [docs/guide/插件系统.md](docs/guide/插件系统.md) |
 | 🛠️ **工具概览** | [docs/guide/工具概览.md](docs/guide/工具概览.md) |
+| 🎯 **技能系统** | [docs/guide/技能系统.md](docs/guide/技能系统.md) |
+| 🔌 **插件系统** | [docs/guide/插件系统.md](docs/guide/插件系统.md) |
 | 🧠 **记忆系统** | [docs/guide/记忆系统.md](docs/guide/记忆系统.md) |
 | 🌐 **WebUI 手册** | [docs/guide/WebUI手册.md](docs/guide/WebUI手册.md) |
 | 🔧 **开发者文档** | [docs/dev/项目概览.md](docs/dev/项目概览.md) |
