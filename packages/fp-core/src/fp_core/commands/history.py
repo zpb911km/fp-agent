@@ -16,7 +16,6 @@ def execute(agent, arg: str) -> tuple[bool, str]:
 
     roles_zh = {"user": "👤 用户", "assistant": "🤖 AI", "tool": "🔧 工具"}
     display.info(f"\n📜 对话历史（共 {len(history_msgs)} 条）:")
-    print()
 
     for i, msg in enumerate(history_msgs):
         role = roles_zh.get(msg["role"], msg["role"])
@@ -28,5 +27,4 @@ def execute(agent, arg: str) -> tuple[bool, str]:
         content = content.replace("\n", " ")
         display.item(f"  [{i + 1:3d}] {role}: {content}")
 
-    print()
     return (True, "📜 历史已显示（终端）")
