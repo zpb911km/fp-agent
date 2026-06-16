@@ -313,7 +313,7 @@ class Agent:
     def rebuild_context(self):
         """重建上下文：重新加载 system prompt + 从会话文件恢复"""
         prompt = self._prompter.build_system_prompt()
-        self._conv.set_system_prompt(prompt)
+        self._conv.reset(prompt)
         saved = self.session.load_context(prompt)
         if len(saved) > 1:
             self._conv.replace_all(saved)
