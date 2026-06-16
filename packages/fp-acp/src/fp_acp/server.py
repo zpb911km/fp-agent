@@ -263,10 +263,10 @@ class ACPServer:
             return "other"
 
     async def _on_tool_call(self, context, tool_name="", tool_args="", **kwargs):
-        """工具调用前 — 发送带 input 详情的 tool_call 通知
+        """工具调用前 — 发送 tool_call 通知
 
-        ACP 规范支持 input 字段显示工具原始参数。
-        bash 命令显示完整命令，edit_file 显示 old→new 摘要，read_file 显示文件路径。
+        ACP v1 规范使用 rawInput 传递原始工具参数。
+        content 用于富内容展示（如文件预览 resource）。
         """
         # ── 会话未就绪时跳过（start() 之前触发的钩子） ──
         if self._session_id is None:
@@ -290,7 +290,6 @@ class ACPServer:
         kind = self._get_tool_kind(tool_name)
         file_path = self._extract_file_path(tool_name, args_dict)
         title = self._build_tool_title(tool_name, args_dict, kind)
-        input_text = self._build_tool_input(tool_name, args_dict)
 
         notification: dict = {
             "sessionId": self._session_id,
@@ -300,14 +299,12 @@ class ACPServer:
                 "title": title,
                 "kind": kind,
                 "status": "in_progress",
+                # ACP v1 规范: rawInput = 原始工具参数
+                "rawInput": args_dict,
             },
         }
 
-        # 有 input 就加上
-        if input_text:
-            notification["update"]["input"] = {"type": "text", "text": input_text}
-
-        # 有文件路径就加上 content (resource)
+        # 有文件路径就加上 content (resource) 供 IDE 预览
         if file_path and os.path.isfile(file_path):
             notification["update"]["content"] = [
                 {
@@ -373,77 +370,12 @@ class ACPServer:
             return f"{emoji} ELF: {os.path.basename(fp)}"
         return f"{emoji} {tool_name}"
 
-    def _build_tool_input(self, tool_name: str, args: dict) -> str | None:
-        """构建工具 input 文本（显示在 Zed 的 tool_call 详情中）"""
-        if tool_name == "bash":
-            return args.get("command", "")
-        elif tool_name == "read_file":
-            fp = args.get("file_path", "")
-            off = args.get("offset")
-            lim = args.get("limit")
-            parts = [fp]
-            if off is not None:
-                parts.append(f"offset={off}")
-            if lim is not None:
-                parts.append(f"limit={lim}")
-            return " ".join(parts)
-        elif tool_name == "edit_file":
-            old = args.get("old_string", "")
-            new = args.get("new_string", "")
-            old_short = old[:60] + "..." if len(old) > 60 else old
-            new_short = new[:60] + "..." if len(new) > 60 else new
-            return f"{args.get('file_path', '?')}\n- {old_short}\n+ {new_short}"
-        elif tool_name == "write_file":
-            return args.get("file_path", "")
-        elif tool_name == "python":
-            return args.get("code", "")[:200]
-        elif tool_name == "web_search":
-            return args.get("query", "")
-        elif tool_name == "subagent":
-            task = args.get("task", "")
-            ctx = args.get("context", "")
-            if ctx:
-                return f"{task}\n[context] {ctx[:100]}"
-            return task
-        return None
-
-    # ── 结果摘要 ────────────────────────────────────────
-
-    @staticmethod
-    def _summarize_result(tool_name: str, result_str: str) -> str:
-        """
-        按工具类型对结果分级截断，返回适合展示的摘要文本。
-
-        策略：
-          read_file   → 全文（用户就是想看文件内容）
-          edit_file   → 仅 diff（不发完整文本，由 diff 结构承载）
-          write_file  → 500 字（确认写入了什么）
-          bash        → 2000 字（可能包含错误栈）
-          python      → 2000 字（代码计算结果）
-          web_search  → 800 字（搜索结果摘要）
-          subagent    → 1500 字（子任务结论）
-          其他        → 300 字
-        """
-        limits: dict[str, int] = {
-            "read_file": 0,  # 0 = 不限
-            "edit_file": 0,  # 纯 diff，不发 output 文本
-            "write_file": 500,
-            "bash": 2000,
-            "python": 2000,
-            "web_search": 800,
-            "subagent": 1500,
-        }
-        limit = limits.get(tool_name, 300)
-
-        if limit == 0 or len(result_str) <= limit:
-            return result_str
-
-        truncated = result_str[:limit]
-        truncated += f"\n\n**...(已截断，共 {len(result_str)} 字符)**"
-        return truncated
-
     async def _on_tool_result(self, context, tool_name="", result="", **kwargs):
-        """工具完成后 — 发送 tool_call_update，包含 output 和可能的 diff"""
+        """工具完成后 — 发送 tool_call_update
+
+        ACP v1 规范使用 rawOutput 传递原始工具结果。
+        content 用于富内容渲染（resource 代码块 / diff 差异视图）。
+        """
         # ── 会话未就绪时跳过 ──
         if self._session_id is None:
             return
@@ -457,65 +389,40 @@ class ACPServer:
                 "sessionUpdate": "tool_call_update",
                 "toolCallId": self._tool_call_id_for_result(tool_name),
                 "status": status,
+                # ACP v1 规范: rawOutput = 原始工具结果
+                "rawOutput": {"type": "text", "text": result_str} if result_str else None,
             },
         }
 
-        # ── output：所有工具都发结果摘要（分级截断） ──
-        if result_str and status != "failed":
-            summarized = self._summarize_result(tool_name, result_str)
-            if summarized:
-                if tool_name == "read_file":
-                    # read_file：用 resource 类型发，让 IDE 渲染为代码块
-                    read_path = self._last_read_path or "(inline)"
-                    notification["update"]["output"] = {
-                        "type": "resource",
-                        "resource": {
-                            "uri": f"file://{read_path}",
-                            "mimeType": self._guess_mime(read_path) if read_path != "(inline)" else "text/plain",
-                            "text": summarized,
-                        },
-                    }
-                elif tool_name == "edit_file":
-                    # edit_file：有 diff 块时不重复发 output 文本
-                    has_diff = (
-                        status == "completed"
-                        and self._last_edit_args
-                        and self._last_edit_args.get("old_string")
-                        and self._last_edit_args.get("new_string")
-                    )
-                    if not has_diff:
-                        notification["update"]["output"] = {
-                            "type": "text",
-                            "text": summarized,
-                        }
-                else:
-                    notification["update"]["output"] = {
-                        "type": "text",
-                        "text": summarized,
-                    }
+        # ── content：富内容块 ──
+        content_blocks: list[dict] = []
 
-        # ── diff：edit_file 构建 diff 内容块 ──
+        if tool_name == "read_file" and status != "failed":
+            read_path = self._last_read_path or "(inline)"
+            content_blocks.append({
+                "type": "resource",
+                "resource": {
+                    "uri": f"file://{read_path}",
+                    "mimeType": self._guess_mime(read_path) if read_path != "(inline)" else "text/plain",
+                    "text": result_str,
+                },
+            })
+
         if tool_name == "edit_file" and status == "completed" and self._last_edit_args:
             args = self._last_edit_args
             old_text = args.get("old_string", "")
             new_text = args.get("new_string", "")
             file_path = args.get("file_path", "")
             if old_text and new_text and file_path:
-                notification["update"]["content"] = [
-                    {
-                        "type": "diff",
-                        "path": file_path,
-                        "oldText": old_text,
-                        "newText": new_text,
-                    }
-                ]
+                content_blocks.append({
+                    "type": "diff",
+                    "path": file_path,
+                    "oldText": old_text,
+                    "newText": new_text,
+                })
 
-        # ── 错误时显示错误信息 ──
-        if status == "failed":
-            notification["update"]["output"] = {
-                "type": "text",
-                "text": self._summarize_result(tool_name, result_str),
-            }
+        if content_blocks:
+            notification["update"]["content"] = content_blocks
 
         self._send_notification("session/update", notification)
 
