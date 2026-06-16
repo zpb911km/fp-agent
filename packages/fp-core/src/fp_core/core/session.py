@@ -240,9 +240,9 @@ class SessionManager:
         self._meta = self._load_meta_from_session()
         return self._session_id
 
-    def delete_session(self, sid: str) -> bool:
-        """删除指定会话文件。不能删除当前会话。返回是否成功。"""
-        if sid == self._session_id:
+    def delete_session(self, sid: str, force: bool = False) -> bool:
+        """删除指定会话文件。不能删除当前会话（除非 force=True）。返回是否成功。"""
+        if not force and sid == self._session_id:
             return False  # 不允许删除当前会话
         path = _session_path(sid)
         if not os.path.exists(path):

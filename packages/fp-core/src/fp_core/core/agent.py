@@ -252,7 +252,8 @@ class Agent:
                     summary = last_user.get("content", "").strip().replace("\n", " ")[:20]
                     self.session.update_meta(summary=summary)
 
-        self.session.save_context(self._conv.messages)
+        if not self._nuclear_exit:
+            self.session.save_context(self._conv.messages)
 
         # 显示退出面板
         info = self.session.list_sessions().get(self.session.session_id, {})
@@ -296,8 +297,8 @@ class Agent:
         self._conv.reset(system_prompt)
         self.session.clear_session_file()
 
-    def delete_session(self, sid: str) -> bool:
-        return self.session.delete_session(sid)
+    def delete_session(self, sid: str, force: bool = False) -> bool:
+        return self.session.delete_session(sid, force=force)
 
     # ============ 公共 API：上下文与持久化 ============
 
@@ -759,7 +760,7 @@ class Agent:
 
         # _on_shutdown 钩子已保存上下文，此处只需处理核弹模式
         if self._nuclear_exit:
-            self.session.delete_session(self.session.session_id)
+            self.session.delete_session(self.session.session_id, force=True)
             display.info("💥 核弹模式：当前会话已删除，不留痕迹")
 
         display.info("👋 Agent 已关闭")
