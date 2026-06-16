@@ -33,11 +33,11 @@
 | | [dev/数据持久化.md](dev/数据持久化.md) | 会话/记忆/任务存储格式 |
 | | [dev/中断机制.md](dev/中断机制.md) | Ctrl+C 双重检查、恢复策略 |
 | | [dev/自我修改.md](dev/自我修改.md) | 自修改流程、测试、回滚 |
-| | [dev/plugins.md](dev/plugins.md) | 「文件即开关」插件约定 |
+| | [dev/文件命名约定.md](dev/文件命名约定.md) | 「文件即开关」通用规则（Plugin/Skill/Command/Tool 共用） |
 | 🔌 **ACP 协议** | [acp/README.md](acp/README.md) | ACP 协议索引 |
 | | [acp/使用指南.md](acp/使用指南.md) | IDE 集成指南 |
 | | [acp/00-OVERVIEW.md](acp/00-OVERVIEW.md) ~ [07-IMPLEMENTATION.md](acp/07-IMPLEMENTATION.md) | 协议规范全集 |
-| 📋 **项目信息** | [CHANGELOG.md](CHANGELOG.md) | 版本历史：0.1.4（迭代记录见 CHANGELOG） |
+| 📋 **项目信息** | [CHANGELOG.md](CHANGELOG.md) | 版本历史：0.1.5（迭代记录见 CHANGELOG） |
 | | [CONTRIBUTING.md](CONTRIBUTING.md) | PR 流程、代码风格、Commit 规范 |
 
 ---
@@ -76,7 +76,7 @@ docs/
 │   ├── 数据持久化.md             存储格式
 │   ├── 中断机制.md               Ctrl+C 处理
 │   ├── 自我修改.md               自修改流程
-│   └── plugins.md               插件约定
+│   └── 文件命名约定.md            文件即开关（四类扩展共用）
 │
 ├── acp/                       ← 🔌 ACP 协议规范
 │   ├── README.md                协议索引

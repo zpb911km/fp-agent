@@ -252,7 +252,8 @@ class Agent:
                     summary = last_user.get("content", "").strip().replace("\n", " ")[:20]
                     self.session.update_meta(summary=summary)
 
-        self.session.save_context(self._conv.messages)
+        if not self._nuclear_exit:
+            self.session.save_context(self._conv.messages)
 
         # 显示退出面板
         info = self.session.list_sessions().get(self.session.session_id, {})
@@ -296,8 +297,8 @@ class Agent:
         self._conv.reset(system_prompt)
         self.session.clear_session_file()
 
-    def delete_session(self, sid: str) -> bool:
-        return self.session.delete_session(sid)
+    def delete_session(self, sid: str, force: bool = False) -> bool:
+        return self.session.delete_session(sid, force=force)
 
     # ============ 公共 API：上下文与持久化 ============
 
@@ -312,7 +313,7 @@ class Agent:
     def rebuild_context(self):
         """重建上下文：重新加载 system prompt + 从会话文件恢复"""
         prompt = self._prompter.build_system_prompt()
-        self._conv.set_system_prompt(prompt)
+        self._conv.reset(prompt)
         saved = self.session.load_context(prompt)
         if len(saved) > 1:
             self._conv.replace_all(saved)
@@ -593,6 +594,9 @@ class Agent:
         # ── 生命周期：消息已接收 ──
         await self.lifecycle.emit(LifecycleHook.ON_MESSAGE_RECEIVED, content=filtered_input)
 
+        # ── 子 agent 静默模式：抑制 spinner / LLM 流等 UI 输出 ──
+        _silent = os.environ.get("FP_SUBAGENT_SILENT") == "1"
+
         while True:
             # ── 中断检查（支持 signal handler 和 cancel() 两种途径） ──
             self._check_interrupted()
@@ -613,7 +617,7 @@ class Agent:
 
             self._processing = True
             try:
-                assistant_msg = await self._invoke_llm(messages_for_llm)
+                assistant_msg = await self._invoke_llm(messages_for_llm, silent=_silent)
             except (asyncio.CancelledError, KeyboardInterrupt):
                 self._processing = False
                 raise
@@ -627,7 +631,7 @@ class Agent:
                     self._conv.repair_tool_ordering()
                     try:
                         self._processing = True
-                        assistant_msg = await self._invoke_llm(self._conv.messages)
+                        assistant_msg = await self._invoke_llm(self._conv.messages, silent=_silent)
                     except (asyncio.CancelledError, KeyboardInterrupt):
                         self._processing = False
                         raise
@@ -683,7 +687,7 @@ class Agent:
                             tool_name=tc["function"]["name"],
                             tool_args=tc["function"]["arguments"][:5000],
                         )
-                        result = await self._execute_tool(tc)
+                        result = await self._execute_tool(tc, silent=_silent)
                         self._conv.add_tool_message(tc["id"], result)
                         await self.lifecycle.emit(
                             LifecycleHook.ON_TOOL_RESULT,
@@ -756,7 +760,7 @@ class Agent:
 
         # _on_shutdown 钩子已保存上下文，此处只需处理核弹模式
         if self._nuclear_exit:
-            self.session.delete_session(self.session.session_id)
+            self.session.delete_session(self.session.session_id, force=True)
             display.info("💥 核弹模式：当前会话已删除，不留痕迹")
 
         display.info("👋 Agent 已关闭")

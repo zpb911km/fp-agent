@@ -40,6 +40,11 @@ from fp_core.core.lifecycle import LifecycleHook
 # ═══════════════════════════════════════════════════════════
 ACP_PROTOCOL_VERSION = 1
 
+# ── ACP 模式下禁止暴露给 IDE 的毁灭性命令 ──
+# 这些命令（exit/exit!/quit）会 raise SystemExit() 终止整个进程，
+# IDE 环境中误触会导致 ACP 会话直接断开。
+_DESTRUCTIVE_COMMANDS = {"exit", "exit!", "quit"}
+
 
 # ═══════════════════════════════════════════════════════════
 # ACPIO — ACP 专用的 IO 通道
@@ -172,6 +177,13 @@ class ACPServer:
         # ── 工具参数缓存（call → result 阶段共享） ──
         self._last_edit_args: dict | None = None  # edit_file 参数，用于构建 diff
         self._last_read_path: str | None = None  # read_file 路径，用于 result 的 resource URI
+        self._last_write_path: str | None = None  # write_file 路径，用于 result 展示内容
+
+        # ── 当前 prompt 处理 task（用于取消） ──
+        self._current_task: asyncio.Task | None = None
+
+        # ── 并发 prompt 防护 ──
+        self._processing_prompt = False
 
         # ── "Follow Agent" 跟踪注册 ──
         self._register_follow_hooks()
@@ -252,10 +264,10 @@ class ACPServer:
             return "other"
 
     async def _on_tool_call(self, context, tool_name="", tool_args="", **kwargs):
-        """工具调用前 — 发送带 input 详情的 tool_call 通知
+        """工具调用前 — 发送 tool_call 通知
 
-        ACP 规范支持 input 字段显示工具原始参数。
-        bash 命令显示完整命令，edit_file 显示 old→new 摘要，read_file 显示文件路径。
+        ACP v1 规范使用 rawInput 传递原始工具参数。
+        content 用于富内容展示（如文件预览 resource）。
         """
         # ── 会话未就绪时跳过（start() 之前触发的钩子） ──
         if self._session_id is None:
@@ -274,12 +286,14 @@ class ACPServer:
         if tool_name == "read_file":
             fp = args_dict.get("file_path", "")
             self._last_read_path = fp if isinstance(fp, str) else None
+        if tool_name == "write_file":
+            fp = args_dict.get("file_path", "")
+            self._last_write_path = fp if isinstance(fp, str) else None
 
         # ── 构建通知 ──
         kind = self._get_tool_kind(tool_name)
         file_path = self._extract_file_path(tool_name, args_dict)
         title = self._build_tool_title(tool_name, args_dict, kind)
-        input_text = self._build_tool_input(tool_name, args_dict)
 
         notification: dict = {
             "sessionId": self._session_id,
@@ -289,14 +303,12 @@ class ACPServer:
                 "title": title,
                 "kind": kind,
                 "status": "in_progress",
+                # ACP v1 规范: rawInput = 格式化字符串展示工具参数
+                "rawInput": self._build_human_description(tool_name, args_dict),
             },
         }
 
-        # 有 input 就加上
-        if input_text:
-            notification["update"]["input"] = {"type": "text", "text": input_text}
-
-        # 有文件路径就加上 content (resource)
+        # 有文件路径就加上 content (resource) 供 IDE 预览
         if file_path and os.path.isfile(file_path):
             notification["update"]["content"] = [
                 {
@@ -362,77 +374,73 @@ class ACPServer:
             return f"{emoji} ELF: {os.path.basename(fp)}"
         return f"{emoji} {tool_name}"
 
-    def _build_tool_input(self, tool_name: str, args: dict) -> str | None:
-        """构建工具 input 文本（显示在 Zed 的 tool_call 详情中）"""
+    def _build_human_description(self, tool_name: str, args: dict) -> str:
+        """构建人类可读的工具调用描述（放在 content 中替代 JSON 展示）"""
         if tool_name == "bash":
             return args.get("command", "")
         elif tool_name == "read_file":
             fp = args.get("file_path", "")
             off = args.get("offset")
             lim = args.get("limit")
-            parts = [fp]
-            if off is not None:
-                parts.append(f"offset={off}")
-            if lim is not None:
-                parts.append(f"limit={lim}")
-            return " ".join(parts)
+            parts = [f"📄 {fp}"]
+            if off is not None and lim is not None:
+                parts.append(f"读取行 {off}~{off + lim - 1}")
+            elif off is not None:
+                parts.append(f"从第 {off} 行开始")
+            elif lim is not None:
+                parts.append(f"前 {lim} 行")
+            return "\n".join(parts)
+        elif tool_name == "write_file":
+            fp = args.get("file_path", "")
+            content = args.get("content", "")
+            return f"✏️  写入 {fp}\n{content}"
         elif tool_name == "edit_file":
+            fp = args.get("file_path", "")
             old = args.get("old_string", "")
             new = args.get("new_string", "")
-            old_short = old[:60] + "..." if len(old) > 60 else old
-            new_short = new[:60] + "..." if len(new) > 60 else new
-            return f"{args.get('file_path', '?')}\n- {old_short}\n+ {new_short}"
-        elif tool_name == "write_file":
-            return args.get("file_path", "")
+            return f"✏️  编辑 {fp}\n- {old}\n+ {new}"
         elif tool_name == "python":
-            return args.get("code", "")[:200]
+            code = args.get("code", "")
+            return f"🐍 Python:\n{code}"
         elif tool_name == "web_search":
-            return args.get("query", "")
+            q = args.get("query", "")
+            return f"🔍 搜索: {q}"
+        elif tool_name == "web_fetch":
+            url = args.get("url", "")
+            return f"🌐 抓取: {url}"
         elif tool_name == "subagent":
             task = args.get("task", "")
             ctx = args.get("context", "")
+            parts = [f"🔧 子任务: {task}"]
             if ctx:
-                return f"{task}\n[context] {ctx[:100]}"
-            return task
-        return None
-
-    # ── 结果摘要 ────────────────────────────────────────
+                parts.append(f"  上下文: {ctx[:200]}")
+            return "\n".join(parts)
+        elif tool_name in ("file_fingerprint", "elf_analysis"):
+            fp = args.get("file_path", "")
+            return f"🔍 分析: {fp}"
+        return str(args)
 
     @staticmethod
-    def _summarize_result(tool_name: str, result_str: str) -> str:
+    def _extract_display_result(tool_name: str, result_str: str) -> str:
+        """从工具结果中提取适合展示的内容。
+
+        subagent 返回 JSON 包裹 {status, result, ...}，
+        需要抽取 result 字段供用户阅读。其他工具直接返回原文。
         """
-        按工具类型对结果分级截断，返回适合展示的摘要文本。
-
-        策略：
-          read_file   → 全文（用户就是想看文件内容）
-          edit_file   → 仅 diff（不发完整文本，由 diff 结构承载）
-          write_file  → 500 字（确认写入了什么）
-          bash        → 2000 字（可能包含错误栈）
-          python      → 2000 字（代码计算结果）
-          web_search  → 800 字（搜索结果摘要）
-          subagent    → 1500 字（子任务结论）
-          其他        → 300 字
-        """
-        limits: dict[str, int] = {
-            "read_file": 0,  # 0 = 不限
-            "edit_file": 0,  # 纯 diff，不发 output 文本
-            "write_file": 500,
-            "bash": 2000,
-            "python": 2000,
-            "web_search": 800,
-            "subagent": 1500,
-        }
-        limit = limits.get(tool_name, 300)
-
-        if limit == 0 or len(result_str) <= limit:
-            return result_str
-
-        truncated = result_str[:limit]
-        truncated += f"\n\n**...(已截断，共 {len(result_str)} 字符)**"
-        return truncated
+        if tool_name == "subagent" and result_str:
+            with contextlib.suppress(json.JSONDecodeError, KeyError, TypeError):
+                parsed = json.loads(result_str)
+                if isinstance(parsed, dict) and "result" in parsed:
+                    result_str = parsed["result"]
+        # 强制将 \n 替换为 \n\n，防止 IDE 吞掉换行
+        return result_str.replace("\n", "\n\n")
 
     async def _on_tool_result(self, context, tool_name="", result="", **kwargs):
-        """工具完成后 — 发送 tool_call_update，包含 output 和可能的 diff"""
+        """工具完成后 — 发送 tool_call_update
+
+        ACP v1 规范使用 rawOutput 传递原始工具结果。
+        content 用于富内容渲染（resource 代码块 / write_file 内容 / diff 差异视图）。
+        """
         # ── 会话未就绪时跳过 ──
         if self._session_id is None:
             return
@@ -440,71 +448,79 @@ class ACPServer:
         status = "failed" if "❌" in str(result)[:10] else "completed"
         result_str = str(result)
 
+        # ── 清理结果：subagent 抽取 result 字段 ──
+        display_str = self._extract_display_result(tool_name, result_str)
+
         notification: dict = {
             "sessionId": self._session_id,
             "update": {
                 "sessionUpdate": "tool_call_update",
                 "toolCallId": self._tool_call_id_for_result(tool_name),
                 "status": status,
+                # ACP v1 规范: rawOutput = 展示用的文本（subagent 已去 JSON 包裹）
+                "rawOutput": display_str if display_str else None,
             },
         }
 
-        # ── output：所有工具都发结果摘要（分级截断） ──
-        if result_str and status != "failed":
-            summarized = self._summarize_result(tool_name, result_str)
-            if summarized:
-                if tool_name == "read_file":
-                    # read_file：用 resource 类型发，让 IDE 渲染为代码块
-                    read_path = self._last_read_path or "(inline)"
-                    notification["update"]["output"] = {
-                        "type": "resource",
-                        "resource": {
-                            "uri": f"file://{read_path}",
-                            "mimeType": self._guess_mime(read_path) if read_path != "(inline)" else "text/plain",
-                            "text": summarized,
-                        },
-                    }
-                elif tool_name == "edit_file":
-                    # edit_file：有 diff 块时不重复发 output 文本
-                    has_diff = (
-                        status == "completed"
-                        and self._last_edit_args
-                        and self._last_edit_args.get("old_string")
-                        and self._last_edit_args.get("new_string")
-                    )
-                    if not has_diff:
-                        notification["update"]["output"] = {
-                            "type": "text",
-                            "text": summarized,
-                        }
-                else:
-                    notification["update"]["output"] = {
-                        "type": "text",
-                        "text": summarized,
-                    }
+        # ── content：富内容块 ──
+        content_blocks: list[dict] = []
 
-        # ── diff：edit_file 构建 diff 内容块 ──
+        # 所有工具的结果用 resource/text/plain 展示（保留换行和缩进）
+        # text 类型会吞掉换行变为单行，resource 才能正确保留格式
+        # read_file 跳过——它用专用 resource 代码块展示文件内容
+        if display_str and tool_name not in ("read_file",):
+            content_blocks.append({
+                "type": "resource",
+                "resource": {
+                    "uri": "inline://tool-output",
+                    "mimeType": "text/plain",
+                    "text": display_str,
+                },
+            })
+
+        # read_file 额外加 resource 代码块
+        if tool_name == "read_file" and status != "failed":
+            read_path = self._last_read_path or "(inline)"
+            content_blocks.append({
+                "type": "resource",
+                "resource": {
+                    "uri": f"file://{read_path}",
+                    "mimeType": self._guess_mime(read_path) if read_path != "(inline)" else "text/plain",
+                    "text": result_str,
+                },
+            })
+
+        # write_file 额外加 resource 展示写入内容
+        if tool_name == "write_file" and status != "failed" and self._last_write_path:
+            write_path = self._last_write_path
+            if os.path.isfile(write_path):
+                with open(write_path, encoding="utf-8", errors="replace") as f:
+                    file_content = f.read()
+                content_blocks.append({
+                    "type": "resource",
+                    "resource": {
+                        "uri": f"file://{write_path}",
+                        "mimeType": self._guess_mime(write_path),
+                        "text": file_content,
+                    },
+                })
+
+        # edit_file 加 diff 块
         if tool_name == "edit_file" and status == "completed" and self._last_edit_args:
             args = self._last_edit_args
             old_text = args.get("old_string", "")
             new_text = args.get("new_string", "")
             file_path = args.get("file_path", "")
             if old_text and new_text and file_path:
-                notification["update"]["content"] = [
-                    {
-                        "type": "diff",
-                        "path": file_path,
-                        "oldText": old_text,
-                        "newText": new_text,
-                    }
-                ]
+                content_blocks.append({
+                    "type": "diff",
+                    "path": file_path,
+                    "oldText": old_text,
+                    "newText": new_text,
+                })
 
-        # ── 错误时显示错误信息 ──
-        if status == "failed":
-            notification["update"]["output"] = {
-                "type": "text",
-                "text": self._summarize_result(tool_name, result_str),
-            }
+        if content_blocks:
+            notification["update"]["content"] = content_blocks
 
         self._send_notification("session/update", notification)
 
@@ -586,11 +602,20 @@ class ACPServer:
     # ═══════════════════════════════════════════════════════
 
     async def _read_loop(self, reader: asyncio.StreamReader):
-        """从 stdin 逐行读取 JSON-RPC 消息"""
+        """从 stdin 逐行读取 JSON-RPC 消息（全异步派发）
+
+        关键设计：所有请求/通知都通过 create_task 异步派发，不阻塞 stdin 读取循环。
+        这样 session/cancel 通知可以在 prompt 处理期间被读取和派发，
+        实现对正在运行的 agent 真正中断。
+        """
+        active_tasks: set[asyncio.Task] = set()
+
         while True:
             line = await reader.readline()
             if not line:
-                self._log("stdin 已关闭 (EOF)，优雅退出")
+                self._log("stdin 已关闭 (EOF)，等待活跃任务完成...")
+                if active_tasks:
+                    await asyncio.gather(*active_tasks, return_exceptions=True)
                 break
 
             text = line.decode("utf-8").strip()
@@ -603,7 +628,10 @@ class ACPServer:
                 self._log(f"⚠️  JSON 解析失败: {e}")
                 continue
 
-            await self._dispatch(request)
+            # 创建独立 task 派发，不阻塞 stdin 读取
+            task = asyncio.create_task(self._dispatch(request))
+            active_tasks.add(task)
+            task.add_done_callback(active_tasks.discard)
 
     async def _dispatch(self, request: dict):
         """分发 JSON-RPC 请求到对应的处理器"""
@@ -651,14 +679,20 @@ class ACPServer:
             "session/list": self._handle_session_list,
             "session/commands": self._handle_session_commands,
             "session/set_mode": self._handle_session_set_mode,
+            "session/ping": self._handle_session_ping,
         }
         return handlers.get(method)
 
     async def _handle_notification(self, method: str, params: dict):
         """处理通知（无 id 的请求）"""
         if method == "session/cancel":
-            self._log("收到取消通知")
+            self._log("⏹️  收到取消通知，正在中断 agent...")
             self._agent.cancel()
+            # 主动取消当前正在执行的 prompt task，让 agent 立即停止
+            # 而不是等到下一个中断检查点（可能在 LLM 调用或工具执行中，会等很久）
+            if self._current_task is not None and not self._current_task.done():
+                self._current_task.cancel()
+                self._log("  → 已取消当前处理 task")
         elif method == "initialized":
             self._log("客户端已初始化")
             # 不在此处注册命令——此时只有默认 sessionId（IDE 不认识它），
@@ -727,6 +761,8 @@ class ACPServer:
         """
         ACP v1 恢复已有会话。
 
+        如果会话不存在，自动创建新的空会话返回（而不是报错让 IDE 崩溃）。
+
         参考: https://agentclientprotocol.com/protocol/v1/session-setup#loading-sessions
         """
         # ACP v1 使用 camelCase
@@ -742,8 +778,11 @@ class ACPServer:
             # 注意：命令注册通知在 _dispatch 中响应之后发送
             return {"sessionId": session_id}
         else:
-            self._log(f"会话不存在: {session_id}")
-            raise ValueError(f"Session not found: {session_id}")
+            self._log(f"会话不存在: {session_id}，自动创建新会话")
+            new_sid = self._agent.session.create_session()
+            self._agent.rebuild_context()
+            self._session_id = new_sid
+            return {"sessionId": new_sid}
 
     async def _handle_session_list(self, params: dict) -> dict:
         """
@@ -796,41 +835,64 @@ class ACPServer:
         if user_prompt is None:
             raise ValueError("No prompt provided. Use 'prompt' (ACP format) or 'messages' (OpenAI format)")
 
-        # ── 发送 plan 通知 ──
-        self._send_plan_notification()
+        # ── 并发防护：同一时间只能处理一个 prompt ──
+        if self._processing_prompt:
+            self._log("⚠️  并发 prompt 请求被拒绝")
+            return {"stopReason": "cancelled"}
+        self._processing_prompt = True
 
-        # ── 调用 Agent 核心 ──
-        # 使用 ACPIO 缓冲输出，并在累积到阈值时自动推送 agent_message_chunk，
-        # 让用户在长时间任务中看到渐进式反馈。
-        #
-        # 工具调用通知由 __init__ 中注册的永久钩子
-        # (acp_follow_tool_call / acp_follow_tool_result) 自动发送。
-        acp_io = ACPIO(send_chunk=self._send_message_notification)
+        # ── 快照当前 sessionId，防止在异步处理期间被 session/new 修改 ──
+        sid = self._session_id
 
-        self._log(f"发送给 Agent: {user_prompt[:120]}")
-        response = await self._agent.process(user_prompt, io=acp_io)
+        try:
+            # ── 发送 plan 通知 ──
+            self._send_plan_notification(session_id=sid)
 
-        # ── 处理剩余文本（流式推送后缓冲区可能已空） ──
-        buf = acp_io.flush_text()
-        reply_text = response.content or ""
+            # ── 调用 Agent 核心 ──
+            # 使用 ACPIO 缓冲输出，并在累积到阈值时自动推送 agent_message_chunk
+            #
+            # 注意：send_chunk 回调捕获了 sid 快照，避免 race
+            acp_io = ACPIO(send_chunk=lambda text: self._send_message_notification(text, session_id=sid))
 
-        if buf.strip():
-            # 有缓冲区残留（最终块）
-            self._send_message_notification(buf)
+            self._log(f"发送给 Agent: {user_prompt[:120]}")
+            self._current_task = asyncio.create_task(self._agent.process(user_prompt, io=acp_io))
+            try:
+                response = await self._current_task
+            except asyncio.CancelledError:
+                self._log("⏹️  Agent 处理已被用户取消")
+                # 清理中断标记，确保下次 prompt 正常工作
+                self._agent._interrupted = False
+                self._agent._processing = False
+                # 取消后仍然 flush 缓冲区，确保用户看到已生成的内容
+                buf = acp_io.flush_text()
+                if buf.strip():
+                    self._send_message_notification(buf, session_id=sid)
+                return {"stopReason": "cancelled"}
+            finally:
+                self._current_task = None
 
-        if reply_text and reply_text not in buf:
-            # response.content 有新内容且未在流式推送中出现过
-            self._send_message_notification(reply_text)
+            # ── 处理剩余文本（流式推送后缓冲区可能已空） ──
+            buf = acp_io.flush_text()
+            reply_text = response.content or ""
 
-        # ── ACP v1 响应只包含 stopReason ──
-        return {
-            "stopReason": "end_turn",
-        }
+            if buf.strip():
+                self._send_message_notification(buf, session_id=sid)
+
+            if reply_text and reply_text not in buf:
+                self._send_message_notification(reply_text, session_id=sid)
+
+            return {"stopReason": "end_turn"}
+        finally:
+            self._processing_prompt = False
 
     async def _handle_session_set_mode(self, params: dict) -> dict:
         """切换 Agent 模式（预留）"""
         mode = params.get("mode", "normal")
         return {"mode": mode}
+
+    async def _handle_session_ping(self, params: dict) -> dict:
+        """ACP v1 心跳保持"""
+        return {"pong": True}
 
     async def _handle_session_commands(self, params: dict) -> dict:
         """
@@ -845,6 +907,8 @@ class ACPServer:
             from fp_core.commands import get_all_commands
 
             cmds = get_all_commands()
+            # 过滤掉毁灭性命令（exit/exit!/quit 等会 raise SystemExit 的命令）
+            cmds = {k: v for k, v in cmds.items() if k not in _DESTRUCTIVE_COMMANDS}
             # ACP v1 协议中命令名不带 '/' 前缀
             commands = [{"name": name, "description": desc} for name, desc in sorted(cmds.items())]
             return {"commands": commands}
@@ -952,6 +1016,8 @@ class ACPServer:
             from fp_core.commands import get_all_commands
 
             cmds = get_all_commands()
+            # 过滤掉毁灭性命令（exit/exit!/quit 等会 raise SystemExit 的命令）
+            cmds = {k: v for k, v in cmds.items() if k not in _DESTRUCTIVE_COMMANDS}
             # ACP v1 规范: name 字段不包含 '/' 前缀
             # 示例: {"name": "help", "description": "显示此帮助"}
             available = [{"name": name, "description": desc} for name, desc in sorted(cmds.items())]
@@ -971,12 +1037,13 @@ class ACPServer:
         except Exception as e:
             self._log(f"注册斜杠命令失败: {e}")
 
-    def _send_plan_notification(self):
+    def _send_plan_notification(self, session_id=None):
         """发送 ACP v1 plan 更新通知"""
+        sid = session_id or self._session_id
         self._send_notification(
             "session/update",
             {
-                "sessionId": self._session_id,
+                "sessionId": sid,
                 "update": {
                     "sessionUpdate": "plan",
                     "entries": [
@@ -990,14 +1057,15 @@ class ACPServer:
             },
         )
 
-    def _send_message_notification(self, text: str):
+    def _send_message_notification(self, text: str, session_id=None):
         """通过 agent_message_chunk 通知发送回复内容"""
         import uuid
 
+        sid = session_id or self._session_id
         self._send_notification(
             "session/update",
             {
-                "sessionId": self._session_id,
+                "sessionId": sid,
                 "update": {
                     "sessionUpdate": "agent_message_chunk",
                     "messageId": f"msg_{uuid.uuid4().hex[:12]}",

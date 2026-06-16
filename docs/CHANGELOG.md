@@ -8,6 +8,30 @@
 > 现已统一修正为 `0.1.0`，与 `pyproject.toml` 保持一致。
 > 以下版本号保留原始记录以供追溯，实际发布包版本均为 `0.1.0`。
 
+## [0.1.5] — 2026-06-17
+
+### Added
+
+- **自举内部文档**: 新增 `fp_core/_self_docs.py` 模块，包含 12 个章节的结构化架构知识（系统概览/生命周期/插件/命令/工具/技能/会话/自修改/配置/LLM抽象/主循环流程图/GitHub资源指引），`pip install fp-core` 后即用，提供 `find_tool()` / `find_command()` / `find_hook()` / `get_summary()` 等辅助函数
+- **插件管理技能**: 新增 `plugin_management` 技能，通过重命名文件实现插件的启用/禁用
+
+### Changed
+
+- **docs**: 重命名 `plugins.md` → `文件命名约定.md`，新增四类扩展（插件/命令/工具/技能）对比表
+- **docs(plugins)**: 插件输出示例统一使用 `display.info()` 替代 `print()`
+- **skills(subagent)**: 精简技能描述，去除冗余内容
+- **history**: `print()` 输出改为 `display.info()`/`display.item()`，静默模式下不泄漏输出
+- **history**: 命令执行结果返回给 IDE 调用方而非仅打印到终端
+
+### Fixed
+
+- **core**: `rebuild_context()` 改用 `reset()` 替代 `set_system_prompt()`，修复上下文重建时历史残留导致的 prompt 错乱
+- **core**: 核弹退出 (`exit!`) 不再残留会话文件
+- **subagent**: 真正的静默模式 — 抑制 spinner / LLM 流等 UI 输出，工具结果纯文本化
+- **acp**: 改用 `rawInput`/`rawOutput` 符合 ACP v1 规范
+- **acp**: 修复并发 prompt 防护、session_id 快照、session-ping 等竞态问题
+- **acp**: 修复取消失效、崩溃恢复、毁灭命令过滤等边缘情况
+
 ## [0.1.4] — 2026-06-16
 
 ### Changed
@@ -148,6 +172,8 @@
 ---
 
 ## 发布历史
+
+| 0.1.5 | 2026-06-17 | 待补充 |
 
 | 0.1.4 | 2026-06-16 | 待补充 |
 
