@@ -177,6 +177,7 @@ class ACPServer:
         # ── 工具参数缓存（call → result 阶段共享） ──
         self._last_edit_args: dict | None = None  # edit_file 参数，用于构建 diff
         self._last_read_path: str | None = None  # read_file 路径，用于 result 的 resource URI
+        self._last_write_path: str | None = None  # write_file 路径，用于 result 展示内容
 
         # ── 当前 prompt 处理 task（用于取消） ──
         self._current_task: asyncio.Task | None = None
@@ -285,6 +286,9 @@ class ACPServer:
         if tool_name == "read_file":
             fp = args_dict.get("file_path", "")
             self._last_read_path = fp if isinstance(fp, str) else None
+        if tool_name == "write_file":
+            fp = args_dict.get("file_path", "")
+            self._last_write_path = fp if isinstance(fp, str) else None
 
         # ── 构建通知 ──
         kind = self._get_tool_kind(tool_name)
@@ -299,8 +303,8 @@ class ACPServer:
                 "title": title,
                 "kind": kind,
                 "status": "in_progress",
-                # ACP v1 规范: rawInput = 原始工具参数
-                "rawInput": args_dict,
+                # ACP v1 规范: rawInput = 格式化字符串展示工具参数
+                "rawInput": self._build_human_description(tool_name, args_dict),
             },
         }
 
@@ -370,11 +374,72 @@ class ACPServer:
             return f"{emoji} ELF: {os.path.basename(fp)}"
         return f"{emoji} {tool_name}"
 
+    def _build_human_description(self, tool_name: str, args: dict) -> str:
+        """构建人类可读的工具调用描述（放在 content 中替代 JSON 展示）"""
+        if tool_name == "bash":
+            return args.get("command", "")
+        elif tool_name == "read_file":
+            fp = args.get("file_path", "")
+            off = args.get("offset")
+            lim = args.get("limit")
+            parts = [f"📄 {fp}"]
+            if off is not None and lim is not None:
+                parts.append(f"读取行 {off}~{off + lim - 1}")
+            elif off is not None:
+                parts.append(f"从第 {off} 行开始")
+            elif lim is not None:
+                parts.append(f"前 {lim} 行")
+            return "\n".join(parts)
+        elif tool_name == "write_file":
+            fp = args.get("file_path", "")
+            content = args.get("content", "")
+            return f"✏️  写入 {fp}\n{content}"
+        elif tool_name == "edit_file":
+            fp = args.get("file_path", "")
+            old = args.get("old_string", "")
+            new = args.get("new_string", "")
+            return f"✏️  编辑 {fp}\n- {old}\n+ {new}"
+        elif tool_name == "python":
+            code = args.get("code", "")
+            return f"🐍 Python:\n{code}"
+        elif tool_name == "web_search":
+            q = args.get("query", "")
+            return f"🔍 搜索: {q}"
+        elif tool_name == "web_fetch":
+            url = args.get("url", "")
+            return f"🌐 抓取: {url}"
+        elif tool_name == "subagent":
+            task = args.get("task", "")
+            ctx = args.get("context", "")
+            parts = [f"🔧 子任务: {task}"]
+            if ctx:
+                parts.append(f"  上下文: {ctx[:200]}")
+            return "\n".join(parts)
+        elif tool_name in ("file_fingerprint", "elf_analysis"):
+            fp = args.get("file_path", "")
+            return f"🔍 分析: {fp}"
+        return str(args)
+
+    @staticmethod
+    def _extract_display_result(tool_name: str, result_str: str) -> str:
+        """从工具结果中提取适合展示的内容。
+
+        subagent 返回 JSON 包裹 {status, result, ...}，
+        需要抽取 result 字段供用户阅读。其他工具直接返回原文。
+        """
+        if tool_name == "subagent" and result_str:
+            with contextlib.suppress(json.JSONDecodeError, KeyError, TypeError):
+                parsed = json.loads(result_str)
+                if isinstance(parsed, dict) and "result" in parsed:
+                    result_str = parsed["result"]
+        # 强制将 \n 替换为 \n\n，防止 IDE 吞掉换行
+        return result_str.replace("\n", "\n\n")
+
     async def _on_tool_result(self, context, tool_name="", result="", **kwargs):
         """工具完成后 — 发送 tool_call_update
 
         ACP v1 规范使用 rawOutput 传递原始工具结果。
-        content 用于富内容渲染（resource 代码块 / diff 差异视图）。
+        content 用于富内容渲染（resource 代码块 / write_file 内容 / diff 差异视图）。
         """
         # ── 会话未就绪时跳过 ──
         if self._session_id is None:
@@ -383,20 +448,37 @@ class ACPServer:
         status = "failed" if "❌" in str(result)[:10] else "completed"
         result_str = str(result)
 
+        # ── 清理结果：subagent 抽取 result 字段 ──
+        display_str = self._extract_display_result(tool_name, result_str)
+
         notification: dict = {
             "sessionId": self._session_id,
             "update": {
                 "sessionUpdate": "tool_call_update",
                 "toolCallId": self._tool_call_id_for_result(tool_name),
                 "status": status,
-                # ACP v1 规范: rawOutput = 原始工具结果
-                "rawOutput": {"type": "text", "text": result_str} if result_str else None,
+                # ACP v1 规范: rawOutput = 展示用的文本（subagent 已去 JSON 包裹）
+                "rawOutput": display_str if display_str else None,
             },
         }
 
         # ── content：富内容块 ──
         content_blocks: list[dict] = []
 
+        # 所有工具的结果用 resource/text/plain 展示（保留换行和缩进）
+        # text 类型会吞掉换行变为单行，resource 才能正确保留格式
+        # read_file 跳过——它用专用 resource 代码块展示文件内容
+        if display_str and tool_name not in ("read_file",):
+            content_blocks.append({
+                "type": "resource",
+                "resource": {
+                    "uri": "inline://tool-output",
+                    "mimeType": "text/plain",
+                    "text": display_str,
+                },
+            })
+
+        # read_file 额外加 resource 代码块
         if tool_name == "read_file" and status != "failed":
             read_path = self._last_read_path or "(inline)"
             content_blocks.append({
@@ -408,6 +490,22 @@ class ACPServer:
                 },
             })
 
+        # write_file 额外加 resource 展示写入内容
+        if tool_name == "write_file" and status != "failed" and self._last_write_path:
+            write_path = self._last_write_path
+            if os.path.isfile(write_path):
+                with open(write_path, encoding="utf-8", errors="replace") as f:
+                    file_content = f.read()
+                content_blocks.append({
+                    "type": "resource",
+                    "resource": {
+                        "uri": f"file://{write_path}",
+                        "mimeType": self._guess_mime(write_path),
+                        "text": file_content,
+                    },
+                })
+
+        # edit_file 加 diff 块
         if tool_name == "edit_file" and status == "completed" and self._last_edit_args:
             args = self._last_edit_args
             old_text = args.get("old_string", "")
