@@ -181,6 +181,9 @@ class ACPServer:
         # ── 当前 prompt 处理 task（用于取消） ──
         self._current_task: asyncio.Task | None = None
 
+        # ── 并发 prompt 防护 ──
+        self._processing_prompt = False
+
         # ── "Follow Agent" 跟踪注册 ──
         self._register_follow_hooks()
 
@@ -671,6 +674,7 @@ class ACPServer:
             "session/list": self._handle_session_list,
             "session/commands": self._handle_session_commands,
             "session/set_mode": self._handle_session_set_mode,
+            "session/ping": self._handle_session_ping,
         }
         return handlers.get(method)
 
@@ -826,56 +830,64 @@ class ACPServer:
         if user_prompt is None:
             raise ValueError("No prompt provided. Use 'prompt' (ACP format) or 'messages' (OpenAI format)")
 
-        # ── 发送 plan 通知 ──
-        self._send_plan_notification()
-
-        # ── 调用 Agent 核心 ──
-        # 使用 ACPIO 缓冲输出，并在累积到阈值时自动推送 agent_message_chunk，
-        # 让用户在长时间任务中看到渐进式反馈。
-        #
-        # 工具调用通知由 __init__ 中注册的永久钩子
-        # (acp_follow_tool_call / acp_follow_tool_result) 自动发送。
-        #
-        # 关键设计：用 asyncio.create_task 包装 agent.process 调用，
-        # 这样 session/cancel 通知能通过 self._current_task.cancel()
-        # 真正中断正在进行的 LLM 调用或工具执行，而不是仅设置标记后干等。
-        acp_io = ACPIO(send_chunk=self._send_message_notification)
-
-        self._log(f"发送给 Agent: {user_prompt[:120]}")
-        self._current_task = asyncio.create_task(self._agent.process(user_prompt, io=acp_io))
-        try:
-            response = await self._current_task
-        except asyncio.CancelledError:
-            self._log("⏹️  Agent 处理已被用户取消")
-            # 取消后仍然 flush 缓冲区，确保用户看到已生成的内容
-            buf = acp_io.flush_text()
-            if buf.strip():
-                self._send_message_notification(buf)
+        # ── 并发防护：同一时间只能处理一个 prompt ──
+        if self._processing_prompt:
+            self._log("⚠️  并发 prompt 请求被拒绝")
             return {"stopReason": "cancelled"}
+        self._processing_prompt = True
+
+        # ── 快照当前 sessionId，防止在异步处理期间被 session/new 修改 ──
+        sid = self._session_id
+
+        try:
+            # ── 发送 plan 通知 ──
+            self._send_plan_notification(session_id=sid)
+
+            # ── 调用 Agent 核心 ──
+            # 使用 ACPIO 缓冲输出，并在累积到阈值时自动推送 agent_message_chunk
+            #
+            # 注意：send_chunk 回调捕获了 sid 快照，避免 race
+            acp_io = ACPIO(send_chunk=lambda text: self._send_message_notification(text, session_id=sid))
+
+            self._log(f"发送给 Agent: {user_prompt[:120]}")
+            self._current_task = asyncio.create_task(self._agent.process(user_prompt, io=acp_io))
+            try:
+                response = await self._current_task
+            except asyncio.CancelledError:
+                self._log("⏹️  Agent 处理已被用户取消")
+                # 清理中断标记，确保下次 prompt 正常工作
+                self._agent._interrupted = False
+                self._agent._processing = False
+                # 取消后仍然 flush 缓冲区，确保用户看到已生成的内容
+                buf = acp_io.flush_text()
+                if buf.strip():
+                    self._send_message_notification(buf, session_id=sid)
+                return {"stopReason": "cancelled"}
+            finally:
+                self._current_task = None
+
+            # ── 处理剩余文本（流式推送后缓冲区可能已空） ──
+            buf = acp_io.flush_text()
+            reply_text = response.content or ""
+
+            if buf.strip():
+                self._send_message_notification(buf, session_id=sid)
+
+            if reply_text and reply_text not in buf:
+                self._send_message_notification(reply_text, session_id=sid)
+
+            return {"stopReason": "end_turn"}
         finally:
-            self._current_task = None
-
-        # ── 处理剩余文本（流式推送后缓冲区可能已空） ──
-        buf = acp_io.flush_text()
-        reply_text = response.content or ""
-
-        if buf.strip():
-            # 有缓冲区残留（最终块）
-            self._send_message_notification(buf)
-
-        if reply_text and reply_text not in buf:
-            # response.content 有新内容且未在流式推送中出现过
-            self._send_message_notification(reply_text)
-
-        # ── ACP v1 响应只包含 stopReason ──
-        return {
-            "stopReason": "end_turn",
-        }
+            self._processing_prompt = False
 
     async def _handle_session_set_mode(self, params: dict) -> dict:
         """切换 Agent 模式（预留）"""
         mode = params.get("mode", "normal")
         return {"mode": mode}
+
+    async def _handle_session_ping(self, params: dict) -> dict:
+        """ACP v1 心跳保持"""
+        return {"pong": True}
 
     async def _handle_session_commands(self, params: dict) -> dict:
         """
@@ -1020,12 +1032,13 @@ class ACPServer:
         except Exception as e:
             self._log(f"注册斜杠命令失败: {e}")
 
-    def _send_plan_notification(self):
+    def _send_plan_notification(self, session_id=None):
         """发送 ACP v1 plan 更新通知"""
+        sid = session_id or self._session_id
         self._send_notification(
             "session/update",
             {
-                "sessionId": self._session_id,
+                "sessionId": sid,
                 "update": {
                     "sessionUpdate": "plan",
                     "entries": [
@@ -1039,14 +1052,15 @@ class ACPServer:
             },
         )
 
-    def _send_message_notification(self, text: str):
+    def _send_message_notification(self, text: str, session_id=None):
         """通过 agent_message_chunk 通知发送回复内容"""
         import uuid
 
+        sid = session_id or self._session_id
         self._send_notification(
             "session/update",
             {
-                "sessionId": self._session_id,
+                "sessionId": sid,
                 "update": {
                     "sessionUpdate": "agent_message_chunk",
                     "messageId": f"msg_{uuid.uuid4().hex[:12]}",
