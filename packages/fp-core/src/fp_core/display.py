@@ -13,6 +13,15 @@ import sys
 
 from fp_core.config import apply_style, truncate
 
+# ── 静默模式：子 agent 执行时抑制所有终端输出 ──────────
+_FP_SILENT = os.environ.get("FP_SUBAGENT_SILENT") == "1"
+
+
+def _silent() -> bool:
+    """返回 True 表示当前为子 agent 静默模式，应跳过所有终端 UI 输出"""
+    return _FP_SILENT
+
+
 # ═══════════════════════════════════════════════════════════
 # A. 操作反馈 — 用户主动操作后的回应
 #   注册名称: "info", "item"
@@ -21,11 +30,15 @@ from fp_core.config import apply_style, truncate
 
 def info(msg: str):
     """一般信息 / 操作成功的反馈（消息中应包含 emoji）"""
+    if _silent():
+        return
     print(apply_style(msg, "info"))
 
 
 def item(msg: str):
     """列表中的子条目（默认色，无着色，由调用方控制缩进）"""
+    if _silent():
+        return
     print(msg)
 
 
@@ -37,6 +50,8 @@ def item(msg: str):
 
 def hint(msg: str):
     """引导 / 用法提示（消息中应包含 💡）"""
+    if _silent():
+        return
     print(apply_style(msg, "hint"))
 
 
@@ -49,6 +64,8 @@ def hint(msg: str):
 
 def error(msg: str, fix: str = ""):
     """错误（配色从配置），可带第二行解决指引"""
+    if _silent():
+        return
     print(apply_style(msg, "error"))
     if fix:
         print(apply_style(f"   → {fix}", "hint"))
@@ -56,6 +73,8 @@ def error(msg: str, fix: str = ""):
 
 def warning(msg: str):
     """警告（配色从配置）"""
+    if _silent():
+        return
     print(apply_style(msg, "warning"))
 
 
@@ -68,23 +87,31 @@ def warning(msg: str):
 
 def llm_thought(msg: str):
     """LLM 思考过程（支持按配置截断）"""
+    if _silent():
+        return
     text = truncate(msg, "llm_thought")
     print(apply_style(text, "llm_thought"))
 
 
 def llm_tool(msg: str):
     """工具调用 / 工具结果（支持按配置截断）"""
+    if _silent():
+        return
     text = truncate(msg, "llm_tool")
     print(apply_style(text, "llm_tool"))
 
 
 def llm_output(text: str):
     """LLM 回复内容（流式，默认色，不换行）"""
+    if _silent():
+        return
     print(text, end="", flush=True)
 
 
 def llm_iteration(count: int):
     """打印迭代次数统计"""
+    if _silent():
+        return
     print(apply_style(f"📊 本次交互共迭代 {count} 次", "llm_iteration"))
     print()
 
@@ -192,6 +219,8 @@ def debug(msg: str):
 
 def startup(model: str, resume: bool = False):
     """启动横幅"""
+    if _silent():
+        return
     if resume:
         print(apply_style(f"🤖 Five Pebbles 已续会话 (模型: {model})", "startup"))
     else:
@@ -212,6 +241,8 @@ def _display_width(text: str) -> int:
 
 def shutdown_panel(summary: str, file: str, model: str, msg_count: int, created: str, duration: str = ""):
     """退出时的统计面板（框线装饰），自动适应内容宽度"""
+    if _silent():
+        return
     MIN_W = 48  # 最小宽度
     MAX_W = 60  # 最大宽度，防止撑爆终端
 
@@ -308,6 +339,8 @@ LOGO_ART = r"""
 
 def print_logo():
     """打印 ASCII 启动画（支持按配置截断）"""
+    if _silent():
+        return
     art = truncate(LOGO_ART, "logo")
     print(apply_style(art, "logo"))
 
@@ -340,6 +373,9 @@ class Spinner:
 
     async def start(self):
         """启动 spinner（启动一个后台 asyncio 任务）"""
+        if _silent():
+            self._task = None
+            return
         self._task = asyncio.create_task(self._spin())
 
     async def _spin(self):
@@ -360,7 +396,9 @@ class Spinner:
 
     async def stop(self):
         """停止 spinner 并清除动画行"""
-        if self._task and not self._task.done():
+        if self._task is None:
+            return
+        if not self._task.done():
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task

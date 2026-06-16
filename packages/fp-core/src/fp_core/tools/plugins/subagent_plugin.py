@@ -285,9 +285,6 @@ async def execute(params: dict[str, Any]) -> str:
         except (json.JSONDecodeError, ValueError):
             output = json.dumps({"reply": output}, ensure_ascii=False, indent=2)
 
-    # 估算 token 数
-    estimated_tokens = len(output) // 3
-
     # ═══════════════════════════════════════════════════════════
     # 可选：保存到记忆
     # ═══════════════════════════════════════════════════════════
@@ -305,16 +302,7 @@ async def execute(params: dict[str, Any]) -> str:
             output += f"\n\n⚠️ 记忆保存失败 ({store_result}): {e}"
 
     # ═══════════════════════════════════════════════════════════
-    # 返回结果
+    # 返回结果：成功时返回纯文本，主 agent 直接看到子 agent 的回复
+    # 不包装 JSON 壳，不让 metadata 污染 LLM 的 tool result
     # ═══════════════════════════════════════════════════════════
-    mode_note = "subagent 静默模式" if not verbose else "subagent 调试模式（含完整过程）"
-    summary = {
-        "status": "success",
-        "result": output,
-        "duration": duration_str,
-        "estimated_tokens": estimated_tokens,
-        "mode": mode_note,
-        "note": "子 agent 的推理过程在独立会话中完成，未占用主上下文。",
-    }
-
-    return json.dumps(summary, ensure_ascii=False, indent=2)
+    return output

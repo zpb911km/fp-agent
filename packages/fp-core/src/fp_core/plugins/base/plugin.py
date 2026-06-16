@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from fp_core import display
 from fp_core.core.lifecycle import LifecycleManager
 
 
@@ -137,7 +138,7 @@ class PluginRegistry:
         返回已注册的插件名称列表。
         """
         if not os.path.isdir(plugin_dir):
-            print(f"[PluginRegistry] 目录不存在，跳过扫描: {plugin_dir}")
+            display.info(f"[PluginRegistry] 目录不存在，跳过扫描: {plugin_dir}")
             return []
 
         registered: list[str] = []
@@ -176,14 +177,14 @@ class PluginRegistry:
                 try:
                     instance = obj()
                 except Exception as e:
-                    print(f"[PluginRegistry] 实例化 {obj.__name__} 失败: {e}")
+                    display.info(f"[PluginRegistry] 实例化 {obj.__name__} 失败: {e}")
                     continue
 
                 if instance.name in self._plugins:
                     # 已有同名插件 → 卸载旧的，用用户版本替换
                     old = self._plugins[instance.name]
                     self.unregister(old.name)
-                    print(f"[PluginRegistry] 覆盖插件: {instance.name}")
+                    display.info(f"[PluginRegistry] 覆盖插件: {instance.name}")
 
                 self._register_instance(instance)
                 registered.append(instance.name)
@@ -208,7 +209,7 @@ class PluginRegistry:
             spec.loader.exec_module(module)
             return module
         except Exception as e:
-            print(f"[PluginRegistry] 加载模块失败 {filepath}: {e}")
+            display.info(f"[PluginRegistry] 加载模块失败 {filepath}: {e}")
             return None
 
     # ── 内部：注册实例 ─────────────────────────────
@@ -226,7 +227,7 @@ class PluginRegistry:
         if tracker:
             self._tracked_hooks[plugin.name] = tracker
 
-        print(f"[PluginRegistry] 自动注册: {plugin}")
+        display.info(f"[PluginRegistry] 自动注册: {plugin}")
 
     def register(self, plugin: Plugin) -> Plugin:
         """手动注册插件"""
@@ -246,7 +247,7 @@ class PluginRegistry:
                     self._lifecycle.unregister(hook, hook_name)
             # 再调用插件的卸载钩子
             plugin.on_unregister()
-            print(f"[PluginRegistry] Unregistered: {plugin}")
+            display.info(f"[PluginRegistry] Unregistered: {plugin}")
         return plugin
 
     def get(self, name: str) -> Plugin | None:

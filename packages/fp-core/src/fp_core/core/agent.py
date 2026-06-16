@@ -593,6 +593,9 @@ class Agent:
         # ── 生命周期：消息已接收 ──
         await self.lifecycle.emit(LifecycleHook.ON_MESSAGE_RECEIVED, content=filtered_input)
 
+        # ── 子 agent 静默模式：抑制 spinner / LLM 流等 UI 输出 ──
+        _silent = os.environ.get("FP_SUBAGENT_SILENT") == "1"
+
         while True:
             # ── 中断检查（支持 signal handler 和 cancel() 两种途径） ──
             self._check_interrupted()
@@ -613,7 +616,7 @@ class Agent:
 
             self._processing = True
             try:
-                assistant_msg = await self._invoke_llm(messages_for_llm)
+                assistant_msg = await self._invoke_llm(messages_for_llm, silent=_silent)
             except (asyncio.CancelledError, KeyboardInterrupt):
                 self._processing = False
                 raise
@@ -627,7 +630,7 @@ class Agent:
                     self._conv.repair_tool_ordering()
                     try:
                         self._processing = True
-                        assistant_msg = await self._invoke_llm(self._conv.messages)
+                        assistant_msg = await self._invoke_llm(self._conv.messages, silent=_silent)
                     except (asyncio.CancelledError, KeyboardInterrupt):
                         self._processing = False
                         raise
@@ -683,7 +686,7 @@ class Agent:
                             tool_name=tc["function"]["name"],
                             tool_args=tc["function"]["arguments"][:5000],
                         )
-                        result = await self._execute_tool(tc)
+                        result = await self._execute_tool(tc, silent=_silent)
                         self._conv.add_tool_message(tc["id"], result)
                         await self.lifecycle.emit(
                             LifecycleHook.ON_TOOL_RESULT,

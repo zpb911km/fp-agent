@@ -192,9 +192,13 @@ async def main():
         display.startup(agent.model, resume=args.resume)
 
     if args.message:
-        print(f"> {args.message}")
-        response = await agent.process(args.message)
-        print(f"\nAgent: {response.content}")
+        if os.environ.get("FP_SUBAGENT_SILENT"):
+            response = await agent.process(args.message)
+            print(response.content, end="")
+        else:
+            print(f"> {args.message}")
+            response = await agent.process(args.message)
+            print(f"\nAgent: {response.content}")
     else:
         inp = InputHandler()
 
