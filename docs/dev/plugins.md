@@ -54,6 +54,7 @@ mv old_plugin.py old_plugin.py.v2
 快速开始：
 
 ```python
+from fp_core import display
 from fp_core.plugins.base.plugin import Plugin, PluginConfig, PluginRegistry
 from fp_core.core.lifecycle import LifecycleHook
 
@@ -68,9 +69,13 @@ class MyPlugin(Plugin):
             priority=50,
             name=f"my_{LifecycleHook.ON_MESSAGE_RECEIVED.name}",
         )
+        display.info("[MyPlugin] 插件已注册")
 
     async def on_message(self, ctx, **kwargs):
-        print(f"收到消息: {kwargs.get('content')}")
+        display.info(f"[MyPlugin] 收到消息: {kwargs.get('content')}")
+
+    def on_unregister(self):
+        display.info("[MyPlugin] 插件已卸载")
 ```
 
 注册到 Agent：
