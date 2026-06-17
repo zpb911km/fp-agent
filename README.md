@@ -67,7 +67,6 @@
 | 🔌 **生命周期插件** | 23 个生命周期钩子覆盖全流程——"文件即开关"，改文件名即改配置 |
 | 🛠️ **工具系统** | 内置 15+ 工具（bash、文件读写、网页搜索/抓取、逆向分析等），支持自动循环调用 |
 | 💬 **会话管理** | 持久化到 JSONL 文件，支持续会话（resume）、分支（fork）、回退（back） |
-| 🎯 **技能系统** | 技能即 `.md` 文件，热重载无需重启，AI 可自主修改 |
 | 🧠 **记忆系统** | 跨会话持久化记忆，AI 可通过工具读写 |
 | 🖥️ **终端 REPL** | 基于 prompt_toolkit，支持 Tab 补全、多行输入、Rich Markdown 渲染 |
 | 🌐 **Web 界面** | FastAPI + 浏览器端图形界面，开箱即用 |
@@ -81,9 +80,8 @@
 fp/                              # 用户入口包
 ├── fp-core/                     # 🔧 核心引擎
 │   ├── core/                    # Agent 主干、LLM 客户端、会话、工具执行器
-│   ├── commands/                # 16 个斜杠命令
+│   ├── commands/                # 13 个斜杠命令
 │   ├── plugins/                 # 生命周期插件系统
-│   ├── skills/                  # 技能定义文件（.md）
 │   ├── tools/                   # 工具注册与执行
 │   └── prompts/                 # 系统提示词
 ├── fp-terminal/                 # 🖥️ 终端 REPL
@@ -154,7 +152,6 @@ echo "运行 ls -la" | fp
 | ⚙️ **配置指南** | [docs/guide/配置指南.md](docs/guide/配置指南.md) |
 | 🎮 **命令参考** | [docs/guide/命令参考.md](docs/guide/命令参考.md) |
 | 🛠️ **工具概览** | [docs/guide/工具概览.md](docs/guide/工具概览.md) |
-| 🎯 **技能系统** | [docs/guide/技能系统.md](docs/guide/技能系统.md) |
 | 🔌 **插件系统** | [docs/guide/插件系统.md](docs/guide/插件系统.md) |
 | 🧠 **记忆系统** | [docs/guide/记忆系统.md](docs/guide/记忆系统.md) |
 | 🌐 **WebUI 手册** | [docs/guide/WebUI手册.md](docs/guide/WebUI手册.md) |
