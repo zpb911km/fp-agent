@@ -72,7 +72,7 @@ class Agent:
     特性：
     - 生命周期驱动的插件系统（emit 返回值被消费）
     - 会话管理（持久化通过 SessionStore）
-    - 技能系统（热重载通过 PromptBuilder）
+    - 技能系统（已迁移到 memory，通过 memory_read 按需检索）
     - 工具调用（循环执行通过 ToolExecutor）
     - 死循环检测
     - 上下文压缩
@@ -102,8 +102,7 @@ class Agent:
 
         # ── 注入服务 ─────────────────────────────────
 
-        # PromptBuilder：系统提示词构建
-        # 不传参数 → PromptBuilder 自动创建独立的 SkillLoader（不再使用全局单例）
+        # PromptBuilder：系统提示词构建（技能已迁移到 memory）
         self._prompter = prompt_builder or PromptBuilder()
 
         # LLMService：纯 LLM 调用

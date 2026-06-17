@@ -22,11 +22,7 @@ CORE_TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": (
-                "执行 shell 命令，支持管道/重定向。"
-                "跨平台：Linux 原生执行，Windows 自动路由到 Git Bash 或降级 cmd.exe。"
-                "超时 300 秒。"
-            ),
+            "description": "执行 shell 命令，支持管道/重定向。超时 300 秒。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -40,13 +36,13 @@ CORE_TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "读取文件内容，支持指定行范围",
+            "description": "读取文件内容。默认返回前 200 行（limit=200），超出提示继续读取",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "文件绝对路径"},
                     "offset": {"type": "integer", "description": "起始行号（从 0 开始，不传则从头）"},
-                    "limit": {"type": "integer", "description": "最多读取行数"},
+                    "limit": {"type": "integer", "description": "最多读取行数（默认 200，上限 500）"},
                 },
                 "required": ["file_path"],
             },
@@ -186,15 +182,47 @@ async def _execute_read_file(file_path: str, offset: int | None = None, limit: i
 
         def _read():
             with open(file_path, encoding="utf-8") as f:
-                if offset:
-                    for _ in range(offset):
-                        f.readline()
+                all_lines = f.readlines()
+            total_lines = len(all_lines)
 
-                content = f.read()
-                if limit:
-                    lines = content.split("\n")
-                    return "\n".join(lines[:limit])
-                return content
+            # 应用 offset（从第几行开始读）
+            lines = all_lines[offset:] if offset else list(all_lines)
+
+            # ── 行数截断 ──
+            # 默认 limit=200，用户指定则取 min(用户值, 500)
+            effective_limit = limit if limit is not None else 200
+            if effective_limit > 500:
+                effective_limit = 500
+
+            content_lines = lines[:effective_limit]
+            content = "".join(content_lines)
+            lines_returned = len(content_lines)
+
+            # ── 字符截断 10K ──
+            char_cut = False
+            if len(content) > 10000:
+                # 按字符截断，保留最后一行完整？（不，直接硬截断更清晰）
+                content = content[:10000]
+                char_cut = True
+
+            # ── 判断是否有未读内容，生成提示 ──
+            remainder = total_lines - (offset or 0) - lines_returned
+            if offset and offset > total_lines:
+                return f"错误：offset={offset} 超出文件总行数 ({total_lines})"
+
+            if (remainder > 0) or char_cut:
+                next_offset = (offset or 0) + lines_returned
+                hints = []
+                if remainder > 0:
+                    hints.append(f"共 {total_lines} 行，已读 {lines_returned} 行，剩余 {remainder} 行")
+                if char_cut:
+                    hints.append("已截断至 10000 字符")
+                content += (
+                    f"\n--- 文件已截断（{'；'.join(hints)}）"
+                    f"\n继续读取：read_file(file_path={file_path!r}, offset={next_offset}, limit=200)"
+                )
+
+            return content
 
         return await loop.run_in_executor(None, _read)
     except FileNotFoundError:

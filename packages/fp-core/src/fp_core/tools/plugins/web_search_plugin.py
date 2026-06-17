@@ -19,8 +19,7 @@ PLUGIN_DEFINITION = {
     "function": {
         "name": "web_search",
         "description": "快速搜索 - 直接爬取搜索引擎（Bing/DuckDuckGo）返回标题+链接+摘要列表。"
-        "适合查简单事实、定义、时间、价格等可直接从摘要获取的信息。"
-        "速度快（1~2秒），无需登录。但只返回结果列表，不做深度阅读和总结。",
+        "适合查简单事实。速度快，不做深度阅读。如果需分析多篇文章请用 smart_web_search。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -60,7 +59,7 @@ class BingResultParser(HTMLParser):
         if self._skip_depth > 0:
             return
 
-        classes = d.get("class", "")
+        classes = d.get("class") or ""
         if tag == "li" and "b_algo" in classes.split():
             self._in_algo = True
             self._cur = {}
@@ -73,7 +72,7 @@ class BingResultParser(HTMLParser):
             self._in_h2 = True
 
         if tag == "a" and self._in_h2:
-            href = d.get("href", "")
+            href = d.get("href") or ""
             if href and not href.startswith("#"):
                 self._cur["href"] = href
                 self._in_title_link = True
@@ -119,7 +118,7 @@ class DuckDuckGoResultParser(HTMLParser):
         if self._skip_depth > 0:
             return
 
-        classes = d.get("class", "")
+        classes = d.get("class") or ""
         if tag == "div" and classes and "result" in classes.split():
             self._in_result = True
             self._cur = {}
@@ -130,7 +129,7 @@ class DuckDuckGoResultParser(HTMLParser):
 
         if tag == "a" and "result__a" in classes.split():
             self._in_title = True
-            self._cur["href"] = d.get("href", "")
+            self._cur["href"] = d.get("href") or ""
 
         if tag == "a" and "result__snippet" in classes.split():
             self._in_snippet = True
