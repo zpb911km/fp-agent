@@ -18,7 +18,7 @@ _current_agent = None
 class SlashCompleter(PtCompleter):
     """自定义补全器：仅在输入 "/" 前缀时匹配命令和工具名。
 
-    补全字典初始化时从 tools/commands/skills 系统动态加载，确保始终同步。
+    补全字典初始化时从 tools/commands 系统动态加载，确保始终同步。
     每个补全项附带描述信息作为 display_meta，帮助用户快速了解功能。
     """
 
@@ -28,7 +28,7 @@ class SlashCompleter(PtCompleter):
         self._load_words()
 
     def _load_words(self):
-        """从 tools、commands、skills 系统加载补全词条及描述"""
+        """从 tools、commands 系统加载补全词条及描述"""
         words: set[str] = set()
         meta: dict[str, str] = {}
 

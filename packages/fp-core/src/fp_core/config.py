@@ -169,7 +169,6 @@ SESSIONS_DIR = os.path.join(_FP_DATA_DIR, "sessions")
 MEMORY_DIR = os.path.join(_FP_DATA_DIR, "memory")
 TASKS_FILE = os.path.join(_FP_DATA_DIR, "tasks.json")
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
-SKILLS_DIR = os.path.join(os.path.dirname(__file__), "skills")
 
 
 # ═══════════════════════════════════════════════════════════════
