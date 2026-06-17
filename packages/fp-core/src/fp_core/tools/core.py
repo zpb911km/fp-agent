@@ -9,8 +9,12 @@
 """
 
 import asyncio
+import contextlib
+import glob
 import locale
 import os
+import tempfile
+import time
 from typing import Any
 
 from fp_core.platform_utils import find_bash, is_windows
@@ -22,7 +26,7 @@ CORE_TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "执行 shell 命令，支持管道/重定向。超时 300 秒。",
+            "description": "执行 shell 命令。小输出直接返回，大输出(≥3K)自动保存文件+返回预览。超时 300 秒。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -90,6 +94,11 @@ def get_core_definitions() -> list:
 async def _execute_bash(command: str) -> str:
     """异步执行 shell 命令
 
+    策略：
+      失败（exit≠0）→ 直接返回错误（通常很短）
+      成功且输出 < 3K → 直接返回完整结果
+      成功且输出 ≥ 3K → 写入临时文件，返回预览 + 路径，LLM 自行 read_file 分页读取
+
     跨平台策略：
       - Linux/macOS:      使用 asyncio.create_subprocess_shell，由系统 shell 执行
       - Windows + Git Bash: 使用 bash.exe -c，Unix 命令（ls/grep/awk）可用
@@ -98,8 +107,15 @@ async def _execute_bash(command: str) -> str:
     if not command:
         raise ValueError("bash 工具需要 command 参数")
 
+    # ── 清理旧临时文件（每次调用前） ──
+    tmpdir = tempfile.gettempdir()
+    for f in glob.glob(os.path.join(tmpdir, "fp_bash_*.log")):
+        with contextlib.suppress(OSError):
+            os.unlink(f)
+
     # ── 跨平台路由：选择正确的 shell 执行方式 ──
     cmd_prefix = ""  # 输出前缀，cmd.exe 回退时标记
+    start_time = time.monotonic()
     try:
         if is_windows():
             bash_path = find_bash()
@@ -144,30 +160,51 @@ async def _execute_bash(command: str) -> str:
             await proc.wait()
             raise
 
+        duration = time.monotonic() - start_time
         output = stdout.decode("utf-8", errors="replace")
-        if stderr:
-            stderr_text = stderr.decode("utf-8", errors="replace")
-            if stderr_text.strip():
-                output += f"\n[stderr]\n{stderr_text}"
+        stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
 
-        # 截断 10000 字符
-        if len(output) > 10000:
-            output = output[:10000] + f"\n...（已截断，原文 {len(output)} 字符）"
+        # 合并 stderr
+        if stderr_text.strip():
+            if output:
+                output += "\n"
+            output += f"[stderr]\n{stderr_text}"
 
-        # cmd.exe 回退模式下加前缀告知 LLM
+        # cmd.exe 回退模式特殊处理（通常短输出，直接返回）
         if cmd_prefix and output.strip():
-            # cmd.exe 的输出可能是系统 locale 编码（如 GBK），
-            # 若 UTF-8 解码后出现大量替换字符（\ufffd），则用 locale 编码重试
             if "\ufffd" in output:
                 enc = locale.getpreferredencoding()
                 output = stdout.decode(enc, errors="replace")
                 if stderr:
-                    stderr_text = stderr.decode(enc, errors="replace")
-                    if stderr_text.strip():
-                        output += f"\n[stderr]\n{stderr_text}"
-            output = cmd_prefix + output.lstrip()
+                    stderr_text2 = stderr.decode(enc, errors="replace")
+                    if stderr_text2.strip():
+                        output += f"\n[stderr]\n{stderr_text2}"
+            return cmd_prefix + output.lstrip()
 
-        return output
+        # ── 失败（exit≠0）→ 直接返回，不走文件 ──
+        if proc.returncode != 0:
+            return f"❌ 命令执行失败（exit={proc.returncode}，{duration:.1f}s）\n命令: {command}\n{output}"
+
+        # ── 成功，输出 < 3K → 直接返回 ──
+        if len(output) < 3000:
+            return output
+
+        # ── 成功，输出 ≥ 3K → 写入文件 + 预览 ──
+        fd, tmp_path = tempfile.mkstemp(prefix="fp_bash_", suffix=".log", text=True)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(output)
+
+        preview = output[:200]
+        return (
+            f"✅ 命令执行成功（exit=0，{duration:.1f}s）\n"
+            f"输出较长（{len(output)} 字符），已保存至 {tmp_path}\n\n"
+            f"前 200 字符预览：\n"
+            f"────────────────────────\n"
+            f"{preview}\n"
+            f"────────────────────────\n\n"
+            f"需要完整内容 → read_file({tmp_path!r})"
+        )
+
     except Exception as e:
         return f"错误：{e}"
 
