@@ -15,7 +15,6 @@
   doc/插件系统.md      — 插件开发指南
   doc/命令系统.md      — 命令开发指南
   doc/工具系统.md      — 工具开发指南
-  doc/技能系统.md      — 技能文件编写指南
   doc/会话模块.md      — 会话与持久化
   doc/配置系统.md      — 配置详解
   doc/自我修改.md      — 自修改机制
@@ -520,11 +519,6 @@ TOOL_SYSTEM = {
             "description": "通过 Playwright 驱动 Chromium 实现浏览器自动化",
             "module": "fp_core.tools.plugins",
         },
-        {
-            "name": "modify_skills",
-            "description": "添加/修改/删除技能",
-            "module": "fp_core.tools.plugins",
-        },
     ],
     "module_path": "fp_core.tools",
     "tool_execution_flow": """
@@ -539,42 +533,7 @@ TOOL_SYSTEM = {
 
 
 # ═══════════════════════════════════════════════════════════════
-# 6. 技能系统
-# ═══════════════════════════════════════════════════════════════
-
-SKILL_SYSTEM = {
-    "description": "技能是以 .md 文件形式存储的能力描述。SkillLoader 扫描技能目录，将其注入到 system prompt 中。",
-    "architecture": {
-        "loader": "fp_core.skills.loader.SkillLoader",
-        "layers": [
-            "内置技能: packages/fp-core/src/fp_core/skills/ (随 fp-core 发布)",
-            "用户技能: ~/.local/share/fp/skills/ (同名覆盖内置)",
-        ],
-        "file_format": "Markdown 文件，可选 YAML frontmatter",
-        "injection": "技能标题+描述注入 system prompt，正文在 Agent 需要时主动加载",
-    },
-    "skill_format_example": """
----
-name: my_skill
-title: 我的技能
-description: 这是自定义技能的描述
-category: general
-priority: 5
----
-
-这是技能的完整描述文本，会被注入到 system prompt 中的「可用技能」部分。
-
-当 Agent 需要使用此技能时，会加载完整的 .md 文件内容。
-""",
-    "module_path": "fp_core.skills.loader",
-    "key_classes": {
-        "Skill": "dataclass，包含 name/title/description/content/category/priority",
-        "SkillLoader": "加载器，load_all() 扫描目录并加载",
-    },
-}
-
-# ═══════════════════════════════════════════════════════════════
-# 7. 会话与持久化
+# 6. 会话与持久化
 # ═══════════════════════════════════════════════════════════════
 
 SESSION_SYSTEM = {
@@ -620,7 +579,7 @@ SESSION_SYSTEM = {
 
 
 # ═══════════════════════════════════════════════════════════════
-# 8. 自修改机制
+# 7. 自修改机制
 # ═══════════════════════════════════════════════════════════════
 
 SELF_MODIFICATION = {
@@ -661,7 +620,7 @@ SELF_MODIFICATION = {
 
 
 # ═══════════════════════════════════════════════════════════════
-# 9. 配置系统
+# 8. 配置系统
 # ═══════════════════════════════════════════════════════════════
 
 CONFIG_SYSTEM = {
@@ -683,7 +642,6 @@ CONFIG_SYSTEM = {
             "memories": "~/.local/share/fp/memories/",
             "plugins": "~/.local/share/fp/plugins/",
             "commands": "~/.local/share/fp/commands/",
-            "skills": "~/.local/share/fp/skills/",
         },
         "windows": {
             "config": "%APPDATA%/fp/",
@@ -692,7 +650,6 @@ CONFIG_SYSTEM = {
             "memories": "%LOCALAPPDATA%/fp/memories/",
             "plugins": "%LOCALAPPDATA%/fp/plugins/",
             "commands": "%LOCALAPPDATA%/fp/commands/",
-            "skills": "%LOCALAPPDATA%/fp/skills/",
         },
     },
     "module_path": "fp_core.config",
@@ -700,7 +657,7 @@ CONFIG_SYSTEM = {
 
 
 # ═══════════════════════════════════════════════════════════════
-# 10. LLM 通信抽象层
+# 9. LLM 通信抽象层
 # ═══════════════════════════════════════════════════════════════
 
 LLM_ABSTRACTION = {
@@ -740,7 +697,7 @@ LLM_ABSTRACTION = {
 
 
 # ═══════════════════════════════════════════════════════════════
-# 11. Agent 主循环（完整流程图）
+# 10. Agent 主循环（完整流程图）
 # ═══════════════════════════════════════════════════════════════
 
 AGENT_MAIN_LOOP = """
@@ -802,7 +759,7 @@ ON_BEFORE_RESPONSE (transform — 可修改回复)
 
 
 # ═══════════════════════════════════════════════════════════════
-# 12. GitHub 资源指引
+# 11. GitHub 资源指引
 # ═══════════════════════════════════════════════════════════════
 
 GITHUB_RESOURCES = {
@@ -814,7 +771,6 @@ GITHUB_RESOURCES = {
         "插件系统": "docs/dev/插件系统.md",
         "命令系统": "docs/dev/命令系统.md",
         "工具系统": "docs/dev/工具系统.md",
-        "技能系统": "docs/dev/技能系统.md",
         "会话模块": "docs/dev/会话模块.md",
         "配置系统": "docs/dev/配置系统.md",
         "数据持久化": "docs/dev/数据持久化.md",
@@ -828,7 +784,6 @@ GITHUB_RESOURCES = {
         "快速开始": "docs/guide/快速开始.md",
         "CLI入门": "docs/guide/CLI入门.md",
         "命令参考": "docs/guide/命令参考.md",
-        "技能系统": "docs/guide/技能系统.md",
         "记忆系统": "docs/guide/记忆系统.md",
         "会话管理": "docs/guide/会话管理.md",
         "配置指南": "docs/guide/配置指南.md",
@@ -872,7 +827,6 @@ def get_all_sections() -> dict[str, Any]:
         "plugin_system": PLUGIN_SYSTEM,
         "command_system": COMMAND_SYSTEM,
         "tool_system": TOOL_SYSTEM,
-        "skill_system": SKILL_SYSTEM,
         "session_system": SESSION_SYSTEM,
         "self_modification": SELF_MODIFICATION,
         "config_system": CONFIG_SYSTEM,

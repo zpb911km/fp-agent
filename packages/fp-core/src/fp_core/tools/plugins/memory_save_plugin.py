@@ -21,13 +21,13 @@ PLUGIN_DEFINITION = {
         "parameters": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "记忆名称（英文短词，如 user_role, project_goal）"},
+                "name": {"type": "string", "description": "记忆名称，英文短词"},
                 "type": {
                     "type": "string",
                     "enum": ["user", "project", "feedback", "reference"],
-                    "description": "记忆类型：user=用户信息，project=项目状态，feedback=反馈偏好，reference=参考资料",
+                    "description": "类型：user/project/feedback/reference",
                 },
-                "description": {"type": "string", "description": "一句话描述，用于检索"},
+                "description": {"type": "string", "description": "一句话描述"},
                 "content": {"type": "string", "description": "记忆正文内容"},
             },
             "required": ["name", "type", "description", "content"],

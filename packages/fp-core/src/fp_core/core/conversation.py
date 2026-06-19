@@ -353,3 +353,169 @@ class ConversationState:
     def estimate_tokens(text: str) -> int:
         """估算 token 数量（简单近似）"""
         return len(text) // 3
+
+    # ═══════════════════════════════════════════════
+    # Shortcircuit（短路）
+    # ═══════════════════════════════════════════════
+
+    def scan_components(self) -> list[dict]:
+        """
+        扫描 _messages，返回从旧到新排序的连通块列表。
+
+        连通块定义：从 user 消息开始，到第一条 assistant(无 tool_calls) 结束。
+        消息数 > 2 为可压缩态，= 2 为充分压缩态。
+
+        每条记录：
+        {
+            "idx": 1,                   # 连通块编号（1-based）
+            "user_idx": 1,              # _messages 中的索引
+            "terminal_idx": 2,          # _messages 中的索引（终点 assistant）
+            "message_count": 2,         # 该连通块包含的消息总数
+            "user_preview": "帮我查天气",
+            "assistant_preview": "北京25°C...",
+            "compressible": True/False,
+        }
+        """
+        components: list[dict] = []
+        i = len(self._messages) - 1
+
+        while i >= 1:
+            msg = self._messages[i]
+
+            # ── Case A: assistant(无 tc) → 连通块终点 ──
+            if msg["role"] == "assistant" and not msg.get("tool_calls"):
+                terminal_idx = i
+                # 向前找匹配的 user
+                j = i - 1
+                user_idx = -1
+                while j >= 1:
+                    if self._messages[j]["role"] == "user":
+                        user_idx = j
+                        break
+                    j -= 1
+
+                if user_idx == -1:
+                    # 理论不会发生（没有 user 的 assistant 回复），安全降级
+                    i -= 1
+                    continue
+
+                msg_count = terminal_idx - user_idx + 1
+                components.append({
+                    "idx": 0,  # 稍后重排
+                    "user_idx": user_idx,
+                    "terminal_idx": terminal_idx,
+                    "message_count": msg_count,
+                    "user_preview": self._messages[user_idx].get("content", "")[:120],
+                    "assistant_preview": self._messages[terminal_idx].get("content", "")[:120],
+                    "compressible": msg_count > 2,
+                })
+                i = user_idx - 1  # 跳过该连通块
+                continue
+
+            # ── Case B: 活跃的 user（交互未完成）→ 跳过 ──
+            if msg["role"] == "user":
+                i -= 1
+                continue
+
+            # ── 其他（system / tool / assistant(有tc)）→ 跳过 ──
+            i -= 1
+
+        # 反转：从旧到新，并分配编号
+        components.reverse()
+        for idx, comp in enumerate(components, start=1):
+            comp["idx"] = idx
+
+        return components
+
+    async def shortcircuit(
+        self,
+        refiner: Callable[[str, str, str], Any] | None,
+        indices: list[tuple[int, int]],
+        mode: str = "regenerate",
+    ) -> tuple[bool, str, int]:
+        """
+        短路：将指定连通块压缩为 user + assistant 消息对。
+
+        Args:
+            refiner:  提炼回调，(user_text, assistant_text, context_text) → (new_user, new_assistant)
+                      crop 模式传 None
+            indices:  要短路的连通块消息索引 [(user_idx, terminal_idx), ...]
+            mode:     "regenerate" | "crop"
+
+        Returns:
+            (是否成功, 描述信息, 压缩减少的消息数)
+        """
+        snapshot = list(self._messages)
+
+        try:
+            # ── Step 2: 逐块处理（全部成功才继续） ──
+            new_sections: list[list[dict]] = []
+            total_saved = 0
+
+            for user_idx, terminal_idx in indices:
+                user_msg = self._messages[user_idx]
+                terminal_msg = self._messages[terminal_idx]
+                msg_count = terminal_idx - user_idx + 1
+
+                # ── 构建完整上下文（始终包含范围内所有消息） ──
+                context_parts = []
+                for j in range(user_idx, terminal_idx + 1):
+                    m = self._messages[j]
+                    role_label = "用户" if m["role"] == "user" else "AI" if m["role"] == "assistant" else "工具"
+                    tc = " [调用工具]" if m.get("tool_calls") else ""
+                    content = (m.get("content") or "")[:500]
+                    context_parts.append(f"[{role_label}]{tc}: {content}")
+                context_text = "\n\n".join(context_parts)
+
+                if msg_count == 2:
+                    # 充分压缩态
+                    if mode == "crop":
+                        new_sections.append([dict(user_msg), dict(terminal_msg)])
+                    else:
+                        assert refiner is not None
+                        new_user, new_assistant = await refiner(
+                            user_msg["content"], terminal_msg["content"], context_text
+                        )
+                        new_sections.append([
+                            {"role": "user", "content": new_user},
+                            {"role": "assistant", "content": new_assistant},
+                        ])
+                else:
+                    # 可压缩态
+                    if mode == "crop" or refiner is None:
+                        new_sections.append([
+                            {"role": "user", "content": user_msg["content"]},
+                            {"role": "assistant", "content": terminal_msg["content"]},
+                        ])
+                    else:
+                        assert refiner is not None
+                        new_user, new_assistant = await refiner(
+                            user_msg["content"], terminal_msg["content"], context_text
+                        )
+                        new_sections.append([
+                            {"role": "user", "content": new_user},
+                            {"role": "assistant", "content": new_assistant},
+                        ])
+                    total_saved += msg_count - 2
+
+            # ── Step 3: 一次性重建消息列表 ──
+            new_messages = [self._messages[0]]  # system
+            i = 1
+            section_idx = 0
+
+            while i < len(self._messages):
+                if section_idx < len(indices) and i == indices[section_idx][0]:
+                    for msg in new_sections[section_idx]:
+                        new_messages.append(dict(msg))
+                    i = indices[section_idx][1] + 1
+                    section_idx += 1
+                else:
+                    new_messages.append(dict(self._messages[i]))
+                    i += 1
+
+            self._messages = new_messages
+            return (True, "shortcircuit completed", total_saved)
+
+        except Exception as e:
+            self._messages = snapshot
+            return (False, f"短路失败，已回滚: {e}", 0)

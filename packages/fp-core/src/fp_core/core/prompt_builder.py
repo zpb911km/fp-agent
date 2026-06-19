@@ -2,14 +2,13 @@
 PromptBuilder — 系统提示词构建器
 
 职责：
-- 组装系统提示词：基础提示 → 技能提示 → 运行时状态信息
-- 持有 SkillLoader 引用
+- 组装系统提示词：基础提示 → 运行时状态信息 → 长期记忆索引
+- 技能已迁移到 memory 系统，通过 memory_read 按需检索
 - 不直接操作 Agent 或 ConversationState
 """
 
 import os
 from datetime import datetime
-from typing import Any
 
 from fp_core.platform_utils import check_git_bash, is_windows, platform
 
@@ -17,21 +16,8 @@ from fp_core.platform_utils import check_git_bash, is_windows, platform
 class PromptBuilder:
     """系统提示词构建器"""
 
-    def __init__(self, skill_loader: Any | None = None):
-        """
-        Args:
-            skill_loader: SkillLoader 实例。None 时创建独立实例（不再共享全局单例）
-        """
-        if skill_loader is not None:
-            self._skill_loader = skill_loader
-        else:
-            from fp_core.skills.loader import create_skill_loader
-
-            self._skill_loader = create_skill_loader()
-
-    @property
-    def skill_loader(self):
-        return self._skill_loader
+    def __init__(self):
+        pass
 
     def build_system_prompt(self) -> str:
         """构建完整的系统提示词"""
@@ -43,11 +29,6 @@ class PromptBuilder:
         agent_prompt = load_agent_prompt()
         if agent_prompt:
             parts.append(agent_prompt)
-
-        # 技能提示词
-        skill_text = self._skill_loader.get_all_prompt_text()
-        if skill_text:
-            parts.append(skill_text)
 
         # 运行时状态信息
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -124,11 +105,3 @@ class PromptBuilder:
 
         lines.insert(1, f"共 {count} 条（进入新会话后自动加载，需要详情时使用 memory_read 查询）")
         return "\n".join(lines)
-
-    def reload_skills(self) -> int:
-        """热重载技能，返回加载的技能数"""
-        self._skill_loader.reload()
-        return len(self._skill_loader.skills)
-
-    def get_skills_count(self) -> int:
-        return len(self._skill_loader.skills)

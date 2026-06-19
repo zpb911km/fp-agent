@@ -378,7 +378,7 @@ FastAPI 的 `@app.middleware("http")`，拦截所有 `/api/*` 请求（白名单
 |------|------|
 | 1 | `config`, `display` |
 | 2 | `core.io`, `core.lifecycle`, `core.session`, `core.llm_client` |
-| 3 | `plugins.base.plugin`, `prompts.agent`, `skills.loader` |
+| 3 | `plugins.base.plugin`, `prompts.agent` |
 | 4 | `commands`, `tools`（含全局注册表重建） |
 | 5 | `core.agent` |
 

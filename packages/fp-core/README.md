@@ -87,7 +87,6 @@ fp_core/
 ├── plugins/        # 插件系统
 │   └── base/           # 插件基类与钩子定义
 ├── prompts/        # 提示词模板管理
-├── skills/         # 技能定义与加载
 └── sessions/       # 会话存储与管理
 ```
 

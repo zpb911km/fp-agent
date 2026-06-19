@@ -849,7 +849,6 @@ _RELOAD_MODULES = [
     # 第 3 层：依赖 core.*
     "fp_core.plugins.base.plugin",
     "fp_core.prompts.agent",
-    "fp_core.skills.loader",
     # 第 4 层：工具和命令（含全局注册表状态）
     "fp_core.commands",  # _discover_commands() 重新扫描
     "fp_core.tools",  # ToolRegistry 全局实例重建

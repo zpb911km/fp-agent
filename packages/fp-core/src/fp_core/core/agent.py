@@ -13,6 +13,7 @@ import contextlib
 import contextvars
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -72,7 +73,7 @@ class Agent:
     特性：
     - 生命周期驱动的插件系统（emit 返回值被消费）
     - 会话管理（持久化通过 SessionStore）
-    - 技能系统（热重载通过 PromptBuilder）
+    - 技能系统（已迁移到 memory，通过 memory_read 按需检索）
     - 工具调用（循环执行通过 ToolExecutor）
     - 死循环检测
     - 上下文压缩
@@ -102,8 +103,7 @@ class Agent:
 
         # ── 注入服务 ─────────────────────────────────
 
-        # PromptBuilder：系统提示词构建
-        # 不传参数 → PromptBuilder 自动创建独立的 SkillLoader（不再使用全局单例）
+        # PromptBuilder：系统提示词构建（技能已迁移到 memory）
         self._prompter = prompt_builder or PromptBuilder()
 
         # LLMService：纯 LLM 调用
@@ -428,6 +428,92 @@ class Agent:
     async def compact_context(self):
         """压缩对话历史（公共 API）"""
         await self._compact_context()
+
+    # ═══════════════════════════════════════════════
+    # Shortcircuit（短路）
+    # ═══════════════════════════════════════════════
+
+    def scan_components(self) -> list[dict]:
+        """获取连通块列表（公共 API）"""
+        return self._conv.scan_components()
+
+    async def shortcircuit_context(
+        self,
+        count: int = 1,
+        indices: list[int] | None = None,
+        raw_indices: list[tuple[int, int]] | None = None,
+        mode: str = "regenerate",
+    ) -> dict:
+        """短路上下文 — 将指定连通块压缩为 user/assistant 对
+
+        Args:
+            count:       短路最近 N 个可压缩态的连通块（默认 1）
+            indices:     短路指定编号的连通块（@N 语法解析后的结果）
+            raw_indices: 直接传入消息索引 [(user_idx, terminal_idx), ...]（合并范围用）
+            mode:        "regenerate" | "crop"
+
+        Returns:
+            结构化结果 dict:
+            {"ok": bool, "msg": str, "saved": int, "count": int}
+            ok=False 时 msg 为失败原因
+        """
+        components = self._conv.scan_components()
+        if not components:
+            return {"ok": False, "msg": "没有已完成的连通块需要短路", "saved": 0, "count": 0}
+
+        # 确定要短路的原始索引
+        if raw_indices is not None:
+            target_raw = raw_indices
+        elif indices is not None:
+            target_raw: list[tuple[int, int]] = []
+            for idx in indices:
+                for comp in components:
+                    if comp["idx"] == idx:
+                        target_raw.append((comp["user_idx"], comp["terminal_idx"]))
+                        break
+        else:
+            native = [c for c in reversed(components) if c["compressible"]]
+            selected = native[:count]
+            target_raw = [(c["user_idx"], c["terminal_idx"]) for c in selected]
+
+        if not target_raw:
+            return {"ok": False, "msg": "没有可短路的连通块，或指定的连通块编号不存在", "saved": 0, "count": 0}
+
+        refiner = None if mode == "crop" else self._build_regenerate_refiner()
+        success, msg, saved = await self._conv.shortcircuit(refiner, target_raw, mode)
+
+        if success:
+            self.session.save_context(self._conv.messages)
+            return {"ok": True, "msg": msg, "saved": saved, "count": len(target_raw)}
+        else:
+            return {"ok": False, "msg": msg, "saved": 0, "count": 0}
+
+    def _build_regenerate_refiner(self) -> Callable:
+        """构建提炼回调 — 调用 LLM 精炼 assistant 回复"""
+
+        async def refiner(user_text: str, assistant_text: str, context_text: str) -> tuple[str, str]:
+            prompt = (
+                "请将以下完整对话进行重述。\n\n"
+                "要求：\n"
+                "1. 以第一人称描述整个过程的状态变化(我做了什么)\n"
+                "2. 保留关键信息和持久化信息\n"
+                "3. 只输出 AI 回复的内容，不要任何前缀或格式说明\n"
+                "4. 适当概括, 适当保留信息, 提高信息密度"
+            )
+            try:
+                result = await self._llm.summarize(
+                    context_text,
+                    instruction=prompt,
+                    max_tokens=10000,
+                )
+                refined = (result or "").strip()
+                if not refined:
+                    refined = assistant_text
+            except Exception:
+                refined = assistant_text
+            return (user_text, refined)
+
+        return refiner
 
     def set_nuclear_exit(self):
         """设置核弹退出标志"""

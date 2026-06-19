@@ -13,7 +13,6 @@
 | | [guide/CLI入门.md](guide/CLI入门.md) | 基本用法、命令行参数、快捷键 |
 | | [guide/命令参考.md](guide/命令参考.md) | 16 个斜杠命令完整参考 |
 | | [guide/会话管理.md](guide/会话管理.md) | 自动保存、恢复、Fork 分支 |
-| | [guide/技能系统.md](guide/技能系统.md) | 技能文件格式、管理命令、内置技能一览 |
 | | [guide/工具概览.md](guide/工具概览.md) | 核心工具、插件工具、调用流程 |
 | | [guide/记忆系统.md](guide/记忆系统.md) | 跨会话持久化、记忆格式、管理 |
 | | [guide/插件系统.md](guide/插件系统.md) | 生命周期钩子、内置插件 |
@@ -29,7 +28,6 @@
 | | [dev/命令系统.md](dev/命令系统.md) | 命令格式、自动发现、开发指南 |
 | | [dev/工具系统.md](dev/工具系统.md) | ToolRegistry、核心工具、插件工具开发 |
 | | [dev/插件系统.md](dev/插件系统.md) | Plugin 基类、钩子注册、NotificationPlugin |
-| | [dev/技能系统.md](dev/技能系统.md) | SkillLoader、技能文件格式、热重载 |
 | | [dev/数据持久化.md](dev/数据持久化.md) | 会话/记忆/任务存储格式 |
 | | [dev/中断机制.md](dev/中断机制.md) | Ctrl+C 双重检查、恢复策略 |
 | | [dev/自我修改.md](dev/自我修改.md) | 自修改流程、测试、回滚 |
@@ -37,7 +35,7 @@
 | 🔌 **ACP 协议** | [acp/README.md](acp/README.md) | ACP 协议索引 |
 | | [acp/使用指南.md](acp/使用指南.md) | IDE 集成指南 |
 | | [acp/00-OVERVIEW.md](acp/00-OVERVIEW.md) ~ [07-IMPLEMENTATION.md](acp/07-IMPLEMENTATION.md) | 协议规范全集 |
-| 📋 **项目信息** | [CHANGELOG.md](CHANGELOG.md) | 版本历史：0.1.5（迭代记录见 CHANGELOG） |
+| 📋 **项目信息** | [CHANGELOG.md](CHANGELOG.md) | 版本历史：0.1.6（迭代记录见 CHANGELOG） |
 | | [CONTRIBUTING.md](CONTRIBUTING.md) | PR 流程、代码风格、Commit 规范 |
 
 ---
@@ -54,7 +52,6 @@ docs/
 │   ├── CLI入门.md              基本用法、快捷键
 │   ├── 命令参考.md              16 个斜杠命令详解
 │   ├── 会话管理.md              自动保存、恢复、Fork
-│   ├── 技能系统.md              管理技能、内置技能列表
 │   ├── 工具概览.md              所有可用工具
 │   ├── 记忆系统.md              跨会话记忆
 │   ├── 插件系统.md              生命周期钩子、内置插件
@@ -72,7 +69,6 @@ docs/
 │   ├── 命令系统.md               命令格式、开发指南
 │   ├── 工具系统.md               ToolRegistry、工具开发
 │   ├── 插件系统.md               Plugin 基类、钩子注册
-│   ├── 技能系统.md               SkillLoader、技能格式
 │   ├── 数据持久化.md             存储格式
 │   ├── 中断机制.md               Ctrl+C 处理
 │   ├── 自我修改.md               自修改流程
@@ -87,8 +83,7 @@ docs/
 └── CONTRIBUTING.md             ← 贡献指南（符号链接自根目录）
 ```
 
-> **注**：`fp_core/skills/` 目录下的 `.md` 文件是技能定义文件（非文档），由技能加载器动态加载。
-> `prompts/agent.md` 是系统提示词模板，由运行时加载。两者均保留在原位置。
+> **注**：`prompts/agent.md` 是系统提示词模板，由运行时加载。
 
 ---
 

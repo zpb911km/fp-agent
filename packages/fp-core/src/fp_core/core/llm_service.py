@@ -99,11 +99,12 @@ class LLMService:
         text: str,
         instruction: str = "请将以下内容压缩为一段连贯的摘要，保留关键信息。用中文，200字以内。只输出摘要。",
         system_prompt: str = "你是一个对话压缩助手，擅长提炼关键信息。",
+        max_tokens: int = 1000,
     ) -> str:
         """通用摘要接口"""
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"{instruction}\n\n{text}"},
         ]
-        result = await self.chat(messages, tools=None, max_tokens=500)
+        result = await self.chat(messages, tools=None, max_tokens=max_tokens)
         return result.get("content", "").strip()

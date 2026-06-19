@@ -6,6 +6,10 @@ import sys
 
 
 def main():
+    from fp.version_checker import check_updates_background
+
+    check_updates_background()
+
     parser = argparse.ArgumentParser("fp")
     parser.add_argument(
         "--mode",
