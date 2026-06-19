@@ -15,9 +15,8 @@
   -r                     提炼模式（regenerate）：调 LLM 重新生成精简回复（默认）
 """
 
-name = "shortcircuit"
-aliases = ["sc"]
-description = "短路已完成的连通块。用法: /sc list 查看, /sc 或 /sc N 短路最近的, /sc @N 短路指定编号的"
+name = "sc"
+description = "短路(shortcircuit)已完成的连通块。用法: /sc list 查看, /sc 或 /sc N 短路最近的, /sc @N 短路指定编号的"
 
 
 def _parse_args(arg: str) -> tuple[str, object, str]:
