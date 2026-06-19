@@ -13,6 +13,7 @@ import contextlib
 import contextvars
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -427,6 +428,83 @@ class Agent:
     async def compact_context(self):
         """压缩对话历史（公共 API）"""
         await self._compact_context()
+
+    # ═══════════════════════════════════════════════
+    # Shortcircuit（短路）
+    # ═══════════════════════════════════════════════
+
+    def scan_components(self) -> list[dict]:
+        """获取连通块列表（公共 API）"""
+        return self._conv.scan_components()
+
+    async def shortcircuit_context(
+        self,
+        count: int = 1,
+        indices: list[int] | None = None,
+        mode: str = "regenerate",
+    ) -> dict:
+        """短路上下文 — 将指定连通块压缩为 user/assistant 对
+
+        Args:
+            count:   短路最近 N 个可压缩态的连通块
+            indices: 短路指定编号的连通块（不限形态，@N 语法解析后的结果）
+            mode:    "regenerate" | "crop"
+
+        Returns:
+            结构化结果 dict:
+            {"ok": bool, "msg": str, "saved": int, "count": int}
+            ok=False 时 msg 为失败原因
+        """
+        components = self._conv.scan_components()
+        if not components:
+            return {"ok": False, "msg": "没有已完成的连通块需要短路", "saved": 0, "count": 0}
+
+        # 确定要短路的原始索引
+        if indices is not None:
+            target_raw: list[tuple[int, int]] = []
+            for idx in indices:
+                for comp in components:
+                    if comp["idx"] == idx:
+                        target_raw.append((comp["user_idx"], comp["terminal_idx"]))
+                        break
+        else:
+            native = [c for c in reversed(components) if c["compressible"]]
+            selected = native[:count]
+            target_raw = [(c["user_idx"], c["terminal_idx"]) for c in selected]
+
+        if not target_raw:
+            return {"ok": False, "msg": "没有可短路的连通块，或指定的连通块编号不存在", "saved": 0, "count": 0}
+
+        refiner = None if mode == "crop" else await self._build_regenerate_refiner()
+        success, msg, saved = await self._conv.shortcircuit(refiner, target_raw, mode)
+
+        if success:
+            self.session.save_context(self._conv.messages)
+            return {"ok": True, "msg": msg, "saved": saved, "count": len(target_raw)}
+        else:
+            return {"ok": False, "msg": msg, "saved": 0, "count": 0}
+
+    async def _build_regenerate_refiner(self) -> Callable:
+        """构建提炼回调 — 调用 LLM 精炼 assistant 回复"""
+
+        async def refiner(user_text: str, assistant_text: str) -> tuple[str, str]:
+            prompt = (
+                "请将以下 AI 回复精简为 1-3 句话，保留关键信息和结论。"
+                "去掉工具调用细节、中间步骤、语气词。只输出精简后的回复，不要任何前缀。"
+            )
+            try:
+                result = await self._llm.summarize(
+                    assistant_text,
+                    instruction=prompt,
+                )
+                refined = (result or "").strip()
+                if not refined:
+                    refined = assistant_text
+            except Exception:
+                refined = assistant_text
+            return (user_text, refined)
+
+        return refiner
 
     def set_nuclear_exit(self):
         """设置核弹退出标志"""
