@@ -429,7 +429,7 @@ class ConversationState:
 
     async def shortcircuit(
         self,
-        refiner: Callable[[str, str], Any] | None,
+        refiner: Callable[[str, str, str], Any] | None,
         indices: list[tuple[int, int]],
         mode: str = "regenerate",
     ) -> tuple[bool, str, int]:
@@ -437,7 +437,7 @@ class ConversationState:
         短路：将指定连通块压缩为 user + assistant 消息对。
 
         Args:
-            refiner:  提炼回调，(user_text, assistant_text) → (new_user, new_assistant)
+            refiner:  提炼回调，(user_text, assistant_text, context_text) → (new_user, new_assistant)
                       crop 模式传 None
             indices:  要短路的连通块消息索引 [(user_idx, terminal_idx), ...]
             mode:     "regenerate" | "crop"
@@ -457,14 +457,25 @@ class ConversationState:
                 terminal_msg = self._messages[terminal_idx]
                 msg_count = terminal_idx - user_idx + 1
 
+                # ── 构建完整上下文（始终包含范围内所有消息） ──
+                context_parts = []
+                for j in range(user_idx, terminal_idx + 1):
+                    m = self._messages[j]
+                    role_label = "用户" if m["role"] == "user" else "AI" if m["role"] == "assistant" else "工具"
+                    tc = " [调用工具]" if m.get("tool_calls") else ""
+                    content = (m.get("content") or "")[:500]
+                    context_parts.append(f"[{role_label}]{tc}: {content}")
+                context_text = "\n\n".join(context_parts)
+
                 if msg_count == 2:
                     # 充分压缩态
                     if mode == "crop":
                         new_sections.append([dict(user_msg), dict(terminal_msg)])
                     else:
-                        # regenerate: 重新提炼
-                        assert refiner is not None  # regenerate 模式下 refiner 必传
-                        new_user, new_assistant = await refiner(user_msg["content"], terminal_msg["content"])
+                        assert refiner is not None
+                        new_user, new_assistant = await refiner(
+                            user_msg["content"], terminal_msg["content"], context_text
+                        )
                         new_sections.append([
                             {"role": "user", "content": new_user},
                             {"role": "assistant", "content": new_assistant},
@@ -477,8 +488,10 @@ class ConversationState:
                             {"role": "assistant", "content": terminal_msg["content"]},
                         ])
                     else:
-                        assert refiner is not None  # regenerate 模式下 refiner 必传
-                        new_user, new_assistant = await refiner(user_msg["content"], terminal_msg["content"])
+                        assert refiner is not None
+                        new_user, new_assistant = await refiner(
+                            user_msg["content"], terminal_msg["content"], context_text
+                        )
                         new_sections.append([
                             {"role": "user", "content": new_user},
                             {"role": "assistant", "content": new_assistant},

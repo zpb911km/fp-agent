@@ -122,7 +122,15 @@ async def execute(agent, arg: str) -> tuple[bool, str]:
     elif action == "range":
         assert isinstance(value, tuple) and len(value) == 2
         start, end = value
-        result = await agent.shortcircuit_context(indices=list(range(start, end + 1)), mode=mode)
+        # 合并范围内的所有连通块为单一范围
+        components = agent.scan_components()
+        selected = [c for c in components if start <= c["idx"] <= end]
+        if not selected:
+            result = {"ok": False, "msg": f"未找到编号 {start}~{end} 的连通块", "saved": 0, "count": 0}
+        else:
+            min_user = selected[0]["user_idx"]
+            max_terminal = selected[-1]["terminal_idx"]
+            result = await agent.shortcircuit_context(raw_indices=[(min_user, max_terminal)], mode=mode)
 
     if result["ok"]:
         detail = f"已处理 {result['count']} 个连通块，节省 {result['saved']} 条消息"

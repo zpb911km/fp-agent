@@ -441,14 +441,16 @@ class Agent:
         self,
         count: int = 1,
         indices: list[int] | None = None,
+        raw_indices: list[tuple[int, int]] | None = None,
         mode: str = "regenerate",
     ) -> dict:
         """短路上下文 — 将指定连通块压缩为 user/assistant 对
 
         Args:
-            count:   短路最近 N 个可压缩态的连通块
-            indices: 短路指定编号的连通块（不限形态，@N 语法解析后的结果）
-            mode:    "regenerate" | "crop"
+            count:       短路最近 N 个可压缩态的连通块（默认 1）
+            indices:     短路指定编号的连通块（@N 语法解析后的结果）
+            raw_indices: 直接传入消息索引 [(user_idx, terminal_idx), ...]（合并范围用）
+            mode:        "regenerate" | "crop"
 
         Returns:
             结构化结果 dict:
@@ -460,7 +462,9 @@ class Agent:
             return {"ok": False, "msg": "没有已完成的连通块需要短路", "saved": 0, "count": 0}
 
         # 确定要短路的原始索引
-        if indices is not None:
+        if raw_indices is not None:
+            target_raw = raw_indices
+        elif indices is not None:
             target_raw: list[tuple[int, int]] = []
             for idx in indices:
                 for comp in components:
@@ -475,7 +479,7 @@ class Agent:
         if not target_raw:
             return {"ok": False, "msg": "没有可短路的连通块，或指定的连通块编号不存在", "saved": 0, "count": 0}
 
-        refiner = None if mode == "crop" else await self._build_regenerate_refiner()
+        refiner = None if mode == "crop" else self._build_regenerate_refiner()
         success, msg, saved = await self._conv.shortcircuit(refiner, target_raw, mode)
 
         if success:
@@ -484,17 +488,22 @@ class Agent:
         else:
             return {"ok": False, "msg": msg, "saved": 0, "count": 0}
 
-    async def _build_regenerate_refiner(self) -> Callable:
+    def _build_regenerate_refiner(self) -> Callable:
         """构建提炼回调 — 调用 LLM 精炼 assistant 回复"""
 
-        async def refiner(user_text: str, assistant_text: str) -> tuple[str, str]:
+        async def refiner(user_text: str, assistant_text: str, context_text: str) -> tuple[str, str]:
             prompt = (
-                "请将以下 AI 回复精简为 1-3 句话，保留关键信息和结论。"
-                "去掉工具调用细节、中间步骤、语气词。只输出精简后的回复，不要任何前缀。"
+                "请将以下对话压缩为一对精简的对话消息。\n\n"
+                f"完整对话：\n{context_text}\n\n"
+                "要求：\n"
+                "1. 保留第一条用户消息的原文\n"
+                "2. 将 AI 回复精简为 1-3 句话，保留关键信息和结论\n"
+                "3. 去掉工具调用细节、中间步骤、语气词\n"
+                "4. 只输出 AI 回复的内容，不要任何前缀或格式说明"
             )
             try:
                 result = await self._llm.summarize(
-                    assistant_text,
+                    context_text,
                     instruction=prompt,
                 )
                 refined = (result or "").strip()
