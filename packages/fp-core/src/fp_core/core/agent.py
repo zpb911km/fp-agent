@@ -493,17 +493,18 @@ class Agent:
 
         async def refiner(user_text: str, assistant_text: str, context_text: str) -> tuple[str, str]:
             prompt = (
-                "请将以下完整对话压缩为一对精简的对话消息。\n\n"
+                "请将以下完整对话进行重述。\n\n"
                 "要求：\n"
-                "1. 保留第一条用户消息的原文\n"
-                "2. 将 AI 回复精简为 1-3 句话，保留关键信息和结论\n"
-                "3. 去掉工具调用细节、中间步骤、语气词\n"
-                "4. 只输出 AI 回复的内容，不要任何前缀或格式说明"
+                "1. 以第一人称描述整个过程的状态变化(我做了什么)\n"
+                "2. 保留关键信息和持久化信息\n"
+                "3. 只输出 AI 回复的内容，不要任何前缀或格式说明\n"
+                "4. 适当概括, 适当保留信息, 提高信息密度"
             )
             try:
                 result = await self._llm.summarize(
                     context_text,
                     instruction=prompt,
+                    max_tokens=10000,
                 )
                 refined = (result or "").strip()
                 if not refined:

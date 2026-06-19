@@ -7,8 +7,8 @@
   /sc                    短路最近 1 个可压缩态的连通块
   /sc N                  短路最近 N 个可压缩态的连通块
   /sc list               显示所有连通块概览
-  /sc @N                 短路编号为 N 的连通块
-  /sc @M-@N              短路编号 M 到 N 的连通块
+  /sc #N                 短路编号为 N 的连通块
+  /sc #M-#N              短路编号 M 到 N 的连通块
 
 可选修饰（跟在最后）:
   -c                     裁剪模式（crop）：只移除 tool 中间消息，不调 LLM
@@ -16,7 +16,7 @@
 """
 
 name = "sc"
-description = "短路(shortcircuit)已完成的连通块。用法: /sc list 查看, /sc 或 /sc N 短路最近的, /sc @N 短路指定编号的"
+description = "短路(shortcircuit)已完成的连通块。用法: /sc list 查看, /sc 或 /sc N 短路最近的, /sc #N 短路指定编号的"
 
 
 def _parse_args(arg: str) -> tuple[str, object, str]:
@@ -52,13 +52,13 @@ def _parse_args(arg: str) -> tuple[str, object, str]:
     if cmd == "list":
         return ("list", None, mode)
 
-    # /sc @N 或 /sc @M-@N
-    if cmd.startswith("@"):
+    # /sc #N 或 /sc #M-#N
+    if cmd.startswith("#"):
         if "-" in cmd:
             parts_range = cmd.split("-")
             try:
-                start = int(parts_range[0].lstrip("@"))
-                end = int(parts_range[1].lstrip("@"))
+                start = int(parts_range[0].lstrip("#"))
+                end = int(parts_range[1].lstrip("#"))
             except ValueError:
                 return ("error", f"无效范围: '{cmd}'", mode)
             if start > end:
@@ -66,7 +66,7 @@ def _parse_args(arg: str) -> tuple[str, object, str]:
             return ("range", (start, end), mode)
         else:
             try:
-                return ("index", int(cmd.lstrip("@")), mode)
+                return ("index", int(cmd.lstrip("#")), mode)
             except ValueError:
                 return ("error", f"无效编号: '{cmd}'", mode)
 
