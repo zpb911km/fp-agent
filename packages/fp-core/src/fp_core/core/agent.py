@@ -493,8 +493,7 @@ class Agent:
 
         async def refiner(user_text: str, assistant_text: str, context_text: str) -> tuple[str, str]:
             prompt = (
-                "请将以下对话压缩为一对精简的对话消息。\n\n"
-                f"完整对话：\n{context_text}\n\n"
+                "请将以下完整对话压缩为一对精简的对话消息。\n\n"
                 "要求：\n"
                 "1. 保留第一条用户消息的原文\n"
                 "2. 将 AI 回复精简为 1-3 句话，保留关键信息和结论\n"
