@@ -37,3 +37,4 @@ include = ["fp_core*"]
 [tool.setuptools_scm]
 root = "../.."
 local_scheme = "no-local-version"
+write_to = "src/fp_core/_version.py"
