@@ -322,6 +322,10 @@ class SessionManager:
                     save_msg[k] = msg[k]
             lines.append(json.dumps(save_msg, ensure_ascii=False))
 
+        # ★ 修复：没有任何消息时跳过文件创建，防止空 session 文件爆炸
+        if msg_count == 0:
+            return
+
         self._meta["message_count"] = msg_count
         self._meta["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 

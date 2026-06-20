@@ -24,7 +24,7 @@ assignees: ""
 **环境信息**
 - OS: [例如 Ubuntu 22.04, macOS 14.0]
 - Python 版本: [例如 3.12.0]
-- Agent 版本: [例如 0.1.6]
+- Agent 版本: [例如 0.1.7]
 - 终端: [例如 iTerm2, GNOME Terminal]
 
 **附加上下文**
