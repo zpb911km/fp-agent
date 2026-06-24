@@ -1,7 +1,10 @@
-"""shortcircuit 命令 — 短路已完成的连通块
+"""shortcircuit 命令 — 短路连通块
 
-将已完成的交互（连通块）压缩为 user + assistant 消息对，
+将交互（连通块）压缩为 user + assistant 消息对，
 移除中间的工具调用细节。
+
+连通块按 user 消息分隔切割，覆盖所有消息（包括中断块）。
+中断块压缩后标记为"被用户中断"或由 LLM 提炼保留有效信息。
 
 用法:
   /sc                    短路最近 1 个可压缩态的连通块
@@ -13,6 +16,10 @@
 可选修饰（跟在最后）:
   -c                     裁剪模式（crop）：只移除 tool 中间消息，不调 LLM
   -r                     提炼模式（regenerate）：调 LLM 重新生成精简回复（默认）
+
+状态标记（/sc list）:
+  ~ = 已充分压缩（无可压缩空间）
+  * = 未完成（中断块 / 待回复）
 """
 
 name = "sc"
@@ -102,7 +109,8 @@ async def execute(agent, arg: str) -> tuple[bool, str]:
                 agent.io.info(line)
             elif line.strip():
                 agent.io.item(line)
-        return (True, display_text)
+        # 内容已通过 IO 通道逐行输出，返回值留空避免 WebUI 二次渲染
+        return (True, "")
 
     # ── 执行短路 ─────────────────────────────────────────
     if action in ("default", "count", "index", "range"):
@@ -146,13 +154,26 @@ def _format_components_display(components: list[dict]) -> str:
     if not components:
         return "没有已完成的连通块"
 
-    lines = [f"📦 连通块列表（共 {len(components)} 个，~ = 已充分压缩）:"]
+    lines = [f"📦 连通块列表（共 {len(components)} 个，~ = 已充分压缩，* = 未完成）:"]
     for comp in components:
-        flag = " ~" if not comp["compressible"] else "  "
-        user_text = comp["user_preview"][:80].replace("\n", " ")
-        ai_text = comp["assistant_preview"][:80].replace("\n", " ")
         msg_count = comp["message_count"]
-        lines.append(f"  #{comp['idx']:2d}{flag} [用户] {user_text}")
-        lines.append(f"         [AI]   {ai_text}  ({msg_count}条)")
-        lines.append("")
+        complete = comp["complete"]
+
+        # 决定状态标记
+        if msg_count == 1:
+            flag = " *"
+            ai_preview = "（待回复）"
+        elif not complete:
+            flag = " *"
+            ai_preview = comp["assistant_preview"][:80].replace("\n", " ")
+        elif msg_count == 2 and not comp["compressible"]:
+            flag = " ~"
+            ai_preview = comp["assistant_preview"][:80].replace("\n", " ")
+        else:
+            flag = "  "
+            ai_preview = comp["assistant_preview"][:80].replace("\n", " ")
+
+        user_text = comp["user_preview"][:80].replace("\n", " ")
+        lines.append(f"#{comp['idx']:<2d}{flag} [用户] {user_text}")
+        lines.append(f"      [AI]   {ai_preview}  ({msg_count}条)\n")
     return "\n".join(lines)

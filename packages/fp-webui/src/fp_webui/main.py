@@ -223,10 +223,9 @@ class WebUIPlugin(Plugin):
         await self._emit("llm_start")
 
     async def _on_after_llm(self, ctx: HookContext, **kwargs):
-        """LLM 调用完成 → 前端显示回复内容"""
+        """LLM 调用完成 → 通知前端 LLM 状态（内容由 response 事件统一推送，避免重复）"""
         await self._emit(
             "llm_end",
-            content=kwargs.get("content", ""),
             has_tool_calls=kwargs.get("has_tool_calls", False),
             tool_names=kwargs.get("tool_names", []),
         )

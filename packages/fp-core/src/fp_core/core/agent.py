@@ -492,13 +492,15 @@ class Agent:
         """构建提炼回调 — 调用 LLM 精炼 assistant 回复"""
 
         async def refiner(user_text: str, assistant_text: str, context_text: str) -> tuple[str, str]:
+            is_interrupted = assistant_text == "_INTERRUPTED_"
             prompt = (
                 "请将以下完整对话进行重述。\n\n"
                 "要求：\n"
                 "1. 以第一人称描述整个过程的状态变化(我做了什么)\n"
                 "2. 保留关键信息和持久化信息\n"
                 "3. 只输出 AI 回复的内容，不要任何前缀或格式说明\n"
-                "4. 适当概括, 适当保留信息, 提高信息密度"
+                "4. 适当概括, 适当保留信息, 提高信息密度\n"
+                "5. 如果对话被中断（助手未完成回复），在末尾加上「（对话被中断）」"
             )
             try:
                 result = await self._llm.summarize(
@@ -508,9 +510,9 @@ class Agent:
                 )
                 refined = (result or "").strip()
                 if not refined:
-                    refined = assistant_text
+                    refined = "被用户中断" if is_interrupted else assistant_text
             except Exception:
-                refined = assistant_text
+                refined = "被用户中断" if is_interrupted else assistant_text
             return (user_text, refined)
 
         return refiner
