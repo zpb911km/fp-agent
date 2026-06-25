@@ -766,22 +766,70 @@ class Agent:
             tool_interrupted = False
             if tool_calls:
                 sel_tool_names = [tc["function"]["name"] for tc in tool_calls]
-                await self.lifecycle.emit(LifecycleHook.ON_TOOL_SELECT, tools=sel_tool_names)
+                ctx = await self.lifecycle.emit(LifecycleHook.ON_TOOL_SELECT, tools=sel_tool_names)
+                if ctx.data.get("cancelled"):
+                    display.warning(f"⏹️ 工具执行被插件拦截: {ctx.data.get('cancel_reason', '无原因')}")
+                    break
+                # 如果插件修改了工具列表，按新列表过滤
+                modified_tools = ctx.data.get("modified_tools")
+                if modified_tools is not None:
+                    skipped = [
+                        tc["function"]["name"] for tc in tool_calls if tc["function"]["name"] not in modified_tools
+                    ]
+                    if skipped:
+                        display.info(f"🔧 插件过滤了工具: {', '.join(skipped)}")
+                    tool_calls = [tc for tc in tool_calls if tc["function"]["name"] in modified_tools]
 
                 for i, tc in enumerate(tool_calls):
                     try:
-                        await self.lifecycle.emit(
+                        ctx = await self.lifecycle.emit(
                             LifecycleHook.ON_TOOL_CALL,
                             tool_name=tc["function"]["name"],
                             tool_args=tc["function"]["arguments"][:5000],
+                            tool_call_id=tc["id"],
                         )
+                        if ctx.data.get("cancelled"):
+                            reason = ctx.data.get("cancel_reason", "工具被插件拒绝")
+                            display.info(f"🔧 插件拒绝工具 {tc['function']['name']}: {reason}")
+                            # 构造假结果，走完整的结果处理流程
+                            result = "被用户拒绝"
+                            ctx = await self.lifecycle.emit(
+                                LifecycleHook.ON_TOOL_RESULT,
+                                tool_name=tc["function"]["name"],
+                                result=result,
+                                tool_call_id=tc["id"],
+                            )
+                            if ctx.data.get("blocked"):
+                                result = ctx.data.get("block_reason", "结果被插件过滤")
+                            modified_result = ctx.data.get("modified_result")
+                            if modified_result is not None:
+                                result = modified_result
+                            self._conv.add_tool_message(tc["id"], result)
+                            continue
+                        # 使用插件修改后的参数
+                        modified_args = ctx.data.get("modified_tool_args")
+                        if modified_args is not None:
+                            tc["function"]["arguments"] = modified_args
+                            display.info(f"🔧 插件修改了 {tc['function']['name']} 的参数")
+
                         result = await self._execute_tool(tc, silent=_silent)
-                        self._conv.add_tool_message(tc["id"], result)
-                        await self.lifecycle.emit(
+
+                        ctx = await self.lifecycle.emit(
                             LifecycleHook.ON_TOOL_RESULT,
                             tool_name=tc["function"]["name"],
                             result=result[:5000],
+                            tool_call_id=tc["id"],
                         )
+                        if ctx.data.get("blocked"):
+                            display.warning(f"🔧 工具 {tc['function']['name']} 的结果被插件过滤")
+                            result = ctx.data.get("block_reason", "结果被插件过滤")
+                        modified_result = ctx.data.get("modified_result")
+                        if modified_result is not None:
+                            result = modified_result
+                            display.info(f"🔧 插件修改了 {tc['function']['name']} 的结果")
+
+                        self._conv.add_tool_message(tc["id"], result)
+
                     except (KeyboardInterrupt, asyncio.CancelledError):
                         self._interrupted = False
                         self._cancelled_by_user = True
@@ -791,6 +839,21 @@ class Agent:
                         display.info("⏹️ 已中断（上下文已保留工具调用信息）")
                         tool_interrupted = True
                         break
+                    except Exception as e:
+                        # 工具执行异常 → 通知插件，看是否可抑制
+                        display.error(f"工具 {tc['function']['name']} 执行错误: {e}")
+                        ctx = await self.lifecycle.emit(
+                            LifecycleHook.ON_TOOL_ERROR,
+                            tool_name=tc["function"]["name"],
+                            error=str(e),
+                            tool_call_id=tc["id"],
+                        )
+                        if ctx.data.get("suppressed"):
+                            reason = ctx.data.get("suppress_reason", "插件已抑制错误")
+                            display.warning(f"  ⚠️ 错误已被插件抑制: {reason}")
+                            self._conv.add_tool_message(tc["id"], f"错误已被抑制：{reason}")
+                        else:
+                            raise
 
                 if tool_interrupted:
                     break

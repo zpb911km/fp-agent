@@ -3,8 +3,11 @@
 基于事件驱动，支持同步/异步钩子
 
 核心设计：
-- observe 型钩子：只通知，不改流程。异常被隔离。
-- transform 型钩子：可修改传入数据、守卫（阻止/取消）流程。异常会传播。
+- observe 型钩子：只通知，不改流程。
+- transform 型钩子：可修改传入数据、守卫（阻止/取消）流程。
+- 统一异常处理：任何钩子异常都设置 context.error + 停止传播，
+  调用方自主检查 context.error 决定是否处理。
+  不再区分 observe/transform 的异常行为。
 - typed event context：为每个关键事件定义明确的输入/输出字段。
 """
 
@@ -39,11 +42,11 @@ class LifecycleHook(Enum):
     # ── 响应阶段（transform: 可修改最终回复） ──
     ON_BEFORE_RESPONSE = auto()  # 【transform】返回响应前 — 可修改 content
 
-    # ── 工具执行阶段（observe: 仅通知） ──
-    ON_TOOL_SELECT = auto()  # 【observe】工具已选择
-    ON_TOOL_CALL = auto()  # 【observe】工具即将调用
-    ON_TOOL_RESULT = auto()  # 【observe】工具调用完成
-    ON_TOOL_ERROR = auto()  # 【observe】工具错误
+    # ── 工具执行阶段（transform: 可拦截/修改） ──
+    ON_TOOL_SELECT = auto()  # 【transform】工具已选择 — 可修改工具列表/阻止执行
+    ON_TOOL_CALL = auto()  # 【transform】工具即将调用 — 可修改参数/暂停/拒绝
+    ON_TOOL_RESULT = auto()  # 【transform】工具调用完成 — 可审查/修改/过滤结果
+    ON_TOOL_ERROR = auto()  # 【transform】工具调用出错 — 可处理/覆盖错误
 
     # ── 上下文管理（observe） ──
     ON_CONTEXT_UPDATE = auto()  # 【observe】上下文已更新
@@ -105,19 +108,51 @@ class BeforeResponseEvent:
 
 
 @dataclass
+class ToolSelectEvent:
+    """ON_TOOL_SELECT 的事件上下文（transform）"""
+
+    tools: list[str]  # 选中的工具名列表（插件可修改）
+    modified_tools: list[str] | None = None  # 插件修改后的工具列表
+    cancelled: bool = False  # 守卫：阻止所有工具执行
+    cancel_reason: str = ""
+
+
+@dataclass
 class ToolCallEvent:
-    """ON_TOOL_CALL 的事件上下文（observe）"""
+    """ON_TOOL_CALL 的事件上下文（transform）"""
 
     tool_name: str
-    tool_args: str
+    tool_args: str  # JSON 字符串
+    tool_call_id: str = ""  # 工具调用 ID
+    modified_tool_args: str | None = None  # 插件修改后的参数
+    cancelled: bool = False  # 守卫：阻止此工具执行
+    cancel_reason: str = ""
+    pending_review: bool = False  # 等待人工审核
 
 
 @dataclass
 class ToolResultEvent:
-    """ON_TOOL_RESULT 的事件上下文（observe）"""
+    """ON_TOOL_RESULT 的事件上下文（transform）"""
 
     tool_name: str
-    result: str
+    result: str  # 原始结果
+    tool_call_id: str = ""
+    modified_result: str | None = None  # 插件修改后的结果
+    blocked: bool = False  # 守卫：阻止结果返回给 LLM
+    block_reason: str = ""
+    pending_review: bool = False  # 等待人工审核
+
+
+@dataclass
+class ToolErrorEvent:
+    """ON_TOOL_ERROR 的事件上下文（transform）"""
+
+    tool_name: str
+    error: str
+    tool_call_id: str = ""
+    modified_error: str | None = None  # 插件修改后的错误信息
+    suppressed: bool = False  # 守卫：抑制错误，继续流程
+    suppress_reason: str = ""
 
 
 @dataclass
@@ -184,6 +219,10 @@ class LifecycleManager:
                 "ON_BEFORE_LLM_CALL",
                 "ON_AFTER_LLM_CALL",
                 "ON_BEFORE_RESPONSE",
+                "ON_TOOL_SELECT",
+                "ON_TOOL_CALL",
+                "ON_TOOL_RESULT",
+                "ON_TOOL_ERROR",
             }
             hook_type = "transform" if hook_name in _transform_hooks else "observe"
 
@@ -217,6 +256,11 @@ class LifecycleManager:
 
         返回最终的上下文（可能被 transform 型钩子修改）。
         调用方应检查返回的 context.data 来获取插件修改后的值。
+
+        异常处理策略（统一）：
+        - 任何钩子抛出异常 → 设置 context.error，停止传播（stop_propagation=True）
+        - 不再自动 raise，调用方自主检查 context.error 决定如何处理
+        - 这使所有钩子类型（observe/transform）的行为一致
         """
         if context is None:
             context = HookContext(hook=hook)
@@ -235,7 +279,7 @@ class LifecycleManager:
         if hook_name not in self._hooks or not self._hooks[hook_name]:
             return context
 
-        for _priority, name, func, ht in self._hooks[hook_name]:
+        for _priority, name, func, _ht in self._hooks[hook_name]:
             if context.stop_propagation:
                 break
 
@@ -258,18 +302,9 @@ class LifecycleManager:
 
             except Exception as e:
                 context.error = e
-                if ht == "transform":
-                    # transform 型钩子异常 → 停止传播，向上报告
-                    context.stop_propagation = True
-                    if self._enable_log:
-                        print(f"[Lifecycle]   -> {name} (transform) ERROR: {e}")
-                else:
-                    # observe 型钩子异常 → 只记录错误，不中断流程
-                    if self._enable_log:
-                        print(f"[Lifecycle]   -> {name} (observe) ERROR: {e} (isolated)")
-                # 对于 transform 钩子，立即抛出以让调用方知晓
-                if ht == "transform" and not isinstance(e, (asyncio.CancelledError, KeyboardInterrupt)):
-                    raise
+                context.stop_propagation = True
+                if self._enable_log:
+                    print(f"[Lifecycle]   -> {name} ERROR: {e}")
 
         return context
 
@@ -288,7 +323,7 @@ class LifecycleManager:
         if hook_name not in self._hooks or not self._hooks[hook_name]:
             return context
 
-        for _priority, name, func, ht in self._hooks[hook_name]:
+        for _priority, name, func, _ht in self._hooks[hook_name]:
             if context.stop_propagation:
                 break
             try:
@@ -297,8 +332,7 @@ class LifecycleManager:
                     context = result
             except Exception as e:
                 context.error = e
-                if ht == "transform":
-                    context.stop_propagation = True
+                context.stop_propagation = True
                 if self._enable_log:
                     print(f"[Lifecycle]   -> {name} ERROR: {e}")
 
