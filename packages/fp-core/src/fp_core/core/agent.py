@@ -678,8 +678,9 @@ class Agent:
         if user_input.strip().startswith("/"):
             handled, output = await self.handle_command(user_input)
             if handled:
-                ctx = await self.lifecycle.emit(LifecycleHook.ON_BEFORE_RESPONSE, content=output)
-                return Response(content=output)
+                # 命令输出走单一通路：Response.content
+                # 不再额外 emit ON_BEFORE_RESPONSE（前端从 done.final_content 消费）
+                return Response(content=output, metadata={"from_command": True})
 
         # ── 生命周期：MESSAGE_FILTER（插件可 transform/拒绝） ──
         ctx = await self.lifecycle.emit(

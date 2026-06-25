@@ -93,33 +93,17 @@ async def execute(agent, arg: str) -> tuple[bool, str]:
     # ── 错误 ─────────────────────────────────────────────
     if action == "error":
         msg = f"❌ {value}"
-        agent.io.error(msg)
         return (True, msg)
 
     # ── /sc list ─────────────────────────────────────────
     if action == "list":
         components = agent.scan_components()
         if not components:
-            msg = "没有已完成的连通块"
-            agent.io.info(msg)
-            return (True, msg)
+            return (True, "没有已完成的连通块")
         display_text = _format_components_display(components)
-        for line in display_text.split("\n"):
-            if line.startswith("📦"):
-                agent.io.info(line)
-            elif line.strip():
-                agent.io.item(line)
-        # 内容已通过 IO 通道逐行输出，返回值留空避免 WebUI 二次渲染
-        return (True, "")
+        return (True, display_text)
 
     # ── 执行短路 ─────────────────────────────────────────
-    if action in ("default", "count", "index", "range"):
-        agent.io.info("🔄 正在短路...")
-    else:
-        msg = "未知错误"
-        agent.io.error(msg)
-        return (True, msg)
-
     result: dict = {"ok": False, "msg": "", "saved": 0, "count": 0}
     if action == "default":
         result = await agent.shortcircuit_context(count=1, mode=mode)
@@ -142,10 +126,8 @@ async def execute(agent, arg: str) -> tuple[bool, str]:
 
     if result["ok"]:
         detail = f"已处理 {result['count']} 个连通块，节省 {result['saved']} 条消息"
-        agent.io.info(f" ✅\n📦 {detail}")
         return (True, f"✅ {detail}")
     else:
-        agent.io.error(f" ❌\n{result['msg']}")
         return (True, result["msg"])
 
 
@@ -154,26 +136,31 @@ def _format_components_display(components: list[dict]) -> str:
     if not components:
         return "没有已完成的连通块"
 
-    lines = [f"📦 连通块列表（共 {len(components)} 个，~ = 已充分压缩，* = 未完成）:"]
+    lines = [
+        f"## 📦 连通块列表（共 {len(components)} 个）",
+        "`~` = 已充分压缩，`*` = 未完成",
+    ]
     for comp in components:
         msg_count = comp["message_count"]
         complete = comp["complete"]
 
         # 决定状态标记
         if msg_count == 1:
-            flag = " *"
+            flag = "`*`"
             ai_preview = "（待回复）"
         elif not complete:
-            flag = " *"
+            flag = "`*`"
             ai_preview = comp["assistant_preview"][:80].replace("\n", " ")
         elif msg_count == 2 and not comp["compressible"]:
-            flag = " ~"
+            flag = "`~`"
             ai_preview = comp["assistant_preview"][:80].replace("\n", " ")
         else:
-            flag = "  "
+            flag = ""
             ai_preview = comp["assistant_preview"][:80].replace("\n", " ")
 
         user_text = comp["user_preview"][:80].replace("\n", " ")
-        lines.append(f"#{comp['idx']:<2d}{flag} [用户] {user_text}")
-        lines.append(f"      [AI]   {ai_preview}  ({msg_count}条)\n")
+        flag_part = f" {flag}" if flag else ""
+        lines.append(f"- **#{comp['idx']}**{flag_part} **用户**: {user_text}")
+        lines.append(f"  **AI**: {ai_preview} ({msg_count}条)")
+
     return "\n".join(lines)

@@ -108,6 +108,23 @@ def llm_output(text: str):
     print(text, end="", flush=True)
 
 
+def render_markdown(text: str):
+    """用 rich 渲染 Markdown 文本到终端，缺失时降级为纯文本。
+
+    这是 LLMStreamer._render_markdown 的公开版本，
+    供外部（如 terminal 前端）统一调用。
+    """
+    if _silent():
+        return
+    try:
+        from rich.console import Console
+        from rich.markdown import Markdown
+
+        Console().print(Markdown(text))
+    except ImportError:
+        print(text)
+
+
 def llm_iteration(count: int):
     """打印迭代次数统计"""
     if _silent():

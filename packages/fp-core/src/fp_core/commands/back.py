@@ -11,13 +11,19 @@ aliases = []
 description = "回退到对话的某个历史时刻。用法: /back list 查看列表, /back <N> 直接回退"
 
 
+def _safe_preview(text: str, max_len: int = 80) -> str:
+    """将消息内容截断并放入行内代码，防止残缺 MD 破坏全局渲染"""
+    text = text.replace("`", "′")  # 反引号替换为类似字符，防止破坏代码块
+    if len(text) > max_len:
+        text = text[:max_len] + "..."
+    return f"`{text}`"
+
+
 async def execute(agent, arg: str) -> tuple[bool, str]:
     parts = arg.strip().split()
 
     if not parts:
-        msg = "❌ 用法: /back list (查看列表) 或 /back <N> (直接回退)"
-        agent.io.error(msg)
-        return (True, msg)
+        return (True, "❌ 用法: `/back list` (查看列表) 或 `/back <N>` (直接回退)")
 
     cmd = parts[0]
 
@@ -25,25 +31,18 @@ async def execute(agent, arg: str) -> tuple[bool, str]:
     if cmd == "list":
         history_msgs = agent.get_history_for_display()
         if not history_msgs:
-            msg = "没有历史记录"
-            agent.io.info(msg)
-            return (True, msg)
+            return (True, "没有历史记录")
 
         roles_zh = {"user": "👤 用户", "assistant": "🤖 AI", "tool": "🔧 工具"}
-        lines = [f"📜 对话历史（共 {len(history_msgs)} 条消息，使用 /back <N> 回退）:"]
+        lines = [f"## 📜 对话历史（共 {len(history_msgs)} 条消息，使用 `/back <N>` 回退）"]
         for i, msg in enumerate(history_msgs):
             role = roles_zh.get(msg["role"], msg["role"])
             content = msg.get("content", "")
             if msg["role"] == "tool":
-                content = content[:60] + "..." if len(content) > 60 else content
+                preview = _safe_preview(content, max_len=60)
             else:
-                content = content[:120] + "..." if len(content) > 120 else content
-            content = content.replace("\n", " ")
-            lines.append(f"  [{i + 1:3d}] {role}: {content}")
-
-        agent.io.info(lines[0])
-        for line in lines[1:]:
-            agent.io.item(line)
+                preview = _safe_preview(content, max_len=120)
+            lines.append(f"- **[{i + 1}] {role}**: {preview}")
 
         return (True, "\n".join(lines))
 
@@ -51,23 +50,16 @@ async def execute(agent, arg: str) -> tuple[bool, str]:
     try:
         index = int(cmd)
     except ValueError:
-        msg = f"❌ 无效参数：'{cmd}' — 请用 /back list 查看列表，/back <N> 回退"
-        agent.io.error(msg)
-        return (True, msg)
+        return (True, f"❌ 无效参数：`{cmd}` — 请用 `/back list` 查看列表，`/back <N>` 回退")
 
     mode = None
     if len(parts) >= 2:
         try:
             mode = int(parts[1])
             if mode != 2:
-                msg = "❌ mode=1（保留后续消息）暂不支持，请用 mode=2 或 /fork"
-                agent.io.error(msg)
-                return (True, msg)
+                return (True, "❌ mode=1（保留后续消息）暂不支持，请用 mode=2 或 `/fork`")
         except ValueError:
-            msg = f"❌ 无效参数：'{parts[1]}' 不是数字"
-            agent.io.error(msg)
-            return (True, msg)
+            return (True, f"❌ 无效参数：`{parts[1]}` 不是数字")
 
     result = await agent.back(target_idx=index, mode=mode)
-    agent.io.info(result)
     return (True, result)
