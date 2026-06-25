@@ -398,7 +398,7 @@ class ConversationState:
                 "message_count": msg_count,
                 "user_preview": self._messages[user_idx].get("content", "")[:120],
                 "assistant_preview": terminal_msg.get("content", "")[:120],
-                "compressible": msg_count > 1,
+                "compressible": msg_count > 2,
                 "complete": complete,
             })
 
