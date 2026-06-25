@@ -477,7 +477,7 @@ class Agent:
 
         # 确定要短路的原始索引
         if raw_indices is not None:
-            target_raw = raw_indices
+            target_raw = list(raw_indices)
         elif indices is not None:
             target_raw: list[tuple[int, int]] = []
             for idx in indices:

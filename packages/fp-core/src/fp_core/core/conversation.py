@@ -425,6 +425,10 @@ class ConversationState:
         snapshot = list(self._messages)
 
         try:
+            # 按 user_idx 升序排序 —— Step 3 的重建遍历从旧到新，
+            # 若 indices 乱序（如 count 模式从最新开始选），较早的块会被跳过
+            indices = sorted(indices, key=lambda x: x[0])
+
             # ── Step 2: 逐块处理（全部成功才继续） ──
             new_sections: list[list[dict]] = []
             total_saved = 0
