@@ -45,6 +45,20 @@ from fp_core.plugins.base.plugin import PluginRegistry
 _current_io: contextvars.ContextVar["IOChannel | None"] = contextvars.ContextVar("_current_io", default=None)
 
 
+def get_current_io() -> IOChannel | None:
+    """获取当前 asyncio Task 的 IO 通道（插件用）
+
+    生命周期钩子函数中调用此方法获取当前环境的 IO 通道：
+      - CLI 终端   → CLIIO（使用 input()）
+      - WebUI      → WebSocketIO（推送到前端）
+      - ACP/IDE    → ACPIO（返回 "q"）
+      - REST API   → RestIO（返回 ""）
+
+    返回值在 process() 调用期间有效，之后恢复为 None。
+    """
+    return _current_io.get()
+
+
 @dataclass
 class Message:
     """消息对象"""
@@ -632,9 +646,10 @@ class Agent:
         处理用户输入（全异步）
 
         io: 可选 IO 通道覆盖。WebUI 模式传入 WebSocketIO
+           io=None → 使用 self._default_io（CLIIO）
 
         context var 生命周期：
-          _current_io.set(io) 在此方法入口调用 → 绑定到当前 asyncio.Task
+          _current_io.set(io or self._default_io) 在此方法入口调用 → 绑定到当前 asyncio.Task
           _current_io.reset(token) 在 finally 块中恢复 → 保证不泄漏
 
           注意：_current_io 只对当前 Task 可见。
@@ -647,12 +662,12 @@ class Agent:
             return Response(content="")
 
         # 使用 contextvars 设置 IO 通道（不修改实例变量，防并发竞态）
-        token = _current_io.set(io) if io is not None else None
+        # io=None → fallback 到 self._default_io，保证 get_current_io() 始终返回有效值
+        token = _current_io.set(io or self._default_io)
         try:
             return await self._process_inner(user_input)
         finally:
-            if token is not None:
-                _current_io.reset(token)
+            _current_io.reset(token)
 
     async def _process_inner(self, user_input: str) -> Response:
         """处理用户输入的核心逻辑"""
