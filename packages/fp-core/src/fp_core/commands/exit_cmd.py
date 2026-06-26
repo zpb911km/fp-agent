@@ -5,5 +5,5 @@ aliases = ["quit"]
 description = "退出程序"
 
 
-def execute(agent, arg: str) -> bool:
+def execute(agent, arg: str) -> tuple[bool, str]:
     raise SystemExit()

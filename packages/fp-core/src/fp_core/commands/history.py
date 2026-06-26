@@ -1,10 +1,16 @@
 """history 命令 — 查看当前对话历史"""
 
-from fp_core import display
-
 name = "history"
 aliases = []
 description = "查看当前对话历史"
+
+
+def _safe_preview(text: str, max_len: int = 80) -> str:
+    """将消息内容截断并放入行内代码，防止残缺 MD 破坏全局渲染"""
+    text = text.replace("`", "′")  # 反引号替换为类似字符，防止破坏代码块
+    if len(text) > max_len:
+        text = text[:max_len] + "..."
+    return f"`{text}`"
 
 
 def execute(agent, arg: str) -> tuple[bool, str]:
@@ -14,18 +20,13 @@ def execute(agent, arg: str) -> tuple[bool, str]:
         return (True, "暂无对话历史")
 
     roles_zh = {"user": "👤 用户", "assistant": "🤖 AI", "tool": "🔧 工具"}
-    lines = [f"📜 对话历史（共 {len(history_msgs)} 条）:"]
+    lines = [f"## 📜 对话历史（共 {len(history_msgs)} 条）"]
 
     for i, msg in enumerate(history_msgs):
         role = roles_zh.get(msg["role"], msg["role"])
         content = msg.get("content", "")
-        if msg["role"] == "tool":
-            content = content[:80] + "..." if len(content) > 80 else content
-        else:
-            content = content[:120] + "..." if len(content) > 120 else content
-        content = content.replace("\n", " ")
-        lines.append(f"  [{i + 1:3d}] {role}: {content}")
+        preview = _safe_preview(content, max_len=80) if msg["role"] == "tool" else _safe_preview(content, max_len=120)
+        lines.append(f"- **[{i + 1}] {role}**: {preview}")
 
     output = "\n".join(lines)
-    display.info(f"\n{output}")
     return (True, output)

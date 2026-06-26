@@ -45,6 +45,20 @@ from fp_core.plugins.base.plugin import PluginRegistry
 _current_io: contextvars.ContextVar["IOChannel | None"] = contextvars.ContextVar("_current_io", default=None)
 
 
+def get_current_io() -> IOChannel | None:
+    """获取当前 asyncio Task 的 IO 通道（插件用）
+
+    生命周期钩子函数中调用此方法获取当前环境的 IO 通道：
+      - CLI 终端   → CLIIO（使用 input()）
+      - WebUI      → WebSocketIO（推送到前端）
+      - ACP/IDE    → ACPIO（返回 "q"）
+      - REST API   → RestIO（返回 ""）
+
+    返回值在 process() 调用期间有效，之后恢复为 None。
+    """
+    return _current_io.get()
+
+
 @dataclass
 class Message:
     """消息对象"""
@@ -463,7 +477,7 @@ class Agent:
 
         # 确定要短路的原始索引
         if raw_indices is not None:
-            target_raw = raw_indices
+            target_raw = list(raw_indices)
         elif indices is not None:
             target_raw: list[tuple[int, int]] = []
             for idx in indices:
@@ -492,25 +506,42 @@ class Agent:
         """构建提炼回调 — 调用 LLM 精炼 assistant 回复"""
 
         async def refiner(user_text: str, assistant_text: str, context_text: str) -> tuple[str, str]:
+            is_interrupted = assistant_text == "_INTERRUPTED_"
             prompt = (
-                "请将以下完整对话进行重述。\n\n"
+                "以下是一段 AI 与用户之间的完整对话，包含工具调用过程。\n\n"
+                "任务：将这段对话压缩为第一人称操作日志，保留 AI 做了什么、发现了什么、决策了什么。\n\n"
                 "要求：\n"
-                "1. 以第一人称描述整个过程的状态变化(我做了什么)\n"
-                "2. 保留关键信息和持久化信息\n"
-                "3. 只输出 AI 回复的内容，不要任何前缀或格式说明\n"
-                "4. 适当概括, 适当保留信息, 提高信息密度"
+                "1. 【第一人称叙述】以「我」的视角，按时间顺序描述："
+                "我做了什么操作 → 发现了什么 → 得出了什么结论 → 做了什么决策。\n"
+                "2. 【保留关键产出】工具调用的参数/命令细节可以丢弃，但工具的发现结果必须保留："
+                "查到了什么数据、找到了什么文件、确认了什么状态、修改了什么代码。\n"
+                "3. 【信息密度】压缩到原回复的 1/3~1/2 长度。"
+                "重点保留：文件路径、函数名、变量名、错误信息、数值、决策理由。\n"
+                "4. 【过程精炼，结果展开】过程描述控制在 1~2 句话概括做了什么、为什么做；"
+                "最终结果（创建的/修改了什么、测试结论、状态变化、发现的数据）展开保留，不得过度压缩。\n"
+                "5. 【保留末尾总结】如果最后一条输出是总结性陈述"
+                "（如「搞定」、「改完了」、「测试通过」、具体数值等），"
+                "则原样输出最后一次回复的完整内容。\n"
+                "6. 只输出压缩后的内容，不要任何前缀或格式说明。\n"
+                "7. 如果对话被中断，在末尾加上「（对话被中断）」"
             )
             try:
                 result = await self._llm.summarize(
                     context_text,
                     instruction=prompt,
-                    max_tokens=10000,
+                    system_prompt=(
+                        "你是一个第一人称操作日志记录助手。"
+                        "将工具调用过程压缩为连贯的"
+                        "「我做了什么→发现了什么→决策了什么」日志，"
+                        "丢弃工具调用细节，保留发现和决策。"
+                    ),
+                    max_tokens=8192,
                 )
                 refined = (result or "").strip()
                 if not refined:
-                    refined = assistant_text
+                    refined = "被用户中断" if is_interrupted else assistant_text
             except Exception:
-                refined = assistant_text
+                refined = "被用户中断" if is_interrupted else assistant_text
             return (user_text, refined)
 
         return refiner
@@ -630,9 +661,10 @@ class Agent:
         处理用户输入（全异步）
 
         io: 可选 IO 通道覆盖。WebUI 模式传入 WebSocketIO
+           io=None → 使用 self._default_io（CLIIO）
 
         context var 生命周期：
-          _current_io.set(io) 在此方法入口调用 → 绑定到当前 asyncio.Task
+          _current_io.set(io or self._default_io) 在此方法入口调用 → 绑定到当前 asyncio.Task
           _current_io.reset(token) 在 finally 块中恢复 → 保证不泄漏
 
           注意：_current_io 只对当前 Task 可见。
@@ -645,12 +677,12 @@ class Agent:
             return Response(content="")
 
         # 使用 contextvars 设置 IO 通道（不修改实例变量，防并发竞态）
-        token = _current_io.set(io) if io is not None else None
+        # io=None → fallback 到 self._default_io，保证 get_current_io() 始终返回有效值
+        token = _current_io.set(io or self._default_io)
         try:
             return await self._process_inner(user_input)
         finally:
-            if token is not None:
-                _current_io.reset(token)
+            _current_io.reset(token)
 
     async def _process_inner(self, user_input: str) -> Response:
         """处理用户输入的核心逻辑"""
@@ -661,8 +693,9 @@ class Agent:
         if user_input.strip().startswith("/"):
             handled, output = await self.handle_command(user_input)
             if handled:
-                ctx = await self.lifecycle.emit(LifecycleHook.ON_BEFORE_RESPONSE, content=output)
-                return Response(content=output)
+                # 命令输出走单一通路：Response.content
+                # 不再额外 emit ON_BEFORE_RESPONSE（前端从 done.final_content 消费）
+                return Response(content=output, metadata={"from_command": True})
 
         # ── 生命周期：MESSAGE_FILTER（插件可 transform/拒绝） ──
         ctx = await self.lifecycle.emit(
@@ -764,22 +797,70 @@ class Agent:
             tool_interrupted = False
             if tool_calls:
                 sel_tool_names = [tc["function"]["name"] for tc in tool_calls]
-                await self.lifecycle.emit(LifecycleHook.ON_TOOL_SELECT, tools=sel_tool_names)
+                ctx = await self.lifecycle.emit(LifecycleHook.ON_TOOL_SELECT, tools=sel_tool_names)
+                if ctx.data.get("cancelled"):
+                    display.warning(f"⏹️ 工具执行被插件拦截: {ctx.data.get('cancel_reason', '无原因')}")
+                    break
+                # 如果插件修改了工具列表，按新列表过滤
+                modified_tools = ctx.data.get("modified_tools")
+                if modified_tools is not None:
+                    skipped = [
+                        tc["function"]["name"] for tc in tool_calls if tc["function"]["name"] not in modified_tools
+                    ]
+                    if skipped:
+                        display.info(f"🔧 插件过滤了工具: {', '.join(skipped)}")
+                    tool_calls = [tc for tc in tool_calls if tc["function"]["name"] in modified_tools]
 
                 for i, tc in enumerate(tool_calls):
                     try:
-                        await self.lifecycle.emit(
+                        ctx = await self.lifecycle.emit(
                             LifecycleHook.ON_TOOL_CALL,
                             tool_name=tc["function"]["name"],
                             tool_args=tc["function"]["arguments"][:5000],
+                            tool_call_id=tc["id"],
                         )
+                        if ctx.data.get("cancelled"):
+                            reason = ctx.data.get("cancel_reason", "工具被插件拒绝")
+                            display.info(f"🔧 插件拒绝工具 {tc['function']['name']}: {reason}")
+                            # 构造假结果，走完整的结果处理流程
+                            result = "被用户拒绝"
+                            ctx = await self.lifecycle.emit(
+                                LifecycleHook.ON_TOOL_RESULT,
+                                tool_name=tc["function"]["name"],
+                                result=result,
+                                tool_call_id=tc["id"],
+                            )
+                            if ctx.data.get("blocked"):
+                                result = ctx.data.get("block_reason", "结果被插件过滤")
+                            modified_result = ctx.data.get("modified_result")
+                            if modified_result is not None:
+                                result = modified_result
+                            self._conv.add_tool_message(tc["id"], result)
+                            continue
+                        # 使用插件修改后的参数
+                        modified_args = ctx.data.get("modified_tool_args")
+                        if modified_args is not None:
+                            tc["function"]["arguments"] = modified_args
+                            display.info(f"🔧 插件修改了 {tc['function']['name']} 的参数")
+
                         result = await self._execute_tool(tc, silent=_silent)
-                        self._conv.add_tool_message(tc["id"], result)
-                        await self.lifecycle.emit(
+
+                        ctx = await self.lifecycle.emit(
                             LifecycleHook.ON_TOOL_RESULT,
                             tool_name=tc["function"]["name"],
                             result=result[:5000],
+                            tool_call_id=tc["id"],
                         )
+                        if ctx.data.get("blocked"):
+                            display.warning(f"🔧 工具 {tc['function']['name']} 的结果被插件过滤")
+                            result = ctx.data.get("block_reason", "结果被插件过滤")
+                        modified_result = ctx.data.get("modified_result")
+                        if modified_result is not None:
+                            result = modified_result
+                            display.info(f"🔧 插件修改了 {tc['function']['name']} 的结果")
+
+                        self._conv.add_tool_message(tc["id"], result)
+
                     except (KeyboardInterrupt, asyncio.CancelledError):
                         self._interrupted = False
                         self._cancelled_by_user = True
@@ -789,6 +870,21 @@ class Agent:
                         display.info("⏹️ 已中断（上下文已保留工具调用信息）")
                         tool_interrupted = True
                         break
+                    except Exception as e:
+                        # 工具执行异常 → 通知插件，看是否可抑制
+                        display.error(f"工具 {tc['function']['name']} 执行错误: {e}")
+                        ctx = await self.lifecycle.emit(
+                            LifecycleHook.ON_TOOL_ERROR,
+                            tool_name=tc["function"]["name"],
+                            error=str(e),
+                            tool_call_id=tc["id"],
+                        )
+                        if ctx.data.get("suppressed"):
+                            reason = ctx.data.get("suppress_reason", "插件已抑制错误")
+                            display.warning(f"  ⚠️ 错误已被插件抑制: {reason}")
+                            self._conv.add_tool_message(tc["id"], f"错误已被抑制：{reason}")
+                        else:
+                            raise
 
                 if tool_interrupted:
                     break

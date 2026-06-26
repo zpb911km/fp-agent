@@ -362,68 +362,45 @@ class ConversationState:
         """
         扫描 _messages，返回从旧到新排序的连通块列表。
 
-        连通块定义：从 user 消息开始，到第一条 assistant(无 tool_calls) 结束。
-        消息数 > 2 为可压缩态，= 2 为充分压缩态。
+        连通块定义：以 user 消息为分隔符，从前向后切割。
+        每个连通块从一条 user 消息开始，到下一个 user 的前一条或队列末尾结束。
+        0 号位（system prompt）不计入。
 
         每条记录：
         {
             "idx": 1,                   # 连通块编号（1-based）
             "user_idx": 1,              # _messages 中的索引
-            "terminal_idx": 2,          # _messages 中的索引（终点 assistant）
+            "terminal_idx": 2,          # _messages 中的索引（块终点）
             "message_count": 2,         # 该连通块包含的消息总数
             "user_preview": "帮我查天气",
             "assistant_preview": "北京25°C...",
-            "compressible": True/False,
+            "compressible": True/False,  # 有实际内容可压缩（msg_count > 1）
+            "complete": True/False,      # 最后一条是 assistant(无 tool_calls)
         }
         """
-        components: list[dict] = []
-        i = len(self._messages) - 1
+        # 收集所有 user 消息位置（跳过 system prompt 索引 0）
+        user_indices = [i for i in range(1, len(self._messages)) if self._messages[i]["role"] == "user"]
 
-        while i >= 1:
-            msg = self._messages[i]
+        components = []
+        for pos, user_idx in enumerate(user_indices):
+            # 终点 = 下一个 user 的前一条，或队列末尾
+            terminal_idx = user_indices[pos + 1] - 1 if pos + 1 < len(user_indices) else len(self._messages) - 1
 
-            # ── Case A: assistant(无 tc) → 连通块终点 ──
-            if msg["role"] == "assistant" and not msg.get("tool_calls"):
-                terminal_idx = i
-                # 向前找匹配的 user
-                j = i - 1
-                user_idx = -1
-                while j >= 1:
-                    if self._messages[j]["role"] == "user":
-                        user_idx = j
-                        break
-                    j -= 1
+            msg_count = terminal_idx - user_idx + 1
+            terminal_msg = self._messages[terminal_idx]
 
-                if user_idx == -1:
-                    # 理论不会发生（没有 user 的 assistant 回复），安全降级
-                    i -= 1
-                    continue
+            complete = terminal_msg["role"] == "assistant" and not terminal_msg.get("tool_calls")
 
-                msg_count = terminal_idx - user_idx + 1
-                components.append({
-                    "idx": 0,  # 稍后重排
-                    "user_idx": user_idx,
-                    "terminal_idx": terminal_idx,
-                    "message_count": msg_count,
-                    "user_preview": self._messages[user_idx].get("content", "")[:120],
-                    "assistant_preview": self._messages[terminal_idx].get("content", "")[:120],
-                    "compressible": msg_count > 2,
-                })
-                i = user_idx - 1  # 跳过该连通块
-                continue
-
-            # ── Case B: 活跃的 user（交互未完成）→ 跳过 ──
-            if msg["role"] == "user":
-                i -= 1
-                continue
-
-            # ── 其他（system / tool / assistant(有tc)）→ 跳过 ──
-            i -= 1
-
-        # 反转：从旧到新，并分配编号
-        components.reverse()
-        for idx, comp in enumerate(components, start=1):
-            comp["idx"] = idx
+            components.append({
+                "idx": pos + 1,
+                "user_idx": user_idx,
+                "terminal_idx": terminal_idx,
+                "message_count": msg_count,
+                "user_preview": self._messages[user_idx].get("content", "")[:120],
+                "assistant_preview": terminal_msg.get("content", "")[:120],
+                "compressible": msg_count > 2,
+                "complete": complete,
+            })
 
         return components
 
@@ -448,6 +425,10 @@ class ConversationState:
         snapshot = list(self._messages)
 
         try:
+            # 按 user_idx 升序排序 —— Step 3 的重建遍历从旧到新，
+            # 若 indices 乱序（如 count 模式从最新开始选），较早的块会被跳过
+            indices = sorted(indices, key=lambda x: x[0])
+
             # ── Step 2: 逐块处理（全部成功才继续） ──
             new_sections: list[list[dict]] = []
             total_saved = 0
@@ -456,6 +437,9 @@ class ConversationState:
                 user_msg = self._messages[user_idx]
                 terminal_msg = self._messages[terminal_idx]
                 msg_count = terminal_idx - user_idx + 1
+
+                # ── 判断块是否完整（最后一条是 assistant 无 tool_calls） ──
+                complete = terminal_msg["role"] == "assistant" and not terminal_msg.get("tool_calls")
 
                 # ── 构建完整上下文（始终包含范围内所有消息） ──
                 context_parts = []
@@ -467,35 +451,56 @@ class ConversationState:
                     context_parts.append(f"[{role_label}]{tc}: {content}")
                 context_text = "\n\n".join(context_parts)
 
-                if msg_count == 2:
-                    # 充分压缩态
-                    if mode == "crop":
-                        new_sections.append([dict(user_msg), dict(terminal_msg)])
+                if complete:
+                    # ── 完整块：原有逻辑 ──
+                    if msg_count == 2:
+                        if mode == "crop":
+                            new_sections.append([dict(user_msg), dict(terminal_msg)])
+                        else:
+                            assert refiner is not None
+                            new_user, new_assistant = await refiner(
+                                user_msg["content"], terminal_msg["content"], context_text
+                            )
+                            new_sections.append([
+                                {"role": "user", "content": new_user},
+                                {"role": "assistant", "content": new_assistant},
+                            ])
                     else:
-                        assert refiner is not None
-                        new_user, new_assistant = await refiner(
-                            user_msg["content"], terminal_msg["content"], context_text
-                        )
-                        new_sections.append([
-                            {"role": "user", "content": new_user},
-                            {"role": "assistant", "content": new_assistant},
-                        ])
+                        if mode == "crop" or refiner is None:
+                            new_sections.append([
+                                {"role": "user", "content": user_msg["content"]},
+                                {"role": "assistant", "content": terminal_msg["content"]},
+                            ])
+                        else:
+                            assert refiner is not None
+                            new_user, new_assistant = await refiner(
+                                user_msg["content"], terminal_msg["content"], context_text
+                            )
+                            new_sections.append([
+                                {"role": "user", "content": new_user},
+                                {"role": "assistant", "content": new_assistant},
+                            ])
                 else:
-                    # 可压缩态
+                    # ── 不完整块（中断）：安全压缩 ──
                     if mode == "crop" or refiner is None:
                         new_sections.append([
-                            {"role": "user", "content": user_msg["content"]},
-                            {"role": "assistant", "content": terminal_msg["content"]},
+                            {"role": "user", "content": user_msg.get("content", "")},
+                            {"role": "assistant", "content": "被用户中断"},
                         ])
                     else:
                         assert refiner is not None
                         new_user, new_assistant = await refiner(
-                            user_msg["content"], terminal_msg["content"], context_text
+                            user_msg.get("content", ""),
+                            "_INTERRUPTED_",  # 标记中断，refiner 据此分流
+                            context_text,
                         )
                         new_sections.append([
                             {"role": "user", "content": new_user},
                             {"role": "assistant", "content": new_assistant},
                         ])
+
+                # ── 计算节省的消息数（msg_count <= 2 不计数） ──
+                if msg_count > 2:
                     total_saved += msg_count - 2
 
             # ── Step 3: 一次性重建消息列表 ──

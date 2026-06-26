@@ -432,8 +432,7 @@ class ACPServer:
                 parsed = json.loads(result_str)
                 if isinstance(parsed, dict) and "result" in parsed:
                     result_str = parsed["result"]
-        # 强制将 \n 替换为 \n\n，防止 IDE 吞掉换行
-        return result_str.replace("\n", "\n\n")
+        return result_str
 
     async def _on_tool_result(self, context, tool_name="", result="", **kwargs):
         """工具完成后 — 发送 tool_call_update
@@ -872,13 +871,15 @@ class ACPServer:
                 self._current_task = None
 
             # ── 处理剩余文本（流式推送后缓冲区可能已空） ──
+            # 设计原则：io 负责展示，return 负责状态传递
+            # - IO 通道有内容（命令场景）→ 由 IO 负责展示，不重复推 response.content
+            # - IO 通道无内容（对话/工具场景）→ fallback 到 response.content
             buf = acp_io.flush_text()
             reply_text = response.content or ""
 
             if buf.strip():
                 self._send_message_notification(buf, session_id=sid)
-
-            if reply_text and reply_text not in buf:
+            elif reply_text:
                 self._send_message_notification(reply_text, session_id=sid)
 
             return {"stopReason": "end_turn"}

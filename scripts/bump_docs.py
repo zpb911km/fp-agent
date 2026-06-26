@@ -36,11 +36,6 @@ TARGETS: list[dict] = [
         "replacement": r"\g<1>{version}",
     },
     {
-        "path": "docs/guide/快速开始.md",
-        "pattern": r"(Five Pebbles Agent  )v?[\d.]+",
-        "replacement": r"\g<1>{version}",
-    },
-    {
         "path": "docs/CONTRIBUTING.md",
         "pattern": r"(Agent 版本: )[\d.]+",
         "replacement": r"\g<1>{version}",

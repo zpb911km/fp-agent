@@ -201,12 +201,8 @@ class WebUIPlugin(Plugin):
             priority=5,
             name="webui_error",
         )
-        lifecycle.register(
-            LifecycleHook.ON_BEFORE_RESPONSE,
-            self._on_response,
-            priority=5,
-            name="webui_response",
-        )
+        # 注意：不监听 ON_BEFORE_RESPONSE — 前端统一从 done.final_content 获取最终回复
+        # 避免与 WebSocketIO·say() / process_and_notify 重复推送
         lifecycle.register(
             LifecycleHook.ON_SHUTDOWN,
             self._on_shutdown,
@@ -223,10 +219,16 @@ class WebUIPlugin(Plugin):
         await self._emit("llm_start")
 
     async def _on_after_llm(self, ctx: HookContext, **kwargs):
-        """LLM 调用完成 → 前端显示回复内容"""
+        """LLM 调用完成 → 通知前端 LLM 状态
+
+        注意：LLM 可能同时返回文本内容和工具调用（如"我来查一下..." + tool_calls）。
+        文本内容通过 llm_end.content 推送，前端在其已存在的分支中消费。
+        最终的 done.final_content 只包含最后一条纯文本回复，不包含中间输出。
+        """
+        content = kwargs.get("content", "")
         await self._emit(
             "llm_end",
-            content=kwargs.get("content", ""),
+            content=content,
             has_tool_calls=kwargs.get("has_tool_calls", False),
             tool_names=kwargs.get("tool_names", []),
         )
@@ -256,13 +258,6 @@ class WebUIPlugin(Plugin):
     async def _on_error(self, ctx: HookContext, **kwargs):
         """错误发生 → 前端显示错误信息"""
         await self._emit("error", error=str(kwargs.get("error", "")))
-
-    async def _on_response(self, ctx: HookContext, **kwargs):
-        """最终回复生成 → 前端显示完整回复"""
-        await self._emit(
-            "response",
-            content=kwargs.get("content", ""),
-        )
 
     async def _on_shutdown(self, ctx: HookContext, **kwargs):
         """Agent 关闭 → 前端显示关闭通知"""

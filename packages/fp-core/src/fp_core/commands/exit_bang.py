@@ -2,14 +2,12 @@
 
 import os
 
-from fp_core import display
-
 name = "exit!"
 aliases = []
 description = "核弹级退出：删除当前会话、不留痕迹"
 
 
-def execute(agent, arg: str) -> bool:
+def execute(agent, arg: str) -> tuple[bool, str]:
     sid = agent.session.session_id
     path = agent.session.get_session_path()
 
@@ -20,8 +18,10 @@ def execute(agent, arg: str) -> bool:
     if os.path.exists(path):
         try:
             os.remove(path)
-            display.info(f"💥 会话 {sid} 已删除，不留痕迹")
+            msg = f"💥 会话 {sid} 已删除，不留痕迹"
         except Exception as e:
-            display.warning(f"⚠️  删除失败: {e}")
+            msg = f"⚠️  删除失败: {e}"
+    else:
+        msg = ""
 
-    raise SystemExit()
+    raise SystemExit(msg)
