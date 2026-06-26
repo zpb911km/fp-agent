@@ -167,8 +167,12 @@ _FP_DATA_DIR = get_data_dir()
 
 SESSIONS_DIR = os.path.join(_FP_DATA_DIR, "sessions")
 MEMORY_DIR = os.path.join(_FP_DATA_DIR, "memory")
+MEMORY_DIR_LOCAL = os.path.join(".fp", "memory")
 TASKS_FILE = os.path.join(_FP_DATA_DIR, "tasks.json")
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
+
+# ── 记忆系统禁用分类（不可作为 category 使用） ─────────────────────
+FORBIDDEN_CATEGORIES = {"core", "misc", "other", "uncategorized"}
 
 
 # ═══════════════════════════════════════════════════════════════
