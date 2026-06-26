@@ -8,6 +8,28 @@
 > 现已统一修正为 `0.1.0`，与 `pyproject.toml` 保持一致。
 > 以下版本号保留原始记录以供追溯，实际发布包版本均为 `0.1.0`。
 
+## [0.1.8] — 2026-06-26
+
+### Added
+
+- **项目原则文档**: 新增 `docs/项目原则.md`，记录关键架构决策与设计约束（如"先改 AST 后落地"、"零全局状态"、"外置扩展优先"），作为后续开发与评审的契约依据
+- **`.fp/` 纳入版本管理**: 将 Agent 本地记忆目录加入 `.gitignore`，允许每个项目仓库独立维护本地 `.fp/` 而不被误提交
+
+### Changed
+
+- **记忆系统重构（双根树 + 三层结构）**: `memory_save`/`memory_read` 全新接口，按 root（`~/` 全局 / `./` 本地）、category、name 三层寻址；`prompt_builder` 索引从平铺改为分类分组显示，行数从 79+ 压缩至约 25 行，语义明确；记忆搜索支持跨分类全文检索；19 个 skill 文件统一整理（#74b9aaa）
+- **shortcircuit 提炼提示词重写**: 从"重述对话"改为"第一人称操作日志"风格，新增 8 条结构化规则（保留关键产出、信息密度优先、过程精炼结果展开等），`max_tokens` 从 10000 调整为 8192，压缩质量显著提升
+- **命令输出统一为 Markdown 单一通路**: 所有 15 个命令的 `execute()` 统一返回 Markdown 格式字符串，terminal 用 rich 渲染、webui/acp 各自消费，消除前端重复显示与双路输出的不一致问题（#71927ab）
+- **工具钩子升级为 transform 型**: 工具执行阶段的 4 个钩子（`before_call`/`after_call`/`before_add_msg`/`after_add_msg`）升级为 transform 模式，支持拦截、修改返回值和人工审核流程
+- **resume 命令重构**: 支持纯数字序号 → session ID 映射、Markdown 特殊字符转义、无参数时默认执行 list，提升交互流畅度
+- **提示词与压缩策略优化**: 补充上下文管理提示词，优化压缩时机与策略，降低 token 消耗
+
+### Fixed
+
+- **shortcircuit 块重建乱序（严重）**: `#/sc N` 只对最后一个块生效——根源是 `shortcircuit()` Step 3 重建时递增遍历 user_idx，但最新块选中后 i 已越过老块的 user_idx，导致较早的块被跳过未压缩。修复：Step 2 处理前对 indices 按 user_idx 升序排序
+- **WebSocket 协议空字段导致回复不渲染**: `llm_end` 事件收到 content 但未传递给前端；`done` 事件缺少 `final_content` 渲染入口，回复全部不显示；同步清理了永不触发的 `response` 分支死代码。附：修复 ACP 工具输出双倍行距问题
+- **`process()` 缺失 io 上下文（安全隐蔽）**: CLI 调用 `process(msg)` 不传 io 参数时 `_current_io` 为 None，审计插件 `get_current_io()` 返回 None 后静默放行，拦截完全失效。修复：`_current_io.set(io or self._default_io)` 确保各通道统一路径
+
 ## [0.1.7] — 2026-06-20
 
 ### Fixed
@@ -198,6 +220,8 @@
 ---
 
 ## 发布历史
+
+| 0.1.8 | 2026-06-26 | 待补充 |
 
 | 0.1.7 | 2026-06-20 | 修复空 session 文件爆炸 |
 
