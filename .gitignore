@@ -83,6 +83,9 @@ packages/*/*.egg-info/
 # 内置默认配置应被跟踪，不忽略
 !packages/fp-core/src/fp_core/config.default.json
 
+# Agent 本地记忆
+.fp/
+
 # 构建生成的版本文件（由 setuptools-scm 写入）
 **/_version.py
 
