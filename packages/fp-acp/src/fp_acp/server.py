@@ -432,8 +432,7 @@ class ACPServer:
                 parsed = json.loads(result_str)
                 if isinstance(parsed, dict) and "result" in parsed:
                     result_str = parsed["result"]
-        # 强制将 \n 替换为 \n\n，防止 IDE 吞掉换行
-        return result_str.replace("\n", "\n\n")
+        return result_str
 
     async def _on_tool_result(self, context, tool_name="", result="", **kwargs):
         """工具完成后 — 发送 tool_call_update

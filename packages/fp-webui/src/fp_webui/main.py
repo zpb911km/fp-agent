@@ -219,9 +219,16 @@ class WebUIPlugin(Plugin):
         await self._emit("llm_start")
 
     async def _on_after_llm(self, ctx: HookContext, **kwargs):
-        """LLM 调用完成 → 通知前端 LLM 状态（内容由 done.final_content 统一推送）"""
+        """LLM 调用完成 → 通知前端 LLM 状态
+
+        注意：LLM 可能同时返回文本内容和工具调用（如"我来查一下..." + tool_calls）。
+        文本内容通过 llm_end.content 推送，前端在其已存在的分支中消费。
+        最终的 done.final_content 只包含最后一条纯文本回复，不包含中间输出。
+        """
+        content = kwargs.get("content", "")
         await self._emit(
             "llm_end",
+            content=content,
             has_tool_calls=kwargs.get("has_tool_calls", False),
             tool_names=kwargs.get("tool_names", []),
         )

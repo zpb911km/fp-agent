@@ -1717,14 +1717,15 @@ function handleEvent(data) {
       setProcessing(false);
       break;
 
-    case 'response':
-      removeThinking();
-      addAssistantMessage(data.content);
-      break;
-
     case 'done':
       removeThinking();
       setProcessing(false);
+      // ── 渲染最终回复内容 ──
+      // 命令和 LLM 回复统一通过 done.final_content 传递，
+      // 不再走独立的 response 事件（参见 commits 71927ab）
+      if (data.final_content && data.final_content !== '') {
+        addAssistantMessage(data.final_content);
+      }
       // ── 从后端获取权威索引计数，消除前端自增漂移 ──
       // 每次 done 事件都校准 liveMsgIndex，之后新的消息从正确起点继续累加。
       // 这样即使某条消息在保存过程中被跳过/压缩，索引也不会错位。
