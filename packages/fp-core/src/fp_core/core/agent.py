@@ -921,12 +921,27 @@ class Agent:
     # ============ 生命周期管理 ============
 
     async def _ensure_initialized(self):
-        """确保已触发初始化钩子（线程安全，asyncio.Lock 保护）"""
+        """确保已触发初始化钩子（线程安全，asyncio.Lock 保护）
+
+        向 ON_INIT 传递 tool_registry，供插件注册工具。
+        插件可通过 context.data.system_prompt_append 返回要附加到 system prompt 的文本。
+        """
         async with self._init_lock:
             if hasattr(self, "_initialized") and self._initialized:
                 return
             self._initialized = True
-            await self.lifecycle.emit(LifecycleHook.ON_INIT)
+
+            ctx = await self.lifecycle.emit(
+                LifecycleHook.ON_INIT,
+                tool_registry=self._tool_exec._registry,
+            )
+
+            # 插件可通过 system_prompt_append 追加内容到 system prompt
+            append_text = ctx.data.get("system_prompt_append")
+            if append_text:
+                current = self._conv.system_prompt
+                new_prompt = current + "\n\n" + append_text
+                self._conv.set_system_prompt(new_prompt)
 
     async def shutdown(self):
         """关闭 Agent（清理生命周期钩子 + 释放连接池）"""

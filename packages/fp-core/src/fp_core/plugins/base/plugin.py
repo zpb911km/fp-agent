@@ -144,16 +144,29 @@ class PluginRegistry:
         registered: list[str] = []
 
         for entry in os.scandir(plugin_dir):
-            # ── 跳过子目录 ────────────────────────
-            if entry.is_dir():
-                continue
-
             fname = entry.name
 
+            # ── 跳过隐藏/内部文件 ─────────────────
+            if fname.startswith("_"):
+                continue
+
+            # ── 目录插件（包） ────────────────────
+            if entry.is_dir():
+                init_path = os.path.join(entry.path, "__init__.py")
+                if not os.path.isfile(init_path):
+                    continue  # 没有 __init__.py 不是有效的包
+                module = self._import_module(init_path)
+                if module is None:
+                    continue
+                # 检查此包是否有 Plugin 子类
+                found = self._register_plugin_from_module(module, entry.name)
+                if found:
+                    registered.append(entry.name)
+                continue
+
+            # ── 文件插件 ──────────────────────────
             # ── 过滤：只取 name.py（无多余后缀） ───
             if not fname.endswith(".py"):
-                continue
-            if fname.startswith("_"):
                 continue
             if fname in self.SKIP_FILES:
                 continue
@@ -163,31 +176,9 @@ class PluginRegistry:
             if module is None:
                 continue
 
-            # ── 提取 Plugin 子类 ───────────────────
-            for _, obj in inspect.getmembers(module, inspect.isclass):
-                if obj is Plugin:
-                    continue
-                if not issubclass(obj, Plugin):
-                    continue
-                if obj.__module__ != module.__name__:
-                    # 避免抓到 import 进来的其他模块的 Plugin 子类
-                    continue
-
-                # ── 自动实例化注册 ──────────────────
-                try:
-                    instance = obj()
-                except Exception as e:
-                    display.info(f"[PluginRegistry] 实例化 {obj.__name__} 失败: {e}")
-                    continue
-
-                if instance.name in self._plugins:
-                    # 已有同名插件 → 卸载旧的，用用户版本替换
-                    old = self._plugins[instance.name]
-                    self.unregister(old.name)
-                    display.info(f"[PluginRegistry] 覆盖插件: {instance.name}")
-
-                self._register_instance(instance)
-                registered.append(instance.name)
+            found = self._register_plugin_from_module(module, fname[:-3])
+            if found:
+                registered.append(fname[:-3])
 
         return registered
 
@@ -211,6 +202,41 @@ class PluginRegistry:
         except Exception as e:
             display.info(f"[PluginRegistry] 加载模块失败 {filepath}: {e}")
             return None
+
+    # ── 内部：从模块提取并注册 Plugin ─────────────
+
+    def _register_plugin_from_module(self, module, fallback_name: str) -> bool:
+        """从模块中查找 Plugin 子类并注册
+
+        Returns:
+            是否成功注册了插件
+        """
+        found = False
+        for _, obj in inspect.getmembers(module, inspect.isclass):
+            if obj is Plugin:
+                continue
+            if not issubclass(obj, Plugin):
+                continue
+            # 允许 __init__.py 中 import 后 re-export 的类
+            # 通过 module.__name__ starts with 判断，允许子模块
+
+            # ── 自动实例化注册 ──────────────────
+            try:
+                instance = obj()
+            except Exception as e:
+                display.info(f"[PluginRegistry] 实例化 {obj.__name__} 失败: {e}")
+                continue
+
+            if instance.name in self._plugins:
+                # 已有同名插件 → 卸载旧的，用用户版本替换
+                old = self._plugins[instance.name]
+                self.unregister(old.name)
+                display.info(f"[PluginRegistry] 覆盖插件: {instance.name}")
+
+            self._register_instance(instance)
+            found = True
+
+        return found
 
     # ── 内部：注册实例 ─────────────────────────────
 

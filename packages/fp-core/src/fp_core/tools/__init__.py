@@ -91,6 +91,20 @@ class ToolRegistry:
             except Exception as e:
                 print(f"[tools] ⚠️ 加载插件 {plugin_name} 失败: {e}")
 
+    def register_tool(self, name: str, definition: dict, executor: Callable):
+        """动态注册一个工具（供生命周期插件使用）
+
+        Args:
+            name: 工具名称（如 'task_create'）
+            definition: OpenAI function calling schema dict
+            executor: 异步处理函数，签名 async def(params: dict) -> str
+        """
+        self._plugins[f"lifecycle/{name}"] = {
+            "definition": definition,
+            "executor": executor,
+            "source": "lifecycle_plugin",
+        }
+
     def get_all_definitions(self) -> list[dict]:
         """获取所有工具的 OpenAI function calling schema 列表"""
         definitions = list(self._core_defs)
