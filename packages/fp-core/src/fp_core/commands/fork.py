@@ -16,7 +16,7 @@ def execute(state, arg: str) -> tuple[bool, str]:
         return (True, "当前会话没有消息，无法 `fork`")
 
     # 保存当前会话
-    state.session.save_context(state.conversation.messages)
+    state.session.save_context(state.conversation.to_serializable())
 
     last_msg_content = old_messages[-1].get("content", "")[:50] if old_messages else ""
     old_sid = state.session_id
@@ -25,7 +25,7 @@ def execute(state, arg: str) -> tuple[bool, str]:
     # 重建上下文：用当前 system prompt + 旧消息
     system_prompt = state.conversation.system_prompt
     state.conversation.set_messages(system_prompt, old_messages)
-    state.session.save_context(state.conversation.messages)
+    state.session.save_context(state.conversation.to_serializable())
 
     # 更新旧会话摘要
     state.session.update_meta(old_sid, summary=last_msg_content)

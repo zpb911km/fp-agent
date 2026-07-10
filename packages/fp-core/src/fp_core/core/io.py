@@ -31,9 +31,6 @@ class IOChannel:
         """向用户提问，获取文本回复"""
         raise NotImplementedError
 
-    def say(self, text: str):
-        """输出普通信息"""
-
     def info(self, text: str):
         """输出信息（绿色高亮）"""
 
@@ -65,11 +62,6 @@ class CLIIO(IOChannel):
         except (EOFError, KeyboardInterrupt):
             d.info("")
             return ""
-
-    def say(self, text: str):
-        from fp_core import display as d
-
-        d.info(text)
 
     def info(self, text: str):
         from fp_core import display as d
@@ -136,9 +128,6 @@ class WebSocketIO(IOChannel):
         """向 EventBus 发布事件（fire-and-forget）"""
         asyncio.ensure_future(self._event_bus.publish({"type": type_, **data}))
 
-    def say(self, text: str):
-        self._pub("say", content=text)
-
     def info(self, text: str):
         self._pub("info", content=text)
 
@@ -163,9 +152,6 @@ class RestIO(IOChannel):
 
     async def ask(self, prompt: str) -> str:
         return ""
-
-    def say(self, text: str):
-        pass
 
     def info(self, text: str):
         pass

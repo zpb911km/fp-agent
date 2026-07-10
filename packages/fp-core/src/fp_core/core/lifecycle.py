@@ -308,46 +308,23 @@ class LifecycleManager:
 
         return context
 
-    def emit_sync(self, hook: LifecycleHook, context: HookContext | None = None, **kwargs) -> HookContext:
-        """同步触发钩子（用于非异步环境）"""
-        if context is None:
-            context = HookContext(hook=hook)
-
-        for key, value in kwargs.items():
-            if key == "data":
-                context.data.update(value)
-            else:
-                context.data[key] = value
-
-        hook_name = hook.name
-        if hook_name not in self._hooks or not self._hooks[hook_name]:
-            return context
-
-        for _priority, name, func, _ht in self._hooks[hook_name]:
-            if context.stop_propagation:
-                break
-            try:
-                result = func(context, **context.data)
-                if result is not None and isinstance(result, HookContext):
-                    context = result
-            except Exception as e:
-                context.error = e
-                context.stop_propagation = True
-                if self._enable_log:
-                    print(f"[Lifecycle]   -> {name} ERROR: {e}")
-
-        return context
-
-    def get_hooks(self, hook: LifecycleHook) -> list[str]:
-        """获取已注册的所有钩子名称"""
-        return [name for _, name, _, _ in self._hooks.get(hook.name, [])]
-
     def clear(self, hook: LifecycleHook | None = None):
-        """清除钩子"""
+        """清除钩子。清除前通过 get_hooks / get_stats 输出诊断信息。"""
+        if self._enable_log:
+            hooks_info = self.get_hooks()
+            stats_info = self.get_stats()
+            if hooks_info:
+                print(f"[Lifecycle] 清除 {len(hooks_info)} 个钩子: {hooks_info}")
+            if stats_info:
+                print(f"[Lifecycle] 统计: {stats_info}")
         if hook:
             self._hooks[hook.name] = []
         else:
             self._hooks.clear()
+
+    def get_hooks(self) -> list[str]:
+        """返回所有已注册的钩子名称（扁平列表）"""
+        return [name for names in self._hooks.values() for _, name, _, _ in names]
 
     def get_stats(self) -> dict[str, int]:
         """获取钩子执行统计"""

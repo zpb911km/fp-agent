@@ -56,10 +56,11 @@ def _resolve_sid(state, raw: str, exclude_current: bool = False) -> str | None:
 def _rebuild_context(state):
     """用 system prompt 重建 context（切换会话时调用）"""
     prompt = PromptBuilder().build_system_prompt()
-    state.conversation.reset(prompt)
     saved = state.session.load_context(prompt)
-    if len(saved) > 1:
-        state.conversation.replace_all(saved)
+    if saved:
+        state.conversation.set_messages(prompt, saved)
+    else:
+        state.conversation.set_system_prompt(prompt)
 
 
 async def execute(state, arg: str) -> tuple[bool, str]:

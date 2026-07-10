@@ -117,11 +117,6 @@ class ConversationState:
         self._messages.append(msg)
         return msg
 
-    def add_system_message(self, content: str) -> dict:
-        msg = {"role": "system", "content": content}
-        self._messages.append(msg)
-        return msg
-
     # ── 查询方法 ─────────────────────────────────────
 
     def get_non_system_messages(self) -> list[dict]:
@@ -251,12 +246,6 @@ class ConversationState:
         """获取用于显示的历史消息"""
         return self.get_non_system_messages()
 
-    # ── Fork ─────────────────────────────────────────
-
-    def fork_snapshot(self) -> list[dict]:
-        """返回当前上下文的完整快照（包括 system prompt）"""
-        return list(self._messages)
-
     # ── 压缩 ─────────────────────────────────────────
 
     async def compact(
@@ -358,13 +347,6 @@ class ConversationState:
         for msg in serialized:
             state._messages.append(msg)
         return state
-
-    # ── 工具方法 ─────────────────────────────────────
-
-    @staticmethod
-    def estimate_tokens(text: str) -> int:
-        """估算 token 数量（简单近似）"""
-        return len(text) // 3
 
     # ═══════════════════════════════════════════════
     # Shortcircuit（短路）

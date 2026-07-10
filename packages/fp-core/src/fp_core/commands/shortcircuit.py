@@ -184,7 +184,7 @@ async def execute(state, arg: str) -> tuple[bool, str]:
     success, msg, saved = await state.conversation.shortcircuit(refiner, target_raw, mode)
 
     if success:
-        state.session.save_context(state.conversation.messages)
+        state.session.save_context(state.conversation.to_serializable())
         return (True, f"✅ 已处理 {len(target_raw)} 个连通块，节省 {saved} 条消息")
     else:
         return (True, msg)

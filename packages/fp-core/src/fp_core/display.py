@@ -85,12 +85,12 @@ def warning(msg: str):
 # ═══════════════════════════════════════════════════════════
 
 
-def llm_thought(msg: str):
+def llm_thought(msg: str, end: str = "\n"):
     """LLM 思考过程（支持按配置截断）"""
     if _silent():
         return
     text = truncate(msg, "llm_thought")
-    print(apply_style(text, "llm_thought"))
+    print(apply_style(text, "llm_thought"), end=end, flush=True)
 
 
 def llm_tool(msg: str):
@@ -106,31 +106,6 @@ def llm_output(text: str):
     if _silent():
         return
     print(text, end="", flush=True)
-
-
-def render_markdown(text: str):
-    """用 rich 渲染 Markdown 文本到终端，缺失时降级为纯文本。
-
-    这是 LLMStreamer._render_markdown 的公开版本，
-    供外部（如 terminal 前端）统一调用。
-    """
-    if _silent():
-        return
-    try:
-        from rich.console import Console
-        from rich.markdown import Markdown
-
-        Console().print(Markdown(text))
-    except ImportError:
-        print(text)
-
-
-def llm_iteration(count: int):
-    """打印迭代次数统计"""
-    if _silent():
-        return
-    print(apply_style(f"📊 本次交互共迭代 {count} 次", "llm_iteration"))
-    print()
 
 
 class LLMStreamer:
@@ -169,8 +144,7 @@ class LLMStreamer:
             print(apply_style(f"{prefix}思考: ", "llm_thought"), end="", flush=True)
             self._thinking = True
 
-        truncated = truncate(text, "llm_thought")
-        print(apply_style(truncated, "llm_thought"), end="", flush=True)
+        llm_thought(text, end="")
         self.thinking += text
 
     def write(self, text: str):
@@ -218,16 +192,6 @@ class LLMStreamer:
 
 # ═══════════════════════════════════════════════════════════
 # E. 系统日志 — 开发者调试用，默认隐藏
-#   注册名称: "debug"
-# ═══════════════════════════════════════════════════════════
-
-
-def debug(msg: str):
-    """调试日志，仅 DEBUG=1 时可见"""
-    if os.environ.get("DEBUG"):
-        print(apply_style(f"┐dbg│ {msg}", "debug"))
-
-
 # ═══════════════════════════════════════════════════════════
 # 🎨 仪式感 — 品牌记忆点
 #   注册名称: "startup", "shutdown_panel", "logo"

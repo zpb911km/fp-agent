@@ -115,12 +115,6 @@ class TestAddMethods:
         assert result["tool_call_id"] == "call_123"
         assert result["content"] == "工具返回结果"
 
-    def test_add_system_message(self):
-        cs = ConversationState()
-        result = cs.add_system_message("系统消息")
-        assert result["role"] == "system"
-        assert result["content"] == "系统消息"
-
 
 class TestQueryMethods:
     """查询方法"""
@@ -283,25 +277,6 @@ class TestBack:
         assert len(cs) == 3
 
 
-class TestForkSnapshot:
-    """分支快照"""
-
-    def test_fork_snapshot_contains_all(self):
-        cs = ConversationState("system")
-        cs.add_user_message("A")
-        cs.add_assistant_message({"content": "B"})
-        snapshot = cs.fork_snapshot()
-        assert len(snapshot) == 3
-        assert snapshot[0]["role"] == "system"
-
-    def test_fork_snapshot_is_copy(self):
-        """快照是拷贝，修改快照不影响原状态"""
-        cs = ConversationState("system")
-        snapshot = cs.fork_snapshot()
-        snapshot.append({"role": "user", "content": "hack"})
-        assert len(cs) == 1
-
-
 class TestCompact:
     """压缩功能"""
 
@@ -367,10 +342,11 @@ class TestEdgeCases:
     def test_system_at_position_0_only(self):
         """system prompt 始终在位置 0"""
         cs = ConversationState("system")
-        cs.add_system_message("另一个 system")
         assert cs[0]["role"] == "system"
-        assert cs[0]["content"] == "system"  # 没被替换
-        assert cs[1]["role"] == "system"
+        assert cs[0]["content"] == "system"
+
+        cs.add_user_message("用户")
+        assert cs[1]["role"] == "user"
         assert cs[1]["content"] == "另一个 system"
 
     def test_empty_messages_for_llm(self):

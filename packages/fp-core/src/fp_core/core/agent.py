@@ -145,8 +145,8 @@ class Agent:
 
         # 从会话文件恢复历史
         saved = self.session.load_context(initial_prompt)
-        if len(saved) > 1:
-            self._conv.replace_all(saved)
+        if saved:
+            self._conv.set_messages(initial_prompt, saved)
 
         # 生命周期管理器
         self.lifecycle = LifecycleManager(enable_log=enable_log)
@@ -211,28 +211,6 @@ class Agent:
         ctx_io: IOChannel | None = _current_io.get()
         return ctx_io if ctx_io is not None else self._default_io
 
-    # ── 跨 Task context 传播工具 ─────────────────────
-
-    @staticmethod
-    def make_io_context() -> contextvars.Context:
-        """捕获当前 asyncio Task 的 context 拷贝，用于子 Task 创建时传播 IO 通道。
-
-        当需要在 _process_inner 内部创建子 Task 且子 Task 需要访问 agent.io 时，
-        使用此方法获取 context 拷贝，确保 _current_io 在子 Task 中可见。
-
-        用法：
-          ctx = Agent.make_io_context()
-          asyncio.create_task(ctx.run(some_async_fn()))
-
-        Python 3.12+ 也可直接：
-          asyncio.create_task(coro, context=Agent.make_io_context())
-
-        原理：
-          contextvars.copy_context() 捕获当前 Task 所有 ContextVar 的快照，
-          ctx.run() 在指定 context 中执行代码，使子 Task 能读到正确的 _current_io。
-        """
-        return contextvars.copy_context()
-
     # ── 公共属性 ─────────────────────────────────────
 
     @property
@@ -278,7 +256,7 @@ class Agent:
                     self.session.update_meta(summary=summary)
 
         if not self.state.nuclear_exit:
-            self.session.save_context(self._conv.messages)
+            self.session.save_context(self._conv.to_serializable())
 
         # 显示退出面板
         info = self.session.list_sessions().get(self.session.session_id, {})
@@ -569,7 +547,7 @@ class Agent:
             if ctx.data.get("cancelled"):
                 return Response(content=ctx.data.get("cancel_reason", "已取消"))
 
-            messages_for_llm = ctx.data.get("modified_messages", self._conv.messages)
+            messages_for_llm = ctx.data.get("modified_messages", self._conv.get_messages_for_llm())
 
             self._processing = True
             try:
@@ -711,7 +689,7 @@ class Agent:
         )
 
         # 保存上下文
-        self.session.save_context(self._conv.messages)
+        self.session.save_context(self._conv.to_serializable())
 
         # 提取最终回复
         final_content = self._conv.get_last_content()

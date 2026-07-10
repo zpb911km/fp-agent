@@ -32,7 +32,7 @@ async def execute(state, arg: str) -> tuple[bool, str]:
     )
 
     if did_compact:
-        state.session.save_context(state.conversation.messages)
+        state.session.save_context(state.conversation.to_serializable())
         display.info(f" ✅\n📦 {msg}")
     else:
         display.info(msg)

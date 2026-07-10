@@ -73,7 +73,7 @@ async def execute(state, arg: str) -> tuple[bool, str]:
         # 直接调 ConversationState.back()
         state.conversation.back(target_idx=index, mode=2)
         # 持久化
-        state.session.save_context(state.conversation.messages)
+        state.session.save_context(state.conversation.to_serializable())
         return (True, f"⏪ 已回退到第 {index} 条消息，后续消息已删除")
 
     return (True, "已回退")

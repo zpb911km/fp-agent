@@ -224,7 +224,13 @@ async def main():
                     # 命令输出：由 response.content 单一通路传递，不再由命令内部 display
                     # 此处用 rich Markdown 渲染（terminal 唯一消费点）
                     if user_input.strip().startswith("/") and response.content:
-                        display.render_markdown(response.content)
+                        try:
+                            from rich.console import Console
+                            from rich.markdown import Markdown
+
+                            Console().print(Markdown(response.content))
+                        except ImportError:
+                            print(response.content)
                 except (SystemExit, asyncio.CancelledError):
                     break
                 except Exception as e:
