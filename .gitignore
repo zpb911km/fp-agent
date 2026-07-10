@@ -29,6 +29,9 @@ env/
 .conda/
 .python-version
 
+# 项目内 TODO / 笔记
+TODO.md
+
 # 测试 / 临时
 *.log
 *.tmp

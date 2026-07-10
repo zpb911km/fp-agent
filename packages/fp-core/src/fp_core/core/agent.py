@@ -174,6 +174,9 @@ class Agent:
         # 初始化锁（防竞态）
         self._init_lock = asyncio.Lock()
 
+        # 工具展示锁（并行工具调用时防止 display 输出交错）
+        self._tool_display_lock = asyncio.Lock()
+
         # 内置钩子
         self._register_builtin_hooks()
 
@@ -613,28 +616,109 @@ class Agent:
     # ============ 工具展示 ============
 
     async def _execute_tool(self, tc: dict, silent: bool = False) -> str:
-        """执行工具（含展示）"""
+        """执行工具（异常逃逸到 _execute_one_tool，由 ON_TOOL_ERROR 生命周期处理）"""
         name = tc["function"]["name"]
-        try:
-            args = json.loads(tc["function"]["arguments"])
-        except json.JSONDecodeError as e:
-            return f"错误：工具参数 JSON 解析失败 - {e}"
+        args = json.loads(tc["function"]["arguments"])
 
-        if not silent:
-            safe_args = {k: str(v) for k, v in args.items()}
-            display.llm_tool(f"  🛠️  {name}({json.dumps(safe_args, ensure_ascii=False)})")
+        async with self._tool_display_lock:
+            if not silent:
+                safe_args = {k: str(v) for k, v in args.items()}
+                display.llm_tool(f"  🛠️  {name}({json.dumps(safe_args, ensure_ascii=False)})")
 
-        try:
-            result = await self._tool_exec.execute(tc)
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            raise
-        except Exception as e:
-            return f"❌ 工具执行失败 ({name}): {e}"
+        result = await self._tool_exec.execute(tc)
 
-        if not silent:
-            display.llm_tool(f"  📋  {result.strip()}")
+        async with self._tool_display_lock:
+            if not silent:
+                display.llm_tool(f"  📋  {result.strip()}")
 
         return result
+
+    async def _execute_one_tool(self, tc: dict, silent: bool = False) -> tuple[str, str]:
+        """并行工具执行单元 — 封装单个工具的完整生命周期
+
+        包含：
+          1. ON_TOOL_CALL（插件可拒绝/修改参数）
+          2. 执行工具
+          3. ON_TOOL_RESULT（插件可审查/修改/过滤结果）
+          4. ON_TOOL_ERROR（异常时）
+
+        Returns:
+            (tool_call_id, result_string)
+
+        Raises:
+            asyncio.CancelledError / KeyboardInterrupt: 用户中断
+            Exception: 未被插件抑制的工具执行异常
+        """
+        tool_name = tc["function"]["name"]
+
+        # ── ON_TOOL_CALL ──
+        ctx = await self.lifecycle.emit(
+            LifecycleHook.ON_TOOL_CALL,
+            tool_name=tool_name,
+            tool_args=tc["function"]["arguments"][:5000],
+            tool_call_id=tc["id"],
+        )
+
+        # 插件拒绝
+        if ctx.data.get("cancelled"):
+            reason = ctx.data.get("cancel_reason", "工具被插件拒绝")
+            display.info(f"🔧 插件拒绝工具 {tool_name}: {reason}")
+            result = f"被插件拒绝: {reason}"
+            # 仍然触发 ON_TOOL_RESULT（保持与原串行行为一致）
+            ctx = await self.lifecycle.emit(
+                LifecycleHook.ON_TOOL_RESULT,
+                tool_name=tool_name,
+                result=result,
+                tool_call_id=tc["id"],
+            )
+            if ctx.data.get("blocked"):
+                result = ctx.data.get("block_reason", "结果被插件过滤")
+            modified_result = ctx.data.get("modified_result")
+            if modified_result is not None:
+                result = modified_result
+            return (tc["id"], result)
+
+        # 插件修改参数
+        modified_args = ctx.data.get("modified_tool_args")
+        if modified_args is not None:
+            tc["function"]["arguments"] = modified_args
+
+        # 执行工具
+        try:
+            result = await self._execute_tool(tc, silent=silent)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            raise  # 中断→外部 gather 统一处理
+        except Exception as e:
+            # 工具异常 → 通知插件，看是否可抑制
+            display.error(f"工具 {tool_name} 执行错误: {e}")
+            ctx = await self.lifecycle.emit(
+                LifecycleHook.ON_TOOL_ERROR,
+                tool_name=tool_name,
+                error=str(e),
+                tool_call_id=tc["id"],
+            )
+            if ctx.data.get("suppressed"):
+                reason = ctx.data.get("suppress_reason", "插件已抑制错误")
+                display.warning(f"  ⚠️ 错误已被插件抑制: {reason}")
+                return (tc["id"], f"错误已被抑制：{reason}")
+            # 未被抑制 → 让异常传播到外部处理
+            raise
+
+        # ── ON_TOOL_RESULT ──
+        ctx = await self.lifecycle.emit(
+            LifecycleHook.ON_TOOL_RESULT,
+            tool_name=tool_name,
+            result=result[:5000],
+            tool_call_id=tc["id"],
+        )
+        if ctx.data.get("blocked"):
+            display.warning(f"🔧 工具 {tool_name} 的结果被插件过滤")
+            result = ctx.data.get("block_reason", "结果被插件过滤")
+        modified_result = ctx.data.get("modified_result")
+        if modified_result is not None:
+            result = modified_result
+
+        return (tc["id"], result)
 
     # ============ 命令处理 ============
 
@@ -811,86 +895,61 @@ class Agent:
                         display.info(f"🔧 插件过滤了工具: {', '.join(skipped)}")
                     tool_calls = [tc for tc in tool_calls if tc["function"]["name"] in modified_tools]
 
-                for i, tc in enumerate(tool_calls):
-                    try:
-                        ctx = await self.lifecycle.emit(
-                            LifecycleHook.ON_TOOL_CALL,
-                            tool_name=tc["function"]["name"],
-                            tool_args=tc["function"]["arguments"][:5000],
-                            tool_call_id=tc["id"],
-                        )
-                        if ctx.data.get("cancelled"):
-                            reason = ctx.data.get("cancel_reason", "工具被插件拒绝")
-                            display.info(f"🔧 插件拒绝工具 {tc['function']['name']}: {reason}")
-                            # 构造假结果，走完整的结果处理流程
-                            result = "被用户拒绝"
-                            ctx = await self.lifecycle.emit(
-                                LifecycleHook.ON_TOOL_RESULT,
-                                tool_name=tc["function"]["name"],
-                                result=result,
-                                tool_call_id=tc["id"],
-                            )
-                            if ctx.data.get("blocked"):
-                                result = ctx.data.get("block_reason", "结果被插件过滤")
-                            modified_result = ctx.data.get("modified_result")
-                            if modified_result is not None:
-                                result = modified_result
-                            self._conv.add_tool_message(tc["id"], result)
-                            continue
-                        # 使用插件修改后的参数
-                        modified_args = ctx.data.get("modified_tool_args")
-                        if modified_args is not None:
-                            tc["function"]["arguments"] = modified_args
-                            display.info(f"🔧 插件修改了 {tc['function']['name']} 的参数")
+                # ═══════════════════════════════════════════════════════════
+                # 并行执行所有工具（asyncio.gather + return_exceptions）
+                #   - 每个工具独立触发 ON_TOOL_CALL → 执行 → ON_TOOL_RESULT
+                #   - 展示层通过 _tool_display_lock 防止输出交错
+                #   - 结果列表保持与 tool_calls 相同的顺序
+                # ═══════════════════════════════════════════════════════════
+                try:
+                    raw_results: list[tuple[str, str] | BaseException] = await asyncio.gather(
+                        *[self._execute_one_tool(tc, silent=_silent) for tc in tool_calls],
+                        return_exceptions=True,
+                    )
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    # gather 自身被取消（如 signal handler 中断）→ 标记全部中断
+                    self._interrupted = False
+                    self._cancelled_by_user = True
+                    for tc in tool_calls:
+                        self._conv.add_tool_message(tc["id"], "工具调用失败：用户中断")
+                    display.info("⏹️ 已中断（上下文已保留工具调用信息）")
+                    break
 
-                        result = await self._execute_tool(tc, silent=_silent)
-
-                        ctx = await self.lifecycle.emit(
-                            LifecycleHook.ON_TOOL_RESULT,
-                            tool_name=tc["function"]["name"],
-                            result=result[:5000],
-                            tool_call_id=tc["id"],
-                        )
-                        if ctx.data.get("blocked"):
-                            display.warning(f"🔧 工具 {tc['function']['name']} 的结果被插件过滤")
-                            result = ctx.data.get("block_reason", "结果被插件过滤")
-                        modified_result = ctx.data.get("modified_result")
-                        if modified_result is not None:
-                            result = modified_result
-                            display.info(f"🔧 插件修改了 {tc['function']['name']} 的结果")
-
-                        self._conv.add_tool_message(tc["id"], result)
-
-                    except (KeyboardInterrupt, asyncio.CancelledError):
+                # ── 按序处理结果（保持与 LLM 返回顺序一致） ──
+                for tc, result_or_exc in zip(tool_calls, raw_results, strict=True):
+                    if isinstance(result_or_exc, (asyncio.CancelledError, KeyboardInterrupt)):
+                        # 用户中断 — 此工具及其后的工具均未完成
                         self._interrupted = False
                         self._cancelled_by_user = True
                         self._conv.add_tool_message(tc["id"], "工具调用失败：用户中断")
-                        for remaining in tool_calls[i + 1 :]:
-                            self._conv.add_tool_message(remaining["id"], "未执行（工具调用失败：用户中断）")
-                        display.info("⏹️ 已中断（上下文已保留工具调用信息）")
                         tool_interrupted = True
                         break
-                    except Exception as e:
-                        # 工具执行异常 → 通知插件，看是否可抑制
-                        display.error(f"工具 {tc['function']['name']} 执行错误: {e}")
-                        ctx = await self.lifecycle.emit(
-                            LifecycleHook.ON_TOOL_ERROR,
-                            tool_name=tc["function"]["name"],
-                            error=str(e),
-                            tool_call_id=tc["id"],
-                        )
-                        if ctx.data.get("suppressed"):
-                            reason = ctx.data.get("suppress_reason", "插件已抑制错误")
-                            display.warning(f"  ⚠️ 错误已被插件抑制: {reason}")
-                            self._conv.add_tool_message(tc["id"], f"错误已被抑制：{reason}")
-                        else:
-                            raise
+                    elif isinstance(result_or_exc, Exception):
+                        # 工具异常（未被插件抑制）→ 记录错误，不中断其他工具
+                        err_msg = f"❌ 工具执行失败 ({tc['function']['name']}): {result_or_exc}"
+                        display.error(err_msg)
+                        self._conv.add_tool_message(tc["id"], err_msg)
+                    else:
+                        tid, result = result_or_exc
+                        self._conv.add_tool_message(tid, result)
 
                 if tool_interrupted:
+                    # 补全未处理工具的中断记录（for break 后剩余的 tool_calls）
+                    break_out_idx = next(
+                        (
+                            i
+                            for i, r in enumerate(raw_results)
+                            if isinstance(r, (asyncio.CancelledError, KeyboardInterrupt))
+                        ),
+                        len(tool_calls),
+                    )
+                    for remaining in tool_calls[break_out_idx + 1 :]:
+                        self._conv.add_tool_message(remaining["id"], "未执行（工具调用失败：用户中断）")
+                    display.info("⏹️ 已中断（上下文已保留工具调用信息）")
                     break
-                continue
+                continue  # 工具全部完成 → 回到 while 循环（再次调用 LLM）
             else:
-                break
+                break  # 无工具调用 → 跳出 while 循环
 
         # ── 生命周期：上下文已更新 ──
         await self.lifecycle.emit(

@@ -36,6 +36,9 @@ class ToolExecutor:
         """
         执行工具调用。
 
+        异常策略：不吞异常，所有工具执行异常向上传播。
+        由 Agent 层的 _execute_one_tool 捕获并触发 ON_TOOL_ERROR 生命周期。
+
         Args:
             tool_call: tool_call dict，格式:
                 {"id": "...", "type": "function",
@@ -43,17 +46,13 @@ class ToolExecutor:
 
         Returns:
             执行结果的字符串表示
+
+        Raises:
+            json.JSONDecodeError: 工具参数 JSON 解析失败
+            TypeError: 工具参数类型错误
+            Exception: 工具执行时的其他异常
         """
         name = tool_call["function"]["name"]
-        try:
-            args = json.loads(tool_call["function"]["arguments"])
-        except json.JSONDecodeError as e:
-            return f"错误：工具参数 JSON 解析失败 - {e}"
-
-        try:
-            result = await self._registry.execute(name, args)
-            return str(result) if result is not None else "执行成功（无返回）"
-        except TypeError as e:
-            return f"错误：工具参数错误 - {e}"
-        except Exception as e:
-            return f"❌ 工具执行失败 ({name}): {e}"
+        args = json.loads(tool_call["function"]["arguments"])
+        result = await self._registry.execute(name, args)
+        return str(result) if result is not None else "执行成功（无返回）"
