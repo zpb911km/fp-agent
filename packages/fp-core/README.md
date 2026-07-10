@@ -83,7 +83,7 @@ fp_core/
 │   └── context.py      # 会话上下文
 ├── commands/       # 内置命令（内置工具）
 ├── tools/          # 工具执行引擎与内置工具集
-│   └── plugins/        # 工具插件加载器
+│   └── extensions/     # 工具扩展加载器
 ├── plugins/        # 插件系统
 │   └── base/           # 插件基类与钩子定义
 ├── prompts/        # 提示词模板管理

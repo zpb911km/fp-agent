@@ -3,7 +3,7 @@ Tools 包 — 插件化工具系统（全异步版本）
 
 核心原则:
 - bash, read_file, write_file, edit_file 必须保持直接绑定（core.py），不可插件化
-- 其他工具通过 plugins/*_plugin.py 插件机制动态加载
+- 其他工具通过 extensions/*_plugin.py 插件机制动态加载
 
 包导出:
 - ToolRegistry: 工具注册表类
@@ -40,12 +40,16 @@ class ToolRegistry:
 
     def _load_plugins(self):
         """自动扫描并加载插件（内置 → 用户，同名覆盖）"""
-        builtin_dir = os.path.join(os.path.dirname(__file__), "plugins")
-        self._load_from_dir(builtin_dir, "fp_core.tools.plugins")
+        builtin_dir = os.path.join(os.path.dirname(__file__), "extensions")
+        self._load_from_dir(builtin_dir, "fp_core.tools.extensions")
 
-        # 用户工具目录（跨平台：Linux ~/.local/share/fp/tools/plugins, Windows %LOCALAPPDATA%/fp/tools/plugins）
-        user_dir = os.path.join(get_data_dir(), "tools", "plugins")
+        # 用户工具目录（跨平台：Linux ~/.local/share/fp/tools/extensions, Windows %LOCALAPPDATA%/fp/tools/extensions）
+        # 向后兼容：同时扫描旧目录 ~/.local/share/fp/tools/plugins/
+        user_dir = os.path.join(get_data_dir(), "tools", "extensions")
         self._load_from_dir(user_dir)
+        legacy_dir = os.path.join(get_data_dir(), "tools", "plugins")
+        if legacy_dir != user_dir and os.path.isdir(legacy_dir):
+            self._load_from_dir(legacy_dir)
 
     def _load_from_dir(self, directory: str, package_prefix: str | None = None):
         """从指定目录加载插件工具"""
@@ -60,7 +64,7 @@ class ToolRegistry:
 
             try:
                 if package_prefix:
-                    module = importlib.import_module(f".plugins.{plugin_name}", package="fp_core.tools")
+                    module = importlib.import_module(f".extensions.{plugin_name}", package="fp_core.tools")
                 else:
                     spec = importlib.util.spec_from_file_location(plugin_name, os.path.join(directory, fname))
                     if spec is None or spec.loader is None:
