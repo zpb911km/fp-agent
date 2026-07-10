@@ -1,4 +1,7 @@
-"""exit! 命令 — 核弹级退出：删除当前会话、不留痕迹"""
+"""exit! 命令 — 核弹级退出：删除当前会话、不留痕迹
+
+直接操作 state.session + 设置 state.nuclear_exit。
+"""
 
 import os
 
@@ -7,12 +10,12 @@ aliases = []
 description = "核弹级退出：删除当前会话、不留痕迹"
 
 
-def execute(agent, arg: str) -> tuple[bool, str]:
-    sid = agent.session.session_id
-    path = agent.session.get_session_path()
+def execute(state, arg: str) -> tuple[bool, str]:
+    sid = state.session_id
+    path = state.session.get_session_path()
 
     # 标记核弹退出 — shutdown 时会删除会话文件
-    agent.set_nuclear_exit()
+    state.nuclear_exit = True
 
     # 提前删除文件（shutdown 也会删，双重保险）
     if os.path.exists(path):

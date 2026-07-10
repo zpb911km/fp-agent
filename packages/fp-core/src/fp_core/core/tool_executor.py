@@ -28,6 +28,11 @@ class ToolExecutor:
 
             self._registry = create_registry()
 
+    @property
+    def registry(self):
+        """工具注册表（供插件注册工具时使用）"""
+        return self._registry
+
     def get_definitions(self) -> list[dict]:
         """获取所有工具的 OpenAI function calling schema"""
         return self._registry.get_all_definitions()

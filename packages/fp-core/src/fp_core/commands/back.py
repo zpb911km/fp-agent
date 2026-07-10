@@ -4,6 +4,8 @@
   /back list           查看历史消息列表（仅非 system 消息，按 1-based 编号）
   /back <index>        回退到指定位置（删除后续消息）
   /back <index> 2      同上（删除后续消息）
+
+直接操作 state.conversation + state.session，不走 Agent 中转。
 """
 
 name = "back"
@@ -19,7 +21,7 @@ def _safe_preview(text: str, max_len: int = 80) -> str:
     return f"`{text}`"
 
 
-async def execute(agent, arg: str) -> tuple[bool, str]:
+async def execute(state, arg: str) -> tuple[bool, str]:
     parts = arg.strip().split()
 
     if not parts:
@@ -27,15 +29,17 @@ async def execute(agent, arg: str) -> tuple[bool, str]:
 
     cmd = parts[0]
 
+    # ── 构建 history（直接读 conversation） ─────────────────
+    history = state.conversation.get_history_for_display()
+
     # ── /back list ─────────────────────────────────────────────
     if cmd == "list":
-        history_msgs = agent.get_history_for_display()
-        if not history_msgs:
+        if not history:
             return (True, "没有历史记录")
 
         roles_zh = {"user": "👤 用户", "assistant": "🤖 AI", "tool": "🔧 工具"}
-        lines = [f"## 📜 对话历史（共 {len(history_msgs)} 条消息，使用 `/back <N>` 回退）"]
-        for i, msg in enumerate(history_msgs):
+        lines = [f"## 📜 对话历史（共 {len(history)} 条消息，使用 `/back <N>` 回退）"]
+        for i, msg in enumerate(history):
             role = roles_zh.get(msg["role"], msg["role"])
             content = msg.get("content", "")
             if msg["role"] == "tool":
@@ -61,5 +65,15 @@ async def execute(agent, arg: str) -> tuple[bool, str]:
         except ValueError:
             return (True, f"❌ 无效参数：`{parts[1]}` 不是数字")
 
-    result = await agent.back(target_idx=index, mode=mode)
-    return (True, result)
+    # ── 执行回退（直接操作 conversation + session） ──────────
+    if index < 1 or index > len(history):
+        return (True, f"❌ 无效索引：{index}，有效范围 1~{len(history)}")
+
+    if mode is None or mode == 2:
+        # 直接调 ConversationState.back()
+        state.conversation.back(target_idx=index, mode=2)
+        # 持久化
+        state.session.save_context(state.conversation.messages)
+        return (True, f"⏪ 已回退到第 {index} 条消息，后续消息已删除")
+
+    return (True, "已回退")

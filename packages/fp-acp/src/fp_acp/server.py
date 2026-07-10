@@ -578,7 +578,7 @@ class ACPServer:
         self._session_id = self._agent.session.session_id
 
         self._log(f"✅  ACP Server 启动 (session={self._session_id})")
-        self._log(f"   模型: {self._agent.model}")
+        self._log(f"   模型: {self._agent.state.model_name}")
 
         # ── 设置异步 stdin 读取器 ──
         loop = asyncio.get_event_loop()
@@ -746,9 +746,15 @@ class ACPServer:
 
         参考: https://agentclientprotocol.com/protocol/v1/session-setup
         """
-        self._agent.save_context()
+        self._agent.state.session.save_context(self._agent.state.conversation.messages)
         new_sid = self._agent.session.create_session()
-        self._agent.rebuild_context()
+        from fp_core.core.prompt_builder import PromptBuilder
+
+        prompt = PromptBuilder().build_system_prompt()
+        self._agent.state.conversation.reset(prompt)
+        saved = self._agent.state.session.load_context(prompt)
+        if len(saved) > 1:
+            self._agent.state.conversation.replace_all(saved)
         self._session_id = new_sid
         self._log(f"创建新会话: {new_sid}")
 
@@ -769,17 +775,27 @@ class ACPServer:
         if not session_id:
             return {"sessionId": self._agent.session.session_id}
 
-        self._agent.save_context()
-        if self._agent.switch_session(session_id):
+        self._agent.state.session.save_context(self._agent.state.conversation.messages)
+        if self._agent.session.switch_session(session_id):
             self._session_id = session_id
             self._log(f"恢复会话: {session_id}")
+            prompt = self._agent.state.conversation.system_prompt
+            saved = self._agent.session.load_context(prompt)
+            if len(saved) > 1:
+                self._agent.state.conversation.replace_all(saved)
 
             # 注意：命令注册通知在 _dispatch 中响应之后发送
             return {"sessionId": session_id}
         else:
             self._log(f"会话不存在: {session_id}，自动创建新会话")
             new_sid = self._agent.session.create_session()
-            self._agent.rebuild_context()
+            from fp_core.core.prompt_builder import PromptBuilder
+
+            prompt = PromptBuilder().build_system_prompt()
+            self._agent.state.conversation.reset(prompt)
+            saved = self._agent.state.session.load_context(prompt)
+            if len(saved) > 1:
+                self._agent.state.conversation.replace_all(saved)
             self._session_id = new_sid
             return {"sessionId": new_sid}
 
@@ -1081,7 +1097,7 @@ class ACPServer:
     async def _shutdown_agent(self):
         """安全关闭 Agent"""
         try:
-            self._agent.set_nuclear_exit()
+            self._agent.state.nuclear_exit = True
             with contextlib.redirect_stdout(sys.stderr):
                 await self._agent.shutdown()
         except Exception as e:

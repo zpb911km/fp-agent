@@ -3,6 +3,13 @@ commands/__init__.py — 命令注册表与自动发现
 
 自动扫描 commands/ 目录下所有 .py 文件（排除 __init__.py），
 导入每个模块并检查 name/execute 接口，构建命令名→模块的映射（含别名）。
+
+命令接口：
+    所有命令的 execute 签名统一为:
+      async def execute(state: State, arg: str) -> tuple[bool, str]
+
+    其中 State 是 fp_core.core.state.State 实例，提供命令所需的
+    全部核心状态访问（conversation / session / llm / lifecycle 等）。
 """
 
 import asyncio
@@ -105,11 +112,11 @@ def get_all_commands() -> dict[str, str]:
     return result
 
 
-async def execute(agent, cmd_name: str, arg: str) -> tuple[bool, str]:
+async def execute(state: object, cmd_name: str, arg: str) -> tuple[bool, str]:
     """执行命令，返回 (是否已处理, 输出文本)。
 
+    命令的 execute 接收 State 参数（而非 Agent），直接操作核心状态。
     兼容旧版只返回 bool 的命令（自动补为 ("", False/True)）。
-    新版命令可返回 tuple[bool, str] 或 tuple[bool, str, str]。
     """
     mod = get_command(cmd_name)
     if mod is None:
@@ -117,9 +124,9 @@ async def execute(agent, cmd_name: str, arg: str) -> tuple[bool, str]:
 
     # 执行命令（自动适配同步/异步）
     if asyncio.iscoroutinefunction(mod.execute):
-        result = await mod.execute(agent, arg)
+        result = await mod.execute(state, arg)
     else:
-        result = mod.execute(agent, arg)
+        result = mod.execute(state, arg)
 
     # 兼容旧版：只返回 bool
     if isinstance(result, bool):

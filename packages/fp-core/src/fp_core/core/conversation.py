@@ -63,6 +63,18 @@ class ConversationState:
         else:
             self._messages.insert(0, {"role": "system", "content": prompt})
 
+    def set_messages(self, system_prompt: str, non_system_messages: list[dict]):
+        """「大通道」批量替换 — 一次性替换全部消息
+
+        fork/back/switch 等需要批量操作的场景使用此方法，
+        避免调用方直接操作私有属性 _messages。
+
+        Args:
+            system_prompt: 新的 system prompt
+            non_system_messages: 非 system 消息列表（每条 dict，会被拷贝）
+        """
+        self._messages = [{"role": "system", "content": system_prompt}] + [dict(m) for m in non_system_messages]
+
     def append(self, message: dict):
         """追加一条消息"""
         self._messages.append(message)

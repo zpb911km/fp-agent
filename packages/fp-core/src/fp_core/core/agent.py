@@ -13,7 +13,6 @@ import contextlib
 import contextvars
 import json
 import os
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -22,11 +21,12 @@ from fp_core import config, display
 from fp_core.commands import execute as execute_command
 from fp_core.commands import get_all_commands
 from fp_core.core import session
-from fp_core.core.conversation import CompactConfig, ConversationState
+from fp_core.core.conversation import ConversationState
 from fp_core.core.io import CLIIO, IOChannel
 from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 from fp_core.core.llm_service import LLMConfig, LLMService
 from fp_core.core.prompt_builder import PromptBuilder
+from fp_core.core.state import State
 from fp_core.core.tool_executor import ToolExecutor
 from fp_core.platform_utils import get_data_dir
 from fp_core.plugins.base.plugin import PluginRegistry
@@ -163,8 +163,16 @@ class Agent:
         if os.path.isdir(_user_plugin_dir):
             self.plugins.scan(_user_plugin_dir)
 
-        # 核弹退出标记
-        self._nuclear_exit = False
+        # ── 核心状态访问接口（命令/插件的「大通道」，公开） ──
+        self.state = State(
+            conversation=self._conv,
+            session=self.session,
+            llm=self._llm,
+            lifecycle=self.lifecycle,
+            plugins=self.plugins,
+            tool_exec=self._tool_exec,
+            io=self._default_io,
+        )
 
         # 中断标记
         self._interrupted = False
@@ -181,7 +189,7 @@ class Agent:
         self._register_builtin_hooks()
 
         # 触发初始化生命周期
-        # （init 在 _ensure_initialized 中触发）
+        # （init 在 ensure_initialized 中触发）
 
     @property
     def _system_prompt(self) -> str:
@@ -261,7 +269,7 @@ class Agent:
     async def _on_shutdown(self, ctx: HookContext, **kwargs) -> HookContext:
         """关闭钩子 — 生成会话摘要 + 保存上下文 + 显示退出面板"""
         summary = ""
-        if not self._nuclear_exit:
+        if not self.state.nuclear_exit:
             last_msgs = self._conv.get_non_system_messages()
             if last_msgs:
                 last_user = next((m for m in reversed(last_msgs) if m["role"] == "user"), None)
@@ -269,7 +277,7 @@ class Agent:
                     summary = last_user.get("content", "").strip().replace("\n", " ")[:20]
                     self.session.update_meta(summary=summary)
 
-        if not self._nuclear_exit:
+        if not self.state.nuclear_exit:
             self.session.save_context(self._conv.messages)
 
         # 显示退出面板
@@ -298,47 +306,6 @@ class Agent:
             print("[Agent] Shutting down...")
         return ctx
 
-    # ============ 会话管理 ============
-
-    def switch_session(self, sid: str) -> bool:
-        """切换会话"""
-        if self.session.switch_session(sid):
-            saved = self.session.load_context(self._conv.system_prompt)
-            self._conv.replace_all(saved)
-            return True
-        return False
-
-    def clear_session(self):
-        """清空当前会话（重置上下文 + 清空会话文件）"""
-        system_prompt = self._prompter.build_system_prompt()
-        self._conv.reset(system_prompt)
-        self.session.clear_session_file()
-
-    def delete_session(self, sid: str, force: bool = False) -> bool:
-        return self.session.delete_session(sid, force=force)
-
-    # ============ 公共 API：上下文与持久化 ============
-
-    def get_messages(self) -> list[dict]:
-        """获取当前消息列表的防御性拷贝"""
-        return self._conv.messages
-
-    def save_context(self):
-        """将当前上下文保存到会话文件"""
-        self.session.save_context(self._conv.messages)
-
-    def rebuild_context(self):
-        """重建上下文：重新加载 system prompt + 从会话文件恢复"""
-        prompt = self._prompter.build_system_prompt()
-        self._conv.reset(prompt)
-        saved = self.session.load_context(prompt)
-        if len(saved) > 1:
-            self._conv.replace_all(saved)
-
-    async def ensure_initialized(self):
-        """确保已触发初始化钩子（公共 API）"""
-        await self._ensure_initialized()
-
     # ============ 中断机制 ============
 
     def cancel(self):
@@ -361,197 +328,6 @@ class Agent:
             self._interrupted = False
             self._processing = False
             raise asyncio.CancelledError("用户中断")
-
-    # ============ 公共 API：会话管理 ============
-
-    def resume_latest(self) -> bool:
-        """续最新会话并重建上下文"""
-        if self.session.resume_latest():
-            saved = self.session.load_context(self._conv.system_prompt)
-            self._conv.replace_all(saved)
-            return True
-        return False
-
-    # ============ 公共 API：对话操作 ============
-
-    async def back(self, target_idx: int | None = None, mode: int | None = None) -> str:
-        """回退到对话的某个历史时刻（公共 API）
-
-        Args:
-            target_idx: 目标消息序号（1-based，从第一条非 system 开始），必填
-            mode: 2 或 None=删除后续消息（默认），1=暂不支持
-
-        Returns:
-            状态描述文本
-        """
-        if target_idx is None:
-            return "❌ 请指定要回退到的消息序号。使用 /back list 查看列表，/back <N> 直接回退"
-
-        history_msgs = self._conv.get_history_for_display()
-
-        if not history_msgs:
-            return "没有历史记录可以回退"
-
-        if target_idx < 1 or target_idx > len(history_msgs):
-            return f"❌ 无效索引：{target_idx}，有效范围 1~{len(history_msgs)}"
-
-        if mode == 1:
-            return "❌ mode=1（保留后续消息）暂不支持，请使用 mode=2（删除后续消息）或 /fork"
-
-        self._conv.back(target_idx=target_idx, mode=mode)
-        self.session.save_context(self._conv.messages)
-
-        if mode is None or mode == 2:
-            return f"⏪ 已回退到第 {target_idx} 条消息，后续消息已删除"
-        return "已回退"
-
-    def get_history_for_display(self) -> list[dict]:
-        """获取用于显示的历史消息列表（仅非 system 消息）"""
-        return self._conv.get_history_for_display()
-
-    def fork(self) -> str:
-        """基于当前上下文新建会话（公共 API）
-
-        Returns:
-            fork 结果描述，空字符串表示无可 fork 内容
-        """
-        old_messages = self._conv.get_non_system_messages()
-
-        if not old_messages:
-            return ""
-
-        self.session.save_context(self._conv.messages)
-
-        last_msg_content = old_messages[-1].get("content", "")[:50] if old_messages else ""
-        old_sid = self.session.session_id
-        new_sid = self.session.create_session()
-
-        # 重建上下文：用当前 system prompt，复制旧消息
-        system_prompt = self._conv.system_prompt
-        self._conv.reset(system_prompt)
-        for m in old_messages:
-            self._conv._messages.append(dict(m))
-        self.session.save_context(self._conv.messages)
-
-        # 更新旧会话摘要
-        self.session.update_meta(old_sid, summary=last_msg_content)
-
-        return f"🍴 已 fork：从 {old_sid} → {new_sid}"
-
-    def history(self) -> list[dict]:
-        """获取当前对话历史（仅非 system 消息）"""
-        return self._conv.get_history_for_display()
-
-    async def compact_context(self):
-        """压缩对话历史（公共 API）"""
-        await self._compact_context()
-
-    # ═══════════════════════════════════════════════
-    # Shortcircuit（短路）
-    # ═══════════════════════════════════════════════
-
-    def scan_components(self) -> list[dict]:
-        """获取连通块列表（公共 API）"""
-        return self._conv.scan_components()
-
-    async def shortcircuit_context(
-        self,
-        count: int = 1,
-        indices: list[int] | None = None,
-        raw_indices: list[tuple[int, int]] | None = None,
-        mode: str = "regenerate",
-    ) -> dict:
-        """短路上下文 — 将指定连通块压缩为 user/assistant 对
-
-        Args:
-            count:       短路最近 N 个可压缩态的连通块（默认 1）
-            indices:     短路指定编号的连通块（@N 语法解析后的结果）
-            raw_indices: 直接传入消息索引 [(user_idx, terminal_idx), ...]（合并范围用）
-            mode:        "regenerate" | "crop"
-
-        Returns:
-            结构化结果 dict:
-            {"ok": bool, "msg": str, "saved": int, "count": int}
-            ok=False 时 msg 为失败原因
-        """
-        components = self._conv.scan_components()
-        if not components:
-            return {"ok": False, "msg": "没有已完成的连通块需要短路", "saved": 0, "count": 0}
-
-        # 确定要短路的原始索引
-        if raw_indices is not None:
-            target_raw = list(raw_indices)
-        elif indices is not None:
-            target_raw: list[tuple[int, int]] = []
-            for idx in indices:
-                for comp in components:
-                    if comp["idx"] == idx:
-                        target_raw.append((comp["user_idx"], comp["terminal_idx"]))
-                        break
-        else:
-            native = [c for c in reversed(components) if c["compressible"]]
-            selected = native[:count]
-            target_raw = [(c["user_idx"], c["terminal_idx"]) for c in selected]
-
-        if not target_raw:
-            return {"ok": False, "msg": "没有可短路的连通块，或指定的连通块编号不存在", "saved": 0, "count": 0}
-
-        refiner = None if mode == "crop" else self._build_regenerate_refiner()
-        success, msg, saved = await self._conv.shortcircuit(refiner, target_raw, mode)
-
-        if success:
-            self.session.save_context(self._conv.messages)
-            return {"ok": True, "msg": msg, "saved": saved, "count": len(target_raw)}
-        else:
-            return {"ok": False, "msg": msg, "saved": 0, "count": 0}
-
-    def _build_regenerate_refiner(self) -> Callable:
-        """构建提炼回调 — 调用 LLM 精炼 assistant 回复"""
-
-        async def refiner(user_text: str, assistant_text: str, context_text: str) -> tuple[str, str]:
-            is_interrupted = assistant_text == "_INTERRUPTED_"
-            prompt = (
-                "以下是一段 AI 与用户之间的完整对话，包含工具调用过程。\n\n"
-                "任务：将这段对话压缩为第一人称操作日志，保留 AI 做了什么、发现了什么、决策了什么。\n\n"
-                "要求：\n"
-                "1. 【第一人称叙述】以「我」的视角，按时间顺序描述："
-                "我做了什么操作 → 发现了什么 → 得出了什么结论 → 做了什么决策。\n"
-                "2. 【保留关键产出】工具调用的参数/命令细节可以丢弃，但工具的发现结果必须保留："
-                "查到了什么数据、找到了什么文件、确认了什么状态、修改了什么代码。\n"
-                "3. 【信息密度】压缩到原回复的 1/3~1/2 长度。"
-                "重点保留：文件路径、函数名、变量名、错误信息、数值、决策理由。\n"
-                "4. 【过程精炼，结果展开】过程描述控制在 1~2 句话概括做了什么、为什么做；"
-                "最终结果（创建的/修改了什么、测试结论、状态变化、发现的数据）展开保留，不得过度压缩。\n"
-                "5. 【保留末尾总结】如果最后一条输出是总结性陈述"
-                "（如「搞定」、「改完了」、「测试通过」、具体数值等），"
-                "则原样输出最后一次回复的完整内容。\n"
-                "6. 只输出压缩后的内容，不要任何前缀或格式说明。\n"
-                "7. 如果对话被中断，在末尾加上「（对话被中断）」"
-            )
-            try:
-                result = await self._llm.summarize(
-                    context_text,
-                    instruction=prompt,
-                    system_prompt=(
-                        "你是一个第一人称操作日志记录助手。"
-                        "将工具调用过程压缩为连贯的"
-                        "「我做了什么→发现了什么→决策了什么」日志，"
-                        "丢弃工具调用细节，保留发现和决策。"
-                    ),
-                    max_tokens=8192,
-                )
-                refined = (result or "").strip()
-                if not refined:
-                    refined = "被用户中断" if is_interrupted else assistant_text
-            except Exception:
-                refined = "被用户中断" if is_interrupted else assistant_text
-            return (user_text, refined)
-
-        return refiner
-
-    def set_nuclear_exit(self):
-        """设置核弹退出标志"""
-        self._nuclear_exit = True
 
     # ============ LLM 调用（含 IO 展示） ============
 
@@ -589,29 +365,6 @@ class Agent:
         msg["_interrupted"] = False
 
         return msg
-
-    async def _compact_context(self):
-        """压缩上下文 — 委托给 ConversationState.compact() + LLM 摘要"""
-        history_count = self._conv.get_non_system_count()
-        if history_count <= 4:
-            display.info("对话历史较短，无需压缩")
-            return
-
-        display.info("🔄 正在压缩对话历史...")
-
-        async def summarizer(text: str) -> str:
-            try:
-                return await self._llm.summarize(text)
-            except Exception as e:
-                display.error(f" 压缩失败: {e}")
-                return ""
-
-        did_compact, msg = await self._conv.compact(summarizer=summarizer, config=CompactConfig(keep_meaningful=4))
-
-        if did_compact:
-            display.info(f" ✅\n📦 {msg}")
-        else:
-            display.info(msg)
 
     # ============ 工具展示 ============
 
@@ -736,7 +489,7 @@ class Agent:
         cmd = parts[0].lstrip("/").lower()
         arg = parts[1] if len(parts) > 1 else ""
 
-        return await execute_command(self, cmd, arg)
+        return await execute_command(self.state, cmd, arg)
 
     # ============ 主处理流程（全异步） ============
 
@@ -755,7 +508,7 @@ class Agent:
           如果在 _process_inner 内部创建子 Task，需手动传播 context，
           见 _current_io 定义处的说明。
         """
-        await self._ensure_initialized()
+        await self.ensure_initialized()
 
         if not user_input.strip():
             return Response(content="")
@@ -979,7 +732,7 @@ class Agent:
 
     # ============ 生命周期管理 ============
 
-    async def _ensure_initialized(self):
+    async def ensure_initialized(self):
         """确保已触发初始化钩子（线程安全，asyncio.Lock 保护）
 
         向 ON_INIT 传递 tool_registry，供插件注册工具。
@@ -1015,7 +768,7 @@ class Agent:
             await self.client.close()
 
         # _on_shutdown 钩子已保存上下文，此处只需处理核弹模式
-        if self._nuclear_exit:
+        if self.state.nuclear_exit:
             self.session.delete_session(self.session.session_id, force=True)
             display.info("💥 核弹模式：当前会话已删除，不留痕迹")
 

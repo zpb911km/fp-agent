@@ -9,7 +9,7 @@ aliases = []
 description = "查看持久化记忆"
 
 
-def execute(agent, arg: str) -> tuple[bool, str]:
+def execute(state, arg: str) -> tuple[bool, str]:
     lines = ["## 📋 记忆列表", ""]
     memory_dir = config.MEMORY_DIR
     if os.path.isdir(memory_dir):

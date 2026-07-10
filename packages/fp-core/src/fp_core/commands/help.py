@@ -5,7 +5,7 @@ aliases = ["?"]
 description = "显示此帮助"
 
 
-def execute(agent, arg: str) -> tuple[bool, str]:
+def execute(state, arg: str) -> tuple[bool, str]:
     from fp_core.commands import get_all_commands
 
     cmds = get_all_commands()

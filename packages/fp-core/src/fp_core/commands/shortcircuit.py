@@ -3,8 +3,8 @@
 将交互（连通块）压缩为 user + assistant 消息对，
 移除中间的工具调用细节。
 
-连通块按 user 消息分隔切割，覆盖所有消息（包括中断块）。
-中断块压缩后标记为"被用户中断"或由 LLM 提炼保留有效信息。
+直接操作 state.conversation.(scan_components|shortcircuit) + state.llm.summarize，
+不再经过 Agent 中转。
 
 用法:
   /sc                    短路最近 1 个可压缩态的连通块
@@ -21,6 +21,8 @@
   ~ = 已充分压缩（无可压缩空间）
   * = 未完成（中断块 / 待回复）
 """
+
+from collections.abc import Callable
 
 name = "sc"
 description = "短路(shortcircuit)已完成的连通块。用法: /sc list 查看, /sc 或 /sc N 短路最近的, /sc #N 短路指定编号的"
@@ -55,11 +57,9 @@ def _parse_args(arg: str) -> tuple[str, object, str]:
 
     cmd = clean_parts[0]
 
-    # /sc list
     if cmd == "list":
         return ("list", None, mode)
 
-    # /sc #N 或 /sc #M-#N
     if cmd.startswith("#"):
         if "-" in cmd:
             parts_range = cmd.split("-")
@@ -77,7 +77,6 @@ def _parse_args(arg: str) -> tuple[str, object, str]:
             except ValueError:
                 return ("error", f"无效编号: '{cmd}'", mode)
 
-    # /sc N
     try:
         n = int(cmd)
         if n < 1:
@@ -87,48 +86,108 @@ def _parse_args(arg: str) -> tuple[str, object, str]:
         return ("error", f"无效参数: '{cmd}'", mode)
 
 
-async def execute(agent, arg: str) -> tuple[bool, str]:
+def _build_regenerate_refiner(state) -> Callable:
+    """构建提炼回调 — 调用 LLM 精炼 assistant 回复"""
+
+    async def refiner(user_text: str, assistant_text: str, context_text: str) -> tuple[str, str]:
+        is_interrupted = assistant_text == "_INTERRUPTED_"
+        prompt = (
+            "以下是一段 AI 与用户之间的完整对话，包含工具调用过程。\n\n"
+            "任务：将这段对话压缩为第一人称操作日志，保留 AI 做了什么、发现了什么、决策了什么。\n\n"
+            "要求：\n"
+            "1. 【第一人称叙述】以「我」的视角，按时间顺序描述："
+            "我做了什么操作 → 发现了什么 → 得出了什么结论 → 做了什么决策。\n"
+            "2. 【保留关键产出】工具调用的参数/命令细节可以丢弃，但工具的发现结果必须保留："
+            "查到了什么数据、找到了什么文件、确认了什么状态、修改了什么代码。\n"
+            "3. 【信息密度】压缩到原回复的 1/3~1/2 长度。"
+            "重点保留：文件路径、函数名、变量名、错误信息、数值、决策理由。\n"
+            "4. 【过程精炼，结果展开】过程描述控制在 1~2 句话概括做了什么、为什么做；"
+            "最终结果（创建的/修改了什么、测试结论、状态变化、发现的数据）展开保留，不得过度压缩。\n"
+            "5. 【保留末尾总结】如果最后一条输出是总结性陈述"
+            "（如「搞定」、「改完了」、「测试通过」、具体数值等），"
+            "则原样输出最后一次回复的完整内容。\n"
+            "6. 只输出压缩后的内容，不要任何前缀或格式说明。\n"
+            "7. 如果对话被中断，在末尾加上「（对话被中断）」"
+        )
+        try:
+            result = await state.llm.summarize(
+                context_text,
+                instruction=prompt,
+                system_prompt=(
+                    "你是一个第一人称操作日志记录助手。"
+                    "将工具调用过程压缩为连贯的"
+                    "「我做了什么→发现了什么→决策了什么」日志，"
+                    "丢弃工具调用细节，保留发现和决策。"
+                ),
+                max_tokens=8192,
+            )
+            refined = (result or "").strip()
+            if not refined:
+                refined = "被用户中断" if is_interrupted else assistant_text
+        except Exception:
+            refined = "被用户中断" if is_interrupted else assistant_text
+        return (user_text, refined)
+
+    return refiner
+
+
+async def execute(state, arg: str) -> tuple[bool, str]:
     action, value, mode = _parse_args(arg)
 
-    # ── 错误 ─────────────────────────────────────────────
     if action == "error":
-        msg = f"❌ {value}"
-        return (True, msg)
+        return (True, f"❌ {value}")
 
     # ── /sc list ─────────────────────────────────────────
     if action == "list":
-        components = agent.scan_components()
+        components = state.conversation.scan_components()
         if not components:
             return (True, "没有已完成的连通块")
-        display_text = _format_components_display(components)
-        return (True, display_text)
+        return (True, _format_components_display(components))
 
     # ── 执行短路 ─────────────────────────────────────────
-    result: dict = {"ok": False, "msg": "", "saved": 0, "count": 0}
+
+    components = state.conversation.scan_components()
+    if not components:
+        return (True, "没有已完成的连通块需要短路")
+
+    # 确定要短路的原始索引
     if action == "default":
-        result = await agent.shortcircuit_context(count=1, mode=mode)
+        native = [c for c in reversed(components) if c["compressible"]]
+        selected = native[:1]
+        target_raw = [(c["user_idx"], c["terminal_idx"]) for c in selected]
     elif action == "count":
-        result = await agent.shortcircuit_context(count=value, mode=mode)
+        native = [c for c in reversed(components) if c["compressible"]]
+        selected = native[:value]
+        target_raw = [(c["user_idx"], c["terminal_idx"]) for c in selected]
     elif action == "index":
-        result = await agent.shortcircuit_context(indices=[value], mode=mode)
+        target_raw = []
+        for comp in components:
+            if comp["idx"] == value:
+                target_raw.append((comp["user_idx"], comp["terminal_idx"]))
+                break
     elif action == "range":
         assert isinstance(value, tuple) and len(value) == 2
         start, end = value
-        # 合并范围内的所有连通块为单一范围
-        components = agent.scan_components()
         selected = [c for c in components if start <= c["idx"] <= end]
         if not selected:
-            result = {"ok": False, "msg": f"未找到编号 {start}~{end} 的连通块", "saved": 0, "count": 0}
-        else:
-            min_user = selected[0]["user_idx"]
-            max_terminal = selected[-1]["terminal_idx"]
-            result = await agent.shortcircuit_context(raw_indices=[(min_user, max_terminal)], mode=mode)
-
-    if result["ok"]:
-        detail = f"已处理 {result['count']} 个连通块，节省 {result['saved']} 条消息"
-        return (True, f"✅ {detail}")
+            return (True, f"未找到编号 {start}~{end} 的连通块")
+        min_user = selected[0]["user_idx"]
+        max_terminal = selected[-1]["terminal_idx"]
+        target_raw = [(min_user, max_terminal)]
     else:
-        return (True, result["msg"])
+        return (True, "未知操作")
+
+    if not target_raw:
+        return (True, "没有可短路的连通块，或指定的连通块编号不存在")
+
+    refiner = None if mode == "crop" else _build_regenerate_refiner(state)
+    success, msg, saved = await state.conversation.shortcircuit(refiner, target_raw, mode)
+
+    if success:
+        state.session.save_context(state.conversation.messages)
+        return (True, f"✅ 已处理 {len(target_raw)} 个连通块，节省 {saved} 条消息")
+    else:
+        return (True, msg)
 
 
 def _format_components_display(components: list[dict]) -> str:
@@ -144,7 +203,6 @@ def _format_components_display(components: list[dict]) -> str:
         msg_count = comp["message_count"]
         complete = comp["complete"]
 
-        # 决定状态标记
         if msg_count == 1:
             flag = "`*`"
             ai_preview = "（待回复）"
