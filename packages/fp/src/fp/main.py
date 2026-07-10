@@ -20,8 +20,19 @@ def main():
     )
     parser.add_argument("--model", help="指定模型")
     parser.add_argument("--session", help="指定会话 ID")
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="显示版本号并退出",
+    )
 
     args, rest = parser.parse_known_args()
+
+    if args.version:
+        from fp_core import __version__
+
+        print(f"fp {__version__}")
+        sys.exit(0)
 
     if args.mode == "cli":
         from fp_cli import run
