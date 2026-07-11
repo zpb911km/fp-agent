@@ -66,6 +66,9 @@ class IOChannel:
     def stream_end(self):
         """结束流式输出"""
 
+    def stream_reset(self):
+        """异常恢复：强制重置流式输出状态（默认无操作）"""
+
     # ── 工具调用展示 ─────────────────────────────────
 
     def tool_call(self, name: str, args: dict):
@@ -136,6 +139,10 @@ class CLIIO(IOChannel):
         if not hasattr(self, "_streamer") or self._streamer is None:
             self._streamer = d.LLMStreamer(silent=False)
         self._streamer.write(content)
+
+    def stream_reset(self):
+        """异常恢复：强制重置流式输出状态，下次 stream_write 会重建"""
+        self._streamer = None
 
     def stream_end(self):
         if hasattr(self, "_streamer") and self._streamer:
@@ -233,6 +240,9 @@ class WebSocketIO(IOChannel):
     def stream_end(self):
         self._pub("stream_end")
 
+    def stream_reset(self):
+        """WebSocket 无状态管理，无需操作"""
+
     def tool_call(self, name: str, args: dict):
         self._pub("tool_call", name=name, args=args)
 
@@ -288,6 +298,9 @@ class RestIO(IOChannel):
 
     def stream_end(self):
         pass
+
+    def stream_reset(self):
+        """静默通道，无需操作"""
 
     def tool_call(self, name: str, args: dict):
         pass

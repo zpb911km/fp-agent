@@ -341,9 +341,14 @@ class Agent:
         reply_content = assistant_msg.get("content", "")
 
         if not silent:
-            if reply_content:
-                io.stream_write(reply_content)
-            io.stream_end()
+            try:
+                if reply_content:
+                    io.stream_write(reply_content)
+                io.stream_end()
+            except Exception as e:
+                # 显示层异常不应丢弃 LLM 回复，也不应误报为 API/LLM 错误
+                self.io.warning(f"显示层输出异常 (LLM 回复正常): {type(e).__name__}: {e}")
+                io.stream_reset()  # 清理残留 buffer，防止状态污染
 
         msg = {"role": "assistant", "content": reply_content}
         if assistant_msg.get("tool_calls"):

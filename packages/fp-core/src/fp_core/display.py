@@ -132,6 +132,24 @@ class LLMStreamer:
         self.content = ""  # 最终内容
         self.thinking = ""  # 思考内容
 
+    @staticmethod
+    def _safe_print(*args, **kwargs):
+        """安全打印，stdout 不可用时记录日志而非崩溃"""
+        try:
+            print(*args, **kwargs)
+        except (AttributeError, ValueError, OSError) as e:
+            import logging
+
+            logging.getLogger(__name__).warning(f"LLMStreamer 输出失败 (stdout 可能不可用): {e}")
+
+    def reset(self):
+        """重置流式状态，用于异常恢复"""
+        self._thinking = False
+        self._has_content = False
+        self._buffer = ""
+        self.content = ""
+        self.thinking = ""
+
     def think(self, text: str):
         """输出思考 token（配色从配置），首次自动显示思考标记"""
         if self.silent:
@@ -141,7 +159,7 @@ class LLMStreamer:
             return
         if not self._thinking:
             prefix = "\n" if self._has_content else ""
-            print(apply_style(f"{prefix}思考: ", "llm_thought"), end="", flush=True)
+            self._safe_print(apply_style(f"{prefix}思考: ", "llm_thought"), end="", flush=True)
             self._thinking = True
 
         llm_thought(text, end="")
@@ -157,7 +175,7 @@ class LLMStreamer:
         if not text:
             return
         if self._thinking:
-            print()
+            self._safe_print()
             self._thinking = False
         self._buffer += text
         self._has_content = True
@@ -168,26 +186,31 @@ class LLMStreamer:
             return
         if interrupted:
             # 中断模式下：不渲染残片，直接打印中断标记
-            print(apply_style("⏹️ 已中断", "yellow_bold"))
+            self._safe_print(apply_style("⏹️ 已中断", "yellow_bold"))
             return
         if self._thinking:
-            print(apply_style("", "llm_thought"))
+            self._safe_print(apply_style("", "llm_thought"))
         elif self._has_content and self._buffer:
             self._render_markdown(self._buffer)
             self._buffer = ""
         elif self._has_content:
-            print()
+            self._safe_print()
+        self._has_content = False
 
     @staticmethod
     def _render_markdown(text: str):
-        """用 rich 渲染 Markdown，缺失时降级为纯文本"""
+        """用 rich 渲染 Markdown，缺失时降级为纯文本，stdout 不可用时安全跳过"""
         try:
             from rich.console import Console
             from rich.markdown import Markdown
 
             Console().print(Markdown(text))
         except ImportError:
-            print(text)
+            LLMStreamer._safe_print(text)
+        except (AttributeError, ValueError, OSError) as e:
+            import logging
+
+            logging.getLogger(__name__).warning(f"LLMStreamer Markdown 渲染失败: {e}")
 
 
 # ═══════════════════════════════════════════════════════════
