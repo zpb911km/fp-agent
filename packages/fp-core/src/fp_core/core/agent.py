@@ -319,15 +319,24 @@ class Agent:
         if not silent:
             await io.thinking_start()
 
+        _llm_exc: BaseException | None = None
         try:
             assistant_msg = await self._llm.chat(context, tools=self._tool_exec.get_definitions())
         except asyncio.CancelledError:
             self._cancelled_by_user = True
             msg = {"role": "assistant", "content": "", "_interrupted": True}
             return msg
+        except Exception as e:
+            _llm_exc = e
+            raise
         finally:
             if not silent:
-                await io.thinking_stop()
+                try:
+                    await io.thinking_stop()
+                except Exception:
+                    # 防止 Spinner 停止时的异常（如 stdout 不可用）掩盖原始 LLM 错误
+                    if _llm_exc is None:
+                        raise
 
         reply_content = assistant_msg.get("content", "")
 

@@ -366,14 +366,24 @@ class Spinner:
             while True:
                 char = self._chars[idx % len(self._chars)]
                 msg = f"\r{char} {self._message}..."
-                sys.stdout.write(msg)
-                sys.stdout.flush()
+                self._safe_stdout_write(msg)
                 idx += 1
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
             # 清除 spinner 行（覆盖空白后回到行首）
-            sys.stdout.write("\r" + " " * (len(self._message) + 6) + "\r")
+            self._safe_stdout_write("\r" + " " * (len(self._message) + 6) + "\r")
+
+    @staticmethod
+    def _safe_stdout_write(msg: str) -> None:
+        """安全写入 stdout，避免在 stdout 不可用或已关闭时崩溃"""
+        try:
+            sys.stdout.write(msg)
             sys.stdout.flush()
+        except (AttributeError, ValueError, OSError):
+            # AttributeError: sys.stdout 为 None
+            # ValueError: I/O operation on closed file
+            # OSError: 管道破损等
+            pass
 
     async def stop(self):
         """停止 spinner 并清除动画行"""
@@ -381,5 +391,5 @@ class Spinner:
             return
         if not self._task.done():
             self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._task

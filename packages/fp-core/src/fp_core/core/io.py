@@ -133,7 +133,7 @@ class CLIIO(IOChannel):
     def stream_write(self, content: str):
         from fp_core import display as d
 
-        if not hasattr(self, "_streamer"):
+        if not hasattr(self, "_streamer") or self._streamer is None:
             self._streamer = d.LLMStreamer(silent=False)
         self._streamer.write(content)
 
