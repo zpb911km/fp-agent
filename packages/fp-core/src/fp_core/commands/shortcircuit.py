@@ -14,8 +14,8 @@
   /sc #M-#N              短路编号 M 到 N 的连通块
 
 可选修饰（跟在最后）:
-  -c                     裁剪模式（crop）：只移除 tool 中间消息，不调 LLM
-  -r                     提炼模式（regenerate）：调 LLM 重新生成精简回复（默认）
+  -c                     裁剪模式（crop）：只移除 tool 中间消息，不调 LLM（默认）
+  -r                     提炼模式（regenerate）：调 LLM 重新生成精简回复
 
 状态标记（/sc list）:
   ~ = 已充分压缩（无可压缩空间）
@@ -39,11 +39,11 @@ def _parse_args(arg: str) -> tuple[str, object, str]:
     """
     parts = arg.strip().split()
     if not parts:
-        return ("default", 1, "regenerate")
+        return ("default", 1, "crop")
 
     # 从后往前提取修饰符
     clean_parts: list[str] = []
-    mode = "regenerate"
+    mode = "crop"
     for p in parts:
         if p == "-c":
             mode = "crop"

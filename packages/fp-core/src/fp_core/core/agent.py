@@ -734,6 +734,7 @@ class Agent:
             ctx = await self.lifecycle.emit(
                 LifecycleHook.ON_INIT,
                 tool_registry=self._tool_exec.registry,
+                state=self.state,
             )
 
             # 插件可通过 system_prompt_append 追加内容到 system prompt
