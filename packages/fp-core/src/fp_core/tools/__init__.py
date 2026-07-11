@@ -33,7 +33,7 @@ class ToolRegistry:
 
     def _load_core(self):
         """加载核心工具（直接绑定，不可插件化）"""
-        from .core import execute_core_tool, get_core_definitions
+        from fp_core.core.builtin_tools import execute_core_tool, get_core_definitions
 
         self._core_defs = get_core_definitions()
         self._core_executor = execute_core_tool
@@ -159,77 +159,3 @@ def create_registry() -> ToolRegistry:
 async def execute_tool(tool_name: str, params: dict[str, Any]) -> Any:
     """执行指定工具（异步）"""
     return await registry.execute(tool_name, params)
-
-
-# ═══════════════════════════════════════════════════════════════════
-# 兼容旧代码的导出
-# ═══════════════════════════════════════════════════════════════════
-
-# TOOL_HANDLERS 不再维护同步映射，改用异步 dispatch 函数
-
-
-async def dispatch(tool_name: str, **kwargs) -> str:
-    """
-    工具调度函数（异步）
-
-    Args:
-        tool_name: 工具名称
-        **kwargs: 工具参数
-
-    Returns:
-        执行结果字符串
-    """
-    try:
-        result = await execute_tool(tool_name, kwargs)
-        return str(result) if result is not None else "执行成功（无返回）"
-    except TypeError as e:
-        return f"错误：工具参数错误 - {e}"
-    except Exception as e:
-        return f"错误：工具执行失败 - {e}"
-
-
-# ═══════════════════════════════════════════════════════════════════
-# async 快捷函数
-# ═══════════════════════════════════════════════════════════════════
-
-
-async def bash(command: str) -> str:
-    """执行 shell 命令"""
-    return await execute_tool("bash", {"command": command})
-
-
-async def read_file(file_path: str, offset: int | None = None, limit: int | None = None) -> str:
-    """读取文件内容"""
-    params: dict[str, Any] = {"file_path": file_path}
-    if offset is not None:
-        params["offset"] = offset
-    if limit is not None:
-        params["limit"] = limit
-    return await execute_tool("read_file", params)
-
-
-async def write_file(file_path: str, content: str) -> str:
-    """写入文件"""
-    return await execute_tool("write_file", {"file_path": file_path, "content": content})
-
-
-async def edit_file(file_path: str, old_string: str, new_string: str) -> str:
-    """编辑文件（精确替换）"""
-    return await execute_tool(
-        "edit_file",
-        {
-            "file_path": file_path,
-            "old_string": old_string,
-            "new_string": new_string,
-        },
-    )
-
-
-async def python(code: str) -> str:
-    """执行 Python 代码"""
-    return await execute_tool("python", {"code": code})
-
-
-async def web_search(query: str) -> str:
-    """网络搜索"""
-    return await execute_tool("web_search", {"query": query})

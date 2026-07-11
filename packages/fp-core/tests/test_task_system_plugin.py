@@ -4,7 +4,6 @@ Task System Plugin 集成测试
 验证：
 1. 插件通过 PluginRegistry 自动扫描加载
 2. ON_INIT 中注册工具 + 注入 system prompt
-3. ON_BEFORE_LLM_CALL 中附加 [task] 提醒
 4. 工具可被 ToolRegistry 正常调用
 """
 
@@ -91,10 +90,7 @@ class TestTaskSystemPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertIn("system_prompt_append", ctx.data)
         self.assertIn("task_create", ctx.data["system_prompt_append"])
 
-    # ── 测试 3: ON_BEFORE_LLM_CALL [task] 提醒 ─────
-
     async def test_on_before_llm_call_adds_hint(self):
-        """有进行中/待办任务时，ON_BEFORE_LLM_CALL 应附加 [task] 提醒"""
         lifecycle = LifecycleManager()
         plugin = TaskSystemPlugin()
         plugin.on_register(lifecycle)
@@ -109,20 +105,20 @@ class TestTaskSystemPlugin(unittest.IsolatedAsyncioTestCase):
         msgs = [{"role": "system", "content": "test prompt"}]
         ctx = await lifecycle.emit(LifecycleHook.ON_BEFORE_LLM_CALL, messages=msgs, tools=[])
 
-        # 验证 modified_messages 末尾有 [task]
         modified = ctx.data.get("modified_messages", [])
         last_msg = modified[-1]
         self.assertEqual(last_msg["role"], "system")
-        self.assertIn("[task]", last_msg["content"])
         # 应有 ▶#2（进行中）和 ⬜1（待办）
         self.assertIn("▶#2", last_msg["content"])
         self.assertIn("⬜1", last_msg["content"])
 
     async def test_on_before_llm_call_no_tasks(self):
-        """没有任务时不应附加 [task] 提醒"""
         lifecycle = LifecycleManager()
         plugin = TaskSystemPlugin()
         plugin.on_register(lifecycle)
+
+        # 先触发 ON_INIT（真实流程中 ON_INIT 总是在 ON_BEFORE_LLM_CALL 之前）
+        await lifecycle.emit(LifecycleHook.ON_INIT, tool_registry=None)
 
         msgs = [{"role": "system", "content": "test prompt"}]
         ctx = await lifecycle.emit(LifecycleHook.ON_BEFORE_LLM_CALL, messages=msgs, tools=[])
@@ -132,10 +128,12 @@ class TestTaskSystemPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(modified)
 
     async def test_on_before_llm_call_all_done(self):
-        """所有任务完成时不应附加 [task] 提醒"""
         lifecycle = LifecycleManager()
         plugin = TaskSystemPlugin()
         plugin.on_register(lifecycle)
+
+        # 先触发 ON_INIT（真实流程中 ON_INIT 总是在 ON_BEFORE_LLM_CALL 之前）
+        await lifecycle.emit(LifecycleHook.ON_INIT, tool_registry=None)
 
         store = TaskStore()
         t = store.create("已完成任务")

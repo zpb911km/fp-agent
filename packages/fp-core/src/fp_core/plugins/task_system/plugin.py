@@ -90,11 +90,13 @@ class TaskSystemPlugin(Plugin):
         """
         # 首次调用时注入 system prompt 描述（如果 ON_INIT 没完成注入的 fallback）
         if not self._description_injected:
-            messages = kwargs.get("messages", [])
-            if messages and messages[0].get("role") == "system":
-                existing = messages[0]["content"]
+            modified = list(kwargs.get("messages", []))
+            if modified and modified[0].get("role") == "system":
+                existing = modified[0]["content"]
                 if "【任务系统】" not in existing:
-                    messages[0]["content"] = existing + "\n\n" + TASK_SYSTEM_DESCRIPTION
+                    modified[0] = dict(modified[0])
+                    modified[0]["content"] = existing + "\n\n" + TASK_SYSTEM_DESCRIPTION
+                    ctx.data["modified_messages"] = modified
             self._description_injected = True
 
         # 生成 [task] 提醒

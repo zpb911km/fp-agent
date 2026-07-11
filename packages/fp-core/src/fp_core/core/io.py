@@ -14,6 +14,12 @@ IO 通道抽象 — 解耦 CLI / WebUI 的输入输出
                          │input()│  │EventBus  │  │  (注入用)  │
                          │display│  │+ Queue   │  │            │
                          └────────┘  └──────────┘  └────────────┘
+
+职责：
+  - info/hint/warning/error/item: 输出各类级别的文本消息
+  - thinking_start/stop: LLM 思考中的动画/状态指示
+  - stream_write/end: 流式输出 LLM 回复内容
+  - tool_call/tool_result: 显示工具调用和结果
 """
 
 import asyncio
@@ -27,9 +33,7 @@ class IOChannel:
     不直接依赖 input() 或 display 模块。
     """
 
-    async def ask(self, prompt: str) -> str:
-        """向用户提问，获取文本回复"""
-        raise NotImplementedError
+    # ── 文本输出 ─────────────────────────────────────
 
     def info(self, text: str):
         """输出信息（绿色高亮）"""
@@ -37,11 +41,44 @@ class IOChannel:
     def hint(self, text: str):
         """输出提示（灰色）"""
 
+    def warning(self, text: str):
+        """输出警告（黄色）"""
+
     def error(self, text: str):
         """输出错误（红色）"""
 
     def item(self, text: str):
         """输出列表项（灰色缩进）"""
+
+    # ── 思考动画（Spinner） ──────────────────────────
+
+    async def thinking_start(self):
+        """开始思考动画"""
+
+    async def thinking_stop(self):
+        """停止思考动画"""
+
+    # ── 流式输出（LLMStreamer） ──────────────────────
+
+    def stream_write(self, content: str):
+        """写入流式内容片段"""
+
+    def stream_end(self):
+        """结束流式输出"""
+
+    # ── 工具调用展示 ─────────────────────────────────
+
+    def tool_call(self, name: str, args: dict):
+        """显示工具调用"""
+
+    def tool_result(self, result: str):
+        """显示工具执行结果"""
+
+    # ── 交互式输入 ───────────────────────────────────
+
+    async def ask(self, prompt: str) -> str:
+        """向用户提问，获取文本回复"""
+        raise NotImplementedError
 
 
 class CLIIO(IOChannel):
@@ -51,17 +88,7 @@ class CLIIO(IOChannel):
     保持现有的终端交互体验（着色、缩进等）。
     """
 
-    async def ask(self, prompt: str) -> str:
-        """阻塞等待用户终端输入"""
-        from fp_core import display as d
-
-        loop = asyncio.get_running_loop()
-        try:
-            result = await loop.run_in_executor(None, lambda: input(prompt).strip())
-            return result
-        except (EOFError, KeyboardInterrupt):
-            d.info("")
-            return ""
+    # ── 文本输出 ─────────────────────────────────────
 
     def info(self, text: str):
         from fp_core import display as d
@@ -73,6 +100,11 @@ class CLIIO(IOChannel):
 
         d.hint(text)
 
+    def warning(self, text: str):
+        from fp_core import display as d
+
+        d.warning(text)
+
     def error(self, text: str):
         from fp_core import display as d
 
@@ -83,13 +115,69 @@ class CLIIO(IOChannel):
 
         d.item(text)
 
+    # ── 思考动画 ─────────────────────────────────────
+
+    async def thinking_start(self):
+        from fp_core import display as d
+
+        self._spinner = d.Spinner("思考中")
+        await self._spinner.start()
+
+    async def thinking_stop(self):
+        if hasattr(self, "_spinner") and self._spinner:
+            await self._spinner.stop()
+            self._spinner = None
+
+    # ── 流式输出 ─────────────────────────────────────
+
+    def stream_write(self, content: str):
+        from fp_core import display as d
+
+        if not hasattr(self, "_streamer"):
+            self._streamer = d.LLMStreamer(silent=False)
+        self._streamer.write(content)
+
+    def stream_end(self):
+        if hasattr(self, "_streamer") and self._streamer:
+            self._streamer.end()
+            self._streamer = None
+
+    # ── 工具调用展示 ─────────────────────────────────
+
+    def tool_call(self, name: str, args: dict):
+        import json
+
+        from fp_core import display as d
+
+        safe_args = {k: str(v) for k, v in args.items()}
+        d.llm_tool(f"  🛠️  {name}({json.dumps(safe_args, ensure_ascii=False)})")
+
+    def tool_result(self, result: str):
+        from fp_core import display as d
+
+        d.llm_tool(f"  📋  {result.strip()}")
+
+    # ── 交互式输入 ───────────────────────────────────
+
+    async def ask(self, prompt: str) -> str:
+        from fp_core import display as d
+
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(None, lambda: input(prompt).strip())
+            return result
+        except (EOFError, KeyboardInterrupt):
+            d.info("")
+            return ""
+
 
 class WebSocketIO(IOChannel):
     """
     WebSocket 通道 — 通过 EventBus 推送输出，等待用户回复。
 
     与 WebSocket 处理器配合使用：
-      - WebSocketIO.push_events() 将输出推送到前端
+      - WebSocketIO.thinking_start/stop 推送 thinking 事件
+      - WebSocketIO.stream_write/end 推送 content 块事件
       - WebSocketIO.ask() 发布 "ask" 事件，阻塞等待 feed_reply()
       - WebSocket 处理器收到用户消息后调用 feed_reply()
     """
@@ -114,16 +202,6 @@ class WebSocketIO(IOChannel):
 
     # ── IO 接口 ─────────────────────────────────────────
 
-    async def ask(self, prompt: str) -> str:
-        """发布 ask 事件，等待用户通过 WebSocket 回复"""
-        self._pending_reply = asyncio.get_running_loop().create_future()
-        await self._event_bus.publish({"type": "ask", "prompt": prompt})
-        try:
-            result = await self._pending_reply
-            return result
-        finally:
-            self._pending_reply = None
-
     def _pub(self, type_: str, **data):
         """向 EventBus 发布事件（fire-and-forget）"""
         asyncio.ensure_future(self._event_bus.publish({"type": type_, **data}))
@@ -134,11 +212,41 @@ class WebSocketIO(IOChannel):
     def hint(self, text: str):
         self._pub("hint", content=text)
 
+    def warning(self, text: str):
+        self._pub("warning", content=text)
+
     def error(self, text: str):
         self._pub("error", error=text)
 
     def item(self, text: str):
         self._pub("item", content=text)
+
+    async def thinking_start(self):
+        self._pub("thinking", status="start")
+
+    async def thinking_stop(self):
+        self._pub("thinking", status="stop")
+
+    def stream_write(self, content: str):
+        self._pub("chunk", content=content)
+
+    def stream_end(self):
+        self._pub("stream_end")
+
+    def tool_call(self, name: str, args: dict):
+        self._pub("tool_call", name=name, args=args)
+
+    def tool_result(self, result: str):
+        self._pub("tool_result", result=result)
+
+    async def ask(self, prompt: str) -> str:
+        self._pending_reply = asyncio.get_running_loop().create_future()
+        await self._event_bus.publish({"type": "ask", "prompt": prompt})
+        try:
+            result = await self._pending_reply
+            return result
+        finally:
+            self._pending_reply = None
 
 
 class RestIO(IOChannel):
@@ -153,14 +261,36 @@ class RestIO(IOChannel):
     async def ask(self, prompt: str) -> str:
         return ""
 
+    # 所有显示方法都是 no-op
     def info(self, text: str):
         pass
 
     def hint(self, text: str):
         pass
 
+    def warning(self, text: str):
+        pass
+
     def error(self, text: str):
         pass
 
     def item(self, text: str):
+        pass
+
+    async def thinking_start(self):
+        pass
+
+    async def thinking_stop(self):
+        pass
+
+    def stream_write(self, content: str):
+        pass
+
+    def stream_end(self):
+        pass
+
+    def tool_call(self, name: str, args: dict):
+        pass
+
+    def tool_result(self, result: str):
         pass

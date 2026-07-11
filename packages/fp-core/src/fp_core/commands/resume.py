@@ -11,8 +11,6 @@
 
 import re
 
-from fp_core.core.prompt_builder import PromptBuilder
-
 name = "resume"
 aliases = []
 description = (
@@ -55,7 +53,8 @@ def _resolve_sid(state, raw: str, exclude_current: bool = False) -> str | None:
 
 def _rebuild_context(state):
     """用 system prompt 重建 context（切换会话时调用）"""
-    prompt = PromptBuilder().build_system_prompt()
+    state.rebuild_system_prompt()
+    prompt = state.conversation.system_prompt
     saved = state.session.load_context(prompt)
     if saved:
         state.conversation.set_messages(prompt, saved)

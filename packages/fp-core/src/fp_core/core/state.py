@@ -3,7 +3,7 @@
 不藏不掖，命令/插件/钩子需要什么就拿什么。
 
 设计原则：
-- 不提供业务逻辑包装方法（那是调用方自己的事）
+- 提供常用操作的便捷方法（如 rebuild_system_prompt），消除调用方对 core 内部类的依赖
 - 不限制读写能力（调用方是成年人）
 - 不预测未来需要什么（接口跟随调用方生长）
 
@@ -32,6 +32,8 @@ class State:
     """核心状态访问接口
 
     命令通过此对象直接读写所有状态，无需 Agent 中转。
+    State 承担「持有状态 + 提供便捷操作」的职责，
+    调用方不需要知道 core 内部的具体类名。
 
     当前提供：
       conversation — 消息列表（读 + 写）
@@ -41,12 +43,14 @@ class State:
       plugins      — 插件注册表
       tool_exec    — 工具注册表（供插件注册工具）
       io           — IO 通道（供交互式命令使用）
+      rebuild_system_prompt() — 重建 system prompt（命令层无需知道 PromptBuilder）
 
     用法:
         # 命令内部（直接读写，不绕路）
         state.conversation.back(target_idx=3)
         state.session.save_context(state.conversation.messages)
         state.conversation.set_messages(prompt, history)
+        state.rebuild_system_prompt()  # 命令无需 import PromptBuilder
     """
 
     conversation: "ConversationState" = field(repr=False)
@@ -66,6 +70,19 @@ class State:
     @property
     def model_name(self) -> str:
         return self.llm.model
+
+    # ── 便捷操作 ────────────────────────────────────────
+
+    def rebuild_system_prompt(self):
+        """重建 system prompt 并应用到当前会话
+
+        命令层（clear, resume 等）需要重置上下文时调用此方法，
+        无需知道 PromptBuilder 的存在。
+        """
+        from fp_core.core.prompt_builder import PromptBuilder
+
+        prompt = PromptBuilder().build_system_prompt()
+        self.conversation.set_system_prompt(prompt)
 
     # ── 标志位 ──────────────────────────────────────────
 
