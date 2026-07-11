@@ -156,6 +156,7 @@ async def execute(state, arg: str) -> tuple[bool, str]:
         selected = native[:1]
         target_raw = [(c["user_idx"], c["terminal_idx"]) for c in selected]
     elif action == "count":
+        assert isinstance(value, int)
         native = [c for c in reversed(components) if c["compressible"]]
         selected = native[:value]
         target_raw = [(c["user_idx"], c["terminal_idx"]) for c in selected]

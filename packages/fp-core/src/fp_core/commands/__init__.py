@@ -16,12 +16,13 @@ import asyncio
 import importlib
 import importlib.util
 import os
+from types import ModuleType
 
 from fp_core import display
 from fp_core.platform_utils import get_data_dir
 
 # 缓存：命令名 → 模块对象
-_commands: dict[str, "CommandModule"] = {}
+_commands: dict[str, ModuleType] = {}
 
 
 # 类型标注
@@ -33,7 +34,7 @@ class CommandModule:
     # execute 返回 (已处理, 输出文本)；
     # 兼容旧版：也可只返回 bool（自动转为 ("", False/True)）
     # 同步或异步均可，由 execute() 自动适配
-    async def execute(self, arg: str) -> tuple[bool, str]: ...
+    async def execute(self, state: object, arg: str) -> tuple[bool, str]: ...
 
 
 def _discover_commands():
@@ -93,7 +94,7 @@ def _scan_dir(directory: str, package_prefix: str | None = None):
 _discover_commands()
 
 
-def get_command(name: str) -> CommandModule | None:
+def get_command(name: str) -> ModuleType | None:
     """根据命令名（含斜杠）或别名查找命令模块"""
     return _commands.get(name)
 

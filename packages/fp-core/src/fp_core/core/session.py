@@ -135,7 +135,7 @@ class SessionManager:
     _session_id: str
     _meta: dict
 
-    def __init__(self, resume: str | None = None):
+    def __init__(self, resume: str | bool | None = None):
         """
         resume=None/False → 创建新会话（默认）
         resume=True       → 续最近会话

@@ -250,7 +250,7 @@ class ConversationState:
 
     async def compact(
         self,
-        summarizer: Callable[[str], Any],
+        summarizer: Callable[[str], Any] | None,
         config: CompactConfig | None = None,
     ) -> tuple[bool, str]:
         """

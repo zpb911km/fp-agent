@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from fp_core import display
-from fp_core.core.lifecycle import LifecycleManager
+from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 
 
 @dataclass
@@ -81,7 +81,7 @@ class Plugin(ABC):
         return f"<{self.__class__.__name__}(name={self.name}, enabled={self._enabled})>"
 
 
-class _TrackingLifecycle:
+class _TrackingLifecycle(LifecycleManager):
     """生命周期包装器 — 追踪插件注册了哪些钩子。
 
     在插件注册期间替代原始 LifecycleManager 传入 plugin.on_register()，
@@ -90,6 +90,7 @@ class _TrackingLifecycle:
     """
 
     def __init__(self, lifecycle: LifecycleManager, tracker: list):
+        super().__init__()
         self._lifecycle = lifecycle
         self._tracker = tracker
 
@@ -98,11 +99,8 @@ class _TrackingLifecycle:
         self._tracker.append((hook, resolved_name))
         return self._lifecycle.register(hook, func, priority, name, hook_type)
 
-    def emit(self, *args, **kwargs):
-        return self._lifecycle.emit(*args, **kwargs)
-
-    def __getattr__(self, name):
-        return getattr(self._lifecycle, name)
+    async def emit(self, hook: LifecycleHook, context: HookContext | None = None, **kwargs) -> HookContext:
+        return await self._lifecycle.emit(hook, context, **kwargs)
 
 
 class PluginRegistry:
