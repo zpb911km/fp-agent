@@ -130,6 +130,7 @@ async def _shortcircuit(
                     ])
                 # regenerate：调 LLM 提炼
                 else:
+                    assert refiner is not None
                     new_user, new_assistant = await refiner(user_msg["content"], terminal_msg["content"], context_text)
                     new_sections.append([
                         {"role": "user", "content": new_user},

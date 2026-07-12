@@ -8,7 +8,7 @@
 """
 
 name = "back"
-aliases = []
+aliases: list[str] = []
 description = "回退到对话的某个历史时刻。用法: /back list 查看列表, /back <N> 直接回退"
 
 

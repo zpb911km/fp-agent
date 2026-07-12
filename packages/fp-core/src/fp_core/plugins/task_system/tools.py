@@ -76,7 +76,7 @@ DEF_CLEAR = {
 
 # ── 工具定义列表（方便批量注册） ─────────────────────
 
-ALL_DEFINITIONS = [DEF_CREATE, DEF_UPDATE, DEF_LIST, DEF_CLEAR]
+ALL_DEFINITIONS: list[dict[str, Any]] = [DEF_CREATE, DEF_UPDATE, DEF_LIST, DEF_CLEAR]
 
 # ── 状态标签（用于显示） ──────────────────────────────
 

@@ -229,7 +229,7 @@ def ansi_supported() -> bool:
             import ctypes
             from ctypes import wintypes
 
-            kernel32 = ctypes.windll.kernel32
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
             # STD_OUTPUT_HANDLE = -11
             h = kernel32.GetStdHandle(-11)
             mode = wintypes.DWORD()

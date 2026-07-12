@@ -4,7 +4,7 @@
 """
 
 name = "session"
-aliases = []
+aliases: list[str] = []
 description = "显示当前会话信息"
 
 

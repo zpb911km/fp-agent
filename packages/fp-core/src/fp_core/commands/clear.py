@@ -5,7 +5,7 @@
 """
 
 name = "clear"
-aliases = []
+aliases: list[str] = []
 description = "清空当前会话"
 
 

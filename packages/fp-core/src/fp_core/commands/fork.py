@@ -5,7 +5,7 @@
 """
 
 name = "fork"
-aliases = []
+aliases: list[str] = []
 description = "基于当前上下文新建会话"
 
 

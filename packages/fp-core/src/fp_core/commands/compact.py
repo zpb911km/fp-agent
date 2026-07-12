@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from fp_core import display
 
 name = "compact"
-aliases = []
+aliases: list[str] = []
 description = "压缩对话历史"
 
 

@@ -185,6 +185,7 @@ class Agent:
 
         # 初始化锁（防竞态）
         self._init_lock = asyncio.Lock()
+        self._initialized: bool = False
 
         # 内置钩子
         self._register_builtin_hooks()
@@ -235,7 +236,7 @@ class Agent:
 
     # ── 内置钩子 ─────────────────────────────────────
 
-    def _register_builtin_hooks(self):
+    def _register_builtin_hooks(self) -> None:
         self.lifecycle.register(LifecycleHook.ON_INIT, self._on_init, priority=0, name="builtin_init")
         self.lifecycle.register(LifecycleHook.ON_SHUTDOWN, self._on_shutdown, priority=999, name="builtin_shutdown")
 
@@ -291,7 +292,7 @@ class Agent:
 
     # ============ 中断机制 ============
 
-    def cancel(self):
+    def cancel(self) -> None:
         """请求中断当前处理
 
         设置中断标记，在下一个循环检查点生效。
@@ -301,7 +302,7 @@ class Agent:
         """
         self._interrupted = True
 
-    def _check_interrupted(self):
+    def _check_interrupted(self) -> None:
         """检查中断标记（纯实例方案）
 
         信号处理器通过 agent.cancel() 设置 self._interrupted，
@@ -314,7 +315,7 @@ class Agent:
 
     # ============ LLM 调用（含 IO 展示） ============
 
-    async def _invoke_llm(self, context: list[dict], silent: bool = False) -> dict:
+    async def _invoke_llm(self, context: list[dict], silent: bool = False) -> dict[str, Any]:
         """发起聊天请求（含 spinner 和增量展示）
 
         实际 LLM 调用委托给 LLMService.chat()，
@@ -364,7 +365,7 @@ class Agent:
 
     # ============ 工具展示 ============
 
-    async def _execute_tool(self, tc: dict, silent: bool = False) -> str:
+    async def _execute_tool(self, tc: dict[str, Any], silent: bool = False) -> str:
         """执行工具（异常逃逸到 _execute_one_tool，由 ON_TOOL_ERROR 生命周期处理）"""
         name = tc["function"]["name"]
         args = json.loads(tc["function"]["arguments"])
@@ -677,6 +678,7 @@ class Agent:
                         self.io.error(err_msg)
                         self._conv.add_tool_message(tc["id"], err_msg)
                     else:
+                        assert isinstance(result_or_exc, tuple), f"预期 tuple，实际 {type(result_or_exc)}"
                         tid, result = result_or_exc
                         self._conv.add_tool_message(tid, result)
 
@@ -726,7 +728,7 @@ class Agent:
 
     # ============ 生命周期管理 ============
 
-    async def ensure_initialized(self):
+    async def ensure_initialized(self) -> None:
         """确保已触发初始化钩子（线程安全，asyncio.Lock 保护）
 
         向 ON_INIT 传递 tool_registry，供插件注册工具。
@@ -750,7 +752,7 @@ class Agent:
                 new_prompt = current + "\n\n" + append_text
                 self._conv.set_system_prompt(new_prompt)
 
-    async def shutdown(self):
+    async def shutdown(self) -> None:
         """关闭 Agent（清理生命周期钩子 + 释放连接池）"""
         await self.lifecycle.emit(LifecycleHook.ON_SHUTDOWN)
         await self.lifecycle.emit(LifecycleHook.ON_CLEANUP)

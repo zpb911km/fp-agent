@@ -4,7 +4,7 @@
 """
 
 name = "history"
-aliases = []
+aliases: list[str] = []
 description = "查看当前对话历史"
 
 

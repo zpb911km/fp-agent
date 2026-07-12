@@ -34,7 +34,8 @@ class CommandModule:
     # execute 返回 (已处理, 输出文本)；
     # 兼容旧版：也可只返回 bool（自动转为 ("", False/True)）
     # 同步或异步均可，由 execute() 自动适配
-    async def execute(self, state: object, arg: str) -> tuple[bool, str]: ...
+    async def execute(self, state: object, arg: str) -> tuple[bool, str]:
+        return (False, "")
 
 
 def _discover_commands():

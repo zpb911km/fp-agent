@@ -12,7 +12,7 @@
 import re
 
 name = "resume"
-aliases = []
+aliases: list[str] = []
 description = (
     "切换/删除历史会话。支持 sid 和 list 序号。"
     "用法: /resume [list], /resume latest, /resume <sid|序号>, /resume delete <sid|序号>"

@@ -4,7 +4,7 @@
 """
 
 name = "exit!"
-aliases = []
+aliases: list[str] = []
 description = "核弹级退出：删除当前会话、不留痕迹"
 
 

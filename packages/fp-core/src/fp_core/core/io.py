@@ -23,6 +23,7 @@ IO 通道抽象 — 解耦 CLI / WebUI 的输入输出
 """
 
 import asyncio
+from typing import Any
 
 
 class IOChannel:
@@ -90,6 +91,9 @@ class CLIIO(IOChannel):
 
     保持现有的终端交互体验（着色、缩进等）。
     """
+
+    def __init__(self):
+        self._streamer: Any | None = None
 
     # ── 文本输出 ─────────────────────────────────────
 

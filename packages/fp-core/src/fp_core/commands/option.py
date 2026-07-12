@@ -682,13 +682,13 @@ def _get_ordered_items(mgr: OptionManager, type_filter: str = "all", status_filt
     elif status_filter == "disabled":
         items = [i for i in items if i.status == "disabled"]
 
-    groups = {"command": [], "plugin": [], "tool": []}
+    groups: dict[str, list[Entry]] = {"command": [], "plugin": [], "tool": []}
     for item in items:
         groups.setdefault(item.type, []).append(item)
     for t in groups:
         groups[t].sort(key=lambda x: (0 if x.status == "enabled" else 1, x.name))
 
-    result = []
+    result: list[Entry] = []
     for t in ("command", "plugin", "tool"):
         result.extend(groups.get(t, []))
     return result
@@ -718,7 +718,7 @@ def _fmt_list(items: list[Entry]) -> str:
         return "📭 无匹配的拓展"
 
     # items 已是有序的（来自 _get_ordered_items）
-    groups = {"command": [], "plugin": [], "tool": []}
+    groups: dict[str, list[Entry]] = {"command": [], "plugin": [], "tool": []}
     for item in items:
         groups.setdefault(item.type, []).append(item)
 
