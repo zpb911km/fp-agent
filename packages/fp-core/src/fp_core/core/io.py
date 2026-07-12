@@ -16,7 +16,7 @@ IO 通道抽象 — 解耦 CLI / WebUI 的输入输出
                          └────────┘  └──────────┘  └────────────┘
 
 职责：
-  - info/hint/warning/error/item: 输出各类级别的文本消息
+  - info/warning/error: 输出各类级别文本消息
   - thinking_start/stop: LLM 思考中的动画/状态指示
   - stream_write/end: 流式输出 LLM 回复内容
   - tool_call/tool_result: 显示工具调用和结果
@@ -39,17 +39,11 @@ class IOChannel:
     def info(self, text: str):
         """输出信息（绿色高亮）"""
 
-    def hint(self, text: str):
-        """输出提示（灰色）"""
-
     def warning(self, text: str):
         """输出警告（黄色）"""
 
     def error(self, text: str):
         """输出错误（红色）"""
-
-    def item(self, text: str):
-        """输出列表项（灰色缩进）"""
 
     # ── 思考动画（Spinner） ──────────────────────────
 
@@ -81,7 +75,10 @@ class IOChannel:
     # ── 交互式输入 ───────────────────────────────────
 
     async def ask(self, prompt: str) -> str:
-        """向用户提问，获取文本回复"""
+        """向用户提问，获取文本回复
+
+        TODO: 当前无消费方调用此方法，属"基础设施先于业务"的设计预留。
+        """
         raise NotImplementedError
 
 
@@ -102,11 +99,6 @@ class CLIIO(IOChannel):
 
         d.info(text)
 
-    def hint(self, text: str):
-        from fp_core import display as d
-
-        d.hint(text)
-
     def warning(self, text: str):
         from fp_core import display as d
 
@@ -116,11 +108,6 @@ class CLIIO(IOChannel):
         from fp_core import display as d
 
         d.error(text)
-
-    def item(self, text: str):
-        from fp_core import display as d
-
-        d.item(text)
 
     # ── 思考动画 ─────────────────────────────────────
 
@@ -220,17 +207,11 @@ class WebSocketIO(IOChannel):
     def info(self, text: str):
         self._pub("info", content=text)
 
-    def hint(self, text: str):
-        self._pub("hint", content=text)
-
     def warning(self, text: str):
         self._pub("warning", content=text)
 
     def error(self, text: str):
         self._pub("error", error=text)
-
-    def item(self, text: str):
-        self._pub("item", content=text)
 
     async def thinking_start(self):
         self._pub("thinking", status="start")
@@ -279,16 +260,10 @@ class RestIO(IOChannel):
     def info(self, text: str):
         pass
 
-    def hint(self, text: str):
-        pass
-
     def warning(self, text: str):
         pass
 
     def error(self, text: str):
-        pass
-
-    def item(self, text: str):
         pass
 
     async def thinking_start(self):
