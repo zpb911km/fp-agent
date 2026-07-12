@@ -31,7 +31,7 @@ CORE_TOOLS = {"bash", "read_file", "write_file", "edit_file"}
 PLUGIN_SKIP = {"base.py", "setup.py"}
 
 name = "option"
-aliases = ["opt", "ext", "extension", "extensions"]
+aliases = ["opt", "op", "ext", "extension", "extensions"]
 description = "统一管理三种拓展机制（commands / plugins / tools）"
 
 
@@ -668,26 +668,59 @@ class OptionManager:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 格式化输出（Markdown）
+# 辅助：按展示顺序获取有序列表（编号依据）
 # ═══════════════════════════════════════════════════════════════
 
 
-def _fmt_list(items: list[Entry], type_filter: str = "all", status_filter: str = "all") -> str:
+def _get_ordered_items(mgr: OptionManager, type_filter: str = "all", status_filter: str = "all") -> list[Entry]:
+    """按展示顺序（命令→插件→工具，每组内已启用在前，按字母排序）"""
+    items = mgr.scan_all()
     if type_filter != "all":
         items = [i for i in items if i.type == type_filter]
     if status_filter == "enabled":
         items = [i for i in items if i.status == "enabled"]
     elif status_filter == "disabled":
         items = [i for i in items if i.status == "disabled"]
-    if not items:
-        return "📭 无匹配的拓展"
 
     groups = {"command": [], "plugin": [], "tool": []}
     for item in items:
         groups.setdefault(item.type, []).append(item)
-
     for t in groups:
         groups[t].sort(key=lambda x: (0 if x.status == "enabled" else 1, x.name))
+
+    result = []
+    for t in ("command", "plugin", "tool"):
+        result.extend(groups.get(t, []))
+    return result
+
+
+def _resolve_target(ordered: list[Entry], target: str) -> Entry | None:
+    """'3' → 第 3 个条目（1-based）；'web_search' → 按名称查找"""
+    if target.isdigit():
+        idx = int(target) - 1
+        if 0 <= idx < len(ordered):
+            return ordered[idx]
+        return None  # 编号越界
+    # 名称精确匹配
+    for item in ordered:
+        if item.name == target:
+            return item
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════
+# 格式化输出（Markdown）
+# ═══════════════════════════════════════════════════════════════
+
+
+def _fmt_list(items: list[Entry]) -> str:
+    if not items:
+        return "📭 无匹配的拓展"
+
+    # items 已是有序的（来自 _get_ordered_items）
+    groups = {"command": [], "plugin": [], "tool": []}
+    for item in items:
+        groups.setdefault(item.type, []).append(item)
 
     labels = {
         "command": "命令 (command)",
@@ -699,26 +732,23 @@ def _fmt_list(items: list[Entry], type_filter: str = "all", status_filter: str =
 
     lines = [f"### 📦 拓展总览（共 {total} 个" + (f"，{disabled_count} 个已禁用" if disabled_count else "") + "）\n"]
 
+    idx = 0  # 全局连续编号
     for t in ("command", "plugin", "tool"):
         group = groups.get(t, [])
         if not group:
             continue
         lines.append(f"**{labels.get(t, t)}**（{len(group)} 个）\n")
-        row = []
         for item in group:
+            idx += 1
             if item.status == "disabled":
-                row.append(f"⛔ {item.name}")
+                lines.append(f"- ⛔ `{idx}. {item.name}`")
             else:
                 marker = " ⚡" if item.user_override else ""
-                row.append(f"✅ {item.name}{marker}")
-        # 每行 4 个
-        per_row = 4
-        for i in range(0, len(row), per_row):
-            lines.append("  " + "　".join(row[i : i + per_row]) + "  ")
+                lines.append(f"- ✅ `{idx}. {item.name}`{marker}")
         lines.append("")
 
     lines.append("---\n")
-    lines.append("`✅ 已启用　⛔ 已禁用　⚡ 用户覆盖`")
+    lines.append("`✅ 已启用　⛔ 已禁用　⚡ 用户覆盖　复制编号操作: /option info 3`")
 
     return "\n".join(lines)
 
@@ -821,50 +851,79 @@ def _fmt_diff(diff_info: dict) -> str:
 
 def execute(state, arg: str) -> tuple[bool, str]:
     mgr = OptionManager(state)
-    parts = arg.strip().split()
-    cmd = parts[0].lower() if parts else "list"
+    arg = arg.strip()
 
-    if cmd == "list" or (cmd == "option" and len(parts) == 1):
-        type_filter = parts[1] if len(parts) > 1 else "all"
-        return _handle_list(mgr, type_filter)
+    # 无参数 → 显示帮助
+    if not arg:
+        return (True, _fmt_help())
 
-    if cmd == "info":
-        if len(parts) < 2:
-            return (True, "用法: `/option info <拓展名>`")
-        target = parts[1]
-        if ":" in target:
-            etype, ename = target.split(":", 1)
-            item = mgr.get_by_type(ename, etype)
-        else:
-            item = mgr.get(target)
-        if item is None:
-            return (True, f"⚠️ 未找到拓展 '{target}'")
-        return (True, _fmt_info(item))
+    parts = arg.split()
+    cmd = parts[0].lower()
+    args = parts[1:]
 
-    if cmd == "enable":
-        if len(parts) < 2:
-            return (True, "用法: `/option enable <拓展名>`")
-        ok, msg = mgr.enable(parts[1])
-        return (True, msg)
+    if cmd == "list":
+        return _handle_list(mgr, args)
 
-    if cmd == "disable":
-        if len(parts) < 2:
-            return (True, "用法: `/option disable <拓展名>`")
-        ok, msg = mgr.disable(parts[1])
-        return (True, msg)
+    if cmd in ("info", "enable", "disable", "diff"):
+        if not args:
+            return (True, f"用法: `/option {cmd} <名称或编号>`")
+        return _handle_action(mgr, cmd, args[0])
 
-    if cmd == "diff":
-        if len(parts) < 2:
-            return (True, "用法: `/option diff <拓展名>`")
-        result = mgr.diff(parts[1])
-        if result is None:
-            return (True, f"⚠️ 未找到拓展 '{parts[1]}'")
-        return (True, _fmt_diff(result))
-
-    return (True, f"⚠️ 未知子命令: {cmd}\n\n可用子命令: `list`, `info`, `enable`, `disable`, `diff`")
+    cmd_list = "`list`, `info`, `enable`, `disable`, `diff`"
+    return (
+        True,
+        f"⚠️ 未知子命令: `{cmd}`\n\n可用子命令: {cmd_list}\n无参数显示帮助: `/option`",
+    )
 
 
-def _handle_list(mgr: OptionManager, type_filter: str) -> tuple[bool, str]:
+# ═══════════════════════════════════════════════════════════════
+# 帮助信息
+# ═══════════════════════════════════════════════════════════════
+
+
+def _fmt_help() -> str:
+    return """### 🔧 /option — 统一拓展管理
+
+管理三种拓展机制：命令 (command) / 生命周期插件 (plugin) / 工具 (tool)
+
+**用法**
+
+| 命令 | 说明 |
+|------|------|
+| `/option` | 显示本帮助 |
+| `/option list` | 列出所有拓展（带编号） |
+| `/option list command` | 只列命令 |
+| `/option list plugin` | 只列插件 |
+| `/option list tool` | 只列工具 |
+| `/option list enabled` | 只列已启用 |
+| `/option list disabled` | 只列已禁用 |
+| `/option info <名称/编号>` | 查看详情 |
+| `/option enable <名称/编号>` | 启用（`.disabled` → `.py`） |
+| `/option disable <名称/编号>` | 禁用（`.py` → `.disabled`） |
+| `/option diff <名称/编号>` | 内置 vs 用户版差异对比 |
+
+**编号操作**
+
+`/option list` 中每个条目左侧有编号，可用编号代替名称：
+
+```
+/option info 3      → 查看第 3 个拓展
+/option disable 5   → 禁用第 5 个拓展
+```
+
+**标记说明**
+
+`✅` 已启用　`⛔` 已禁用　`⚡` 用户覆盖
+"""
+
+
+# ═══════════════════════════════════════════════════════════════
+# 调度
+# ═══════════════════════════════════════════════════════════════
+
+
+def _handle_list(mgr: OptionManager, args: list[str]) -> tuple[bool, str]:
+    type_filter = args[0] if args else "all"
     type_filter = type_filter.lower()
     type_map = {
         "all": "all",
@@ -892,5 +951,42 @@ def _handle_list(mgr: OptionManager, type_filter: str) -> tuple[bool, str]:
     if resolved not in ("all", "command", "plugin", "tool"):
         return (True, f"⚠️ 未知类型: {type_filter}（可用: all, command, plugin, tool, enabled, disabled）")
 
-    items = mgr.scan_all()
-    return (True, _fmt_list(items, resolved, status_filter))
+    items = _get_ordered_items(mgr, resolved, status_filter)
+    return (True, _fmt_list(items))
+
+
+def _handle_action(mgr: OptionManager, action: str, target: str) -> tuple[bool, str]:
+    """处理 info / enable / disable / diff，支持编号和名称"""
+    ordered = _get_ordered_items(mgr)
+    entry = _resolve_target(ordered, target)
+
+    if entry is None:
+        # 尝试直接传递给 mgr（可能对应禁用的命令等）
+        if action in ("enable", "disable"):
+            if action == "enable":
+                ok, msg = mgr.enable(target)
+            else:
+                ok, msg = mgr.disable(target)
+            return (True, msg)
+        return (True, f"⚠️ 未找到拓展 '{target}'（使用 `/option list` 查看可用名称/编号）")
+
+    if action == "info":
+        return (True, _fmt_info(entry))
+
+    name = entry.name
+
+    if action == "enable":
+        ok, msg = mgr.enable(name)
+        return (True, msg)
+
+    if action == "disable":
+        ok, msg = mgr.disable(name)
+        return (True, msg)
+
+    if action == "diff":
+        result = mgr.diff(name)
+        if result is None:
+            return (True, f"⚠️ 未找到拓展 '{name}'")
+        return (True, _fmt_diff(result))
+
+    return (True, f"⚠️ 未知操作: {action}")
