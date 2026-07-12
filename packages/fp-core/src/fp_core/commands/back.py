@@ -3,9 +3,8 @@
 用法:
   /back list           查看历史消息列表（仅非 system 消息，按 1-based 编号）
   /back <index>        回退到指定位置（删除后续消息）
-  /back <index> 2      同上（删除后续消息）
 
-直接操作 state.conversation + state.session，不走 Agent 中转。
+全部逻辑通过公共 API 自组装，不依赖 core 层的业务策略。
 """
 
 name = "back"
@@ -29,8 +28,8 @@ async def execute(state, arg: str) -> tuple[bool, str]:
 
     cmd = parts[0]
 
-    # ── 构建 history（直接读 conversation） ─────────────────
-    history = state.conversation.get_history_for_display()
+    # ── 直接读 conversation 的非 system 消息（公共 API） ────
+    history = state.conversation.get_non_system_messages()
 
     # ── /back list ─────────────────────────────────────────────
     if cmd == "list":
@@ -50,13 +49,13 @@ async def execute(state, arg: str) -> tuple[bool, str]:
 
         return (True, "\n".join(lines))
 
-    # ── /back <index> [2] ──────────────────────────────────────
+    # ── /back <index> ─────────────────────────────────────────
     try:
         index = int(cmd)
     except ValueError:
         return (True, f"❌ 无效参数：`{cmd}` — 请用 `/back list` 查看列表，`/back <N>` 回退")
 
-    mode = None
+    # 支持 `mode 参数` 但只接受 2（删除后续），mode=1 暂不支持
     if len(parts) >= 2:
         try:
             mode = int(parts[1])
@@ -65,15 +64,15 @@ async def execute(state, arg: str) -> tuple[bool, str]:
         except ValueError:
             return (True, f"❌ 无效参数：`{parts[1]}` 不是数字")
 
-    # ── 执行回退（直接操作 conversation + session） ──────────
+    # ── 索引验证 ─────────────────────────────────────────────
     if index < 1 or index > len(history):
         return (True, f"❌ 无效索引：{index}，有效范围 1~{len(history)}")
 
-    if mode is None or mode == 2:
-        # 直接调 ConversationState.back()
-        state.conversation.back(target_idx=index, mode=2)
-        # 持久化
-        state.session.save_context(state.conversation.to_serializable())
-        return (True, f"⏪ 已回退到第 {index} 条消息，后续消息已删除")
+    # ── 执行回退（命令层自组装，纯公共 API） ────────────────
+    # 1-based 序号直接当切片用：保留前 index 条非 system 消息
+    kept = history[:index]
+    state.conversation.set_messages(state.conversation.system_prompt, kept)
+    # 持久化
+    state.session.save_context(state.conversation.to_serializable())
 
-    return (True, "已回退")
+    return (True, f"⏪ 已回退到第 {index} 条消息，后续消息已删除")

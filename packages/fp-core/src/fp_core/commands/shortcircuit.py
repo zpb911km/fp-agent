@@ -3,8 +3,7 @@
 将交互（连通块）压缩为 user + assistant 消息对，
 移除中间的工具调用细节。
 
-直接操作 state.conversation.(scan_components|shortcircuit) + state.llm.summarize，
-不再经过 Agent 中转。
+全部通公共 API 自组装，不依赖 core 层的业务策略。
 
 用法:
   /sc                    短路最近 1 个可压缩态的连通块
@@ -28,62 +27,153 @@ name = "sc"
 description = "短路(shortcircuit)已完成的连通块。用法: /sc list 查看, /sc 或 /sc N 短路最近的, /sc #N 短路指定编号的"
 
 
-def _parse_args(arg: str) -> tuple[str, object, str]:
-    """解析短路命令参数
+# ═══════════════════════════════════════════════════════
+# 公共函数（plugin 也导入使用）
+# ═══════════════════════════════════════════════════════
+
+
+def _scan_components(messages: list[dict]) -> list[dict]:
+    """
+    扫描非 system 消息列表，返回从旧到新排序的连通块。
+
+    连通块定义：以 user 消息为分隔符，从前向后切割。
+    每条记录中的 user_idx / terminal_idx 是 messages 中的索引（0-based）。
+
+    每条记录：
+    {
+        "idx": 1,                   # 连通块编号（1-based）
+        "user_idx": 0,              # messages 中的索引
+        "terminal_idx": 1,          # messages 中的索引（块终点）
+        "message_count": 2,         # 该连通块包含的消息总数
+        "user_preview": "帮我查天气",
+        "assistant_preview": "北京25°C...",
+        "compressible": True/False,  # 有实际内容可压缩（msg_count > 2）
+        "complete": True/False,      # 最后一条是 assistant(无 tool_calls)
+    }
+    """
+    user_indices = [i for i, m in enumerate(messages) if m["role"] == "user"]
+
+    components = []
+    for pos, user_idx in enumerate(user_indices):
+        terminal_idx = user_indices[pos + 1] - 1 if pos + 1 < len(user_indices) else len(messages) - 1
+        msg_count = terminal_idx - user_idx + 1
+        terminal_msg = messages[terminal_idx]
+
+        complete = terminal_msg["role"] == "assistant" and not terminal_msg.get("tool_calls")
+
+        components.append({
+            "idx": pos + 1,
+            "user_idx": user_idx,
+            "terminal_idx": terminal_idx,
+            "message_count": msg_count,
+            "user_preview": messages[user_idx].get("content", "")[:120],
+            "assistant_preview": terminal_msg.get("content", "")[:120],
+            "compressible": msg_count > 2,
+            "complete": complete,
+        })
+
+    return components
+
+
+async def _shortcircuit(
+    messages: list[dict],
+    refiner: Callable | None,
+    targets: list[tuple[int, int]],
+    mode: str = "crop",
+) -> tuple[bool, str, int, list[dict] | None]:
+    """
+    短路压缩：将指定连通块压缩为 user + assistant 消息对。
+
+    Args:
+        messages:   非 system 消息列表
+        refiner:    提炼回调，(user_text, assistant_text, context_text) → (new_user, new_assistant)
+                    crop 模式传 None
+        targets:    要短路的连通块消息索引 [(user_idx, terminal_idx), ...]
+                    均为 messages 中的 0-based 索引
+        mode:       "regenerate" | "crop"
 
     Returns:
-        (action, value, mode)
-        action: "list" | "default" | "count" | "index" | "range" | "error"
-        value:  int | tuple(int,int) | str(错误信息)
-        mode:   "regenerate" | "crop"
+        (是否成功, 描述信息, 节省的消息数, 新的消息列表或 None)
+        失败时返回 (False, 错误信息, 0, None)，原始 messages 不受影响。
     """
-    parts = arg.strip().split()
-    if not parts:
-        return ("default", 1, "crop")
-
-    # 从后往前提取修饰符
-    clean_parts: list[str] = []
-    mode = "crop"
-    for p in parts:
-        if p == "-c":
-            mode = "crop"
-        elif p == "-r":
-            mode = "regenerate"
-        else:
-            clean_parts.append(p)
-
-    if not clean_parts:
-        return ("default", 1, mode)
-
-    cmd = clean_parts[0]
-
-    if cmd == "list":
-        return ("list", None, mode)
-
-    if cmd.startswith("#"):
-        if "-" in cmd:
-            parts_range = cmd.split("-")
-            try:
-                start = int(parts_range[0].lstrip("#"))
-                end = int(parts_range[1].lstrip("#"))
-            except ValueError:
-                return ("error", f"无效范围: '{cmd}'", mode)
-            if start > end:
-                return ("error", f"起始编号 {start} 大于终止编号 {end}", mode)
-            return ("range", (start, end), mode)
-        else:
-            try:
-                return ("index", int(cmd.lstrip("#")), mode)
-            except ValueError:
-                return ("error", f"无效编号: '{cmd}'", mode)
+    targets = sorted(targets, key=lambda x: x[0])
+    new_sections: list[list[dict]] = []
+    total_saved = 0
 
     try:
-        n = int(cmd)
-        if n < 1:
-            return ("error", f"数量必须大于 0，收到 {n}", mode)
-        return ("count", n, mode)
-    except ValueError:
-        return ("error", f"无效参数: '{cmd}'", mode)
+        for user_idx, terminal_idx in targets:
+            user_msg = messages[user_idx]
+            terminal_msg = messages[terminal_idx]
+            msg_count = terminal_idx - user_idx + 1
+            complete = terminal_msg["role"] == "assistant" and not terminal_msg.get("tool_calls")
+
+            # ── 构建上下文（含中文标签，命令层策略） ──
+            context_parts = []
+            for j in range(user_idx, terminal_idx + 1):
+                m = messages[j]
+                role_label = "用户" if m["role"] == "user" else "AI" if m["role"] == "assistant" else "工具"
+                tc = " [调用工具]" if m.get("tool_calls") else ""
+                content = (m.get("content") or "")[:500]
+                context_parts.append(f"[{role_label}]{tc}: {content}")
+            context_text = "\n\n".join(context_parts)
+
+            # ── 完整块 ──
+            if complete:
+                # msg_count == 2 且 crop：精确保留原消息（含 tool_calls 等字段）
+                if msg_count == 2 and mode == "crop":
+                    new_sections.append([dict(user_msg), dict(terminal_msg)])
+                # msg_count > 2 且 crop/无 refiner：截断中间消息
+                elif (mode == "crop" or refiner is None) and msg_count > 2:
+                    new_sections.append([
+                        {"role": "user", "content": user_msg["content"]},
+                        {"role": "assistant", "content": terminal_msg["content"]},
+                    ])
+                # regenerate：调 LLM 提炼
+                else:
+                    new_user, new_assistant = await refiner(user_msg["content"], terminal_msg["content"], context_text)
+                    new_sections.append([
+                        {"role": "user", "content": new_user},
+                        {"role": "assistant", "content": new_assistant},
+                    ])
+            # ── 不完整块（中断） ──
+            else:
+                if mode == "crop" or refiner is None:
+                    new_sections.append([
+                        {"role": "user", "content": user_msg.get("content", "")},
+                        {"role": "assistant", "content": "被用户中断"},
+                    ])
+                else:
+                    new_user, new_assistant = await refiner(
+                        user_msg.get("content", ""),
+                        "_INTERRUPTED_",
+                        context_text,
+                    )
+                    new_sections.append([
+                        {"role": "user", "content": new_user},
+                        {"role": "assistant", "content": new_assistant},
+                    ])
+
+            if msg_count > 2:
+                total_saved += msg_count - 2
+
+        # ── 重建消息列表 ──
+        new_messages: list[dict] = []
+        i = 0
+        section_idx = 0
+        while i < len(messages):
+            if section_idx < len(targets) and i == targets[section_idx][0]:
+                for msg in new_sections[section_idx]:
+                    new_messages.append(dict(msg))
+                i = targets[section_idx][1] + 1
+                section_idx += 1
+            else:
+                new_messages.append(dict(messages[i]))
+                i += 1
+
+        return (True, "shortcircuit completed", total_saved, new_messages)
+
+    except Exception as e:
+        return (False, f"短路失败: {e}", 0, None)
 
 
 def _build_regenerate_refiner(state) -> Callable:
@@ -131,40 +221,104 @@ def _build_regenerate_refiner(state) -> Callable:
     return refiner
 
 
+# ═══════════════════════════════════════════════════════
+# 命令入口
+# ═══════════════════════════════════════════════════════
+
+
+def _parse_args(arg: str) -> tuple[str, object, str]:
+    """解析短路命令参数
+
+    Returns:
+        (action, value, mode)
+        action: "list" | "default" | "count" | "index" | "range" | "error"
+        value:  int | tuple(int,int) | str(错误信息)
+        mode:   "regenerate" | "crop"
+    """
+    parts = arg.strip().split()
+    if not parts:
+        return ("default", 1, "crop")
+
+    clean_parts: list[str] = []
+    mode = "crop"
+    for p in parts:
+        if p == "-c":
+            mode = "crop"
+        elif p == "-r":
+            mode = "regenerate"
+        else:
+            clean_parts.append(p)
+
+    if not clean_parts:
+        return ("default", 1, mode)
+
+    cmd = clean_parts[0]
+
+    if cmd == "list":
+        return ("list", None, mode)
+
+    if cmd.startswith("#"):
+        if "-" in cmd:
+            parts_range = cmd.split("-")
+            try:
+                start = int(parts_range[0].lstrip("#"))
+                end = int(parts_range[1].lstrip("#"))
+            except ValueError:
+                return ("error", f"无效范围: '{cmd}'", mode)
+            if start > end:
+                return ("error", f"起始编号 {start} 大于终止编号 {end}", mode)
+            return ("range", (start, end), mode)
+        else:
+            try:
+                return ("index", int(cmd.lstrip("#")), mode)
+            except ValueError:
+                return ("error", f"无效编号: '{cmd}'", mode)
+
+    try:
+        n = int(cmd)
+        if n < 1:
+            return ("error", f"数量必须大于 0，收到 {n}", mode)
+        return ("count", n, mode)
+    except ValueError:
+        return ("error", f"无效参数: '{cmd}'", mode)
+
+
 async def execute(state, arg: str) -> tuple[bool, str]:
     action, value, mode = _parse_args(arg)
 
     if action == "error":
         return (True, f"❌ {value}")
 
+    # ── 通过公共 API 获取非 system 消息 ──
+    messages = state.conversation.get_non_system_messages()
+
     # ── /sc list ─────────────────────────────────────────
     if action == "list":
-        components = state.conversation.scan_components()
+        components = _scan_components(messages)
         if not components:
             return (True, "没有已完成的连通块")
         return (True, _format_components_display(components))
 
     # ── 执行短路 ─────────────────────────────────────────
-
-    components = state.conversation.scan_components()
+    components = _scan_components(messages)
     if not components:
         return (True, "没有已完成的连通块需要短路")
 
-    # 确定要短路的原始索引
+    # 确定要短路的非 system 空间索引
     if action == "default":
         native = [c for c in reversed(components) if c["compressible"]]
         selected = native[:1]
-        target_raw = [(c["user_idx"], c["terminal_idx"]) for c in selected]
+        targets = [(c["user_idx"], c["terminal_idx"]) for c in selected]
     elif action == "count":
         assert isinstance(value, int)
         native = [c for c in reversed(components) if c["compressible"]]
         selected = native[:value]
-        target_raw = [(c["user_idx"], c["terminal_idx"]) for c in selected]
+        targets = [(c["user_idx"], c["terminal_idx"]) for c in selected]
     elif action == "index":
-        target_raw = []
+        targets = []
         for comp in components:
             if comp["idx"] == value:
-                target_raw.append((comp["user_idx"], comp["terminal_idx"]))
+                targets.append((comp["user_idx"], comp["terminal_idx"]))
                 break
     elif action == "range":
         assert isinstance(value, tuple) and len(value) == 2
@@ -174,19 +328,22 @@ async def execute(state, arg: str) -> tuple[bool, str]:
             return (True, f"未找到编号 {start}~{end} 的连通块")
         min_user = selected[0]["user_idx"]
         max_terminal = selected[-1]["terminal_idx"]
-        target_raw = [(min_user, max_terminal)]
+        targets = [(min_user, max_terminal)]
     else:
         return (True, "未知操作")
 
-    if not target_raw:
+    if not targets:
         return (True, "没有可短路的连通块，或指定的连通块编号不存在")
 
+    # ── 执行压缩（命令层自组装，纯函数操作消息列表） ──
     refiner = None if mode == "crop" else _build_regenerate_refiner(state)
-    success, msg, saved = await state.conversation.shortcircuit(refiner, target_raw, mode)
+    success, msg, saved, new_messages = await _shortcircuit(messages, refiner, targets, mode)
 
     if success:
+        # 通过公共 API 写回
+        state.conversation.set_messages(state.conversation.system_prompt, new_messages)
         state.session.save_context(state.conversation.to_serializable())
-        return (True, f"✅ 已处理 {len(target_raw)} 个连通块，节省 {saved} 条消息")
+        return (True, f"✅ 已处理 {len(targets)} 个连通块，节省 {saved} 条消息")
     else:
         return (True, msg)
 

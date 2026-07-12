@@ -3,9 +3,16 @@ ShortcircuitPlugin — 自我上下文修剪工具
 
 通过 ON_INIT 获取 state + tool_registry，注册 shortcircuit 工具。
 使 AI 能在上下文过长时主动压缩已完成的连通块。
+
+全部逻辑通过公共 API + commands/shortcircuit 的纯函数实现。
 """
 
-from fp_core.commands.shortcircuit import _build_regenerate_refiner, _format_components_display
+from fp_core.commands.shortcircuit import (
+    _build_regenerate_refiner,
+    _format_components_display,
+    _scan_components,
+    _shortcircuit,
+)
 from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 from fp_core.plugins.base.plugin import Plugin, PluginConfig
 
@@ -89,9 +96,12 @@ class ShortcircuitPlugin(Plugin):
             action = params.get("action", "compress")
             conv = state.conversation
 
+            # ── 通过公共 API 获取非 system 消息 ──
+            messages = conv.get_non_system_messages()
+
             # ── list：查看连通块概览 ──
             if action == "list":
-                components = conv.scan_components()
+                components = _scan_components(messages)
                 return _format_components_display(components)
 
             # ── compress：执行压缩 ──
@@ -100,15 +110,14 @@ class ShortcircuitPlugin(Plugin):
             range_param = params.get("range")
             count = params.get("count", 1)
 
-            components = conv.scan_components()
+            components = _scan_components(messages)
             if not components:
                 return "没有连通块需要处理"
 
-            # 确定要压缩的目标
+            # 确定要压缩的目标（非 system 空间索引）
             target_raw: list[tuple[int, int]] = []
 
             if range_param is not None:
-                # 范围模式：合并为一个范围
                 start, end = range_param
                 selected = [c for c in components if start <= c["idx"] <= end]
                 if not selected:
@@ -118,7 +127,6 @@ class ShortcircuitPlugin(Plugin):
                 target_raw = [(min_user, max_terminal)]
 
             elif block_ids is not None:
-                # 指定编号模式
                 for bid in block_ids:
                     for comp in components:
                         if comp["idx"] == bid:
@@ -128,7 +136,6 @@ class ShortcircuitPlugin(Plugin):
                         return f"未找到编号 {bid} 的连通块"
 
             else:
-                # count 模式：从最早的可压缩块开始
                 compressible = [c for c in components if c["compressible"]]
                 if not compressible:
                     return "所有连通块均已达最小状态（2 条消息），无需压缩"
@@ -139,9 +146,11 @@ class ShortcircuitPlugin(Plugin):
                 return "没有可压缩的连通块"
 
             refiner = None if mode == "crop" else _build_regenerate_refiner(state)
-            success, msg, saved = await conv.shortcircuit(refiner, target_raw, mode)
+            success, msg, saved, new_messages = await _shortcircuit(messages, refiner, target_raw, mode)
 
             if success:
+                # 通过公共 API 写回
+                conv.set_messages(conv.system_prompt, new_messages)
                 state.session.save_context(conv.to_serializable())
                 if range_param is not None:
                     return f"已合并 #{range_param[0]}~#{range_param[1]} 为一个连通块，节省 {saved} 条消息"

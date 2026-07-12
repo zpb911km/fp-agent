@@ -38,7 +38,7 @@ class State:
     当前提供：
       conversation — 消息列表（读 + 写）
       session      — 会话持久化（读取/切换/删除会话）
-      llm          — LLM 调用（供 compact/shortcircuit 做摘要）
+      llm          — LLM 调用（供 compact/shortcircuit 命令做摘要）
       lifecycle    — 生命周期（供插件注册钩子）
       plugins      — 插件注册表
       tool_exec    — 工具注册表（供插件注册工具）
@@ -47,7 +47,6 @@ class State:
 
     用法:
         # 命令内部（直接读写，不绕路）
-        state.conversation.back(target_idx=3)
         state.session.save_context(state.conversation.messages)
         state.conversation.set_messages(prompt, history)
         state.rebuild_system_prompt()  # 命令无需 import PromptBuilder
