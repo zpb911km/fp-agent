@@ -135,6 +135,15 @@ class PluginRegistry:
 
         返回已注册的插件名称列表。
         """
+        # ── 清理旧扫描残留的 _plugin_scan_* 模块 ──
+        # 热重载后 PluginRegistry._import_counter 归零，旧子模块
+        # （如 _plugin_scan_1.plugin）残留在 sys.modules 中。
+        # 不清除会导致目录插件 from .plugin import X 拿到旧类定义，
+        # issubclass(旧类, 新Plugin基类) → False → 插件被静默跳过。
+        stale_keys = [k for k in list(sys.modules) if k.startswith("_plugin_scan_")]
+        for k in stale_keys:
+            del sys.modules[k]
+
         if not os.path.isdir(plugin_dir):
             display.info(f"[PluginRegistry] 目录不存在，跳过扫描: {plugin_dir}")
             return []
