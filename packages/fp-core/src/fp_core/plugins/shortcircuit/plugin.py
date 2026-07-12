@@ -14,8 +14,8 @@ TOOL_DEFINITION = {
     "function": {
         "name": "shortcircuit",
         "description": (
-            "管理对话历史的连通块。用于对于已经完整完成的任务,保存其状态,消除其过程,主动节省上下文",
-            "先用 action=list 查看概览，再用 action=compress 按需压缩。",
+            "管理对话历史的连通块。用于对于已经完整完成的任务,保存其状态,消除其过程,主动节省上下文"
+            "。先用 action=list 查看概览，再用 action=compress 按需压缩。"
         ),
         "parameters": {
             "type": "object",

@@ -33,7 +33,7 @@ class ToolRegistry:
 
     def _load_core(self):
         """加载核心工具（直接绑定，不可插件化）"""
-        from fp_core.core.builtin_tools import execute_core_tool, get_core_definitions
+        from fp_core.tools.core import execute_core_tool, get_core_definitions
 
         self._core_defs = get_core_definitions()
         self._core_executor = execute_core_tool
