@@ -186,13 +186,20 @@ class OptionManager:
                 )
             )
 
-        # 用户目录中禁用的插件
+        # 用户目录中禁用的插件（文件型）
         self._scan_disabled_files(
             os.path.join(DATA_DIR, "plugins"),
             results,
             seen,
             lambda f: not f.startswith("_") and f not in PLUGIN_SKIP,
             self._read_plugin_name_from_file,
+        )
+
+        # 用户目录中禁用的目录型插件（name.disabled/）
+        self._scan_disabled_dirs(
+            os.path.join(DATA_DIR, "plugins"),
+            results,
+            seen,
         )
 
         # 内置目录中子目录（包插件），检查是否未加载（同名用户版禁用导致内置版也被屏蔽）
@@ -265,6 +272,38 @@ class OptionManager:
                     status="disabled",
                     source=self._classify_source(fp),
                     source_path=fp,
+                    contract={"version": "?", "hooks": [], "class_name": "?"},
+                )
+            )
+
+    def _scan_disabled_dirs(self, directory: str, results: list, seen: set):
+        """扫描目录型插件的禁用态（name.disabled/）"""
+        if not os.path.isdir(directory):
+            return
+        for fn in os.listdir(directory):
+            if not fn.endswith(".disabled"):
+                continue
+            dir_path = os.path.join(directory, fn)
+            if not os.path.isdir(dir_path):
+                continue
+            base = fn[:-9]  # strip ".disabled"
+            if base.startswith("_") or base in PLUGIN_SKIP:
+                continue
+            if not os.path.isfile(os.path.join(dir_path, "__init__.py")):
+                continue
+            if base in seen:
+                continue
+            pfile = os.path.join(dir_path, "plugin.py")
+            pname = self._read_plugin_name_from_file(pfile, base) if os.path.isfile(pfile) else base
+            seen.add(pname)
+            results.append(
+                Entry(
+                    name=pname,
+                    type="plugin",
+                    description="",
+                    status="disabled",
+                    source=self._classify_source(dir_path),
+                    source_path=dir_path,
                     contract={"version": "?", "hooks": [], "class_name": "?"},
                 )
             )
@@ -489,11 +528,18 @@ class OptionManager:
         # 插件目录
         pd = os.path.join(DATA_DIR, "plugins")
         if os.path.isdir(pd):
+            # 文件型插件：name.py.disabled
             for fn in os.listdir(pd):
                 if fn.endswith(".py.disabled") and not fn.startswith("_") and fn not in PLUGIN_SKIP:
                     pname = self._read_plugin_name_from_file(os.path.join(pd, fn), fn[:-11])
                     if pname == name:
                         return os.path.join(pd, fn)
+            # 目录型插件：name.disabled/
+            disabled_dir = os.path.join(pd, f"{name}.disabled")
+            if os.path.isdir(disabled_dir):
+                init_path = os.path.join(disabled_dir, "__init__.py")
+                if os.path.isfile(init_path):
+                    return disabled_dir
         # 命令目录
         cd = os.path.join(DATA_DIR, "commands")
         if os.path.isdir(cd):
@@ -513,11 +559,25 @@ class OptionManager:
                             return os.path.join(d, fn)
         pd = os.path.join(DATA_DIR, "plugins")
         if os.path.isdir(pd):
+            # 文件型插件
             for fn in os.listdir(pd):
                 if fn.endswith(".py") and not fn.startswith("_") and fn not in PLUGIN_SKIP:
                     pname = self._read_plugin_name_from_file(os.path.join(pd, fn), fn[:-3])
                     if pname == name:
                         return os.path.join(pd, fn)
+            # 目录型插件
+            for fn in os.listdir(pd):
+                entry_path = os.path.join(pd, fn)
+                if not os.path.isdir(entry_path) or fn.startswith("_"):
+                    continue
+                if not os.path.isfile(os.path.join(entry_path, "__init__.py")):
+                    continue
+                pfile = os.path.join(entry_path, "plugin.py")
+                if not os.path.isfile(pfile):
+                    continue
+                pname = self._read_plugin_name_from_file(pfile, fn)
+                if pname == name:
+                    return entry_path
         cd = os.path.join(DATA_DIR, "commands")
         if os.path.isdir(cd):
             for fn in os.listdir(cd):
@@ -529,12 +589,14 @@ class OptionManager:
         disabled_path = self._find_disabled(name)
         if disabled_path is None:
             return (False, f"⚠️ 未找到已禁用的 '{name}'")
+        is_dir = os.path.isdir(disabled_path)
         enabled_path = disabled_path[:-9]  # strip .disabled
         try:
             os.rename(disabled_path, enabled_path)
+            kind = "目录" if is_dir else "文件"
             return (
                 True,
-                f"✅ 已启用 {name}\n\n源: {disabled_path}\n\n→ {os.path.basename(enabled_path)}\n\n⚠️ 重启后生效",
+                f"✅ 已启用 {name}\n\n{kind}: {disabled_path}\n\n→ {os.path.basename(enabled_path)}\n\n⚠️ 重启后生效",
             )
         except OSError as e:
             return (False, f"❌ 启用失败: {e}")
@@ -549,12 +611,16 @@ class OptionManager:
             return (False, f"⚠️ 未找到已启用的 '{name}'")
         if FP_CORE_DIR in os.path.normpath(enabled_path):
             return (False, "❌ 无法禁用内置拓展。如需覆盖，请在用户目录创建同名文件后再禁用")
+        is_dir = os.path.isdir(enabled_path)
         disabled_path = enabled_path + ".disabled"
+        if os.path.exists(disabled_path):
+            return (False, f"❌ 目标路径已存在: {disabled_path}")
         try:
             os.rename(enabled_path, disabled_path)
+            kind = "目录" if is_dir else "文件"
             return (
                 True,
-                f"⛔ 已禁用 {name}\n\n源: {enabled_path}\n\n→ {os.path.basename(disabled_path)}\n\n⚠️ 重启后生效",
+                f"⛔ 已禁用 {name}\n\n{kind}: {enabled_path}\n\n→ {os.path.basename(disabled_path)}\n\n⚠️ 重启后生效",
             )
         except OSError as e:
             return (False, f"❌ 禁用失败: {e}")

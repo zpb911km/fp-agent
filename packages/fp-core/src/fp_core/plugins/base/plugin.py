@@ -157,6 +157,10 @@ class PluginRegistry:
             if fname.startswith("_"):
                 continue
 
+            # ── 跳过已禁用标记（文件/目录统一处理） ─────
+            if fname.endswith(".disabled"):
+                continue
+
             # ── 目录插件（包） ────────────────────
             if entry.is_dir():
                 init_path = os.path.join(entry.path, "__init__.py")
