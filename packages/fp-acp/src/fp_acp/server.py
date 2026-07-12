@@ -882,6 +882,16 @@ class ACPServer:
                 buf = acp_io.flush_text()
                 if buf.strip():
                     self._send_message_notification(buf, session_id=sid)
+
+                # 取消路径也可能有热重载残留（/reload 已执行完毕但 cancel 同时到达）
+                reload_data = getattr(self._agent.state, "_reload_result", None)
+                if reload_data is not None:
+                    new_agent, info = reload_data
+                    self._agent.state._reload_result = None
+                    self._agent = new_agent
+                    self._register_follow_hooks()
+                    self._log(f"🔄 Agent 已热重载 (model={info['model']})")
+
                 return {"stopReason": "cancelled"}
             finally:
                 self._current_task = None
@@ -897,6 +907,17 @@ class ACPServer:
                 self._send_message_notification(buf, session_id=sid)
             elif reply_text:
                 self._send_message_notification(reply_text, session_id=sid)
+
+            # ── 热重载检测：/reload 命令已将新 Agent 存入 state._reload_result ──
+            # 引用交换后，后续 prompt 由新 Agent 处理（旧 Agent 已 shutdown）
+            reload_data = getattr(self._agent.state, "_reload_result", None)
+            if reload_data is not None:
+                new_agent, info = reload_data
+                self._agent.state._reload_result = None  # 防止重复消费
+                self._agent = new_agent
+                # 新 Agent 有全新的 lifecycle 实例，需重新注册 Follow Agent 钩子
+                self._register_follow_hooks()
+                self._log(f"🔄 Agent 已热重载 (model={info['model']}, session={info['session_id']})")
 
             return {"stopReason": "end_turn"}
         finally:
