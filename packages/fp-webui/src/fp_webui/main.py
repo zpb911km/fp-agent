@@ -593,7 +593,7 @@ async def delete_session_endpoint(session_id: str):
     if session_id == agent.session.session_id:
         raise HTTPException(status_code=400, detail="不能删除当前正在使用的会话")
 
-    if not agent.delete_session(session_id):
+    if not agent.session.delete_session(session_id):
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在或删除失败")
 
     return {"status": "deleted", "session_id": session_id}
@@ -793,8 +793,14 @@ async def switch_session_endpoint(session_id: str):
     # 保存当前会话
     agent.state.session.save_context(agent.state.conversation.messages)
 
-    if not agent.switch_session(session_id):
+    if not agent.session.switch_session(session_id):
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+
+    # 加载目标会话的消息到内存上下文
+    _prompt = agent.state.conversation.system_prompt
+    _saved = agent.session.load_context(_prompt)
+    if _saved:
+        agent.state.conversation.set_messages(_prompt, _saved)
 
     # 同步生成旧会话摘要（不传 tools）
     history_msgs = [m for m in old_context if m["role"] != "system"]
@@ -835,7 +841,9 @@ async def switch_session_endpoint(session_id: str):
 async def clear_current_session():
     """清空当前会话"""
     agent = await get_agent()
-    agent.clear_session()
+    agent.session.clear_session_file()
+    _prompt = agent.state.conversation.system_prompt
+    agent.state.conversation.reset(_prompt)
     return {"status": "cleared"}
 
 
