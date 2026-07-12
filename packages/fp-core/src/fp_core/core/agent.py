@@ -176,6 +176,7 @@ class Agent:
             tool_exec=self._tool_exec,
             io=self._default_io,
         )
+        self.state.agent = self  # 命令通过此回引访问 Agent 实例
 
         # 中断标记
         self._interrupted = False
@@ -246,6 +247,10 @@ class Agent:
 
     async def _on_shutdown(self, ctx: HookContext, **kwargs) -> HookContext:
         """关闭钩子 — 生成会话摘要 + 保存上下文 + 显示退出面板"""
+        # 热重载时不显示关闭面板
+        if getattr(self.state, "silent_shutdown", False):
+            return ctx
+
         summary = ""
         if not self.state.nuclear_exit:
             last_msgs = self._conv.get_non_system_messages()
@@ -505,10 +510,11 @@ class Agent:
         # 使用 contextvars 设置 IO 通道（不修改实例变量，防并发竞态）
         # io=None → fallback 到 self._default_io，保证 get_current_io() 始终返回有效值
         token = _current_io.set(io or self._default_io)
+        _current_io_ref = _current_io  # 锁住旧引用：防止热重载后 _current_io 指向新 contextvar
         try:
             return await self._process_inner(user_input)
         finally:
-            _current_io.reset(token)
+            _current_io_ref.reset(token)
 
     async def _process_inner(self, user_input: str) -> Response:
         """处理用户输入的核心逻辑"""
@@ -761,4 +767,5 @@ class Agent:
             self.session.delete_session(self.session.session_id, force=True)
             self.io.info("💥 核弹模式：当前会话已删除，不留痕迹")
 
-        self.io.info("👋 Agent 已关闭")
+        if not getattr(self.state, "silent_shutdown", False):
+            self.io.info("👋 Agent 已关闭")

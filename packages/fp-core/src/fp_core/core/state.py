@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from fp_core.core.agent import Agent
     from fp_core.core.conversation import ConversationState
     from fp_core.core.io import IOChannel
     from fp_core.core.lifecycle import LifecycleManager
@@ -83,7 +84,15 @@ class State:
         prompt = PromptBuilder().build_system_prompt()
         self.conversation.set_system_prompt(prompt)
 
+    # ── Agent 回引（由 Agent.__init__ 设置，供命令访问 Agent 实例） ──
+    agent: "Agent | None" = field(repr=False, default=None)
+
+    # ── 热重载暂存（/reload 命令设置，外层循环消费后交换 agent 引用） ──
+    _reload_result: "tuple[Agent, dict] | None" = field(repr=False, default=None)
+
     # ── 标志位 ──────────────────────────────────────────
 
     # exit_bang 专用：标记核弹退出，shutdown 时删除会话
     nuclear_exit: bool = False
+    # 热重载专用：shutdown 时跳过关闭面板和 Agent 已关闭 提示
+    silent_shutdown: bool = False
