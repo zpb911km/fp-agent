@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from fp_core.core.lifecycle import LifecycleManager
     from fp_core.core.llm_service import LLMService
     from fp_core.core.session import SessionManager
+    from fp_core.core.token_tracker import TokenTracker
     from fp_core.core.tool_executor import ToolExecutor
     from fp_core.plugins.base.plugin import PluginRegistry
 
@@ -60,6 +61,7 @@ class State:
     plugins: "PluginRegistry" = field(repr=False)
     tool_exec: "ToolExecutor" = field(repr=False)
     io: "IOChannel" = field(repr=False)
+    token_tracker: "TokenTracker" = field(repr=False)
 
     # ── 便捷属性（纯委托，一行的事） ────────────────────
 

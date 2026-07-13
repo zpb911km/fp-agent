@@ -348,6 +348,11 @@ class SessionManager:
 
         return context
 
+    @property
+    def meta(self) -> dict:
+        """获取当前会话的 meta 信息（只读视图）"""
+        return dict(self._meta)
+
     def update_meta(self, sid: str | None = None, **kwargs):
         """更新指定会话的内嵌 meta 字段。"""
         sid = sid or self._session_id

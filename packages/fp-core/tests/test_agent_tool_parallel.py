@@ -16,6 +16,8 @@ import time
 
 import pytest
 
+from fp_core.core.llm_service import LLMResult
+
 # ── 全局：设 LLM API KEY 过门禁 ──
 os.environ.setdefault("LLM_API_KEY", "sk-test-key-for-parallel")
 
@@ -111,18 +113,24 @@ def mock_llm():
         call_count += 1
 
         if call_count == 1:
-            return {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {"id": "call_1", "type": "function", "function": {"name": "sleep_1", "arguments": "{}"}},
-                    {"id": "call_2", "type": "function", "function": {"name": "sleep_2", "arguments": "{}"}},
-                    {"id": "call_3", "type": "function", "function": {"name": "sleep_3", "arguments": "{}"}},
-                ],
-                "_interrupted": False,
-            }
+            return LLMResult(
+                message={
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "sleep_1", "arguments": "{}"}},
+                        {"id": "call_2", "type": "function", "function": {"name": "sleep_2", "arguments": "{}"}},
+                        {"id": "call_3", "type": "function", "function": {"name": "sleep_3", "arguments": "{}"}},
+                    ],
+                    "_interrupted": False,
+                },
+                usage=None,
+            )
         else:
-            return {"role": "assistant", "content": "全部完成", "_interrupted": False}
+            return LLMResult(
+                message={"role": "assistant", "content": "全部完成", "_interrupted": False},
+                usage=None,
+            )
 
     return _mock_chat
 
@@ -136,18 +144,24 @@ def mock_llm_with_fail():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            return {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {"id": "call_1", "type": "function", "function": {"name": "sleep_1", "arguments": "{}"}},
-                    {"id": "call_fail", "type": "function", "function": {"name": "always_fail", "arguments": "{}"}},
-                    {"id": "call_3", "type": "function", "function": {"name": "sleep_3", "arguments": "{}"}},
-                ],
-                "_interrupted": False,
-            }
+            return LLMResult(
+                message={
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "sleep_1", "arguments": "{}"}},
+                        {"id": "call_fail", "type": "function", "function": {"name": "always_fail", "arguments": "{}"}},
+                        {"id": "call_3", "type": "function", "function": {"name": "sleep_3", "arguments": "{}"}},
+                    ],
+                    "_interrupted": False,
+                },
+                usage=None,
+            )
         else:
-            return {"role": "assistant", "content": "done", "_interrupted": False}
+            return LLMResult(
+                message={"role": "assistant", "content": "done", "_interrupted": False},
+                usage=None,
+            )
 
     return _mock_chat
 
@@ -287,16 +301,22 @@ class TestParallelToolExecution:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {"id": "call_x", "type": "function", "function": {"name": "sleep_2", "arguments": "{}"}},
-                    ],
-                    "_interrupted": False,
-                }
+                return LLMResult(
+                    message={
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {"id": "call_x", "type": "function", "function": {"name": "sleep_2", "arguments": "{}"}},
+                        ],
+                        "_interrupted": False,
+                    },
+                    usage=None,
+                )
             else:
-                return {"role": "assistant", "content": "done", "_interrupted": False}
+                return LLMResult(
+                    message={"role": "assistant", "content": "done", "_interrupted": False},
+                    usage=None,
+                )
 
         agent = _make_clean_agent(tool_exec=tool_exec)
         agent._llm.chat = single_tool_chat
@@ -314,7 +334,10 @@ class TestParallelToolExecution:
         """✅ 无工具调用时跳过并行路径，不崩溃"""
 
         async def no_tool_chat(messages, tools=None, **overrides):
-            return {"role": "assistant", "content": "无工具调用", "_interrupted": False}
+            return LLMResult(
+                message={"role": "assistant", "content": "无工具调用", "_interrupted": False},
+                usage=None,
+            )
 
         agent = _make_clean_agent()
         agent._llm.chat = no_tool_chat
@@ -408,16 +431,26 @@ class TestParallelErrorHandling:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {"id": "call_fail", "type": "function", "function": {"name": "always_fail", "arguments": "{}"}},
-                    ],
-                    "_interrupted": False,
-                }
+                return LLMResult(
+                    message={
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_fail",
+                                "type": "function",
+                                "function": {"name": "always_fail", "arguments": "{}"},
+                            },
+                        ],
+                        "_interrupted": False,
+                    },
+                    usage=None,
+                )
             else:
-                return {"role": "assistant", "content": "done", "_interrupted": False}
+                return LLMResult(
+                    message={"role": "assistant", "content": "done", "_interrupted": False},
+                    usage=None,
+                )
 
         agent = _make_clean_agent(tool_exec=tool_exec)
         agent._llm.chat = fail_tool_chat
@@ -456,14 +489,17 @@ class TestParallelInterrupt:
         tool_exec = ToolExecutor(registry=sample_tool_registry)
 
         async def chat_with_cancel(messages, tools=None, **overrides):
-            return {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {"id": "c1", "type": "function", "function": {"name": "sleep_1", "arguments": "{}"}},
-                ],
-                "_interrupted": False,
-            }
+            return LLMResult(
+                message={
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "c1", "type": "function", "function": {"name": "sleep_1", "arguments": "{}"}},
+                    ],
+                    "_interrupted": False,
+                },
+                usage=None,
+            )
 
         agent = _make_clean_agent(tool_exec=tool_exec)
         agent._llm.chat = chat_with_cancel

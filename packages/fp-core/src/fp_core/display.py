@@ -243,12 +243,27 @@ def _display_width(text: str) -> int:
         return len(text)
 
 
-def shutdown_panel(summary: str, file: str, model: str, msg_count: int, created: str, duration: str = ""):
-    """退出时的统计面板（框线装饰），自动适应内容宽度"""
+def shutdown_panel(
+    summary: str, file: str, model: str, msg_count: int, created: str, duration: str = "", token_usage=None
+):
+    """退出时的统计面板（框线装饰），自动适应内容宽度
+
+    Args:
+        token_usage: TokenUsage 实例或 None，控制台显示 ↑↓ 格式
+    """
     if _silent():
         return
     MIN_W = 48  # 最小宽度
     MAX_W = 60  # 最大宽度，防止撑爆终端
+
+    # 准备 token 显示文本
+    token_text = ""
+    if token_usage is not None and token_usage.call_count > 0:
+        base = f"Token: {token_usage.total_tokens:,} (↑{token_usage.prompt_tokens:,} ↓{token_usage.completion_tokens:,}"
+        if token_usage.cache_hit_tokens or token_usage.cache_miss_tokens:
+            base += f" cache:{token_usage.cache_hit_rate_str}"
+        base += f" ×{token_usage.call_count})"
+        token_text = base
 
     # 先收集所有内容行（不含边框装饰），算出最大显示宽度
     entries: list[tuple[str, str]] = [
@@ -261,8 +276,10 @@ def shutdown_panel(summary: str, file: str, model: str, msg_count: int, created:
         ("", "sep"),
         (f"模型: {model}", "info"),
         (f"消息: {msg_count} 条", "info"),
-        (f"创建: {created}", "info"),
     ]
+    if token_text:
+        entries.append((token_text, "info"))
+    entries.append((f"创建: {created}", "info"))
     if duration:
         entries.append((f"耗时: {duration}", "info"))
 

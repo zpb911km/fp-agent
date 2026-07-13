@@ -30,6 +30,7 @@ from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 from fp_core.core.llm_service import LLMConfig, LLMService
 from fp_core.core.prompt_builder import PromptBuilder
 from fp_core.core.state import State
+from fp_core.core.token_tracker import TokenTracker
 from fp_core.core.tool_executor import ToolExecutor
 from fp_core.platform_utils import get_data_dir
 from fp_core.plugins.base.plugin import PluginRegistry
@@ -182,6 +183,13 @@ class Agent:
         if saved:
             self._conv.set_messages(initial_prompt, saved)
 
+        # ── Token 消耗跟踪 ───────────────────────────
+        self._token_tracker = TokenTracker()
+        # 恢复会话后还原 token_usage（resume 场景）
+        meta_token_usage = self.session.meta.get("token_usage")
+        if meta_token_usage:
+            self._token_tracker = TokenTracker.from_dict(meta_token_usage)
+
         # 生命周期管理器
         self.lifecycle = LifecycleManager(enable_log=enable_log)
 
@@ -206,6 +214,7 @@ class Agent:
             plugins=self.plugins,
             tool_exec=self._tool_exec,
             io=self._default_io,
+            token_tracker=self._token_tracker,
         )
         self.state.agent = self  # 命令通过此回引访问 Agent 实例
 
@@ -292,6 +301,11 @@ class Agent:
                     summary = last_user.get("content", "").strip().replace("\n", " ")[:20]
                     self.session.update_meta(summary=summary)
 
+            # 保存 token 消耗到会话 meta
+            token_data = self._token_tracker.to_dict()
+            if token_data.get("total", {}).get("call_count", 0) > 0:
+                self.session.update_meta(token_usage=token_data)
+
         if not self.state.nuclear_exit:
             self.session.save_context(self._conv.to_serializable())
 
@@ -315,6 +329,7 @@ class Agent:
             msg_count=msg_count,
             created=created,
             duration=duration,
+            token_usage=self._token_tracker.total,
         )
 
         if self.enable_log:
@@ -346,23 +361,31 @@ class Agent:
 
     # ============ LLM 调用（含 IO 展示） ============
 
-    async def _invoke_llm(self, context: list[dict], silent: bool = False) -> dict[str, Any]:
+    async def _invoke_llm(self, context: list[dict], silent: bool = False) -> tuple[dict[str, Any], dict | None]:
         """发起聊天请求（含 spinner 和增量展示）
 
         实际 LLM 调用委托给 LLMService.chat()，
         此方法只负责 spinner/streamer 等 IO 展示。
+
+        Returns:
+            (assistant_msg, usage)
+            assistant_msg: {"role", "content", "tool_calls"?}
+            usage: {"prompt_tokens", "completion_tokens", "total_tokens"} | None
         """
         io = self.io
         if not silent:
             await io.thinking_start()
 
         _llm_exc: BaseException | None = None
+        usage: dict | None = None
         try:
-            assistant_msg = await self._llm.chat(context, tools=self._tool_exec.get_definitions())
+            result = await self._llm.chat(context, tools=self._tool_exec.get_definitions())
+            assistant_msg = result.message
+            usage = result.usage
         except asyncio.CancelledError:
             self._cancelled_by_user = True
             msg = {"role": "assistant", "content": "", "_interrupted": True}
-            return msg
+            return msg, None
         except Exception as e:
             _llm_exc = e
             raise
@@ -392,7 +415,7 @@ class Agent:
             msg["tool_calls"] = assistant_msg["tool_calls"]
         msg["_interrupted"] = False
 
-        return msg
+        return msg, usage
 
     # ============ 工具展示 ============
 
@@ -600,7 +623,9 @@ class Agent:
 
             self._processing = True
             try:
-                assistant_msg = await self._invoke_llm(messages_for_llm, silent=_silent)
+                assistant_msg, _usage = await self._invoke_llm(messages_for_llm, silent=_silent)
+                if _usage:
+                    self._token_tracker.accumulate(_usage, model=self.model)
             except (asyncio.CancelledError, KeyboardInterrupt):
                 self._processing = False
                 raise
@@ -614,7 +639,9 @@ class Agent:
                     self._conv.repair_tool_ordering()
                     try:
                         self._processing = True
-                        assistant_msg = await self._invoke_llm(self._conv.messages, silent=_silent)
+                        assistant_msg, _usage2 = await self._invoke_llm(self._conv.messages, silent=_silent)
+                        if _usage2:
+                            self._token_tracker.accumulate(_usage2, model=self.model)
                     except (asyncio.CancelledError, KeyboardInterrupt):
                         self._processing = False
                         raise
