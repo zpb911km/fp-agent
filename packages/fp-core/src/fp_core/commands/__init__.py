@@ -139,3 +139,28 @@ async def execute(state: object, cmd_name: str, arg: str) -> tuple[bool, str]:
         return result
 
     return (True, str(result))
+
+
+# ── 动态命令注册（供插件使用） ────────────────────────────────────
+
+
+def register_command(name: str, module: ModuleType) -> None:
+    """动态注册一条命令（供插件在 on_register 中调用）
+
+    Args:
+        name: 命令名（不含斜杠，如 'office'）
+        module: 实现了 name/aliases/description/execute 接口的模块
+
+    注册后 /<name> 即可被 Agent.handle_command 识别并执行。
+    与文件扫描注册的命令地位完全相同，也支持别名覆盖。
+    """
+    global _commands
+    if name in _commands:
+        display.warning(f"⚠️  动态命令 [{name}] 与现有命令重复，已覆盖")
+    _commands[name] = module
+
+    for alias in getattr(module, "aliases", []):
+        if alias in _commands:
+            display.warning(f"⚠️  别名 [{alias}] 冲突，已跳过")
+            continue
+        _commands[alias] = module

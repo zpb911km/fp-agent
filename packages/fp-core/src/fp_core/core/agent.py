@@ -103,6 +103,7 @@ class Agent:
         io: IOChannel | None = None,
         tool_executor: ToolExecutor | None = None,
         prompt_builder: PromptBuilder | None = None,
+        role: Any | None = None,  # 🆕 角色定义（AgentRole duck-typed，不引入包依赖）
     ):
         self.enable_log = enable_log
 
@@ -135,8 +136,38 @@ class Agent:
         # 不传参数 → ToolExecutor 自动创建独立的 ToolRegistry（不再使用全局单例）
         self._tool_exec = tool_executor or ToolExecutor()
 
+        # ── 角色系统：覆盖 system prompt / 工具集 / LLM 配置 ──
+        self._role = role
+
+        if role is not None:
+            # 角色模式：使用角色的 system prompt
+            initial_prompt = getattr(role, "system_prompt", self._prompter.build_system_prompt())
+
+            # 角色覆盖模型配置
+            model_override = getattr(role, "llm_model", None)
+            if model_override:
+                self._llm = LLMService(
+                    self.client,
+                    LLMConfig(
+                        model=model_override,
+                        temperature=getattr(role, "temperature", None) or config.LLM_TEMPERATURE,
+                        max_tokens=config.LLM_MAX_TOKENS,
+                    ),
+                )
+
+            # 角色工具白名单过滤
+            allowed_tools = getattr(role, "allowed_tools", None)
+            if allowed_tools:
+                allowed_set = set(allowed_tools)
+                _orig_get_defs = self._tool_exec.get_definitions
+                self._tool_exec.get_definitions = lambda: [
+                    d for d in _orig_get_defs() if d["function"]["name"] in allowed_set
+                ]
+        else:
+            # 超级个体模式：使用标准 system prompt
+            initial_prompt = self._prompter.build_system_prompt()
+
         # ConversationState：上下文状态的唯一所有者
-        initial_prompt = self._prompter.build_system_prompt()
         self._conv = ConversationState(initial_prompt)
 
         # SessionManager：持久化（不再持有 _context）
