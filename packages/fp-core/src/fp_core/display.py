@@ -85,12 +85,12 @@ def warning(msg: str):
 # ═══════════════════════════════════════════════════════════
 
 
-def llm_thought(msg: str):
+def llm_thought(msg: str, end: str = "\n"):
     """LLM 思考过程（支持按配置截断）"""
     if _silent():
         return
     text = truncate(msg, "llm_thought")
-    print(apply_style(text, "llm_thought"))
+    print(apply_style(text, "llm_thought"), end=end, flush=True)
 
 
 def llm_tool(msg: str):
@@ -106,31 +106,6 @@ def llm_output(text: str):
     if _silent():
         return
     print(text, end="", flush=True)
-
-
-def render_markdown(text: str):
-    """用 rich 渲染 Markdown 文本到终端，缺失时降级为纯文本。
-
-    这是 LLMStreamer._render_markdown 的公开版本，
-    供外部（如 terminal 前端）统一调用。
-    """
-    if _silent():
-        return
-    try:
-        from rich.console import Console
-        from rich.markdown import Markdown
-
-        Console().print(Markdown(text))
-    except ImportError:
-        print(text)
-
-
-def llm_iteration(count: int):
-    """打印迭代次数统计"""
-    if _silent():
-        return
-    print(apply_style(f"📊 本次交互共迭代 {count} 次", "llm_iteration"))
-    print()
 
 
 class LLMStreamer:
@@ -157,6 +132,24 @@ class LLMStreamer:
         self.content = ""  # 最终内容
         self.thinking = ""  # 思考内容
 
+    @staticmethod
+    def _safe_print(*args, **kwargs):
+        """安全打印，stdout 不可用时记录日志而非崩溃"""
+        try:
+            print(*args, **kwargs)
+        except (AttributeError, ValueError, OSError) as e:
+            import logging
+
+            logging.getLogger(__name__).warning(f"LLMStreamer 输出失败 (stdout 可能不可用): {e}")
+
+    def reset(self):
+        """重置流式状态，用于异常恢复"""
+        self._thinking = False
+        self._has_content = False
+        self._buffer = ""
+        self.content = ""
+        self.thinking = ""
+
     def think(self, text: str):
         """输出思考 token（配色从配置），首次自动显示思考标记"""
         if self.silent:
@@ -166,11 +159,10 @@ class LLMStreamer:
             return
         if not self._thinking:
             prefix = "\n" if self._has_content else ""
-            print(apply_style(f"{prefix}思考: ", "llm_thought"), end="", flush=True)
+            self._safe_print(apply_style(f"{prefix}思考: ", "llm_thought"), end="", flush=True)
             self._thinking = True
 
-        truncated = truncate(text, "llm_thought")
-        print(apply_style(truncated, "llm_thought"), end="", flush=True)
+        llm_thought(text, end="")
         self.thinking += text
 
     def write(self, text: str):
@@ -183,7 +175,7 @@ class LLMStreamer:
         if not text:
             return
         if self._thinking:
-            print()
+            self._safe_print()
             self._thinking = False
         self._buffer += text
         self._has_content = True
@@ -194,40 +186,35 @@ class LLMStreamer:
             return
         if interrupted:
             # 中断模式下：不渲染残片，直接打印中断标记
-            print(apply_style("⏹️ 已中断", "yellow_bold"))
+            self._safe_print(apply_style("⏹️ 已中断", "yellow_bold"))
             return
         if self._thinking:
-            print(apply_style("", "llm_thought"))
+            self._safe_print(apply_style("", "llm_thought"))
         elif self._has_content and self._buffer:
             self._render_markdown(self._buffer)
             self._buffer = ""
         elif self._has_content:
-            print()
+            self._safe_print()
+        self._has_content = False
 
     @staticmethod
     def _render_markdown(text: str):
-        """用 rich 渲染 Markdown，缺失时降级为纯文本"""
+        """用 rich 渲染 Markdown，缺失时降级为纯文本，stdout 不可用时安全跳过"""
         try:
             from rich.console import Console
             from rich.markdown import Markdown
 
             Console().print(Markdown(text))
         except ImportError:
-            print(text)
+            LLMStreamer._safe_print(text)
+        except (AttributeError, ValueError, OSError) as e:
+            import logging
+
+            logging.getLogger(__name__).warning(f"LLMStreamer Markdown 渲染失败: {e}")
 
 
 # ═══════════════════════════════════════════════════════════
 # E. 系统日志 — 开发者调试用，默认隐藏
-#   注册名称: "debug"
-# ═══════════════════════════════════════════════════════════
-
-
-def debug(msg: str):
-    """调试日志，仅 DEBUG=1 时可见"""
-    if os.environ.get("DEBUG"):
-        print(apply_style(f"┐dbg│ {msg}", "debug"))
-
-
 # ═══════════════════════════════════════════════════════════
 # 🎨 仪式感 — 品牌记忆点
 #   注册名称: "startup", "shutdown_panel", "logo"
@@ -256,12 +243,27 @@ def _display_width(text: str) -> int:
         return len(text)
 
 
-def shutdown_panel(summary: str, file: str, model: str, msg_count: int, created: str, duration: str = ""):
-    """退出时的统计面板（框线装饰），自动适应内容宽度"""
+def shutdown_panel(
+    summary: str, file: str, model: str, msg_count: int, created: str, duration: str = "", token_usage=None
+):
+    """退出时的统计面板（框线装饰），自动适应内容宽度
+
+    Args:
+        token_usage: TokenUsage 实例或 None，控制台显示 ↑↓ 格式
+    """
     if _silent():
         return
     MIN_W = 48  # 最小宽度
     MAX_W = 60  # 最大宽度，防止撑爆终端
+
+    # 准备 token 显示文本
+    token_text = ""
+    if token_usage is not None and token_usage.call_count > 0:
+        base = f"Token: {token_usage.total_tokens:,} (↑{token_usage.prompt_tokens:,} ↓{token_usage.completion_tokens:,}"
+        if token_usage.cache_hit_tokens or token_usage.cache_miss_tokens:
+            base += f" cache:{token_usage.cache_hit_rate_str}"
+        base += f" ×{token_usage.call_count})"
+        token_text = base
 
     # 先收集所有内容行（不含边框装饰），算出最大显示宽度
     entries: list[tuple[str, str]] = [
@@ -274,8 +276,10 @@ def shutdown_panel(summary: str, file: str, model: str, msg_count: int, created:
         ("", "sep"),
         (f"模型: {model}", "info"),
         (f"消息: {msg_count} 条", "info"),
-        (f"创建: {created}", "info"),
     ]
+    if token_text:
+        entries.append((token_text, "info"))
+    entries.append((f"创建: {created}", "info"))
     if duration:
         entries.append((f"耗时: {duration}", "info"))
 
@@ -402,14 +406,24 @@ class Spinner:
             while True:
                 char = self._chars[idx % len(self._chars)]
                 msg = f"\r{char} {self._message}..."
-                sys.stdout.write(msg)
-                sys.stdout.flush()
+                self._safe_stdout_write(msg)
                 idx += 1
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
             # 清除 spinner 行（覆盖空白后回到行首）
-            sys.stdout.write("\r" + " " * (len(self._message) + 6) + "\r")
+            self._safe_stdout_write("\r" + " " * (len(self._message) + 6) + "\r")
+
+    @staticmethod
+    def _safe_stdout_write(msg: str) -> None:
+        """安全写入 stdout，避免在 stdout 不可用或已关闭时崩溃"""
+        try:
+            sys.stdout.write(msg)
             sys.stdout.flush()
+        except (AttributeError, ValueError, OSError):
+            # AttributeError: sys.stdout 为 None
+            # ValueError: I/O operation on closed file
+            # OSError: 管道破损等
+            pass
 
     async def stop(self):
         """停止 spinner 并清除动画行"""
@@ -417,5 +431,5 @@ class Spinner:
             return
         if not self._task.done():
             self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._task

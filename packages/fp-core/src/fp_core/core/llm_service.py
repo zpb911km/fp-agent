@@ -3,12 +3,13 @@ LLMService — 纯 LLM 调用层
 
 职责：
 - 封装 LLM client 调用
-- 输入：messages + tools → 输出：assistant message dict
+- 输入：messages + tools → 输出：LLMResult(message, usage)
 - 不处理 IO、不显示 spinner、不格式化输出
 - 只做"消息→LLM→响应"的纯转换
 """
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -19,6 +20,14 @@ class LLMConfig:
     temperature: float = 0.7
     max_tokens: int = 4096
     extra_body: dict = field(default_factory=lambda: {"enable_thinking": False})
+
+
+@dataclass
+class LLMResult:
+    """LLM 调用结果（message + usage 一起返回）"""
+
+    message: dict[str, Any]  # {"role", "content", "tool_calls"?}
+    usage: dict[str, Any] | None = None  # {"prompt_tokens", "completion_tokens", "total_tokens"}
 
 
 class LLMService:
@@ -42,9 +51,9 @@ class LLMService:
         messages: list[dict],
         tools: list[dict] | None = None,
         **overrides,
-    ) -> dict:
+    ) -> LLMResult:
         """
-        调用 LLM 并返回 assistant message dict。
+        调用 LLM 并返回 LLMResult(message, usage)。
 
         Args:
             messages: 消息列表
@@ -52,12 +61,12 @@ class LLMService:
             **overrides: 覆盖 LLMConfig 中的字段（model, temperature, max_tokens 等）
 
         Returns:
-            assistant message dict:
-            {
-                "role": "assistant",
-                "content": "...",
-                "tool_calls": [...]  # 如果有
-            }
+            LLMResult(message, usage)
+
+            message dict:
+                {"role": "assistant", "content": "...", "tool_calls": [...]}
+            usage dict:
+                {"prompt_tokens": int, "completion_tokens": int, "total_tokens": int}
         """
         model = overrides.get("model", self._config.model)
         temperature = overrides.get("temperature", self._config.temperature)
@@ -77,6 +86,7 @@ class LLMService:
 
         response = await self._client.chat.completions.create(**kwargs)
         message = response.choices[0].message
+        usage = response.usage  # 可能为 None，由调用方处理
 
         msg: dict = {"role": "assistant", "content": message.content or ""}
         if message.tool_calls:
@@ -92,7 +102,7 @@ class LLMService:
                 for tc in message.tool_calls
             ]
 
-        return msg
+        return LLMResult(message=msg, usage=usage)
 
     async def summarize(
         self,
@@ -107,4 +117,4 @@ class LLMService:
             {"role": "user", "content": f"{instruction}\n\n{text}"},
         ]
         result = await self.chat(messages, tools=None, max_tokens=max_tokens)
-        return result.get("content", "").strip()
+        return result.message.get("content", "").strip()

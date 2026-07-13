@@ -13,20 +13,24 @@ import contextlib
 import contextvars
 import json
 import os
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from fp_core import config, display
+from fp_core import (
+    config,
+    display,  # only for shutdown_panel (CLI-specific)
+)
 from fp_core.commands import execute as execute_command
 from fp_core.commands import get_all_commands
 from fp_core.core import session
-from fp_core.core.conversation import CompactConfig, ConversationState
+from fp_core.core.conversation import ConversationState
 from fp_core.core.io import CLIIO, IOChannel
 from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 from fp_core.core.llm_service import LLMConfig, LLMService
 from fp_core.core.prompt_builder import PromptBuilder
+from fp_core.core.state import State
+from fp_core.core.token_tracker import TokenTracker
 from fp_core.core.tool_executor import ToolExecutor
 from fp_core.platform_utils import get_data_dir
 from fp_core.plugins.base.plugin import PluginRegistry
@@ -100,6 +104,7 @@ class Agent:
         io: IOChannel | None = None,
         tool_executor: ToolExecutor | None = None,
         prompt_builder: PromptBuilder | None = None,
+        role: Any | None = None,  # 🆕 角色定义（AgentRole duck-typed，不引入包依赖）
     ):
         self.enable_log = enable_log
 
@@ -132,8 +137,38 @@ class Agent:
         # 不传参数 → ToolExecutor 自动创建独立的 ToolRegistry（不再使用全局单例）
         self._tool_exec = tool_executor or ToolExecutor()
 
+        # ── 角色系统：覆盖 system prompt / 工具集 / LLM 配置 ──
+        self._role = role
+
+        if role is not None:
+            # 角色模式：使用角色的 system prompt
+            initial_prompt = getattr(role, "system_prompt", self._prompter.build_system_prompt())
+
+            # 角色覆盖模型配置
+            model_override = getattr(role, "llm_model", None)
+            if model_override:
+                self._llm = LLMService(
+                    self.client,
+                    LLMConfig(
+                        model=model_override,
+                        temperature=getattr(role, "temperature", None) or config.LLM_TEMPERATURE,
+                        max_tokens=config.LLM_MAX_TOKENS,
+                    ),
+                )
+
+            # 角色工具白名单过滤
+            allowed_tools = getattr(role, "allowed_tools", None)
+            if allowed_tools:
+                allowed_set = set(allowed_tools)
+                _orig_get_defs = self._tool_exec.get_definitions
+                self._tool_exec.get_definitions = lambda: [
+                    d for d in _orig_get_defs() if d["function"]["name"] in allowed_set
+                ]
+        else:
+            # 超级个体模式：使用标准 system prompt
+            initial_prompt = self._prompter.build_system_prompt()
+
         # ConversationState：上下文状态的唯一所有者
-        initial_prompt = self._prompter.build_system_prompt()
         self._conv = ConversationState(initial_prompt)
 
         # SessionManager：持久化（不再持有 _context）
@@ -141,12 +176,19 @@ class Agent:
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
 
         if not os.environ.get("FP_SUBAGENT_QUIET"):
-            display.info(f"📂 新会话：{self.session.session_id}")
+            self.io.info(f"📂 新会话：{self.session.session_id}")
 
         # 从会话文件恢复历史
         saved = self.session.load_context(initial_prompt)
-        if len(saved) > 1:
-            self._conv.replace_all(saved)
+        if saved:
+            self._conv.set_messages(initial_prompt, saved)
+
+        # ── Token 消耗跟踪 ───────────────────────────
+        self._token_tracker = TokenTracker()
+        # 恢复会话后还原 token_usage（resume 场景）
+        meta_token_usage = self.session.meta.get("token_usage")
+        if meta_token_usage:
+            self._token_tracker = TokenTracker.from_dict(meta_token_usage)
 
         # 生命周期管理器
         self.lifecycle = LifecycleManager(enable_log=enable_log)
@@ -163,8 +205,18 @@ class Agent:
         if os.path.isdir(_user_plugin_dir):
             self.plugins.scan(_user_plugin_dir)
 
-        # 核弹退出标记
-        self._nuclear_exit = False
+        # ── 核心状态访问接口（命令/插件的「大通道」，公开） ──
+        self.state = State(
+            conversation=self._conv,
+            session=self.session,
+            llm=self._llm,
+            lifecycle=self.lifecycle,
+            plugins=self.plugins,
+            tool_exec=self._tool_exec,
+            io=self._default_io,
+            token_tracker=self._token_tracker,
+        )
+        self.state.agent = self  # 命令通过此回引访问 Agent 实例
 
         # 中断标记
         self._interrupted = False
@@ -173,12 +225,13 @@ class Agent:
 
         # 初始化锁（防竞态）
         self._init_lock = asyncio.Lock()
+        self._initialized: bool = False
 
         # 内置钩子
         self._register_builtin_hooks()
 
         # 触发初始化生命周期
-        # （init 在 _ensure_initialized 中触发）
+        # （init 在 ensure_initialized 中触发）
 
     @property
     def _system_prompt(self) -> str:
@@ -199,28 +252,6 @@ class Agent:
         """
         ctx_io: IOChannel | None = _current_io.get()
         return ctx_io if ctx_io is not None else self._default_io
-
-    # ── 跨 Task context 传播工具 ─────────────────────
-
-    @staticmethod
-    def make_io_context() -> contextvars.Context:
-        """捕获当前 asyncio Task 的 context 拷贝，用于子 Task 创建时传播 IO 通道。
-
-        当需要在 _process_inner 内部创建子 Task 且子 Task 需要访问 agent.io 时，
-        使用此方法获取 context 拷贝，确保 _current_io 在子 Task 中可见。
-
-        用法：
-          ctx = Agent.make_io_context()
-          asyncio.create_task(ctx.run(some_async_fn()))
-
-        Python 3.12+ 也可直接：
-          asyncio.create_task(coro, context=Agent.make_io_context())
-
-        原理：
-          contextvars.copy_context() 捕获当前 Task 所有 ContextVar 的快照，
-          ctx.run() 在指定 context 中执行代码，使子 Task 能读到正确的 _current_io。
-        """
-        return contextvars.copy_context()
 
     # ── 公共属性 ─────────────────────────────────────
 
@@ -245,7 +276,7 @@ class Agent:
 
     # ── 内置钩子 ─────────────────────────────────────
 
-    def _register_builtin_hooks(self):
+    def _register_builtin_hooks(self) -> None:
         self.lifecycle.register(LifecycleHook.ON_INIT, self._on_init, priority=0, name="builtin_init")
         self.lifecycle.register(LifecycleHook.ON_SHUTDOWN, self._on_shutdown, priority=999, name="builtin_shutdown")
 
@@ -257,8 +288,12 @@ class Agent:
 
     async def _on_shutdown(self, ctx: HookContext, **kwargs) -> HookContext:
         """关闭钩子 — 生成会话摘要 + 保存上下文 + 显示退出面板"""
+        # 热重载时不显示关闭面板
+        if getattr(self.state, "silent_shutdown", False):
+            return ctx
+
         summary = ""
-        if not self._nuclear_exit:
+        if not self.state.nuclear_exit:
             last_msgs = self._conv.get_non_system_messages()
             if last_msgs:
                 last_user = next((m for m in reversed(last_msgs) if m["role"] == "user"), None)
@@ -266,8 +301,13 @@ class Agent:
                     summary = last_user.get("content", "").strip().replace("\n", " ")[:20]
                     self.session.update_meta(summary=summary)
 
-        if not self._nuclear_exit:
-            self.session.save_context(self._conv.messages)
+            # 保存 token 消耗到会话 meta
+            token_data = self._token_tracker.to_dict()
+            if token_data.get("total", {}).get("call_count", 0) > 0:
+                self.session.update_meta(token_usage=token_data)
+
+        if not self.state.nuclear_exit:
+            self.session.save_context(self._conv.to_serializable())
 
         # 显示退出面板
         info = self.session.list_sessions().get(self.session.session_id, {})
@@ -289,56 +329,16 @@ class Agent:
             msg_count=msg_count,
             created=created,
             duration=duration,
+            token_usage=self._token_tracker.total,
         )
 
         if self.enable_log:
             print("[Agent] Shutting down...")
         return ctx
 
-    # ============ 会话管理 ============
-
-    def switch_session(self, sid: str) -> bool:
-        """切换会话"""
-        if self.session.switch_session(sid):
-            saved = self.session.load_context(self._conv.system_prompt)
-            self._conv.replace_all(saved)
-            return True
-        return False
-
-    def clear_session(self):
-        """清空当前会话（重置上下文 + 清空会话文件）"""
-        system_prompt = self._prompter.build_system_prompt()
-        self._conv.reset(system_prompt)
-        self.session.clear_session_file()
-
-    def delete_session(self, sid: str, force: bool = False) -> bool:
-        return self.session.delete_session(sid, force=force)
-
-    # ============ 公共 API：上下文与持久化 ============
-
-    def get_messages(self) -> list[dict]:
-        """获取当前消息列表的防御性拷贝"""
-        return self._conv.messages
-
-    def save_context(self):
-        """将当前上下文保存到会话文件"""
-        self.session.save_context(self._conv.messages)
-
-    def rebuild_context(self):
-        """重建上下文：重新加载 system prompt + 从会话文件恢复"""
-        prompt = self._prompter.build_system_prompt()
-        self._conv.reset(prompt)
-        saved = self.session.load_context(prompt)
-        if len(saved) > 1:
-            self._conv.replace_all(saved)
-
-    async def ensure_initialized(self):
-        """确保已触发初始化钩子（公共 API）"""
-        await self._ensure_initialized()
-
     # ============ 中断机制 ============
 
-    def cancel(self):
+    def cancel(self) -> None:
         """请求中断当前处理
 
         设置中断标记，在下一个循环检查点生效。
@@ -348,7 +348,7 @@ class Agent:
         """
         self._interrupted = True
 
-    def _check_interrupted(self):
+    def _check_interrupted(self) -> None:
         """检查中断标记（纯实例方案）
 
         信号处理器通过 agent.cancel() 设置 self._interrupted，
@@ -359,282 +359,168 @@ class Agent:
             self._processing = False
             raise asyncio.CancelledError("用户中断")
 
-    # ============ 公共 API：会话管理 ============
-
-    def resume_latest(self) -> bool:
-        """续最新会话并重建上下文"""
-        if self.session.resume_latest():
-            saved = self.session.load_context(self._conv.system_prompt)
-            self._conv.replace_all(saved)
-            return True
-        return False
-
-    # ============ 公共 API：对话操作 ============
-
-    async def back(self, target_idx: int | None = None, mode: int | None = None) -> str:
-        """回退到对话的某个历史时刻（公共 API）
-
-        Args:
-            target_idx: 目标消息序号（1-based，从第一条非 system 开始），必填
-            mode: 2 或 None=删除后续消息（默认），1=暂不支持
-
-        Returns:
-            状态描述文本
-        """
-        if target_idx is None:
-            return "❌ 请指定要回退到的消息序号。使用 /back list 查看列表，/back <N> 直接回退"
-
-        history_msgs = self._conv.get_history_for_display()
-
-        if not history_msgs:
-            return "没有历史记录可以回退"
-
-        if target_idx < 1 or target_idx > len(history_msgs):
-            return f"❌ 无效索引：{target_idx}，有效范围 1~{len(history_msgs)}"
-
-        if mode == 1:
-            return "❌ mode=1（保留后续消息）暂不支持，请使用 mode=2（删除后续消息）或 /fork"
-
-        self._conv.back(target_idx=target_idx, mode=mode)
-        self.session.save_context(self._conv.messages)
-
-        if mode is None or mode == 2:
-            return f"⏪ 已回退到第 {target_idx} 条消息，后续消息已删除"
-        return "已回退"
-
-    def get_history_for_display(self) -> list[dict]:
-        """获取用于显示的历史消息列表（仅非 system 消息）"""
-        return self._conv.get_history_for_display()
-
-    def fork(self) -> str:
-        """基于当前上下文新建会话（公共 API）
-
-        Returns:
-            fork 结果描述，空字符串表示无可 fork 内容
-        """
-        old_messages = self._conv.get_non_system_messages()
-
-        if not old_messages:
-            return ""
-
-        self.session.save_context(self._conv.messages)
-
-        last_msg_content = old_messages[-1].get("content", "")[:50] if old_messages else ""
-        old_sid = self.session.session_id
-        new_sid = self.session.create_session()
-
-        # 重建上下文：用当前 system prompt，复制旧消息
-        system_prompt = self._conv.system_prompt
-        self._conv.reset(system_prompt)
-        for m in old_messages:
-            self._conv._messages.append(dict(m))
-        self.session.save_context(self._conv.messages)
-
-        # 更新旧会话摘要
-        self.session.update_meta(old_sid, summary=last_msg_content)
-
-        return f"🍴 已 fork：从 {old_sid} → {new_sid}"
-
-    def history(self) -> list[dict]:
-        """获取当前对话历史（仅非 system 消息）"""
-        return self._conv.get_history_for_display()
-
-    async def compact_context(self):
-        """压缩对话历史（公共 API）"""
-        await self._compact_context()
-
-    # ═══════════════════════════════════════════════
-    # Shortcircuit（短路）
-    # ═══════════════════════════════════════════════
-
-    def scan_components(self) -> list[dict]:
-        """获取连通块列表（公共 API）"""
-        return self._conv.scan_components()
-
-    async def shortcircuit_context(
-        self,
-        count: int = 1,
-        indices: list[int] | None = None,
-        raw_indices: list[tuple[int, int]] | None = None,
-        mode: str = "regenerate",
-    ) -> dict:
-        """短路上下文 — 将指定连通块压缩为 user/assistant 对
-
-        Args:
-            count:       短路最近 N 个可压缩态的连通块（默认 1）
-            indices:     短路指定编号的连通块（@N 语法解析后的结果）
-            raw_indices: 直接传入消息索引 [(user_idx, terminal_idx), ...]（合并范围用）
-            mode:        "regenerate" | "crop"
-
-        Returns:
-            结构化结果 dict:
-            {"ok": bool, "msg": str, "saved": int, "count": int}
-            ok=False 时 msg 为失败原因
-        """
-        components = self._conv.scan_components()
-        if not components:
-            return {"ok": False, "msg": "没有已完成的连通块需要短路", "saved": 0, "count": 0}
-
-        # 确定要短路的原始索引
-        if raw_indices is not None:
-            target_raw = list(raw_indices)
-        elif indices is not None:
-            target_raw: list[tuple[int, int]] = []
-            for idx in indices:
-                for comp in components:
-                    if comp["idx"] == idx:
-                        target_raw.append((comp["user_idx"], comp["terminal_idx"]))
-                        break
-        else:
-            native = [c for c in reversed(components) if c["compressible"]]
-            selected = native[:count]
-            target_raw = [(c["user_idx"], c["terminal_idx"]) for c in selected]
-
-        if not target_raw:
-            return {"ok": False, "msg": "没有可短路的连通块，或指定的连通块编号不存在", "saved": 0, "count": 0}
-
-        refiner = None if mode == "crop" else self._build_regenerate_refiner()
-        success, msg, saved = await self._conv.shortcircuit(refiner, target_raw, mode)
-
-        if success:
-            self.session.save_context(self._conv.messages)
-            return {"ok": True, "msg": msg, "saved": saved, "count": len(target_raw)}
-        else:
-            return {"ok": False, "msg": msg, "saved": 0, "count": 0}
-
-    def _build_regenerate_refiner(self) -> Callable:
-        """构建提炼回调 — 调用 LLM 精炼 assistant 回复"""
-
-        async def refiner(user_text: str, assistant_text: str, context_text: str) -> tuple[str, str]:
-            is_interrupted = assistant_text == "_INTERRUPTED_"
-            prompt = (
-                "以下是一段 AI 与用户之间的完整对话，包含工具调用过程。\n\n"
-                "任务：将这段对话压缩为第一人称操作日志，保留 AI 做了什么、发现了什么、决策了什么。\n\n"
-                "要求：\n"
-                "1. 【第一人称叙述】以「我」的视角，按时间顺序描述："
-                "我做了什么操作 → 发现了什么 → 得出了什么结论 → 做了什么决策。\n"
-                "2. 【保留关键产出】工具调用的参数/命令细节可以丢弃，但工具的发现结果必须保留："
-                "查到了什么数据、找到了什么文件、确认了什么状态、修改了什么代码。\n"
-                "3. 【信息密度】压缩到原回复的 1/3~1/2 长度。"
-                "重点保留：文件路径、函数名、变量名、错误信息、数值、决策理由。\n"
-                "4. 【过程精炼，结果展开】过程描述控制在 1~2 句话概括做了什么、为什么做；"
-                "最终结果（创建的/修改了什么、测试结论、状态变化、发现的数据）展开保留，不得过度压缩。\n"
-                "5. 【保留末尾总结】如果最后一条输出是总结性陈述"
-                "（如「搞定」、「改完了」、「测试通过」、具体数值等），"
-                "则原样输出最后一次回复的完整内容。\n"
-                "6. 只输出压缩后的内容，不要任何前缀或格式说明。\n"
-                "7. 如果对话被中断，在末尾加上「（对话被中断）」"
-            )
-            try:
-                result = await self._llm.summarize(
-                    context_text,
-                    instruction=prompt,
-                    system_prompt=(
-                        "你是一个第一人称操作日志记录助手。"
-                        "将工具调用过程压缩为连贯的"
-                        "「我做了什么→发现了什么→决策了什么」日志，"
-                        "丢弃工具调用细节，保留发现和决策。"
-                    ),
-                    max_tokens=8192,
-                )
-                refined = (result or "").strip()
-                if not refined:
-                    refined = "被用户中断" if is_interrupted else assistant_text
-            except Exception:
-                refined = "被用户中断" if is_interrupted else assistant_text
-            return (user_text, refined)
-
-        return refiner
-
-    def set_nuclear_exit(self):
-        """设置核弹退出标志"""
-        self._nuclear_exit = True
-
     # ============ LLM 调用（含 IO 展示） ============
 
-    async def _invoke_llm(self, context: list[dict], silent: bool = False) -> dict:
+    async def _invoke_llm(self, context: list[dict], silent: bool = False) -> tuple[dict[str, Any], dict | None]:
         """发起聊天请求（含 spinner 和增量展示）
 
         实际 LLM 调用委托给 LLMService.chat()，
         此方法只负责 spinner/streamer 等 IO 展示。
-        """
-        spinner = None
-        if not silent:
-            spinner = display.Spinner("思考中")
-            await spinner.start()
 
+        Returns:
+            (assistant_msg, usage)
+            assistant_msg: {"role", "content", "tool_calls"?}
+            usage: {"prompt_tokens", "completion_tokens", "total_tokens"} | None
+        """
+        io = self.io
+        if not silent:
+            await io.thinking_start()
+
+        _llm_exc: BaseException | None = None
+        usage: dict | None = None
         try:
-            assistant_msg = await self._llm.chat(context, tools=self._tool_exec.get_definitions())
+            result = await self._llm.chat(context, tools=self._tool_exec.get_definitions())
+            assistant_msg = result.message
+            usage = result.usage
         except asyncio.CancelledError:
             self._cancelled_by_user = True
             msg = {"role": "assistant", "content": "", "_interrupted": True}
-            return msg
+            return msg, None
+        except Exception as e:
+            _llm_exc = e
+            raise
         finally:
-            if spinner:
-                await spinner.stop()
+            if not silent:
+                try:
+                    await io.thinking_stop()
+                except Exception:
+                    # 防止 Spinner 停止时的异常（如 stdout 不可用）掩盖原始 LLM 错误
+                    if _llm_exc is None:
+                        raise
 
         reply_content = assistant_msg.get("content", "")
 
-        streamer = display.LLMStreamer(silent=silent)
-        if reply_content:
-            streamer.write(reply_content)
-        streamer.end()
+        if not silent:
+            try:
+                if reply_content:
+                    io.stream_write(reply_content)
+                io.stream_end()
+            except Exception as e:
+                # 显示层异常不应丢弃 LLM 回复，也不应误报为 API/LLM 错误
+                self.io.warning(f"显示层输出异常 (LLM 回复正常): {type(e).__name__}: {e}")
+                io.stream_reset()  # 清理残留 buffer，防止状态污染
 
         msg = {"role": "assistant", "content": reply_content}
         if assistant_msg.get("tool_calls"):
             msg["tool_calls"] = assistant_msg["tool_calls"]
         msg["_interrupted"] = False
 
-        return msg
-
-    async def _compact_context(self):
-        """压缩上下文 — 委托给 ConversationState.compact() + LLM 摘要"""
-        history_count = self._conv.get_non_system_count()
-        if history_count <= 4:
-            display.info("对话历史较短，无需压缩")
-            return
-
-        display.info("🔄 正在压缩对话历史...")
-
-        async def summarizer(text: str) -> str:
-            try:
-                return await self._llm.summarize(text)
-            except Exception as e:
-                display.error(f" 压缩失败: {e}")
-                return ""
-
-        did_compact, msg = await self._conv.compact(summarizer=summarizer, config=CompactConfig(keep_meaningful=4))
-
-        if did_compact:
-            display.info(f" ✅\n📦 {msg}")
-        else:
-            display.info(msg)
+        return msg, usage
 
     # ============ 工具展示 ============
 
-    async def _execute_tool(self, tc: dict, silent: bool = False) -> str:
-        """执行工具（含展示）"""
+    async def _execute_tool(self, tc: dict[str, Any], silent: bool = False) -> str:
+        """执行工具（异常逃逸到 _execute_one_tool，由 ON_TOOL_ERROR 生命周期处理）"""
         name = tc["function"]["name"]
-        try:
-            args = json.loads(tc["function"]["arguments"])
-        except json.JSONDecodeError as e:
-            return f"错误：工具参数 JSON 解析失败 - {e}"
+        args = json.loads(tc["function"]["arguments"])
+
+        io = self.io
+        if not silent:
+            io.tool_call(name, args)
+
+        result = await self._tool_exec.execute(tc)
 
         if not silent:
-            safe_args = {k: str(v) for k, v in args.items()}
-            display.llm_tool(f"  🛠️  {name}({json.dumps(safe_args, ensure_ascii=False)})")
-
-        try:
-            result = await self._tool_exec.execute(tc)
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            raise
-        except Exception as e:
-            return f"❌ 工具执行失败 ({name}): {e}"
-
-        if not silent:
-            display.llm_tool(f"  📋  {result.strip()}")
+            io.tool_result(result)
 
         return result
+
+    async def _execute_one_tool(self, tc: dict, silent: bool = False) -> tuple[str, str]:
+        """并行工具执行单元 — 封装单个工具的完整生命周期
+
+        包含：
+          1. ON_TOOL_CALL（插件可拒绝/修改参数）
+          2. 执行工具
+          3. ON_TOOL_RESULT（插件可审查/修改/过滤结果）
+          4. ON_TOOL_ERROR（异常时）
+
+        Returns:
+            (tool_call_id, result_string)
+
+        Raises:
+            asyncio.CancelledError / KeyboardInterrupt: 用户中断
+            Exception: 未被插件抑制的工具执行异常
+        """
+        tool_name = tc["function"]["name"]
+
+        # ── ON_TOOL_CALL ──
+        ctx = await self.lifecycle.emit(
+            LifecycleHook.ON_TOOL_CALL,
+            tool_name=tool_name,
+            tool_args=tc["function"]["arguments"][:5000],
+            tool_call_id=tc["id"],
+        )
+
+        # 插件拒绝
+        if ctx.data.get("cancelled"):
+            reason = ctx.data.get("cancel_reason", "工具被插件拒绝")
+            self.io.info(f"🔧 插件拒绝工具 {tool_name}: {reason}")
+            result = f"被插件拒绝: {reason}"
+            # 仍然触发 ON_TOOL_RESULT（保持与原串行行为一致）
+            ctx = await self.lifecycle.emit(
+                LifecycleHook.ON_TOOL_RESULT,
+                tool_name=tool_name,
+                result=result,
+                tool_call_id=tc["id"],
+            )
+            if ctx.data.get("blocked"):
+                result = ctx.data.get("block_reason", "结果被插件过滤")
+            modified_result = ctx.data.get("modified_result")
+            if modified_result is not None:
+                result = modified_result
+            return (tc["id"], result)
+
+        # 插件修改参数
+        modified_args = ctx.data.get("modified_tool_args")
+        if modified_args is not None:
+            tc["function"]["arguments"] = modified_args
+
+        # 执行工具
+        try:
+            result = await self._execute_tool(tc, silent=silent)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            raise  # 中断→外部 gather 统一处理
+        except Exception as e:
+            # 工具异常 → 通知插件，看是否可抑制
+            self.io.error(f"工具 {tool_name} 执行错误: {e}")
+            ctx = await self.lifecycle.emit(
+                LifecycleHook.ON_TOOL_ERROR,
+                tool_name=tool_name,
+                error=str(e),
+                tool_call_id=tc["id"],
+            )
+            if ctx.data.get("suppressed"):
+                reason = ctx.data.get("suppress_reason", "插件已抑制错误")
+                self.io.warning(f"  ⚠️ 错误已被插件抑制: {reason}")
+                return (tc["id"], f"错误已被抑制：{reason}")
+            # 未被抑制 → 让异常传播到外部处理
+            raise
+
+        # ── ON_TOOL_RESULT ──
+        ctx = await self.lifecycle.emit(
+            LifecycleHook.ON_TOOL_RESULT,
+            tool_name=tool_name,
+            result=result[:5000],
+            tool_call_id=tc["id"],
+        )
+        if ctx.data.get("blocked"):
+            self.io.warning(f"🔧 工具 {tool_name} 的结果被插件过滤")
+            result = ctx.data.get("block_reason", "结果被插件过滤")
+        modified_result = ctx.data.get("modified_result")
+        if modified_result is not None:
+            result = modified_result
+
+        return (tc["id"], result)
 
     # ============ 命令处理 ============
 
@@ -652,7 +538,7 @@ class Agent:
         cmd = parts[0].lstrip("/").lower()
         arg = parts[1] if len(parts) > 1 else ""
 
-        return await execute_command(self, cmd, arg)
+        return await execute_command(self.state, cmd, arg)
 
     # ============ 主处理流程（全异步） ============
 
@@ -671,7 +557,7 @@ class Agent:
           如果在 _process_inner 内部创建子 Task，需手动传播 context，
           见 _current_io 定义处的说明。
         """
-        await self._ensure_initialized()
+        await self.ensure_initialized()
 
         if not user_input.strip():
             return Response(content="")
@@ -679,10 +565,11 @@ class Agent:
         # 使用 contextvars 设置 IO 通道（不修改实例变量，防并发竞态）
         # io=None → fallback 到 self._default_io，保证 get_current_io() 始终返回有效值
         token = _current_io.set(io or self._default_io)
+        _current_io_ref = _current_io  # 锁住旧引用：防止热重载后 _current_io 指向新 contextvar
         try:
             return await self._process_inner(user_input)
         finally:
-            _current_io.reset(token)
+            _current_io_ref.reset(token)
 
     async def _process_inner(self, user_input: str) -> Response:
         """处理用户输入的核心逻辑"""
@@ -732,31 +619,35 @@ class Agent:
             if ctx.data.get("cancelled"):
                 return Response(content=ctx.data.get("cancel_reason", "已取消"))
 
-            messages_for_llm = ctx.data.get("modified_messages", self._conv.messages)
+            messages_for_llm = ctx.data.get("modified_messages", self._conv.get_messages_for_llm())
 
             self._processing = True
             try:
-                assistant_msg = await self._invoke_llm(messages_for_llm, silent=_silent)
+                assistant_msg, _usage = await self._invoke_llm(messages_for_llm, silent=_silent)
+                if _usage:
+                    self._token_tracker.accumulate(_usage, model=self.model)
             except (asyncio.CancelledError, KeyboardInterrupt):
                 self._processing = False
                 raise
             except Exception as e:
                 self._processing = False
-                display.error(f"API/LLM 错误: {e}")
+                self.io.error(f"API/LLM 错误: {e}")
                 await self.lifecycle.emit(LifecycleHook.ON_ERROR, error=str(e))
                 err_str = str(e)
                 if "'tool'" in err_str and "preceding" in err_str:
-                    display.warning("  🔧 检测到 tool 顺序错误，二次修复...")
+                    self.io.warning("  🔧 检测到 tool 顺序错误，二次修复...")
                     self._conv.repair_tool_ordering()
                     try:
                         self._processing = True
-                        assistant_msg = await self._invoke_llm(self._conv.messages, silent=_silent)
+                        assistant_msg, _usage2 = await self._invoke_llm(self._conv.messages, silent=_silent)
+                        if _usage2:
+                            self._token_tracker.accumulate(_usage2, model=self.model)
                     except (asyncio.CancelledError, KeyboardInterrupt):
                         self._processing = False
                         raise
                     except Exception as e2:
                         self._processing = False
-                        display.error(f"  ❌ 修复后仍失败: {e2}")
+                        self.io.error(f"  ❌ 修复后仍失败: {e2}")
                         break
                 else:
                     break
@@ -789,7 +680,7 @@ class Agent:
             self._conv.add_assistant_message(assistant_msg)
 
             if interrupted:
-                display.info("⏹️ 已中断（保留了已生成的内容）")
+                self.io.info("⏹️ 已中断（保留了已生成的内容）")
                 break
 
             # ── 处理工具调用 ──
@@ -799,7 +690,7 @@ class Agent:
                 sel_tool_names = [tc["function"]["name"] for tc in tool_calls]
                 ctx = await self.lifecycle.emit(LifecycleHook.ON_TOOL_SELECT, tools=sel_tool_names)
                 if ctx.data.get("cancelled"):
-                    display.warning(f"⏹️ 工具执行被插件拦截: {ctx.data.get('cancel_reason', '无原因')}")
+                    self.io.warning(f"⏹️ 工具执行被插件拦截: {ctx.data.get('cancel_reason', '无原因')}")
                     break
                 # 如果插件修改了工具列表，按新列表过滤
                 modified_tools = ctx.data.get("modified_tools")
@@ -808,89 +699,64 @@ class Agent:
                         tc["function"]["name"] for tc in tool_calls if tc["function"]["name"] not in modified_tools
                     ]
                     if skipped:
-                        display.info(f"🔧 插件过滤了工具: {', '.join(skipped)}")
+                        self.io.info(f"🔧 插件过滤了工具: {', '.join(skipped)}")
                     tool_calls = [tc for tc in tool_calls if tc["function"]["name"] in modified_tools]
 
-                for i, tc in enumerate(tool_calls):
-                    try:
-                        ctx = await self.lifecycle.emit(
-                            LifecycleHook.ON_TOOL_CALL,
-                            tool_name=tc["function"]["name"],
-                            tool_args=tc["function"]["arguments"][:5000],
-                            tool_call_id=tc["id"],
-                        )
-                        if ctx.data.get("cancelled"):
-                            reason = ctx.data.get("cancel_reason", "工具被插件拒绝")
-                            display.info(f"🔧 插件拒绝工具 {tc['function']['name']}: {reason}")
-                            # 构造假结果，走完整的结果处理流程
-                            result = "被用户拒绝"
-                            ctx = await self.lifecycle.emit(
-                                LifecycleHook.ON_TOOL_RESULT,
-                                tool_name=tc["function"]["name"],
-                                result=result,
-                                tool_call_id=tc["id"],
-                            )
-                            if ctx.data.get("blocked"):
-                                result = ctx.data.get("block_reason", "结果被插件过滤")
-                            modified_result = ctx.data.get("modified_result")
-                            if modified_result is not None:
-                                result = modified_result
-                            self._conv.add_tool_message(tc["id"], result)
-                            continue
-                        # 使用插件修改后的参数
-                        modified_args = ctx.data.get("modified_tool_args")
-                        if modified_args is not None:
-                            tc["function"]["arguments"] = modified_args
-                            display.info(f"🔧 插件修改了 {tc['function']['name']} 的参数")
+                # ═══════════════════════════════════════════════════════════
+                # 并行执行所有工具（asyncio.gather + return_exceptions）
+                #   - 每个工具独立触发 ON_TOOL_CALL → 执行 → ON_TOOL_RESULT
+                #   - 结果列表保持与 tool_calls 相同的顺序
+                # ═══════════════════════════════════════════════════════════
+                try:
+                    raw_results: list[tuple[str, str] | BaseException] = await asyncio.gather(
+                        *[self._execute_one_tool(tc, silent=_silent) for tc in tool_calls],
+                        return_exceptions=True,
+                    )
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    # gather 自身被取消（如 signal handler 中断）→ 标记全部中断
+                    self._interrupted = False
+                    self._cancelled_by_user = True
+                    for tc in tool_calls:
+                        self._conv.add_tool_message(tc["id"], "工具调用失败：用户中断")
+                    self.io.info("⏹️ 已中断（上下文已保留工具调用信息）")
+                    break
 
-                        result = await self._execute_tool(tc, silent=_silent)
-
-                        ctx = await self.lifecycle.emit(
-                            LifecycleHook.ON_TOOL_RESULT,
-                            tool_name=tc["function"]["name"],
-                            result=result[:5000],
-                            tool_call_id=tc["id"],
-                        )
-                        if ctx.data.get("blocked"):
-                            display.warning(f"🔧 工具 {tc['function']['name']} 的结果被插件过滤")
-                            result = ctx.data.get("block_reason", "结果被插件过滤")
-                        modified_result = ctx.data.get("modified_result")
-                        if modified_result is not None:
-                            result = modified_result
-                            display.info(f"🔧 插件修改了 {tc['function']['name']} 的结果")
-
-                        self._conv.add_tool_message(tc["id"], result)
-
-                    except (KeyboardInterrupt, asyncio.CancelledError):
+                # ── 按序处理结果（保持与 LLM 返回顺序一致） ──
+                for tc, result_or_exc in zip(tool_calls, raw_results, strict=True):
+                    if isinstance(result_or_exc, (asyncio.CancelledError, KeyboardInterrupt)):
+                        # 用户中断 — 此工具及其后的工具均未完成
                         self._interrupted = False
                         self._cancelled_by_user = True
                         self._conv.add_tool_message(tc["id"], "工具调用失败：用户中断")
-                        for remaining in tool_calls[i + 1 :]:
-                            self._conv.add_tool_message(remaining["id"], "未执行（工具调用失败：用户中断）")
-                        display.info("⏹️ 已中断（上下文已保留工具调用信息）")
                         tool_interrupted = True
                         break
-                    except Exception as e:
-                        # 工具执行异常 → 通知插件，看是否可抑制
-                        display.error(f"工具 {tc['function']['name']} 执行错误: {e}")
-                        ctx = await self.lifecycle.emit(
-                            LifecycleHook.ON_TOOL_ERROR,
-                            tool_name=tc["function"]["name"],
-                            error=str(e),
-                            tool_call_id=tc["id"],
-                        )
-                        if ctx.data.get("suppressed"):
-                            reason = ctx.data.get("suppress_reason", "插件已抑制错误")
-                            display.warning(f"  ⚠️ 错误已被插件抑制: {reason}")
-                            self._conv.add_tool_message(tc["id"], f"错误已被抑制：{reason}")
-                        else:
-                            raise
+                    elif isinstance(result_or_exc, Exception):
+                        # 工具异常（未被插件抑制）→ 记录错误，不中断其他工具
+                        err_msg = f"❌ 工具执行失败 ({tc['function']['name']}): {result_or_exc}"
+                        self.io.error(err_msg)
+                        self._conv.add_tool_message(tc["id"], err_msg)
+                    else:
+                        assert isinstance(result_or_exc, tuple), f"预期 tuple，实际 {type(result_or_exc)}"
+                        tid, result = result_or_exc
+                        self._conv.add_tool_message(tid, result)
 
                 if tool_interrupted:
+                    # 补全未处理工具的中断记录（for break 后剩余的 tool_calls）
+                    break_out_idx = next(
+                        (
+                            i
+                            for i, r in enumerate(raw_results)
+                            if isinstance(r, (asyncio.CancelledError, KeyboardInterrupt))
+                        ),
+                        len(tool_calls),
+                    )
+                    for remaining in tool_calls[break_out_idx + 1 :]:
+                        self._conv.add_tool_message(remaining["id"], "未执行（工具调用失败：用户中断）")
+                    self.io.info("⏹️ 已中断（上下文已保留工具调用信息）")
                     break
-                continue
+                continue  # 工具全部完成 → 回到 while 循环（再次调用 LLM）
             else:
-                break
+                break  # 无工具调用 → 跳出 while 循环
 
         # ── 生命周期：上下文已更新 ──
         await self.lifecycle.emit(
@@ -899,7 +765,7 @@ class Agent:
         )
 
         # 保存上下文
-        self.session.save_context(self._conv.messages)
+        self.session.save_context(self._conv.to_serializable())
 
         # 提取最终回复
         final_content = self._conv.get_last_content()
@@ -920,15 +786,31 @@ class Agent:
 
     # ============ 生命周期管理 ============
 
-    async def _ensure_initialized(self):
-        """确保已触发初始化钩子（线程安全，asyncio.Lock 保护）"""
+    async def ensure_initialized(self) -> None:
+        """确保已触发初始化钩子（线程安全，asyncio.Lock 保护）
+
+        向 ON_INIT 传递 tool_registry，供插件注册工具。
+        插件可通过 context.data.system_prompt_append 返回要附加到 system prompt 的文本。
+        """
         async with self._init_lock:
             if hasattr(self, "_initialized") and self._initialized:
                 return
             self._initialized = True
-            await self.lifecycle.emit(LifecycleHook.ON_INIT)
 
-    async def shutdown(self):
+            ctx = await self.lifecycle.emit(
+                LifecycleHook.ON_INIT,
+                tool_registry=self._tool_exec.registry,
+                state=self.state,
+            )
+
+            # 插件可通过 system_prompt_append 追加内容到 system prompt
+            append_text = ctx.data.get("system_prompt_append")
+            if append_text:
+                current = self._conv.system_prompt
+                new_prompt = current + "\n\n" + append_text
+                self._conv.set_system_prompt(new_prompt)
+
+    async def shutdown(self) -> None:
         """关闭 Agent（清理生命周期钩子 + 释放连接池）"""
         await self.lifecycle.emit(LifecycleHook.ON_SHUTDOWN)
         await self.lifecycle.emit(LifecycleHook.ON_CLEANUP)
@@ -941,8 +823,9 @@ class Agent:
             await self.client.close()
 
         # _on_shutdown 钩子已保存上下文，此处只需处理核弹模式
-        if self._nuclear_exit:
+        if self.state.nuclear_exit:
             self.session.delete_session(self.session.session_id, force=True)
-            display.info("💥 核弹模式：当前会话已删除，不留痕迹")
+            self.io.info("💥 核弹模式：当前会话已删除，不留痕迹")
 
-        display.info("👋 Agent 已关闭")
+        if not getattr(self.state, "silent_shutdown", False):
+            self.io.info("👋 Agent 已关闭")

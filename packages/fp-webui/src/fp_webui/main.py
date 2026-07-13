@@ -467,7 +467,7 @@ async def new_agent():
         # ── 保存旧会话并 shutdown 旧 Agent ──
         if _agent is not None:
             try:
-                _agent.save_context()
+                _agent.state.session.save_context(_agent.state.conversation.messages)
                 await _agent.shutdown()
             except Exception as e:
                 display.warning(f"[WebUI] ⚠️ 旧 Agent shutdown 时发生异常: {e}")
@@ -497,8 +497,14 @@ async def new_agent():
         # NewAgent() 的 SessionManager(resume=None) 中已调用 _init_session()
         # 生成了全新会话，此处只需重建 context 即可
         try:
-            _agent.rebuild_context()
-            new_sid = _agent.session.session_id
+            from fp_core.core.prompt_builder import PromptBuilder
+
+            prompt = PromptBuilder().build_system_prompt()
+            _agent.state.conversation.reset(prompt)
+            saved = _agent.state.session.load_context(prompt)
+            if len(saved) > 1:
+                _agent.state.conversation.replace_all(saved)
+            new_sid = _agent.state.session.session_id
             display.info(f"[WebUI] 🆕 已使用新会话: {new_sid}")
         except Exception as e:
             display.error(f"[WebUI] ❌ 新会话初始化失败: {e}")
@@ -528,16 +534,22 @@ async def create_new_session():
 
     # 记录旧会话，用于后台生成摘要
     old_sid = agent.session.session_id
-    old_context = agent.get_messages()  # 浅拷贝
+    old_context = agent.state.conversation.messages  # 浅拷贝
 
     # 保存当前会话上下文
-    agent.save_context()
+    agent.state.session.save_context(agent.state.conversation.messages)
 
     # 创建新会话（自动切换到新会话）
     new_sid = agent.session.create_session()
 
     # 重建 agent 上下文（加载 system prompt 到新会话）
-    agent.rebuild_context()
+    from fp_core.core.prompt_builder import PromptBuilder
+
+    prompt = PromptBuilder().build_system_prompt()
+    agent.state.conversation.reset(prompt)
+    saved = agent.state.session.load_context(prompt)
+    if len(saved) > 1:
+        agent.state.conversation.replace_all(saved)
 
     # 同步生成旧会话摘要（不传 tools，确保 LLM 返回纯文本标题）
     history_msgs = [m for m in old_context if m["role"] != "system"]
@@ -581,7 +593,7 @@ async def delete_session_endpoint(session_id: str):
     if session_id == agent.session.session_id:
         raise HTTPException(status_code=400, detail="不能删除当前正在使用的会话")
 
-    if not agent.delete_session(session_id):
+    if not agent.session.delete_session(session_id):
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在或删除失败")
 
     return {"status": "deleted", "session_id": session_id}
@@ -776,13 +788,19 @@ async def switch_session_endpoint(session_id: str):
 
     # 记录旧会话，用于后台生成摘要
     old_sid = agent.session.session_id
-    old_context = agent.get_messages()  # 浅拷贝
+    old_context = agent.state.conversation.messages  # 浅拷贝
 
     # 保存当前会话
-    agent.save_context()
+    agent.state.session.save_context(agent.state.conversation.messages)
 
-    if not agent.switch_session(session_id):
+    if not agent.session.switch_session(session_id):
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+
+    # 加载目标会话的消息到内存上下文
+    _prompt = agent.state.conversation.system_prompt
+    _saved = agent.session.load_context(_prompt)
+    if _saved:
+        agent.state.conversation.set_messages(_prompt, _saved)
 
     # 同步生成旧会话摘要（不传 tools）
     history_msgs = [m for m in old_context if m["role"] != "system"]
@@ -823,7 +841,9 @@ async def switch_session_endpoint(session_id: str):
 async def clear_current_session():
     """清空当前会话"""
     agent = await get_agent()
-    agent.clear_session()
+    agent.session.clear_session_file()
+    _prompt = agent.state.conversation.system_prompt
+    agent.state.conversation.reset(_prompt)
     return {"status": "cleared"}
 
 
@@ -908,8 +928,8 @@ async def reload_agent():
         # ── 保存旧会话并关闭旧 Agent ──
         old_sid: str | None = None
         if _agent is not None:
-            _agent.save_context()
-            old_sid = _agent.session.session_id
+            _agent.state.session.save_context(_agent.state.conversation.messages)
+            old_sid = _agent.state.session.session_id
             # 静默容错
             with suppress(Exception):
                 await _agent.shutdown()
@@ -948,8 +968,14 @@ async def reload_agent():
         # ── 恢复旧会话 ──
         if old_sid:
             try:
-                _agent.session.switch_session(old_sid)
-                _agent.rebuild_context()
+                _agent.state.session.switch_session(old_sid)
+                from fp_core.core.prompt_builder import PromptBuilder
+
+                prompt = PromptBuilder().build_system_prompt()
+                _agent.state.conversation.reset(prompt)
+                saved = _agent.state.session.load_context(prompt)
+                if len(saved) > 1:
+                    _agent.state.conversation.replace_all(saved)
                 display.info(f"[WebUI] 🔄 已恢复会话: {old_sid}")
             except Exception as e:
                 display.warning(f"[WebUI] ⚠️ 会话恢复失败: {e}")
@@ -1093,7 +1119,7 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
                         else:
                             # 从后端获取权威的非 system 消息计数，传递给前端
                             # 前端据此校准 liveMsgIndex，消除前端自增计数器漂移
-                            all_msgs = agent.get_messages()
+                            all_msgs = agent.state.conversation.messages
                             non_sys_count = sum(1 for m in all_msgs if m.get("role") != "system")
                             await event_bus.publish({
                                 "type": "done",

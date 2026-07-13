@@ -26,8 +26,12 @@ PLUGIN_DEFINITION = {
     "type": "function",
     "function": {
         "name": "subagent",
-        "description": "派遣子 agent 执行独立任务，子 agent 有独立上下文，其工具调用和中间推理不占主上下文 token。"
-        "适合多步分析、文件处理、代码调试等。超过 2 步工具调用或读大文件时使用。",
+        "description": (
+            "派遣子 agent 执行独立任务，子 agent 有独立上下文，"
+            "其工具调用和中间推理不占主上下文 token。"
+            "适合多步分析、文件处理、代码调试等。"
+            "超过 2 步工具调用或读大文件时使用。并发执行,适合平行任务分配."
+        ),
         "parameters": {
             "type": "object",
             "properties": {

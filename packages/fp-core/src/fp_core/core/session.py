@@ -135,7 +135,7 @@ class SessionManager:
     _session_id: str
     _meta: dict
 
-    def __init__(self, resume: str | None = None):
+    def __init__(self, resume: str | bool | None = None):
         """
         resume=None/False → 创建新会话（默认）
         resume=True       → 续最近会话
@@ -307,26 +307,15 @@ class SessionManager:
         self._write_meta(self._meta)
 
     def save_context(self, context: list[dict[str, Any]]):
-        """将完整上下文写入文件（重写）。正序写入，最新在末尾。"""
+        """将完整上下文写入文件。context 应为 to_serializable() 的输出（无 system prompt）。"""
         path = self._session_path()
 
-        lines = []
-        msg_count = 0
-        for i, msg in enumerate(context):
-            if msg.get("role") == "system" and i == 0:
-                continue  # 只跳过第一条 system prompt（后续由 load_context 重新加载）
-            msg_count += 1
-            save_msg = {"role": msg["role"], "content": msg.get("content", "")}
-            for k in ("tool_calls", "tool_call_id", "reasoning_content"):
-                if msg.get(k):
-                    save_msg[k] = msg[k]
-            lines.append(json.dumps(save_msg, ensure_ascii=False))
-
-        # ★ 修复：没有任何消息时跳过文件创建，防止空 session 文件爆炸
-        if msg_count == 0:
+        if not context:
             return
 
-        self._meta["message_count"] = msg_count
+        lines = [json.dumps(msg, ensure_ascii=False) for msg in context]
+
+        self._meta["message_count"] = len(context)
         self._meta["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         tmp = path + ".tmp"
@@ -341,8 +330,8 @@ class SessionManager:
                 os.remove(tmp)
 
     def load_context(self, system_prompt: str) -> list[dict[str, Any]]:
-        """加载上下文（system + 历史消息，正序）。"""
-        context = [{"role": "system", "content": system_prompt}]
+        """加载上下文历史消息（不含 system prompt，与 save_context 对称）。"""
+        context: list[dict[str, Any]] = []
         path = self._session_path()
 
         if os.path.exists(path):
@@ -358,6 +347,11 @@ class SessionManager:
                 pass
 
         return context
+
+    @property
+    def meta(self) -> dict:
+        """获取当前会话的 meta 信息（只读视图）"""
+        return dict(self._meta)
 
     def update_meta(self, sid: str | None = None, **kwargs):
         """更新指定会话的内嵌 meta 字段。"""

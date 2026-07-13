@@ -84,10 +84,9 @@ class Message:
             after = self.content[close_idx + 8 :]
             self.content = after if after else None
         raw_tool_calls = data.get("tool_calls")
+        self.tool_calls: list[ToolCall] | None = None
         if raw_tool_calls:
             self.tool_calls = [ToolCall(tc) for tc in raw_tool_calls]
-        else:
-            self.tool_calls = None
 
 
 class MessageChoice:

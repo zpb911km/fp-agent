@@ -190,19 +190,21 @@ async def _execute_bash(command: str) -> str:
             return output
 
         # ── 成功，输出 ≥ 3K → 写入文件 + 预览 ──
-        fd, tmp_path = tempfile.mkstemp(prefix="fp_bash_", suffix=".log", text=True)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(output)
+        import tempfile as _tempfile
+
+        _fd, _path = _tempfile.mkstemp(prefix="fp_bash_", suffix=".log")
+        with os.fdopen(_fd, "w", encoding="utf-8") as _f:
+            _f.write(output)
 
         preview = output[:200]
         return (
             f"✅ 命令执行成功（exit=0，{duration:.1f}s）\n"
-            f"输出较长（{len(output)} 字符），已保存至 {tmp_path}\n\n"
+            f"输出较长（{len(output)} 字符），已保存至 {_path}\n\n"
             f"前 200 字符预览：\n"
             f"────────────────────────\n"
             f"{preview}\n"
             f"────────────────────────\n\n"
-            f"需要完整内容 → read_file({tmp_path!r})"
+            f"需要完整内容 → read_file({_path!r})"
         )
 
     except Exception as e:

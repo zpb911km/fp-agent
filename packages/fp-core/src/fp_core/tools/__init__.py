@@ -3,7 +3,7 @@ Tools 包 — 插件化工具系统（全异步版本）
 
 核心原则:
 - bash, read_file, write_file, edit_file 必须保持直接绑定（core.py），不可插件化
-- 其他工具通过 plugins/*_plugin.py 插件机制动态加载
+- 其他工具通过 extensions/*_plugin.py 插件机制动态加载
 
 包导出:
 - ToolRegistry: 工具注册表类
@@ -33,19 +33,23 @@ class ToolRegistry:
 
     def _load_core(self):
         """加载核心工具（直接绑定，不可插件化）"""
-        from .core import execute_core_tool, get_core_definitions
+        from fp_core.tools.core import execute_core_tool, get_core_definitions
 
         self._core_defs = get_core_definitions()
         self._core_executor = execute_core_tool
 
     def _load_plugins(self):
         """自动扫描并加载插件（内置 → 用户，同名覆盖）"""
-        builtin_dir = os.path.join(os.path.dirname(__file__), "plugins")
-        self._load_from_dir(builtin_dir, "fp_core.tools.plugins")
+        builtin_dir = os.path.join(os.path.dirname(__file__), "extensions")
+        self._load_from_dir(builtin_dir, "fp_core.tools.extensions")
 
-        # 用户工具目录（跨平台：Linux ~/.local/share/fp/tools/plugins, Windows %LOCALAPPDATA%/fp/tools/plugins）
-        user_dir = os.path.join(get_data_dir(), "tools", "plugins")
+        # 用户工具目录（跨平台：Linux ~/.local/share/fp/tools/extensions, Windows %LOCALAPPDATA%/fp/tools/extensions）
+        # 向后兼容：同时扫描旧目录 ~/.local/share/fp/tools/plugins/
+        user_dir = os.path.join(get_data_dir(), "tools", "extensions")
         self._load_from_dir(user_dir)
+        legacy_dir = os.path.join(get_data_dir(), "tools", "plugins")
+        if legacy_dir != user_dir and os.path.isdir(legacy_dir):
+            self._load_from_dir(legacy_dir)
 
     def _load_from_dir(self, directory: str, package_prefix: str | None = None):
         """从指定目录加载插件工具"""
@@ -60,7 +64,7 @@ class ToolRegistry:
 
             try:
                 if package_prefix:
-                    module = importlib.import_module(f".plugins.{plugin_name}", package="fp_core.tools")
+                    module = importlib.import_module(f".extensions.{plugin_name}", package="fp_core.tools")
                 else:
                     spec = importlib.util.spec_from_file_location(plugin_name, os.path.join(directory, fname))
                     if spec is None or spec.loader is None:
@@ -90,6 +94,20 @@ class ToolRegistry:
                     print(f"[tools] ⚠️ 插件 {plugin_name} 缺少 PLUGIN_DEFINITION 或 execute，跳过")
             except Exception as e:
                 print(f"[tools] ⚠️ 加载插件 {plugin_name} 失败: {e}")
+
+    def register_tool(self, name: str, definition: dict, executor: Callable):
+        """动态注册一个工具（供生命周期插件使用）
+
+        Args:
+            name: 工具名称（如 'task_create'）
+            definition: OpenAI function calling schema dict
+            executor: 异步处理函数，签名 async def(params: dict) -> str
+        """
+        self._plugins[f"lifecycle/{name}"] = {
+            "definition": definition,
+            "executor": executor,
+            "source": "lifecycle_plugin",
+        }
 
     def get_all_definitions(self) -> list[dict]:
         """获取所有工具的 OpenAI function calling schema 列表"""
@@ -141,77 +159,3 @@ def create_registry() -> ToolRegistry:
 async def execute_tool(tool_name: str, params: dict[str, Any]) -> Any:
     """执行指定工具（异步）"""
     return await registry.execute(tool_name, params)
-
-
-# ═══════════════════════════════════════════════════════════════════
-# 兼容旧代码的导出
-# ═══════════════════════════════════════════════════════════════════
-
-# TOOL_HANDLERS 不再维护同步映射，改用异步 dispatch 函数
-
-
-async def dispatch(tool_name: str, **kwargs) -> str:
-    """
-    工具调度函数（异步）
-
-    Args:
-        tool_name: 工具名称
-        **kwargs: 工具参数
-
-    Returns:
-        执行结果字符串
-    """
-    try:
-        result = await execute_tool(tool_name, kwargs)
-        return str(result) if result is not None else "执行成功（无返回）"
-    except TypeError as e:
-        return f"错误：工具参数错误 - {e}"
-    except Exception as e:
-        return f"错误：工具执行失败 - {e}"
-
-
-# ═══════════════════════════════════════════════════════════════════
-# async 快捷函数
-# ═══════════════════════════════════════════════════════════════════
-
-
-async def bash(command: str) -> str:
-    """执行 shell 命令"""
-    return await execute_tool("bash", {"command": command})
-
-
-async def read_file(file_path: str, offset: int | None = None, limit: int | None = None) -> str:
-    """读取文件内容"""
-    params: dict[str, Any] = {"file_path": file_path}
-    if offset is not None:
-        params["offset"] = offset
-    if limit is not None:
-        params["limit"] = limit
-    return await execute_tool("read_file", params)
-
-
-async def write_file(file_path: str, content: str) -> str:
-    """写入文件"""
-    return await execute_tool("write_file", {"file_path": file_path, "content": content})
-
-
-async def edit_file(file_path: str, old_string: str, new_string: str) -> str:
-    """编辑文件（精确替换）"""
-    return await execute_tool(
-        "edit_file",
-        {
-            "file_path": file_path,
-            "old_string": old_string,
-            "new_string": new_string,
-        },
-    )
-
-
-async def python(code: str) -> str:
-    """执行 Python 代码"""
-    return await execute_tool("python", {"code": code})
-
-
-async def web_search(query: str) -> str:
-    """网络搜索"""
-    return await execute_tool("web_search", {"query": query})

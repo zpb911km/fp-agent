@@ -578,7 +578,7 @@ class ACPServer:
         self._session_id = self._agent.session.session_id
 
         self._log(f"✅  ACP Server 启动 (session={self._session_id})")
-        self._log(f"   模型: {self._agent.model}")
+        self._log(f"   模型: {self._agent.state.model_name}")
 
         # ── 设置异步 stdin 读取器 ──
         loop = asyncio.get_event_loop()
@@ -746,9 +746,15 @@ class ACPServer:
 
         参考: https://agentclientprotocol.com/protocol/v1/session-setup
         """
-        self._agent.save_context()
+        self._agent.state.session.save_context(self._agent.state.conversation.messages)
         new_sid = self._agent.session.create_session()
-        self._agent.rebuild_context()
+        from fp_core.core.prompt_builder import PromptBuilder
+
+        prompt = PromptBuilder().build_system_prompt()
+        self._agent.state.conversation.reset(prompt)
+        saved = self._agent.state.session.load_context(prompt)
+        if len(saved) > 1:
+            self._agent.state.conversation.replace_all(saved)
         self._session_id = new_sid
         self._log(f"创建新会话: {new_sid}")
 
@@ -769,17 +775,27 @@ class ACPServer:
         if not session_id:
             return {"sessionId": self._agent.session.session_id}
 
-        self._agent.save_context()
-        if self._agent.switch_session(session_id):
+        self._agent.state.session.save_context(self._agent.state.conversation.messages)
+        if self._agent.session.switch_session(session_id):
             self._session_id = session_id
             self._log(f"恢复会话: {session_id}")
+            prompt = self._agent.state.conversation.system_prompt
+            saved = self._agent.session.load_context(prompt)
+            if len(saved) > 1:
+                self._agent.state.conversation.replace_all(saved)
 
             # 注意：命令注册通知在 _dispatch 中响应之后发送
             return {"sessionId": session_id}
         else:
             self._log(f"会话不存在: {session_id}，自动创建新会话")
             new_sid = self._agent.session.create_session()
-            self._agent.rebuild_context()
+            from fp_core.core.prompt_builder import PromptBuilder
+
+            prompt = PromptBuilder().build_system_prompt()
+            self._agent.state.conversation.reset(prompt)
+            saved = self._agent.state.session.load_context(prompt)
+            if len(saved) > 1:
+                self._agent.state.conversation.replace_all(saved)
             self._session_id = new_sid
             return {"sessionId": new_sid}
 
@@ -866,6 +882,16 @@ class ACPServer:
                 buf = acp_io.flush_text()
                 if buf.strip():
                     self._send_message_notification(buf, session_id=sid)
+
+                # 取消路径也可能有热重载残留（/reload 已执行完毕但 cancel 同时到达）
+                reload_data = getattr(self._agent.state, "_reload_result", None)
+                if reload_data is not None:
+                    new_agent, info = reload_data
+                    self._agent.state._reload_result = None
+                    self._agent = new_agent
+                    self._register_follow_hooks()
+                    self._log(f"🔄 Agent 已热重载 (model={info['model']})")
+
                 return {"stopReason": "cancelled"}
             finally:
                 self._current_task = None
@@ -881,6 +907,17 @@ class ACPServer:
                 self._send_message_notification(buf, session_id=sid)
             elif reply_text:
                 self._send_message_notification(reply_text, session_id=sid)
+
+            # ── 热重载检测：/reload 命令已将新 Agent 存入 state._reload_result ──
+            # 引用交换后，后续 prompt 由新 Agent 处理（旧 Agent 已 shutdown）
+            reload_data = getattr(self._agent.state, "_reload_result", None)
+            if reload_data is not None:
+                new_agent, info = reload_data
+                self._agent.state._reload_result = None  # 防止重复消费
+                self._agent = new_agent
+                # 新 Agent 有全新的 lifecycle 实例，需重新注册 Follow Agent 钩子
+                self._register_follow_hooks()
+                self._log(f"🔄 Agent 已热重载 (model={info['model']}, session={info['session_id']})")
 
             return {"stopReason": "end_turn"}
         finally:
@@ -1081,7 +1118,7 @@ class ACPServer:
     async def _shutdown_agent(self):
         """安全关闭 Agent"""
         try:
-            self._agent.set_nuclear_exit()
+            self._agent.state.nuclear_exit = True
             with contextlib.redirect_stdout(sys.stderr):
                 await self._agent.shutdown()
         except Exception as e:

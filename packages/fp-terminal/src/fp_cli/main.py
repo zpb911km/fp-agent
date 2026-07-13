@@ -221,10 +221,26 @@ async def main():
 
                 try:
                     response = await agent.process(user_input)
+
+                    # ── 热重载检测：/reload 命令已将新 Agent 存入 state._reload_result ──
+                    reload_data = getattr(agent.state, "_reload_result", None)
+                    if reload_data is not None:
+                        new_agent, info = reload_data
+                        agent.state._reload_result = None  # 防止重复消费
+                        agent = new_agent
+                        _current_agent = agent
+                        display.info(f"🔄 Agent 已切换 (model={info['model']}, session={info['session_id']})")
+
                     # 命令输出：由 response.content 单一通路传递，不再由命令内部 display
                     # 此处用 rich Markdown 渲染（terminal 唯一消费点）
                     if user_input.strip().startswith("/") and response.content:
-                        display.render_markdown(response.content)
+                        try:
+                            from rich.console import Console
+                            from rich.markdown import Markdown
+
+                            Console().print(Markdown(response.content))
+                        except ImportError:
+                            print(response.content)
                 except (SystemExit, asyncio.CancelledError):
                     break
                 except Exception as e:

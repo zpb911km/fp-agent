@@ -1,0 +1,135 @@
+"""TaskSystemPlugin — 任务系统插件
+
+通过生命周期钩子注入任务管理能力：
+- ON_INIT: 注册 4 个任务工具 + 注入 system prompt 描述
+- ON_BEFORE_LLM_CALL: 每次 LLM 调用前附加 [task] 提醒
+"""
+
+from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
+from fp_core.plugins.base.plugin import Plugin, PluginConfig
+
+from .store import TaskStore
+from .tools import ALL_DEFINITIONS, handle_clear, handle_create, handle_list, handle_update
+
+# ── Task 系统描述文本（注入到 system prompt） ────────
+# 注意：不重复工具功能（已通过 OpenAI schema 的 description 提供）。
+# 此处只解释消息中 [task] 标记的含义，让 LLM 理解这个信号。
+
+TASK_SYSTEM_DESCRIPTION = """【任务系统】
+每次 LLM 调用前会在消息末尾看到 [task] 进度标记：
+  [task] ▶#N        — 进行中的任务 #N
+  [task] ⬜M         — M 个待办任务
+  [task] ▶#N ⬜M    — 进行中 #N + 待办 M 个
+无标记 = 无待办任务
+
+看到 [task] 时，根据需要调用 task_create/task_update/task_clear 管理进度。
+通过 task_list 查看完整清单，使用 #ID 引用追踪任务。"""
+
+
+class TaskSystemPlugin(Plugin):
+    """任务系统插件"""
+
+    name = "task_system"
+    version = "1.0.0"
+
+    def __init__(self, config: PluginConfig | None = None):
+        super().__init__(config)
+        self._store = TaskStore()
+        self._description_injected = False
+
+    def on_register(self, lifecycle: LifecycleManager):
+        """注册两个生命周期钩子"""
+        lifecycle.register(LifecycleHook.ON_INIT, self._on_init, priority=50, name="task_system_init")
+        lifecycle.register(
+            LifecycleHook.ON_BEFORE_LLM_CALL,
+            self._on_before_llm_call,
+            priority=50,
+            name="task_system_before_call",
+        )
+
+    def on_unregister(self):
+        """插件卸载时清理"""
+        self._store = TaskStore()
+
+    # ── 钩子实现 ───────────────────────────────────
+
+    async def _on_init(self, ctx: HookContext, **kwargs) -> HookContext:
+        """ON_INIT 钩子：注册工具 + 注入 system prompt 描述
+
+        从 kwargs 中获取 tool_registry，注册 4 个任务工具。
+        通过 context.data.system_prompt_append 返回描述文本，
+        由 Agent 在 ON_INIT emit 后追加到 system prompt。
+        """
+        # 1. 注册工具
+        tool_registry = kwargs.get("tool_registry")
+        if tool_registry is not None:
+            for defn in ALL_DEFINITIONS:
+                tool_name = defn["function"]["name"]
+                executor = self._get_executor(tool_name)
+                tool_registry.register_tool(tool_name, defn, executor)
+
+        # 2. 标记描述已注入（ON_BEFORE_LLM_CALL 不再重复注入）
+        self._description_injected = True
+
+        # 3. 返回 system_prompt_append
+        #    通过 HookContext.data 传递，Agent 会在 emit 后读取并追加到 system prompt
+        ctx.data["system_prompt_append"] = TASK_SYSTEM_DESCRIPTION
+
+        return ctx
+
+    async def _on_before_llm_call(self, ctx: HookContext, **kwargs) -> HookContext:
+        """ON_BEFORE_LLM_CALL 钩子：附加 [task] 跟随提醒
+
+        将 [task] 标记追加到最后一条消息的 content 末尾，格式：
+          [task] ▶#N ⬜M
+          [task] ▶#N
+          [task] ⬜M
+        无待办/进行中时不附加。
+
+        如果最后一条消息无 content（如纯 tool_calls 的 assistant 消息），跳过不附加。
+        """
+        # 首次调用时注入 system prompt 描述（如果 ON_INIT 没完成注入的 fallback）
+        if not self._description_injected:
+            modified = list(kwargs.get("messages", []))
+            if modified and modified[0].get("role") == "system":
+                existing = modified[0]["content"]
+                if "【任务系统】" not in existing:
+                    modified[0] = dict(modified[0])
+                    modified[0]["content"] = existing + "\n\n" + TASK_SYSTEM_DESCRIPTION
+                    ctx.data["modified_messages"] = modified
+            self._description_injected = True
+
+        # 生成 [task] 提醒
+        summary = self._store.summarize()
+        if summary is None:
+            return ctx  # 无任务，不附加
+
+        hint = f"[task] {summary}"
+
+        # ── 将 [task] 追加到最后一条消息的 content 末尾 ──
+        modified = list(kwargs.get("messages", []))
+        if not modified:
+            return ctx  # 空消息列表，跳过
+
+        last = modified[-1]
+        last_content = last.get("content")
+        if not last_content:  # content 为 None 或空字符串（如纯 tool_calls 的 assistant 消息）
+            return ctx  # 跳过，不附加
+
+        modified[-1] = dict(last)  # 复制一份避免副作用
+        modified[-1]["content"] = last_content + f"\n\n{hint}"
+        ctx.data["modified_messages"] = modified
+
+        return ctx
+
+    # ── 工具分派 ───────────────────────────────────
+
+    def _get_executor(self, tool_name: str):
+        """根据工具名返回对应的异步处理函数"""
+        executors = {
+            "task_create": handle_create,
+            "task_update": handle_update,
+            "task_list": handle_list,
+            "task_clear": handle_clear,
+        }
+        return executors[tool_name]

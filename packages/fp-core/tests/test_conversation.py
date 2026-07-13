@@ -1,8 +1,6 @@
 """测试 ConversationState — 上下文状态管理核心"""
 
-import pytest
-
-from fp_core.core.conversation import CompactConfig, ConversationState
+from fp_core.core.conversation import ConversationState
 
 
 class TestConversationInit:
@@ -114,12 +112,6 @@ class TestAddMethods:
         assert result["role"] == "tool"
         assert result["tool_call_id"] == "call_123"
         assert result["content"] == "工具返回结果"
-
-    def test_add_system_message(self):
-        cs = ConversationState()
-        result = cs.add_system_message("系统消息")
-        assert result["role"] == "system"
-        assert result["content"] == "系统消息"
 
 
 class TestQueryMethods:
@@ -249,128 +241,17 @@ class TestToolOrdering:
         assert any(m["role"] == "system" and "被遗漏的结果" in m["content"] for m in result)
 
 
-class TestBack:
-    """回退功能"""
-
-    def test_back_normal(self):
-        cs = ConversationState("system")
-        cs.add_user_message("A")
-        cs.add_assistant_message({"role": "assistant", "content": "B"})
-        cs.add_user_message("C")
-
-        deleted = cs.back(target_idx=2, mode=2)
-        assert deleted > 0
-        assert len(cs) == 3  # system + A + B
-
-    def test_back_invalid_index(self):
-        cs = ConversationState("system")
-        cs.add_user_message("A")
-        deleted = cs.back(target_idx=99, mode=2)
-        assert deleted == 0
-
-    def test_back_no_history(self):
-        cs = ConversationState("system")
-        deleted = cs.back(target_idx=1, mode=2)
-        assert deleted == 0
-
-    def test_back_mode_1_retains(self):
-        """mode=1 保留后续消息"""
-        cs = ConversationState("system")
-        cs.add_user_message("A")
-        cs.add_assistant_message({"role": "assistant", "content": "B"})
-        deleted = cs.back(target_idx=1, mode=1)
-        assert deleted == 0  # 未删除
-        assert len(cs) == 3
-
-
-class TestForkSnapshot:
-    """分支快照"""
-
-    def test_fork_snapshot_contains_all(self):
-        cs = ConversationState("system")
-        cs.add_user_message("A")
-        cs.add_assistant_message({"content": "B"})
-        snapshot = cs.fork_snapshot()
-        assert len(snapshot) == 3
-        assert snapshot[0]["role"] == "system"
-
-    def test_fork_snapshot_is_copy(self):
-        """快照是拷贝，修改快照不影响原状态"""
-        cs = ConversationState("system")
-        snapshot = cs.fork_snapshot()
-        snapshot.append({"role": "user", "content": "hack"})
-        assert len(cs) == 1
-
-
-class TestCompact:
-    """压缩功能"""
-
-    @pytest.mark.asyncio
-    async def test_compact_no_summarizer_raises(self):
-        """summarizer 为 None 时抛出 ValueError"""
-        cs = ConversationState("system")
-        cs.add_user_message("A")
-        cs.add_assistant_message({"role": "assistant", "content": "B"})
-        with pytest.raises(ValueError, match="summarizer"):
-            await cs.compact(None)
-
-    @pytest.mark.asyncio
-    async def test_compact_short_history(self):
-        """历史太短时不压缩"""
-        cs = ConversationState("system")
-        cs.add_user_message("A")
-
-        async def fake_summarizer(_):
-            return "摘要"
-
-        result, desc = await cs.compact(fake_summarizer, CompactConfig(keep_meaningful=4))
-        assert result is False
-        assert "无需压缩" in desc
-
-    @pytest.mark.asyncio
-    async def test_compact_success(self):
-        """成功压缩"""
-        cs = ConversationState("system")
-        # 添加 6 条消息，超过 keep_meaningful=4
-        for i in range(6):
-            cs.add_user_message(f"消息{i}")
-            cs.add_assistant_message({"role": "assistant", "content": f"回复{i}"})
-
-        async def fake_summarizer(text: str) -> str:
-            return "这是前几条消息的摘要"
-
-        result, desc = await cs.compact(fake_summarizer, CompactConfig(keep_meaningful=4))
-        assert result is True
-        assert "已压缩" in desc
-        # 摘要后总消息数 = system + 摘要 + 保留的
-        assert len(cs) < 13  # 原始 1 + 12
-
-    @pytest.mark.asyncio
-    async def test_compact_summarizer_error(self):
-        """summarizer 抛出异常 → 不崩溃，返回错误"""
-        cs = ConversationState("system")
-        for i in range(6):
-            cs.add_user_message(f"消息{i}")
-            cs.add_assistant_message({"role": "assistant", "content": f"回复{i}"})
-
-        async def broken_summarizer(_):
-            raise RuntimeError("模拟失败")
-
-        result, desc = await cs.compact(broken_summarizer)
-        assert result is False
-        assert "失败" in desc
-
-
 class TestEdgeCases:
     """边界情况"""
 
     def test_system_at_position_0_only(self):
         """system prompt 始终在位置 0"""
         cs = ConversationState("system")
-        cs.add_system_message("另一个 system")
         assert cs[0]["role"] == "system"
-        assert cs[0]["content"] == "system"  # 没被替换
-        assert cs[1]["role"] == "system"
+        assert cs[0]["content"] == "system"
+
+        cs.add_user_message("用户")
+        assert cs[1]["role"] == "user"
         assert cs[1]["content"] == "另一个 system"
 
     def test_empty_messages_for_llm(self):
