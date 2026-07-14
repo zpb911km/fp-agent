@@ -10,8 +10,9 @@ import asyncio
 import contextlib
 import os
 import sys
+import time
 
-from fp_core.config import apply_style, truncate
+from fp_core.config import apply_style, color_supported, truncate
 
 # ── 静默模式：子 agent 执行时抑制所有终端输出 ──────────
 _FP_SILENT = os.environ.get("FP_SUBAGENT_SILENT") == "1"
@@ -322,48 +323,163 @@ def shutdown_panel(
     print("👋  再见！")
 
 
-LOGO_ART = r"""
-::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-:::::::::::::::::::::::::,,,,,,,,,,:::::::::::::::::::::::::
-::::::::::::::::::::::,,,,         ,,,::::::::::::::::::::::
-::::::::::::::::::::,,  ;)XYYYYYYUn+   ,::::::::::::::::::::
-::::::::::::::::::, ,[uzccvvvvvvvvvcczf> ,::::::::::::::::::
-:::::::::::,  ,:: ,?rcXXv]        l/XXzv\i ,::,  ,::::::::::
-:::::::::,,~|}I ,_/vX1,               irXx1! ,<|{I,:::::::::
-:::::::::, |oLi  rMXI                   ]bp_  )hO< ,::::::::
-:::::::::, |oL>i1uL\:                   ~cJt?;1aO< ,::::::::
-:::::::::, |oC>/oY!                      ,}dZ~{hO< ,::::::::
-:::::::::, |ow|XMYl                       [bktn*0< ,::::::::
-:::::::::, |oWdo8Yl                       [b&bh80< ,::::::::
-:::::::::, |o0?x#Yl  l<~<I        ,i~~>:  [bp}\o0< ,::::::::
-:::::::::, |oC>t*Yl :ja#kt,       <J##Z?  [bw+{hO< ,::::::::
-:::::::::, |oL>t*Yl ;v%$&x:       +Z$$b}  [bw_1hO< ,::::::::
-:::::::::, \oL>t*Yl ;u8$&r:       ~Z$$b}  [bw+1aO< ,::::::::
-:::::::::, (kC+r#Yl ;nM%*j:       ~Q88q]  [bq])bL< ,::::::::
-:::::::::,,!]jQhWXi ,>[}]i        :+}}-I ,}dMpY(+;,:::::::::
-:::::::::::, >{()nL\:                   ~cJt)(?; ,::::::::::
-:::::::::::::,   r#Xl                   ]bp_   ,::::::::::::
-:::::::::::::::,,_/vX1,               >rXx1!,,::::::::::::::
-::::::::::::::::: ,?rcXYv]        l/XXzv\! ,::::::::::::::::
-::::::::::::::::::, ,[ucccvcvvvvvcccccf> ,::::::::::::::::::
-::::::::::::::::::::,,  :)zYYYYYYYn+   ,::::::::::::::::::::
-::::::::::::::::::::::::,,         ,:,::::::::::::::::::::::
-:::::::::::::::::::::::::,,,,,,,,,,:::::::::::::::::::::::::
-::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-::::::::::::::::::::::::Five Pebbles::::::::::::::::::::::::
-::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-"""
+def _logo_gradient_color(ratio: float) -> str:
+    """从暖橙 (top) 到冷紫 (bottom) 的渐变色 ANSI true color 转义码
+
+    Args:
+        ratio: 0.0 (顶) ~ 1.0 (底)
+    """
+    r = int(255 * (1 - ratio) + 107 * ratio)
+    g = int(107 * (1 - ratio) + 91 * ratio)
+    b = int(53 * (1 - ratio) + 255 * ratio)
+    return f"\033[38;2;{r};{g};{b}m"
 
 
-def print_logo():
-    """打印 ASCII 启动画（支持按配置截断）"""
+# ── Keygen 扫描光带动画参数 ──────────────────────────
+_KEYGEN_FRAME_MS = 35  # 每帧毫秒数
+_KEYGEN_STEP = 1.0  # 每帧光带移动行数
+_KEYGEN_GLOW_RADIUS = 5  # 光带影响半径（行）
+
+
+def _scan_color(i: int, scan_line: float, total: int) -> str:
+    """扫描光带颜色函数
+
+    光带中心为暖金色，向外平滑过渡到暗蓝。
+    模拟 CRT 荧光粉被电子束逐行激发的视觉效果。
+
+    Args:
+        i: 当前行号
+        scan_line: 光带中心线（浮点数，支持子像素移动）
+        total: 总行数
+    """
+    dist = abs(i - scan_line)
+    radius = _KEYGEN_GLOW_RADIUS
+
+    if dist <= radius:
+        t = dist / radius
+        r = int(255 * (1 - t) + 40 * t)
+        g = int(200 * (1 - t) + 60 * t)
+        b = int(60 * (1 - t) + 130 * t)
+    else:
+        r, g, b = 12, 16, 38
+
+    return f"\033[38;2;{r};{g};{b}m"
+
+
+def _build_startup_frame(model: str, resume: bool) -> tuple[list[str], int]:
+    """构建启动信息面板的文本行
+
+    返回 (lines, max_w)，每行等宽。
+    """
+    try:
+        from importlib.metadata import version as _meta_version
+
+        ver = _meta_version("fp-core")
+    except Exception:
+        ver = "?"
+
+    model_display = model if model else "(none)"
+    status = "Resume Session" if resume else "New Session"
+    ver_str = f"v{ver}"
+    title = "Five Pebbles"
+
+    PANEL_W = 50
+    BORDER = "  +" + "=" * (PANEL_W - 4) + "+"
+
+    def content_line(text: str) -> str:
+        inner = PANEL_W - 4
+        left = (inner - len(text)) // 2
+        right = inner - left - len(text)
+        return f"  |{' ' * left}{text}{' ' * right}|"
+
+    lines = [
+        BORDER,  # top border
+        content_line(""),  # padding
+        content_line(f"{title}  {ver_str}"),  # title
+        content_line(""),  # padding
+        content_line("=====  Initializing  ====="),  # divider
+        content_line(""),  # padding
+        content_line(f"Model:  {model_display}"),  # model
+        content_line(f"Status: {status}"),  # status
+        content_line(""),  # padding
+        BORDER,  # bottom border
+    ]
+
+    max_w = max(len(line) for line in lines)
+    return lines, max_w
+
+
+def _print_logo_static(lines: list[str], total: int):
+    """打印静态渐变色面板（暖橙→冷紫逐行渐变）"""
+    for i, line in enumerate(lines):
+        ratio = i / max(total - 1, 1)
+        ansi = _logo_gradient_color(ratio)
+        print(f"{ansi}{line}\033[0m")
+
+
+def print_logo(model: str = "", resume: bool = False):
+    """启动动画：一束暖金光带扫描面板，逐行揭示启动信息
+
+    动画流程：
+      1. 🌀 光带从顶到底扫描，经过的字符暖金高亮
+      2. 🌈 光带离开后渐变为暖橙→冷紫底色
+      3. 💡 最终定格显示版本/模型/会话状态
+    """
     if _silent():
         return
-    art = truncate(LOGO_ART, "logo")
-    print(apply_style(art, "logo"))
+
+    lines, max_w = _build_startup_frame(model, resume)
+    total = len(lines)
+
+    use_color = color_supported()
+    use_anim = use_color and sys.stdout.isatty()
+
+    # ── 不支持动画：直接静态输出 ──
+    if not use_anim:
+        _print_logo_static(lines, total)
+        print()
+        return
+
+    # ════════════════════════════════════════════
+    #  ★ 扫描光带动画 ★
+    # ════════════════════════════════════════════
+    try:
+        sys.stdout.write("\033[?25l")  # 隐藏光标
+        sys.stdout.flush()
+
+        scan = -2.0
+        scan_end = total + 2.0
+
+        # 第一帧
+        for i, line in enumerate(lines):
+            ansi = _scan_color(i, scan, total)
+            sys.stdout.write(ansi + line + "\033[0m\n")
+        sys.stdout.flush()
+        time.sleep(_KEYGEN_FRAME_MS / 1000)
+
+        # 后续帧：上移覆盖
+        while True:
+            scan += _KEYGEN_STEP
+            if scan >= scan_end:
+                break
+
+            sys.stdout.write(f"\033[{total}A")
+            for i, line in enumerate(lines):
+                ansi = _scan_color(i, scan, total)
+                sys.stdout.write(ansi + line.ljust(max_w) + "\033[0m\n")
+            sys.stdout.flush()
+            time.sleep(_KEYGEN_FRAME_MS / 1000)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sys.stdout.write("\033[?25h")  # 恢复光标
+        sys.stdout.flush()
+
+    # ── 定格渐变色 ──
+    sys.stdout.write(f"\033[{total}A")
+    _print_logo_static(lines, total)
+    print()
 
 
 # ═══════════════════════════════════════════════════════════

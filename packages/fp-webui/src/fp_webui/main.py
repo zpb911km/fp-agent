@@ -1228,7 +1228,7 @@ def main():
         args.host = "0.0.0.0"
 
     print()
-    display.print_logo()
+    display.print_logo(model="webui")
     print()
     if args.host == "0.0.0.0":
         display.warning("  ⚠️  已监听 0.0.0.0，局域网设备可访问此服务")

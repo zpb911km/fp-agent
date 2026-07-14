@@ -188,7 +188,7 @@ async def main():
     signal.signal(signal.SIGINT, _raw_sigint_handler)
 
     if not os.environ.get("FP_SUBAGENT_QUIET"):
-        display.print_logo()
+        display.print_logo(model=agent.model, resume=args.resume)
         display.startup(agent.model, resume=args.resume)
 
     if args.message:
