@@ -351,6 +351,7 @@ async def _execute_edit_file(
                 edit_mode = "行号替换"
 
             else:  # old_string 模式
+                assert old_string is not None  # 类型收窄：已通过上方守卫
                 if old_string not in content:
                     return (
                         "错误：未找到要替换的文本\n  提示：改用行号模式（start_line + new_string）无需精确匹配旧文本。"

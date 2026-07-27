@@ -112,7 +112,7 @@ class Agent:
 
         # IO 通道（默认静默）
         self._default_io = io or IOChannel()
-        self._on_shutdown = on_shutdown
+        self._shutdown_callback = on_shutdown
 
         # 检查配置
         if not config.check_llm_config():
@@ -281,7 +281,9 @@ class Agent:
 
     def _register_builtin_hooks(self) -> None:
         self.lifecycle.register(LifecycleHook.ON_INIT, self._on_init, priority=0, name="builtin_init")
-        self.lifecycle.register(LifecycleHook.ON_SHUTDOWN, self._on_shutdown, priority=999, name="builtin_shutdown")
+        self.lifecycle.register(
+            LifecycleHook.ON_SHUTDOWN, self._builtin_shutdown, priority=999, name="builtin_shutdown"
+        )
 
     async def _on_init(self, ctx: HookContext, **kwargs) -> HookContext:
         if self.enable_log:
@@ -289,7 +291,7 @@ class Agent:
         ctx.data["initialized"] = True
         return ctx
 
-    async def _on_shutdown(self, ctx: HookContext, **kwargs) -> HookContext:
+    async def _builtin_shutdown(self, ctx: HookContext, **kwargs) -> HookContext:
         """关闭钩子 — 生成会话摘要 + 保存上下文 + 显示退出面板"""
         # 热重载时不显示关闭面板
         if getattr(self.state, "silent_shutdown", False):
@@ -313,7 +315,7 @@ class Agent:
             self.session.save_context(self._conv.to_serializable())
 
         # 触发 shutdown 回调（终端用于渲染退出面板）
-        if self._on_shutdown and not getattr(self.state, "silent_shutdown", False):
+        if self._shutdown_callback and not getattr(self.state, "silent_shutdown", False):
             info = self.session.list_sessions().get(self.session.session_id, {})
             msg_count = info.get("message_count", 0)
             created = info.get("created", "?")
@@ -326,7 +328,7 @@ class Agent:
             except Exception:
                 pass
 
-            self._on_shutdown(
+            self._shutdown_callback(
                 summary=summary,
                 file=f"{self.session.session_id}.jsonl",
                 model=self.model,
