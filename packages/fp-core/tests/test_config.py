@@ -1,7 +1,6 @@
 """测试 config 模块 — 纯逻辑，无网络依赖"""
 
 import os
-from unittest.mock import patch
 
 # 要在 import config 之前设环境变量，防止 config 模块加载时读取真实配置
 os.environ.setdefault("XDG_CONFIG_HOME", "/tmp/fp_test_config")
@@ -100,85 +99,12 @@ class TestGetDefaultConfig:
         cfg = config.get_default_config()
         assert cfg["TEMPERATURE"] == 0.8
 
-    def test_display_styles_present(self):
-        """包含显示样式配置"""
-        cfg = config.get_default_config()
-        assert "display_styles" in cfg
-        assert "info" in cfg["display_styles"]
-        assert "error" in cfg["display_styles"]
-
     def test_is_valid_json(self):
         """返回的配置可以序列化为 JSON（无特殊对象）"""
         import json
 
         cfg = config.get_default_config()
         json.dumps(cfg)  # 不应抛出异常
-
-
-class TestColorSupport:
-    """color_supported() — 终端颜色检测"""
-
-    @patch.dict(os.environ, {"FORCE_COLOR": "1"}, clear=True)
-    def test_force_color(self):
-        """FORCE_COLOR 环境变量 → 返回 True"""
-        assert config.color_supported() is True
-
-    @patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True)
-    def test_no_color(self):
-        """NO_COLOR 环境变量 → 返回 False"""
-        assert config.color_supported() is False
-
-
-class TestDisplayStyle:
-    """get_display_style() — 显示样式"""
-
-    def test_unknown_style(self):
-        """未知样式名 → 返回默认（无颜色、无样式）"""
-        style = config.get_display_style("nonexistent")
-        assert style["color"] == ""
-        assert style["bold"] is False
-
-    def test_default_styles_exist(self):
-        """内置样式列表中各样式均有定义"""
-        for name in ("info", "error", "warning", "llm_thought", "llm_tool"):
-            style = config.get_display_style(name)
-            assert isinstance(style, dict)
-            assert "color" in style
-
-
-class TestTruncate:
-    """truncate() — 文本截断"""
-
-    def test_no_truncation_needed(self):
-        """短文本不截断"""
-        result = config.truncate("short text", "info")
-        # 无配置时默认 -1（不截断）
-        assert result == "short text"
-
-    def test_long_text_truncated(self):
-        """长文本按配置截断"""
-        # 临时覆盖 _json_cfg
-        config._json_cfg = {
-            "display_truncation": {"test_field": 10},
-        }
-        result = config.truncate("hello world this is long", "test_field")
-        assert len(result) < len("hello world this is long")
-        assert "…" in result
-        assert "+" in result  # 包含超出的字符计数
-
-
-class TestCheckLlmConfig:
-    """check_llm_config() — LLM 配置完整性检查"""
-
-    def test_missing_key(self):
-        """API Key 缺失 → 返回 False"""
-        # 模拟空配置
-        with (
-            patch.object(config, "LLM_API_KEY", ""),
-            patch.object(config, "LLM_API_BASE_URL", "https://test.com"),
-            patch.object(config, "LLM_MODEL", "test-model"),
-        ):
-            assert config.check_llm_config() is False
 
 
 class TestValueFunction:

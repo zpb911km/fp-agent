@@ -44,10 +44,10 @@ except ImportError as e:
     sys.exit(1)
 
 # ── Agent 核心导入 ──────────────────────────────────────
-from fp_core import display
 from fp_core.core.agent import Agent
 from fp_core.core.io import RestIO, WebSocketIO
 from fp_core.core.lifecycle import HookContext, LifecycleHook
+from fp_core.logger import get_logger
 from fp_core.plugins.base.plugin import Plugin
 
 # ════════════════════════════════════════════════════════════
@@ -290,7 +290,7 @@ async def get_agent() -> Agent:
                 webui_plugin = WebUIPlugin()
                 _agent.plugins.register(webui_plugin)
                 await _agent.ensure_initialized()
-                display.info(f"[WebUI] Agent 已初始化 (model={_agent.model})")
+                get_logger().info(f"[WebUI] Agent 已初始化 (model={_agent.model})")
     return _agent
 
 
@@ -300,18 +300,18 @@ async def get_agent() -> Agent:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI 生命周期：启动时初始化 Agent，关闭时清理"""
-    display.info("[WebUI] 🚀 Five Pebbles WebUI 启动中...")
+    get_logger().info("[WebUI] 🚀 Five Pebbles WebUI 启动中...")
 
     # Agent 延迟初始化，第一次请求时创建
     yield
 
     # 关闭
-    display.info("[WebUI] 🛑 正在关闭...")
+    get_logger().info("[WebUI] 🛑 正在关闭...")
     global _agent
     if _agent is not None:
         await _agent.shutdown()
     await event_bus.shutdown()
-    display.info("[WebUI] ✅ 已关闭")
+    get_logger().info("[WebUI] ✅ 已关闭")
 
 
 # ── FastAPI 实例 ─────────────────────────────────────────
@@ -470,7 +470,7 @@ async def new_agent():
                 _agent.state.session.save_context(_agent.state.conversation.messages)
                 await _agent.shutdown()
             except Exception as e:
-                display.warning(f"[WebUI] ⚠️ 旧 Agent shutdown 时发生异常: {e}")
+                get_logger().warning(f"[WebUI] ⚠️ 旧 Agent shutdown 时发生异常: {e}")
             _agent = None
 
         # ── 通知前端准备重连 ──
@@ -489,7 +489,7 @@ async def new_agent():
             _agent.plugins.register(webui_plugin)
             await _agent.ensure_initialized()
         except Exception as e:
-            display.error(f"[WebUI] ❌ 新 Agent 创建失败: {e}")
+            get_logger().error(f"[WebUI] ❌ 新 Agent 创建失败: {e}")
             _agent = None
             raise HTTPException(status_code=500, detail=f"新 Agent 创建失败: {e}") from e
 
@@ -505,12 +505,12 @@ async def new_agent():
             if len(saved) > 1:
                 _agent.state.conversation.replace_all(saved)
             new_sid = _agent.state.session.session_id
-            display.info(f"[WebUI] 🆕 已使用新会话: {new_sid}")
+            get_logger().info(f"[WebUI] 🆕 已使用新会话: {new_sid}")
         except Exception as e:
-            display.error(f"[WebUI] ❌ 新会话初始化失败: {e}")
+            get_logger().error(f"[WebUI] ❌ 新会话初始化失败: {e}")
             raise HTTPException(status_code=500, detail=f"新会话初始化失败: {e}") from e
 
-        display.info(f"[WebUI] 🆕 Agent 新建完成 (model={_agent.model}, session={_agent.session.session_id})")
+        get_logger().info(f"[WebUI] 🆕 Agent 新建完成 (model={_agent.model}, session={_agent.session.session_id})")
 
         # ── 稍等片刻，让前端收到 reload 事件后再推送 done ──
         await asyncio.sleep(0.3)
@@ -855,7 +855,6 @@ async def clear_current_session():
 _RELOAD_MODULES = [
     # 第 1 层：无项目内部依赖
     "fp_core.config",
-    "fp_core.display",
     # 第 2 层：依赖 config
     "fp_core.core.io",
     "fp_core.core.lifecycle",
@@ -945,7 +944,7 @@ async def reload_agent():
         try:
             _reload_modules()
         except RuntimeError as e:
-            display.error(f"[WebUI] ❌ 模块重载失败: {e}")
+            get_logger().error(f"[WebUI] ❌ 模块重载失败: {e}")
             # _agent 保持 None，后续请求会通过 get_agent() 自动创建
             raise HTTPException(status_code=500, detail=f"模块重载失败: {e}") from e
 
@@ -961,7 +960,7 @@ async def reload_agent():
             _agent.plugins.register(webui_plugin)
             await _agent.ensure_initialized()
         except Exception as e:
-            display.error(f"[WebUI] ❌ 新 Agent 创建失败: {e}")
+            get_logger().error(f"[WebUI] ❌ 新 Agent 创建失败: {e}")
             _agent = None
             raise HTTPException(status_code=500, detail=f"新 Agent 创建失败: {e}") from e
 
@@ -976,11 +975,11 @@ async def reload_agent():
                 saved = _agent.state.session.load_context(prompt)
                 if len(saved) > 1:
                     _agent.state.conversation.replace_all(saved)
-                display.info(f"[WebUI] 🔄 已恢复会话: {old_sid}")
+                get_logger().info(f"[WebUI] 🔄 已恢复会话: {old_sid}")
             except Exception as e:
-                display.warning(f"[WebUI] ⚠️ 会话恢复失败: {e}")
+                get_logger().warning(f"[WebUI] ⚠️ 会话恢复失败: {e}")
 
-        display.info(f"[WebUI] 🔄 Agent 重载完成 (model={_agent.model}, session={_agent.session.session_id})")
+        get_logger().info(f"[WebUI] 🔄 Agent 重载完成 (model={_agent.model}, session={_agent.session.session_id})")
 
         # ── 稍等片刻，让前端收到 reload 事件后再推送 done ──
         await asyncio.sleep(0.3)
@@ -1078,7 +1077,7 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
             # 前端此时已显示"已重载"状态，无需再发额外通知。
             current_agent = await get_agent()
             if current_agent is not agent:
-                display.info("[WebUI] ↻ 旧 WS 透明切换到新 Agent（reload 后无缝续传）")
+                get_logger().info("[WebUI] ↻ 旧 WS 透明切换到新 Agent（reload 后无缝续传）")
                 agent = current_agent
 
             if data.get("type") == "message":
@@ -1228,20 +1227,20 @@ def main():
         args.host = "0.0.0.0"
 
     print()
-    display.print_logo(model="webui")
+    print("🤖 Five Pebbles WebUI")
     print()
     if args.host == "0.0.0.0":
-        display.warning("  ⚠️  已监听 0.0.0.0，局域网设备可访问此服务")
-        display.warning("  ⚠️  请妥善保管 Token，建议使用 HTTPS 反向代理")
+        get_logger().warning("  ⚠️  已监听 0.0.0.0，局域网设备可访问此服务")
+        get_logger().warning("  ⚠️  请妥善保管 Token，建议使用 HTTPS 反向代理")
         print()
-    display.info(f"  🌐  WebUI: http://{args.host}:{args.port}")
-    display.info(f"  🔌  WS:    ws://{args.host}:{args.port}/ws/chat")
-    display.info(f"  📡  API:   http://{args.host}:{args.port}/api/health")
+    get_logger().info(f"  🌐  WebUI: http://{args.host}:{args.port}")
+    get_logger().info(f"  🔌  WS:    ws://{args.host}:{args.port}/ws/chat")
+    get_logger().info(f"  📡  API:   http://{args.host}:{args.port}/api/health")
     print()
     # 显示 Token（从文件读，确保与文件一致）
     display_token = _load_or_create_token()
-    display.info(f"  🔑  启动 Token: ...{display_token[-4:]}")
-    display.info(f"  📄  Token 文件: {_TOKEN_FILE}  （cat 查看完整 Token）")
+    get_logger().info(f"  🔑  启动 Token: ...{display_token[-4:]}")
+    get_logger().info(f"  📄  Token 文件: {_TOKEN_FILE}  （cat 查看完整 Token）")
     print()
 
     uvicorn.run(

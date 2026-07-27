@@ -22,7 +22,7 @@ import sys
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from fp_core import display
+from fp_core.logger import get_logger
 from fp_core.plugins.base.plugin import Plugin
 
 # ── 模块重载列表（按依赖顺序） ────────────────────────────────
@@ -35,7 +35,6 @@ from fp_core.plugins.base.plugin import Plugin
 _RELOAD_MODULES: list[str] = [
     # Layer 1
     "fp_core.config",
-    "fp_core.display",
     # Layer 2
     "fp_core.core.io",
     "fp_core.core.lifecycle",
@@ -172,7 +171,7 @@ class AgentReloader:
         try:
             _reload_modules()
         except RuntimeError:
-            display.error("[AgentReloader] ❌ 模块重载失败")
+            get_logger().error("[AgentReloader] ❌ 模块重载失败")
             raise
 
         # ── 5. 创建新 Agent（静默，不打印 "📂 新会话"） ──
@@ -195,13 +194,13 @@ class AgentReloader:
                 try:
                     new_agent.plugins.register(plugin)
                 except Exception as e:
-                    display.warning(f"[AgentReloader] ⚠️ 注册插件 {plugin.name} 失败: {e}")
+                    get_logger().warning(f"[AgentReloader] ⚠️ 注册插件 {plugin.name} 失败: {e}")
 
         # ── 7. 初始化 ──
         try:
             await new_agent.ensure_initialized()
         except Exception as e:
-            display.error(f"[AgentReloader] ❌ 新 Agent 初始化失败: {e}")
+            get_logger().error(f"[AgentReloader] ❌ 新 Agent 初始化失败: {e}")
             raise RuntimeError(f"新 Agent 初始化失败: {e}") from e
 
         # ── 8. 恢复旧会话 ──
@@ -217,9 +216,9 @@ class AgentReloader:
                 if saved:
                     new_agent.state.conversation.replace_all(saved)
                 session_restored = True
-                display.info(f"[AgentReloader] 🔄 已恢复会话: {old_sid}")
+                get_logger().info(f"[AgentReloader] 🔄 已恢复会话: {old_sid}")
             except Exception as e:
-                display.warning(f"[AgentReloader] ⚠️ 会话恢复失败: {e}")
+                get_logger().warning(f"[AgentReloader] ⚠️ 会话恢复失败: {e}")
 
         # ── 9. after_reload ──
         if after_reload is not None:
@@ -228,7 +227,7 @@ class AgentReloader:
                 if result is not None and hasattr(result, "__await__"):
                     await result
             except Exception as e:
-                display.warning(f"[AgentReloader] ⚠️ after_reload 回调异常: {e}")
+                get_logger().warning(f"[AgentReloader] ⚠️ after_reload 回调异常: {e}")
 
         info: dict[str, Any] = {
             "session_id": new_agent.state.session.session_id,
@@ -236,7 +235,7 @@ class AgentReloader:
             "session_restored": session_restored,
         }
 
-        display.info(
+        get_logger().info(
             f"[AgentReloader] ✅ 重载完成 (model={new_agent.model}, session={new_agent.state.session.session_id})"
         )
 

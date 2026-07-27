@@ -6,7 +6,7 @@ core 层只提供 llm.summarize() 基础设施，压缩策略完全由本命令�
 
 from dataclasses import dataclass
 
-from fp_core import display
+from fp_core.logger import get_logger
 
 name = "compact"
 aliases: list[str] = []
@@ -68,14 +68,14 @@ async def execute(state, arg: str) -> tuple[bool, str]:
         return (True, "无需压缩")
 
     # ── 3. 格式化 + 调用 LLM 生成摘要 ──
-    display.info("🔄 正在压缩对话历史...")
+    get_logger().info("🔄 正在压缩对话历史...")
 
     compact_text = _format_for_summary(to_compact)
     try:
         summary = await state.llm.summarize(compact_text)
         summary = (summary or "").strip()
     except Exception as e:
-        display.error(f"  压缩失败: {e}")
+        get_logger().error(f"  压缩失败: {e}")
         return (False, f"压缩失败: {e}")
 
     if not summary:
@@ -92,5 +92,5 @@ async def execute(state, arg: str) -> tuple[bool, str]:
     # ── 5. 持久化 ──
     state.session.save_context(conv.to_serializable())
 
-    display.info(f" ✅\n📦 已压缩 {len(to_compact)} 条早期消息为摘要，保留 {len(recent)} 条")
+    get_logger().info(f" ✅\n📦 已压缩 {len(to_compact)} 条早期消息为摘要，保留 {len(recent)} 条")
     return (True, "**📦 历史已压缩**")

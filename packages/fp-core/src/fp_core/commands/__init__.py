@@ -18,7 +18,7 @@ import importlib.util
 import os
 from types import ModuleType
 
-from fp_core import display
+from fp_core.logger import get_logger
 from fp_core.platform_utils import get_data_dir
 
 # 缓存：命令名 → 模块对象
@@ -71,23 +71,23 @@ def _scan_dir(directory: str, package_prefix: str | None = None):
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
         except Exception as e:
-            display.warning(f"⚠️  命令加载失败 [{mod_name}]: {e}")
+            get_logger().warning(f"⚠️  命令加载失败 [{mod_name}]: {e}")
             continue
 
         # 校验接口
         if not hasattr(mod, "name") or not hasattr(mod, "execute"):
-            display.warning(f"⚠️  命令模块 [{mod_name}] 缺少 name/execute，已跳过")
+            get_logger().warning(f"⚠️  命令模块 [{mod_name}] 缺少 name/execute，已跳过")
             continue
 
         name = mod.name
         if name in _commands:
-            display.warning(f"⚠️  命令 [{name}] 重复定义，已覆盖")
+            get_logger().warning(f"⚠️  命令 [{name}] 重复定义，已覆盖")
         _commands[name] = mod
 
         # 注册别名
         for alias in getattr(mod, "aliases", []):
             if alias in _commands:
-                display.warning(f"⚠️  别名 [{alias}] 与已有命令/别名冲突，已跳过")
+                get_logger().warning(f"⚠️  别名 [{alias}] 与已有命令/别名冲突，已跳过")
                 continue
             _commands[alias] = mod
 
@@ -156,11 +156,11 @@ def register_command(name: str, module: ModuleType) -> None:
     """
     global _commands
     if name in _commands:
-        display.warning(f"⚠️  动态命令 [{name}] 与现有命令重复，已覆盖")
+        get_logger().warning(f"⚠️  动态命令 [{name}] 与现有命令重复，已覆盖")
     _commands[name] = module
 
     for alias in getattr(module, "aliases", []):
         if alias in _commands:
-            display.warning(f"⚠️  别名 [{alias}] 冲突，已跳过")
+            get_logger().warning(f"⚠️  别名 [{alias}] 冲突，已跳过")
             continue
         _commands[alias] = module

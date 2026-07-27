@@ -9,7 +9,25 @@ import sys
 
 from prompt_toolkit.completion import Completer as PtCompleter
 
-from fp_core import config, display
+from fp_cli import display
+from fp_cli.cli_io import CLIIO
+from fp_core import config
+from fp_core.logger import Logger, set_logger
+
+
+# ── Terminal Logger：fp-core 内部日志 → 终端输出 ──
+class _TerminalLogger(Logger):
+    def info(self, msg: str):
+        display.info(msg)
+
+    def warning(self, msg: str):
+        display.warning(msg)
+
+    def error(self, msg: str):
+        display.error(msg)
+
+
+set_logger(_TerminalLogger())
 
 # ── 信号处理器可访问的当前 agent 实例（跨线程安全） ──
 _current_agent = None
@@ -171,7 +189,7 @@ async def main():
 
     from fp_core.core.agent import Agent
 
-    agent = Agent(resume=args.resume)
+    agent = Agent(resume=args.resume, io=CLIIO(), on_shutdown=display.shutdown_panel)
 
     # ── 挂接到模块变量，供信号处理器跨线程访问 ──────────
     global _current_agent

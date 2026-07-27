@@ -11,8 +11,8 @@ IO 通道抽象 — 解耦 CLI / WebUI 的输入输出
                               ▼            ▼            ▼
                          ┌────────┐  ┌──────────┐  ┌────────────┐
                          │ CLIIO │  │WSIO      │  │ 测试 Mock  │
-                         │input()│  │EventBus  │  │  (注入用)  │
-                         │display│  │+ Queue   │  │            │
+                         │(term) │  │EventBus  │  │  (注入用)  │
+                         │       │  │+ Queue   │  │            │
                          └────────┘  └──────────┘  └────────────┘
 
 职责：
@@ -20,10 +20,11 @@ IO 通道抽象 — 解耦 CLI / WebUI 的输入输出
   - thinking_start/stop: LLM 思考中的动画/状态指示
   - stream_write/end: 流式输出 LLM 回复内容
   - tool_call/tool_result: 显示工具调用和结果
+
+CLIIO 实现已在 fp-terminal/packages/fp_cli/cli_io.py 中。
 """
 
 import asyncio
-from typing import Any
 
 
 class IOChannel:
@@ -37,7 +38,7 @@ class IOChannel:
     # ── 文本输出 ─────────────────────────────────────
 
     def info(self, text: str):
-        """输出信息（绿色高亮）"""
+        """输出信息"""
 
     def warning(self, text: str):
         """输出警告（黄色）"""
@@ -80,93 +81,6 @@ class IOChannel:
         TODO: 当前无消费方调用此方法，属"基础设施先于业务"的设计预留。
         """
         raise NotImplementedError
-
-
-class CLIIO(IOChannel):
-    """
-    CLI 通道 — 直接使用 input() 和 display 模块。
-
-    保持现有的终端交互体验（着色、缩进等）。
-    """
-
-    def __init__(self):
-        self._streamer: Any | None = None
-
-    # ── 文本输出 ─────────────────────────────────────
-
-    def info(self, text: str):
-        from fp_core import display as d
-
-        d.info(text)
-
-    def warning(self, text: str):
-        from fp_core import display as d
-
-        d.warning(text)
-
-    def error(self, text: str):
-        from fp_core import display as d
-
-        d.error(text)
-
-    # ── 思考动画 ─────────────────────────────────────
-
-    async def thinking_start(self):
-        from fp_core import display as d
-
-        self._spinner = d.Spinner("思考中")
-        await self._spinner.start()
-
-    async def thinking_stop(self):
-        if hasattr(self, "_spinner") and self._spinner:
-            await self._spinner.stop()
-            self._spinner = None
-
-    # ── 流式输出 ─────────────────────────────────────
-
-    def stream_write(self, content: str):
-        from fp_core import display as d
-
-        if not hasattr(self, "_streamer") or self._streamer is None:
-            self._streamer = d.LLMStreamer(silent=False)
-        self._streamer.write(content)
-
-    def stream_reset(self):
-        """异常恢复：强制重置流式输出状态，下次 stream_write 会重建"""
-        self._streamer = None
-
-    def stream_end(self):
-        if hasattr(self, "_streamer") and self._streamer:
-            self._streamer.end()
-            self._streamer = None
-
-    # ── 工具调用展示 ─────────────────────────────────
-
-    def tool_call(self, name: str, args: dict):
-        import json
-
-        from fp_core import display as d
-
-        safe_args = {k: str(v) for k, v in args.items()}
-        d.llm_tool(f"  🛠️  {name}({json.dumps(safe_args, ensure_ascii=False)})")
-
-    def tool_result(self, result: str):
-        from fp_core import display as d
-
-        d.llm_tool(f"  📋  {result.strip()}")
-
-    # ── 交互式输入 ───────────────────────────────────
-
-    async def ask(self, prompt: str) -> str:
-        from fp_core import display as d
-
-        loop = asyncio.get_running_loop()
-        try:
-            result = await loop.run_in_executor(None, lambda: input(prompt).strip())
-            return result
-        except (EOFError, KeyboardInterrupt):
-            d.info("")
-            return ""
 
 
 class WebSocketIO(IOChannel):

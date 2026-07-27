@@ -8,7 +8,7 @@ import os
 import sys
 from typing import Any
 
-from fp_core.platform_utils import get_config_dir, get_data_dir, is_windows
+from fp_core.platform_utils import get_config_dir, get_data_dir
 
 # 用户配置（跨平台：Linux XDG 标准 / Windows %APPDATA%）
 USER_CONFIG_PATH = os.path.join(get_config_dir(), "config.json")
@@ -176,91 +176,6 @@ FORBIDDEN_CATEGORIES = {"core", "misc", "other", "uncategorized"}
 
 
 # ═══════════════════════════════════════════════════════════════
-# 显示配置
-# ═══════════════════════════════════════════════════════════════
-
-ANSI_COLORS = {
-    "black": "\033[30m",
-    "red": "\033[31m",
-    "green": "\033[32m",
-    "yellow": "\033[33m",
-    "blue": "\033[34m",
-    "magenta": "\033[35m",
-    "cyan": "\033[36m",
-    "white": "\033[37m",
-    "bright_red": "\033[91m",
-    "bright_green": "\033[92m",
-    "bright_yellow": "\033[93m",
-    "bright_cyan": "\033[96m",
-    "bright_white": "\033[97m",
-    "default": "",
-}
-
-
-def get_display_style(name: str) -> dict:
-    """获取显示样式"""
-    raw = _json_cfg.get("display_styles", {}).get(name, {})
-    color_name = raw.get("color", "default")
-    return {
-        "color": ANSI_COLORS.get(color_name, ""),
-        "bold": raw.get("bold", False),
-        "dim": raw.get("dim", False),
-        "italic": raw.get("italic", False),
-    }
-
-
-def color_supported() -> bool:
-    """检测终端是否支持颜色"""
-    if os.environ.get("FORCE_COLOR"):
-        return True
-    if os.environ.get("NO_COLOR"):
-        return False
-
-    if is_windows():
-        # Windows 上委托 platform_utils 做更精细的检测
-        from fp_core.platform_utils import ansi_supported
-
-        return ansi_supported()
-
-    return sys.stdout.isatty()
-
-
-def apply_style(text: str, name: str) -> str:
-    """应用 ANSI 样式"""
-    if not color_supported():
-        return text
-    style = get_display_style(name)
-    prefix = style["color"]
-    if style["bold"]:
-        prefix += "\033[1m"
-    if style["dim"]:
-        prefix += "\033[2m"
-    if style["italic"]:
-        prefix += "\033[3m"
-    return f"{prefix}{text}\033[0m" if prefix else text
-
-
-def truncate(text: str, name: str) -> str:
-    """按名称对应的截断长度截断文本。
-
-    -1 不截断；截断时末尾追加 … <+N chars>。
-    """
-    n = get_display_truncation(name)
-    if n < 0 or len(text) <= n:
-        return text
-    return text[:n] + f"… <+{len(text) - n} chars>"
-
-
-def get_display_truncation(name: str) -> int:
-    """获取指定名称的截断长度。 -1 表示不截断。"""
-    val = _json_cfg.get("display_truncation", {}).get(name, -1)
-    try:
-        return int(val)
-    except (TypeError, ValueError):
-        return -1
-
-
-# ═══════════════════════════════════════════════════════════════
 # 配置检查
 # ═══════════════════════════════════════════════════════════════
 
@@ -310,14 +225,6 @@ def get_default_config() -> dict:
         "MAX_CONTEXT_TOKENS": 8000,
         "MEMORY_MAX_HISTORY": 100,
         "BASH_PATH": "",
-        "display_styles": {
-            "info": {"color": "green"},
-            "error": {"color": "bright_red", "bold": True},
-            "warning": {"color": "yellow"},
-            "yellow_bold": {"color": "yellow", "bold": True},
-            "llm_thought": {"color": "magenta", "dim": True},
-            "llm_tool": {"color": "yellow"},
-        },
     }
 
 

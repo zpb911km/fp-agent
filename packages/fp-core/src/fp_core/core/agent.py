@@ -18,14 +18,13 @@ from datetime import datetime
 from typing import Any
 
 from fp_core import (
-    config,
-    display,  # only for shutdown_panel (CLI-specific)
+    config,  # only for shutdown_panel (CLI-specific)
 )
 from fp_core.commands import execute as execute_command
 from fp_core.commands import get_all_commands
 from fp_core.core import session
 from fp_core.core.conversation import ConversationState
-from fp_core.core.io import CLIIO, IOChannel
+from fp_core.core.io import IOChannel
 from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 from fp_core.core.llm_service import LLMConfig, LLMService
 from fp_core.core.prompt_builder import PromptBuilder
@@ -53,7 +52,7 @@ def get_current_io() -> IOChannel | None:
     """获取当前 asyncio Task 的 IO 通道（插件用）
 
     生命周期钩子函数中调用此方法获取当前环境的 IO 通道：
-      - CLI 终端   → CLIIO（使用 input()）
+      - 终端      → CLIIO（使用 input() + display）
       - WebUI      → WebSocketIO（推送到前端）
       - ACP/IDE    → ACPIO（返回 "q"）
       - REST API   → RestIO（返回 ""）
@@ -105,11 +104,13 @@ class Agent:
         tool_executor: ToolExecutor | None = None,
         prompt_builder: PromptBuilder | None = None,
         role: Any | None = None,  # 🆕 角色定义（AgentRole duck-typed，不引入包依赖）
+        on_shutdown: Any | None = None,  # shutdown 回调 fn(**data)，终端用于渲染退出面板
     ):
         self.enable_log = enable_log
 
-        # IO 通道（默认 CLI）
-        self._default_io = io or CLIIO()
+        # IO 通道（默认静默）
+        self._default_io = io or IOChannel()
+        self._on_shutdown = on_shutdown
 
         # 检查配置
         if not config.check_llm_config():
@@ -242,12 +243,12 @@ class Agent:
         """获取当前异步上下文的 IO 通道（context-local，防并发竞态）
 
         1. 优先返回 process() 的 context var 覆盖值（如 WebSocketIO）
-        2. 无覆盖时退回到 __init__ 注入的默认通道（CLIIO）
+        2. 无覆盖时退回到 __init__ 注入的默认通道
 
         ⚠️  跨 asyncio.Task 隔离：
            contextvars 绑定到创建它的 Task，不会自动传播到子 Task。
            如果在子 Task 中访问此属性且父 Task 设置了 context var，
-           将返回 None → fallback 到 CLIIO（而非预期通道）。
+           将返回 None → fallback 到默认通道（而非预期通道）。
            见 _current_io 定义处的传播方案。
         """
         ctx_io: IOChannel | None = _current_io.get()
@@ -309,28 +310,29 @@ class Agent:
         if not self.state.nuclear_exit:
             self.session.save_context(self._conv.to_serializable())
 
-        # 显示退出面板
-        info = self.session.list_sessions().get(self.session.session_id, {})
-        msg_count = info.get("message_count", 0)
-        created = info.get("created", "?")
-        duration = ""
-        try:
-            delta = datetime.now() - datetime.strptime(created, "%Y-%m-%d %H:%M:%S")
-            h, r = divmod(int(delta.total_seconds()), 3600)
-            m, s = divmod(r, 60)
-            duration = f"{h}:{m:02d}:{s:02d}"
-        except Exception:
-            pass
+        # 触发 shutdown 回调（终端用于渲染退出面板）
+        if self._on_shutdown and not getattr(self.state, "silent_shutdown", False):
+            info = self.session.list_sessions().get(self.session.session_id, {})
+            msg_count = info.get("message_count", 0)
+            created = info.get("created", "?")
+            duration = ""
+            try:
+                delta = datetime.now() - datetime.strptime(created, "%Y-%m-%d %H:%M:%S")
+                h, r = divmod(int(delta.total_seconds()), 3600)
+                m, s = divmod(r, 60)
+                duration = f"{h}:{m:02d}:{s:02d}"
+            except Exception:
+                pass
 
-        display.shutdown_panel(
-            summary=summary,
-            file=f"{self.session.session_id}.jsonl",
-            model=self.model,
-            msg_count=msg_count,
-            created=created,
-            duration=duration,
-            token_usage=self._token_tracker.total,
-        )
+            self._on_shutdown(
+                summary=summary,
+                file=f"{self.session.session_id}.jsonl",
+                model=self.model,
+                msg_count=msg_count,
+                created=created,
+                duration=duration,
+                token_usage=self._token_tracker.total,
+            )
 
         if self.enable_log:
             print("[Agent] Shutting down...")
@@ -547,7 +549,7 @@ class Agent:
         处理用户输入（全异步）
 
         io: 可选 IO 通道覆盖。WebUI 模式传入 WebSocketIO
-           io=None → 使用 self._default_io（CLIIO）
+           io=None → 使用 self._default_io（默认静默 IO）
 
         context var 生命周期：
           _current_io.set(io or self._default_io) 在此方法入口调用 → 绑定到当前 asyncio.Task
