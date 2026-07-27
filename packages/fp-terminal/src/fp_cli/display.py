@@ -174,7 +174,7 @@ class LLMStreamer:
         self.thinking = ""
 
     def think(self, text: str):
-        """输出思考 token（Live 流式渲染灰色文本，切换到内容时自动清除）"""
+        """输出思考 token（Live 流式渲染思考配色，切换到内容时自动清除）"""
         if self.silent:
             self.thinking += text
             return
@@ -184,14 +184,14 @@ class LLMStreamer:
         self._thinking = True
         self.thinking += text
 
-        # 使用 Live 渲染思考内容（灰色），而非 print
+        # 使用 Live 渲染思考内容（配色从 config.json llm_thought）
         if not self._live:
             self._ensure_live()
         if self._live:
             try:
                 from rich.text import Text
 
-                self._live.update(Text(self.thinking, style="dim"))
+                self._live.update(Text(self.thinking, style=self._think_rich_style()))
             except Exception:
                 pass
         else:
@@ -201,6 +201,35 @@ class LLMStreamer:
                 self._safe_print(apply_style(f"{prefix}思考: ", "llm_thought"), end="", flush=True)
                 self._thought_prefix = True
             llm_thought(text, end="")
+
+    @staticmethod
+    def _think_rich_style() -> str:
+        """从 config.json 读取 llm_thought 样式，构建 rich 风格字符串"""
+        import json
+        import os
+
+        from fp_core.platform_utils import get_config_dir
+
+        path = os.path.join(get_config_dir(), "config.json")
+        raw = {}
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    raw = json.load(f).get("display_styles", {}).get("llm_thought", {})
+            except Exception:
+                pass
+
+        parts = []
+        color = raw.get("color", "default")
+        if color and color != "default":
+            parts.append(color)
+        if raw.get("bold"):
+            parts.append("bold")
+        if raw.get("dim"):
+            parts.append("dim")
+        if raw.get("italic"):
+            parts.append("italic")
+        return " ".join(parts) if parts else ""
 
     def write(self, text: str):
         """实时流式 Markdown 渲染内容 token
