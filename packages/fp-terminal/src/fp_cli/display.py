@@ -174,25 +174,38 @@ class LLMStreamer:
         self.thinking = ""
 
     def think(self, text: str):
-        """输出思考 token（配色从配置），首次自动显示思考标记"""
+        """输出思考 token（Live 流式渲染灰色文本，切换到内容时自动清除）"""
         if self.silent:
             self.thinking += text
             return
         if not text:
             return
-        if not self._thinking:
-            prefix = "\n" if self._has_content else ""
-            self._safe_print(apply_style(f"{prefix}思考: ", "llm_thought"), end="", flush=True)
-            self._thinking = True
 
-        llm_thought(text, end="")
+        self._thinking = True
         self.thinking += text
+
+        # 使用 Live 渲染思考内容（灰色），而非 print
+        if not self._live:
+            self._ensure_live()
+        if self._live:
+            try:
+                from rich.text import Text
+
+                self._live.update(Text(self.thinking, style="dim"))
+            except Exception:
+                pass
+        else:
+            # Live 不可用时回退到 print
+            if not hasattr(self, "_thought_prefix"):
+                prefix = "\n" if self._has_content else ""
+                self._safe_print(apply_style(f"{prefix}思考: ", "llm_thought"), end="", flush=True)
+                self._thought_prefix = True
+            llm_thought(text, end="")
 
     def write(self, text: str):
         """实时流式 Markdown 渲染内容 token
 
-        首次内容时启动 rich.live.Live，后续每 token 即时更新；
-        end() 时退出 Live，最后一帧保留在屏幕上。
+        从思考阶段首次进入内容阶段时，自动清除 Live 画布上的思考内容。
         """
         if self.silent:
             self._buffer += text
@@ -201,9 +214,17 @@ class LLMStreamer:
             return
         if not text:
             return
+
+        # 从思考阶段切换到内容阶段：清空 Live 画布
         if self._thinking:
-            self._safe_print()
             self._thinking = False
+            if self._live:
+                try:
+                    from rich.text import Text
+
+                    self._live.update(Text(""))
+                except Exception:
+                    pass
 
         self._buffer += text
         self._has_content = True
@@ -221,8 +242,8 @@ class LLMStreamer:
     def end(self, interrupted: bool = False):
         """结束流式输出
 
-        若 Live 处于活动状态则退出（最后一帧屏幕保留），
-        否则回退到原有批处理渲染逻辑。
+        若有 Live 则退出（最后一帧保留屏幕）；若只有思考且无 Live，
+        关闭思考行。异常中断时保留 Live 最后一帧。
         """
         if self.silent:
             return
@@ -235,8 +256,6 @@ class LLMStreamer:
             self._exit_live()
         elif self._thinking:
             self._safe_print(apply_style("", "llm_thought"))
-        elif self._has_content and self._buffer:
-            self._render_markdown(self._buffer)
 
         self._buffer = ""
         self._has_content = False
