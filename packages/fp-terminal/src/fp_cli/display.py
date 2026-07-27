@@ -132,6 +132,7 @@ class LLMStreamer:
         self._buffer = ""
         self.content = ""  # 最终内容
         self.thinking = ""  # 思考内容
+        self._live = None  # rich.live.Live 实例，首次内容时创建
 
     @staticmethod
     def _safe_print(*args, **kwargs):
@@ -139,8 +140,33 @@ class LLMStreamer:
         with contextlib.suppress(AttributeError, ValueError, OSError):
             print(*args, **kwargs)
 
+    def _ensure_live(self):
+        """惰性创建 rich.live.Live，用于流式 Markdown 渲染"""
+        if self._live is not None:
+            return
+        try:
+            from rich.live import Live
+            from rich.markdown import Markdown
+
+            self._live = Live(
+                Markdown(self._buffer),
+                refresh_per_second=10,
+                vertical_overflow="visible",
+            )
+            self._live.__enter__()
+        except Exception:
+            self._live = None
+
+    def _exit_live(self):
+        """安全退出 Live 上下文"""
+        if self._live is not None:
+            with contextlib.suppress(Exception):
+                self._live.__exit__(None, None, None)
+            self._live = None
+
     def reset(self):
         """重置流式状态，用于异常恢复"""
+        self._exit_live()
         self._thinking = False
         self._has_content = False
         self._buffer = ""
@@ -163,7 +189,11 @@ class LLMStreamer:
         self.thinking += text
 
     def write(self, text: str):
-        """缓冲回复内容，等待 end() 时统一用 rich Markdown 渲染"""
+        """实时流式 Markdown 渲染内容 token
+
+        首次内容时启动 rich.live.Live，后续每 token 即时更新；
+        end() 时退出 Live，最后一帧保留在屏幕上。
+        """
         if self.silent:
             self._buffer += text
             self._has_content = True
@@ -174,23 +204,41 @@ class LLMStreamer:
         if self._thinking:
             self._safe_print()
             self._thinking = False
+
         self._buffer += text
         self._has_content = True
 
+        if not self._live:
+            self._ensure_live()
+        if self._live:
+            try:
+                from rich.markdown import Markdown
+
+                self._live.update(Markdown(self._buffer))
+            except Exception:
+                pass
+
     def end(self, interrupted: bool = False):
-        """结束流式输出，用 rich 渲染完整的 Markdown 内容"""
+        """结束流式输出
+
+        若 Live 处于活动状态则退出（最后一帧屏幕保留），
+        否则回退到原有批处理渲染逻辑。
+        """
         if self.silent:
             return
         if interrupted:
+            self._exit_live()
             self._safe_print(apply_style("⏹️ 已中断", "yellow_bold"))
             return
-        if self._thinking:
+
+        if self._live:
+            self._exit_live()
+        elif self._thinking:
             self._safe_print(apply_style("", "llm_thought"))
         elif self._has_content and self._buffer:
             self._render_markdown(self._buffer)
-            self._buffer = ""
-        elif self._has_content:
-            self._safe_print()
+
+        self._buffer = ""
         self._has_content = False
 
     @staticmethod

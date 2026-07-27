@@ -31,6 +31,7 @@ from fp_core.core.prompt_builder import PromptBuilder
 from fp_core.core.state import State
 from fp_core.core.token_tracker import TokenTracker
 from fp_core.core.tool_executor import ToolExecutor
+from fp_core.logger import get_logger
 from fp_core.platform_utils import get_data_dir
 from fp_core.plugins.base.plugin import PluginRegistry
 
@@ -283,7 +284,7 @@ class Agent:
 
     async def _on_init(self, ctx: HookContext, **kwargs) -> HookContext:
         if self.enable_log:
-            print("[Agent] Initializing...")
+            get_logger().info("[Agent] Initializing...")
         ctx.data["initialized"] = True
         return ctx
 
@@ -335,7 +336,7 @@ class Agent:
             )
 
         if self.enable_log:
-            print("[Agent] Shutting down...")
+            get_logger().info("[Agent] Shutting down...")
         return ctx
 
     # ============ 中断机制 ============

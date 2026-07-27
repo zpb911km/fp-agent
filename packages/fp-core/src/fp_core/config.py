@@ -8,6 +8,7 @@ import os
 import sys
 from typing import Any
 
+from fp_core.logger import get_logger
 from fp_core.platform_utils import get_config_dir, get_data_dir
 
 # 用户配置（跨平台：Linux XDG 标准 / Windows %APPDATA%）
@@ -101,11 +102,8 @@ def validate_config(verbose: bool = False) -> list[str]:
     return all_issues
 
 
-# 模块加载时自动验证配置
+# 模块加载时自动验证配置（结果由 check_llm_config() 报告，此处静默）
 _validation_issues = validate_config()
-if _validation_issues:
-    for msg in _validation_issues:
-        print(f"[Config] {msg}", file=sys.stderr)
 
 
 def _value(key: str, default: Any = None) -> Any:
@@ -184,29 +182,27 @@ def check_llm_config() -> bool:
     """检查 LLM 配置是否完整。
 
     返回 True 表示配置可用，False 表示存在致命问题（无法联网调用 LLM）。
-    会打印所有检测到的问题（含非致命警告）。
+    通过 Logger 输出警告信息（调用方需先注入 Logger 实现）。
     """
     ok = True
+    log = get_logger()
 
     if not LLM_API_KEY:
-        print("[Warning] LLM_API_KEY not set")
-        print("  → 设置方式：① 修改 config.json ② 设置环境变量 LLM_API_KEY")
+        log.warning("LLM_API_KEY not set\n  → 设置方式：① 修改 config.json ② 设置环境变量 LLM_API_KEY")
         ok = False
 
     if not LLM_API_BASE_URL:
-        print("[Warning] LLM_API_BASE_URL not set")
-        print("  → 设置方式：① 修改 config.json ② 设置环境变量 LLM_API_BASE_URL")
+        log.warning("LLM_API_BASE_URL not set\n  → 设置方式：① 修改 config.json ② 设置环境变量 LLM_API_BASE_URL")
         ok = False
 
     if not LLM_MODEL:
-        print("[Warning] LLM_MODEL not set")
-        print("  → 设置方式：① 修改 config.json ② 设置环境变量 LLM_MODEL")
+        log.warning("LLM_MODEL not set\n  → 设置方式：① 修改 config.json ② 设置环境变量 LLM_MODEL")
         ok = False
 
     # 打印所有 Schema 验证发现的问题
     global _validation_issues
     if _validation_issues:
-        print(f"[Info] 配置文件中存在 {len(_validation_issues)} 个配置问题（详见上方警告）")
+        log.warning(f"配置文件中存在 {len(_validation_issues)} 个配置问题（通过 check_llm_config() 可知详情）")
 
     return ok
 
@@ -230,9 +226,10 @@ def get_default_config() -> dict:
 
 def init_config(path: str | None = None):
     """初始化用户配置文件（跨平台：Linux ~/.config/fp/，Windows %APPDATA%/fp/）"""
+    log = get_logger()
     config_path = path or USER_CONFIG_PATH
     if os.path.exists(config_path):
-        print(f"[Config] {config_path} already exists")
+        log.info(f"[Config] {config_path} already exists")
         return
 
     # 确保父目录存在（首次运行配置目录可能不存在）
@@ -242,7 +239,7 @@ def init_config(path: str | None = None):
     default_cfg = get_default_config()
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(default_cfg, f, indent=2, ensure_ascii=False)
-    print(f"[Config] Created {config_path}")
+    log.info(f"[Config] Created {config_path}")
 
 
 if __name__ == "__main__":

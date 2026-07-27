@@ -18,6 +18,7 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from fp_core.logger import get_logger
 from fp_core.platform_utils import get_data_dir
 
 
@@ -91,9 +92,9 @@ class ToolRegistry:
                         "source": plugin_name,
                     }
                 else:
-                    print(f"[tools] ⚠️ 插件 {plugin_name} 缺少 PLUGIN_DEFINITION 或 execute，跳过")
+                    get_logger().warning(f"[tools] ⚠️ 插件 {plugin_name} 缺少 PLUGIN_DEFINITION 或 execute，跳过")
             except Exception as e:
-                print(f"[tools] ⚠️ 加载插件 {plugin_name} 失败: {e}")
+                get_logger().warning(f"[tools] ⚠️ 加载插件 {plugin_name} 失败: {e}")
 
     def register_tool(self, name: str, definition: dict, executor: Callable):
         """动态注册一个工具（供生命周期插件使用）

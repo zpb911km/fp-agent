@@ -19,6 +19,8 @@ from enum import Enum, auto
 from functools import wraps
 from typing import Any
 
+from fp_core.logger import get_logger
+
 # ═══════════════════════════════════════════════════════════════
 # 生命周期钩子枚举
 # ═══════════════════════════════════════════════════════════════
@@ -238,7 +240,7 @@ class LifecycleManager:
             hooks_list.append((priority, name, func, hook_type))
 
         if self._enable_log:
-            print(f"[Lifecycle] Registered '{name}' ({hook_type}) on {hook.name} (priority={priority})")
+            get_logger().info(f"[Lifecycle] Registered '{name}' ({hook_type}) on {hook.name} (priority={priority})")
 
     def unregister(self, hook: LifecycleHook, name: str) -> bool:
         """注销钩子"""
@@ -273,7 +275,7 @@ class LifecycleManager:
                 context.data[key] = value
 
         if self._enable_log:
-            print(f"[Lifecycle] Emitting {hook.name}...")
+            get_logger().info(f"[Lifecycle] Emitting {hook.name}...")
 
         hook_name = hook.name
         if hook_name not in self._hooks or not self._hooks[hook_name]:
@@ -294,7 +296,7 @@ class LifecycleManager:
                 self._stats[f"{hook.name}:{name}"] = self._stats.get(f"{hook.name}:{name}", 0) + 1
 
                 if self._enable_log:
-                    print(f"[Lifecycle]   -> {name} took {elapsed * 1000:.2f}ms")
+                    get_logger().info(f"[Lifecycle]   -> {name} took {elapsed * 1000:.2f}ms")
 
                 # 如果钩子返回新上下文，合并
                 if result is not None and isinstance(result, HookContext):
@@ -304,7 +306,7 @@ class LifecycleManager:
                 context.error = e
                 context.stop_propagation = True
                 if self._enable_log:
-                    print(f"[Lifecycle]   -> {name} ERROR: {e}")
+                    get_logger().info(f"[Lifecycle]   -> {name} ERROR: {e}")
 
         return context
 
@@ -313,10 +315,11 @@ class LifecycleManager:
         if self._enable_log:
             hooks_info = self.get_hooks()
             stats_info = self.get_stats()
+            log = get_logger()
             if hooks_info:
-                print(f"[Lifecycle] 清除 {len(hooks_info)} 个钩子: {hooks_info}")
+                log.info(f"[Lifecycle] 清除 {len(hooks_info)} 个钩子: {hooks_info}")
             if stats_info:
-                print(f"[Lifecycle] 统计: {stats_info}")
+                log.info(f"[Lifecycle] 统计: {stats_info}")
         if hook:
             self._hooks[hook.name] = []
         else:
