@@ -26,6 +26,12 @@ def main():
         action="store_true",
         help="显示版本号并退出",
     )
+    parser.add_argument(
+        "--update",
+        "-u",
+        action="store_true",
+        help="检查并自动更新所有 fp 组件",
+    )
 
     args, rest = parser.parse_known_args()
 
@@ -33,6 +39,12 @@ def main():
         from fp_core import __version__
 
         print(f"fp {__version__}")
+        sys.exit(0)
+
+    if args.update:
+        from fp.version_checker import do_update
+
+        do_update()
         sys.exit(0)
 
     # ── 修复：清理 sys.argv，只保留子包能识别的剩余参数 ──
@@ -55,7 +67,7 @@ def main():
         try:
             from fp_webui import run as run_webui
         except ImportError:
-            print("请安装: pip install fp[webui]")
+            print("请安装: pip install fp-agent[webui]")
             sys.exit(1)
         run_webui()
 
@@ -63,7 +75,7 @@ def main():
         try:
             from fp_acp import run as run_acp
         except ImportError:
-            print("请安装: pip install fp[acp]")
+            print("请安装: pip install fp-agent[acp]")
             sys.exit(1)
         run_acp()
 

@@ -5,10 +5,13 @@
 """
 
 import json
+import sys
 import threading
 import urllib.request
 
+GREEN = "\033[32m"
 YELLOW = "\033[33m"
+RED = "\033[31m"
 RESET = "\033[0m"
 
 # 需要检查的包：(PyPI 包名, 显示名称)
@@ -102,3 +105,41 @@ def check_updates_background():
     """在后台守护线程中执行版本检查，不阻塞启动。"""
     thread = threading.Thread(target=_do_check, daemon=True)
     thread.start()
+
+
+def do_update():
+    """检查并自动升级所有 fp 组件（同步，`fp --update` 入口）"""
+    import subprocess
+
+    print("正在检查更新...")
+
+    outdated = []
+    for pypi_name, display_name in PACKAGES:
+        installed = _get_installed_version(pypi_name)
+        if installed is None:
+            continue
+        latest = _fetch_latest_version(pypi_name)
+        if latest is None:
+            continue
+        if _parse_version(latest) > _parse_version(installed):
+            outdated.append((display_name, installed, latest))
+
+    if not outdated:
+        print(f"{GREEN}✓{RESET} 所有组件已是最新版本")
+        return
+
+    print(f"\n发现 {len(outdated)} 个可更新组件：")
+    for name, old, new in outdated:
+        print(f"  {name:<12}  {old} → {GREEN}{new}{RESET}")
+    print()
+
+    # 一键升级：fp-agent[all] 会连带升级 fp-core/fp-terminal/fp-webui/fp-acp
+    print("正在自动更新（pip install --upgrade fp-agent[all]）...")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--upgrade", "fp-agent[all]"],
+    )
+    if result.returncode == 0:
+        print(f"\n{GREEN}✓ 更新完成！{RESET}")
+    else:
+        print(f"\n{RED}✗ 更新失败{RESET}，请尝试手动运行：")
+        print("  pip install --upgrade fp-agent[all]")
