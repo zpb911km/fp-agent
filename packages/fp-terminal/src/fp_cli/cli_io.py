@@ -35,7 +35,11 @@ class CLIIO(IOChannel):
 
     # ── 思考动画 ─────────────────────────────────────
 
-    async def thinking_start(self):
+    async def thinking_start(self, streaming: bool = False):
+        if streaming:
+            # 流式模式下不显示 spinner，token 本身即是进度指示
+            self._spinner = None
+            return
         from fp_cli import display as d
 
         self._spinner = d.Spinner("思考中")

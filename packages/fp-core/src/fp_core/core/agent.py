@@ -13,6 +13,7 @@ import contextlib
 import contextvars
 import json
 import os
+import types
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -365,13 +366,11 @@ class Agent:
     # ============ LLM 调用（含 IO 展示） ============
 
     async def _invoke_llm(self, context: list[dict], silent: bool = False) -> tuple[dict[str, Any], dict | None]:
-        """发起流式聊天请求（含 spinner 和逐 token 展示）
+        """发起流式聊天请求（逐 token 展示）
 
-        实际 LLM 调用委托给 LLMService.chat_stream()，
-        每个 token 到达时通过 io.stream_write() 实时输出。
-        - 思考 token → 暂不输出（由 LLMStreamer 自行处理）
-        - 内容 token → 逐 token io.stream_write()
-        - 工具调用  → 结束时统一展示
+        实际 LLM 调用委托给 LLMService.chat_stream()。
+        可流式（默认）→ 不显示 spinner，token 随到随显；
+        chat() 被覆写时（如测试 mock）→ 显示 spinner，降级为非流式。
 
         Returns:
             (assistant_msg, usage)
@@ -379,8 +378,13 @@ class Agent:
             usage: {"prompt_tokens", "completion_tokens", "total_tokens"} | None
         """
         io = self.io
+
+        # ── 判断是否为真正的流式（而非测试 mock 降级） ──
+        _chat = self._llm.chat
+        _can_stream = isinstance(_chat, types.MethodType) and _chat.__func__ is LLMService.chat
+
         if not silent:
-            await io.thinking_start()
+            await io.thinking_start(streaming=_can_stream)
 
         _llm_exc: BaseException | None = None
         usage: dict | None = None

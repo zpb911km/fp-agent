@@ -49,8 +49,14 @@ class IOChannel:
 
     # ── 思考动画（Spinner） ──────────────────────────
 
-    async def thinking_start(self):
-        """开始思考动画"""
+    async def thinking_start(self, streaming: bool = False):
+        """开始思考动画
+
+        Args:
+            streaming: True 表示后续会通过 stream_write/think 流式输出 token，
+                       此时不应显示 spinner（token 本身就是进度指示）；
+                       False 表示非流式（如 backward compat），应显示 spinner。
+        """
 
     async def thinking_stop(self):
         """停止思考动画"""
@@ -131,7 +137,7 @@ class WebSocketIO(IOChannel):
     def error(self, text: str):
         self._pub("error", error=text)
 
-    async def thinking_start(self):
+    async def thinking_start(self, streaming: bool = False):
         self._pub("thinking", status="start")
 
     async def thinking_stop(self):
@@ -187,7 +193,7 @@ class RestIO(IOChannel):
     def error(self, text: str):
         pass
 
-    async def thinking_start(self):
+    async def thinking_start(self, streaming: bool = False):
         pass
 
     async def thinking_stop(self):
