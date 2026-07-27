@@ -365,10 +365,13 @@ class Agent:
     # ============ LLM 调用（含 IO 展示） ============
 
     async def _invoke_llm(self, context: list[dict], silent: bool = False) -> tuple[dict[str, Any], dict | None]:
-        """发起聊天请求（含 spinner 和增量展示）
+        """发起流式聊天请求（含 spinner 和逐 token 展示）
 
-        实际 LLM 调用委托给 LLMService.chat()，
-        此方法只负责 spinner/streamer 等 IO 展示。
+        实际 LLM 调用委托给 LLMService.chat_stream()，
+        每个 token 到达时通过 io.stream_write() 实时输出。
+        - 思考 token → 暂不输出（由 LLMStreamer 自行处理）
+        - 内容 token → 逐 token io.stream_write()
+        - 工具调用  → 结束时统一展示
 
         Returns:
             (assistant_msg, usage)
@@ -381,10 +384,19 @@ class Agent:
 
         _llm_exc: BaseException | None = None
         usage: dict | None = None
+        assistant_msg: dict | None = None
         try:
-            result = await self._llm.chat(context, tools=self._tool_exec.get_definitions())
-            assistant_msg = result.message
-            usage = result.usage
+            async for event in self._llm.chat_stream(context, tools=self._tool_exec.get_definitions()):
+                if event.type == "content":
+                    if not silent:
+                        io.stream_write(event.text)
+                elif event.type == "reasoning":
+                    if not silent:
+                        io.stream_think(event.text)
+                elif event.type == "usage":
+                    usage = event.data
+                elif event.type == "done":
+                    assistant_msg = event.data
         except asyncio.CancelledError:
             self._cancelled_by_user = True
             msg = {"role": "assistant", "content": "", "_interrupted": True}
@@ -397,23 +409,18 @@ class Agent:
                 try:
                     await io.thinking_stop()
                 except Exception:
-                    # 防止 Spinner 停止时的异常（如 stdout 不可用）掩盖原始 LLM 错误
                     if _llm_exc is None:
                         raise
+                # 无论异常与否都结束流
+                with contextlib.suppress(Exception):
+                    io.stream_end()
 
-        reply_content = assistant_msg.get("content", "")
+        if assistant_msg is None:
+            # 流结束但没拿到 done 事件（异常分支）
+            msg = {"role": "assistant", "content": "", "_interrupted": True}
+            return msg, usage
 
-        if not silent:
-            try:
-                if reply_content:
-                    io.stream_write(reply_content)
-                io.stream_end()
-            except Exception as e:
-                # 显示层异常不应丢弃 LLM 回复，也不应误报为 API/LLM 错误
-                self.io.warning(f"显示层输出异常 (LLM 回复正常): {type(e).__name__}: {e}")
-                io.stream_reset()  # 清理残留 buffer，防止状态污染
-
-        msg = {"role": "assistant", "content": reply_content}
+        msg = {"role": "assistant", "content": assistant_msg.get("content", "")}
         if assistant_msg.get("tool_calls"):
             msg["tool_calls"] = assistant_msg["tool_calls"]
         msg["_interrupted"] = False

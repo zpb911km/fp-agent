@@ -18,6 +18,7 @@ IO 通道抽象 — 解耦 CLI / WebUI 的输入输出
 职责：
   - info/warning/error: 输出各类级别文本消息
   - thinking_start/stop: LLM 思考中的动画/状态指示
+  - stream_think: 流式输出 LLM 思考过程 token（灰色）
   - stream_write/end: 流式输出 LLM 回复内容
   - tool_call/tool_result: 显示工具调用和结果
 
@@ -55,6 +56,9 @@ class IOChannel:
         """停止思考动画"""
 
     # ── 流式输出（LLMStreamer） ──────────────────────
+
+    def stream_think(self, token: str):
+        """写入思考过程 token（灰色/着色）"""
 
     def stream_write(self, content: str):
         """写入流式内容片段"""
@@ -136,6 +140,9 @@ class WebSocketIO(IOChannel):
     def stream_write(self, content: str):
         self._pub("chunk", content=content)
 
+    def stream_think(self, token: str):
+        self._pub("thinking_content", token=token)
+
     def stream_end(self):
         self._pub("stream_end")
 
@@ -187,6 +194,9 @@ class RestIO(IOChannel):
         pass
 
     def stream_write(self, content: str):
+        pass
+
+    def stream_think(self, token: str):
         pass
 
     def stream_end(self):

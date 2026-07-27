@@ -2,7 +2,7 @@
 OpenAI API HTTP 客户端替代模块
 ================================
 使用 httpx 库直接调用 OpenAI 格式的 API，无需安装 openai SDK。
-仅支持非流式调用（全异步版本）。
+支持非流式和流式调用（全异步版本）。
 
 Usage:
     import openai
@@ -113,6 +113,32 @@ class CompletionResponse:
         self.usage = data.get("usage")
 
 
+class StreamChunk:
+    """流式 SSE 解析后的单个 chunk
+
+    属性与 OpenAI streaming delta 结构对齐：
+      - content: 文本 token（str | None）
+      - reasoning_content: 思考 token（str | None，部分模型专有）
+      - tool_calls: 工具调用增量（list[dict] | None）
+      - finish_reason: 结束原因（str | None）
+      - usage: 用量统计（仅在最后 chunk 出现，dict | None）
+    """
+
+    __slots__ = ("content", "reasoning_content", "tool_calls", "finish_reason", "usage")
+
+    def __init__(self, data: dict):
+        choice = (data.get("choices") or [{}])[0]
+        delta = choice.get("delta", {})
+        self.content: str | None = delta.get("content")
+        self.reasoning_content: str | None = delta.get("reasoning_content")
+        raw_tc = delta.get("tool_calls")
+        self.tool_calls: list[dict] | None = None
+        if raw_tc:
+            self.tool_calls = raw_tc
+        self.finish_reason: str | None = choice.get("finish_reason")
+        self.usage: dict | None = data.get("usage")
+
+
 # ═══════════════════════════════════════════════════════════════
 # 核心 Client（异步版本）
 # ═══════════════════════════════════════════════════════════════
@@ -182,6 +208,79 @@ class Completions:
         except json.JSONDecodeError as e:
             raise APIError(f"响应 JSON 解析失败: {e}", status_code=resp.status_code) from None
         return CompletionResponse(data)
+
+    async def create_stream(
+        self,
+        model: str,
+        messages: list[dict],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        tools: list[dict] | None = None,
+        extra_body: dict | None = None,
+        **kwargs,
+    ):
+        """
+        发起流式聊天补全请求（SSE）。
+        逐个 yield StreamChunk，直到 [DONE]。
+        """
+        url = f"{self._client.base_url}/chat/completions"
+        headers = self._client._headers()
+        headers["Accept"] = "text/event-stream"
+        headers["Cache-Control"] = "no-cache"
+
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+        }
+        if temperature is not None:
+            body["temperature"] = temperature
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        if tools is not None:
+            body["tools"] = tools
+        if extra_body:
+            body.update(extra_body)
+
+        try:
+            async with self._client._session.stream(
+                "POST",
+                url,
+                headers=headers,
+                json=body,
+            ) as resp:
+                if resp.status_code != 200:
+                    error_body = ""
+                    with contextlib.suppress(Exception):
+                        error_body = await resp.aread()
+                    raise APIError(
+                        f"API 返回 {resp.status_code}: {error_body}",
+                        status_code=resp.status_code,
+                        body=error_body,
+                    )
+
+                # SSE 行解析
+                pending = b""
+                async for raw in resp.aiter_bytes():
+                    pending += raw
+                    while b"\n" in pending:
+                        line, pending = pending.split(b"\n", 1)
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if line == b"data: [DONE]":
+                            return
+                        if line.startswith(b"data: "):
+                            payload = line[6:]
+                            try:
+                                data = json.loads(payload)
+                            except json.JSONDecodeError:
+                                continue
+                            yield StreamChunk(data)
+        except httpx.ConnectError as e:
+            raise APIError(f"连接失败: {e}", status_code=0) from None
+        except httpx.TimeoutException as e:
+            raise APIError(f"请求超时: {e}", status_code=0) from None
 
 
 class Chat:

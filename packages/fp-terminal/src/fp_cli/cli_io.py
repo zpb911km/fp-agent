@@ -48,6 +48,13 @@ class CLIIO(IOChannel):
 
     # ── 流式输出 ─────────────────────────────────────
 
+    def stream_think(self, token: str):
+        from fp_cli import display as d
+
+        if self._streamer is None:
+            self._streamer = d.LLMStreamer(silent=False)
+        self._streamer.think(token)
+
     def stream_write(self, content: str):
         from fp_cli import display as d
 
