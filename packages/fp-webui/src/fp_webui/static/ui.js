@@ -22,6 +22,48 @@ let progressEl = null;
 // 解决并行调用同名工具时按名称匹配错乱的问题
 var toolCardMap = {};
 
+// ── 状态栏数据 ──
+var _sbData = {
+  latency: null,
+  toolsActive: 0,
+  toolsTotal: 0,
+  msgs: 0,
+  state: 'idle'   // idle | thinking | processing
+};
+
+function updateStatusBar() {
+  var latEl = document.getElementById('sbLatency');
+  var toolsEl = document.getElementById('sbTools');
+  var msgsEl = document.getElementById('sbMsgs');
+  var stateEl = document.getElementById('sbState');
+  if (!latEl || !toolsEl || !msgsEl || !stateEl) return;
+
+  // 延迟
+  if (_sbData.latency != null) {
+    var t = _sbData.latency;
+    latEl.textContent = '⏱ ' + (t < 1000 ? t + 'ms' : (t/1000).toFixed(1) + 's');
+  } else {
+    latEl.textContent = '⏱ —';
+  }
+
+  // 工具
+  var active = _sbData.toolsActive;
+  var total = _sbData.toolsTotal;
+  toolsEl.textContent = active > 0 ? '⚙ ' + active + '/' + total : '⚙ ' + total;
+  if (active > 0) { toolsEl.classList.add('has-active'); }
+  else { toolsEl.classList.remove('has-active'); }
+
+  // 消息计数
+  msgsEl.textContent = '✎ ' + _sbData.msgs;
+
+  // 状态
+  var s = _sbData.state;
+  var icon = s === 'idle' ? '○' : s === 'thinking' ? '◌' : '◎';
+  stateEl.textContent = icon + ' ' + s;
+  stateEl.className = 'status-item state';
+  if (s !== 'idle') stateEl.classList.add(s);
+}
+
 // ── DOM 引用 ──
 const messagesEl = document.getElementById('messagesContainer');
 const inputEl = document.getElementById('inputField');
@@ -103,11 +145,15 @@ function renderMath(root) {
   } catch (e) {}
 }
 
-function getOrCreateMsgGroup() {
-  if (!lastGroupEl || !document.body.contains(lastGroupEl)) {
+function getOrCreateMsgGroup(forcedRhythm) {
+  if (!lastGroupEl || !document.body.contains(lastGroupEl) || forcedRhythm === 'loose') {
     lastGroupEl = document.createElement('div');
     lastGroupEl.className = 'msg-group';
+    if (forcedRhythm) lastGroupEl.dataset.rhythm = forcedRhythm;
     messagesEl.appendChild(lastGroupEl);
+  } else if (forcedRhythm && !lastGroupEl.dataset.rhythm) {
+    // 设置节奏（如果尚未设置）
+    lastGroupEl.dataset.rhythm = forcedRhythm;
   }
   return lastGroupEl;
 }
@@ -143,7 +189,7 @@ function toggleToolMsg(event) {
 }
 
 function addUserMessage(content) {
-  var group = getOrCreateMsgGroup();
+  var group = getOrCreateMsgGroup('loose');
   liveMsgIndex++;
   var idx = liveMsgIndex;
 
@@ -164,6 +210,10 @@ function addUserMessage(content) {
 
   // 复制按钮事件
   msg.querySelector('.copy-btn').onclick = function(e) { e.stopPropagation(); copyMsgContent(this); };
+
+  // 状态栏
+  _sbData.msgs++;
+  updateStatusBar();
 
   scrollToBottom();
 }
@@ -244,7 +294,12 @@ function addToolCall(name, args, tool_call_id) {
   if (toolCardMap[tool_call_id]) return;
 
   removeThinking();
-  var group = getOrCreateMsgGroup();
+  var group = getOrCreateMsgGroup('tight');
+
+  // 状态栏
+  _sbData.toolsActive++;
+  _sbData.toolsTotal++;
+  updateStatusBar();
 
   // ⚠️ 关键修复：tool 消息在后端文件中也占一个索引位置，
   // 所以 liveMsgIndex 必须递增，否则后续 user/assistant 消息的
@@ -311,6 +366,10 @@ function addToolResult(name, result, isError, tool_call_id) {
     return;
   }
 
+  // ── 状态栏 ──
+  _sbData.toolsActive = Math.max(0, _sbData.toolsActive - 1);
+  updateStatusBar();
+
   // ── 更新状态 ──
   var newState = isError ? 'failed' : 'completed';
   target.dataset.toolState = newState;
@@ -353,6 +412,8 @@ function addToolResult(name, result, isError, tool_call_id) {
 
 function showThinking() {
   removeThinking();
+  _sbData.state = 'thinking';
+  updateStatusBar();
   var group = getOrCreateMsgGroup();
 
   progressEl = document.createElement('div');
@@ -362,11 +423,11 @@ function showThinking() {
 
   thinkingEl = document.createElement('div');
   thinkingEl.className = 'thinking-indicator';
+  var bars = '';
+  for (var i = 0; i < 9; i++) { bars += '<span class="wave-bar"></span>'; }
   thinkingEl.innerHTML =
-    '<span>⏳ 思考中</span>' +
-    '<span class="thinking-dots" aria-label="思考中">' +
-      '<span></span><span></span><span></span>' +
-    '</span>';
+    '<span class="thinking-label">⏳ 处理中</span>' +
+    '<span class="thinking-wave" aria-label="处理中">' + bars + '</span>';
   group.appendChild(thinkingEl);
 
   scrollToBottom();
@@ -393,6 +454,7 @@ function setProcessing(state) {
 
   if (state) {
     // 处理中 → 按钮变为中断按钮 ⏹️
+    _sbData.state = 'processing';
     sendBtn.disabled = false;
     sendBtn.textContent = '⏹️';
     sendBtn.style.background = '#8b3a3a';
@@ -402,6 +464,7 @@ function setProcessing(state) {
     sendBtn.setAttribute('aria-label', '中断');
   } else {
     // 空闲 → 恢复为发送按钮 ➤
+    _sbData.state = 'idle';
     sendBtn.disabled = false;
     sendBtn.textContent = '➤';
     sendBtn.style.background = '';
@@ -411,6 +474,7 @@ function setProcessing(state) {
     sendBtn.setAttribute('aria-label', '发送消息');
     inputEl.focus();
   }
+  updateStatusBar();
 }
 
 function clearUI() {
@@ -419,6 +483,11 @@ function clearUI() {
   liveMsgIndex = 0;  // 重置索引计数器，后续由 fetchSessionHistory 重新设置
   toolCardMap = {};  // 清空工具卡片映射表
   removeThinking();
+  // 重置状态栏
+  _sbData.toolsActive = 0;
+  _sbData.toolsTotal = 0;
+  _sbData.msgs = 0;
+  updateStatusBar();
 }
 
 // ── WebSocket ──
@@ -662,8 +731,9 @@ function renderHistoryMessages(sid, messages) {
   messages.forEach(function(msg) {
     var group = document.createElement('div');
     group.className = 'msg-group';
+    group.dataset.rhythm = 'compact';
     group.style.borderBottom = 'none';
-    group.style.padding = '2px 0';
+    group.style.padding = '1px 0';
 
     var msgDiv = document.createElement('div');
 

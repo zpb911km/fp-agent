@@ -54,10 +54,20 @@ html, body, .topbar, .messages-container, .input-area, .input-hint,
   --purple:           #9b6b9b;
   --purple-soft:      rgba(155, 107, 155, 0.12);
 
+  /* 钢蓝——故意与锈色冲突的冷色，用于处理中状态 */
+  --steel:            #4a6b8a;
+  --steel-soft:       rgba(74, 107, 138, 0.12);
+  --steel-mid:        rgba(74, 107, 138, 0.30);
+  --steel-glow:       rgba(74, 107, 138, 0.08);
+
   /* 边界 */
   --border:           #3d3d3d;
   --border-light:     #4a4a4a;
   --border-strong:    #555555;
+
+  /* 网格——极低透明度，融入背景（放在 background-image 中可见于半透明子元素之下） */
+  --grid-main:        rgba(61,61,61,0.10);
+  --grid-sub:         rgba(61,61,61,0.05);
 
   /* 阴影——粗野主义硬阴影 */
   --shadow-color:     #0a0a0a;
@@ -69,6 +79,8 @@ html, body, .topbar, .messages-container, .input-area, .input-hint,
 
   /* 排版 */
   --font-mono:        'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  --font-body:        'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', -apple-system, sans-serif;
+  --font-display:     'JetBrains Mono', monospace;
 
   /* 触摸 */
   --touch-min:        44px;
@@ -111,6 +123,10 @@ html, body, .topbar, .messages-container, .input-area, .input-hint,
   --border-strong:    #a8a096;
 
   --shadow-color:     #b8b0a6;
+
+  /* 亮色网格——更淡 */
+  --grid-main:        rgba(192,184,174,0.06);
+  --grid-sub:         rgba(192,184,174,0.03);
 }
 
 /* ── 亮色主题——装饰层微调 ── */
@@ -120,13 +136,20 @@ html, body, .topbar, .messages-container, .input-area, .input-hint,
 :root.light-theme .noise-bg {
   opacity: 0.02;
 }
-:root.light-theme .rust-overlay {
-  background:
-    radial-gradient(ellipse at 85% 15%, rgba(139,58,58,0.05) 0%, transparent 50%),
-    radial-gradient(ellipse at 15% 85%, rgba(166,94,46,0.04) 0%, transparent 50%);
-}
-:root.light-theme .messages-container::before {
-  opacity: 0.03;
+:root.light-theme .rust-overlay::before {
+  background-image:
+    /* 左半 — 亮色下整体减半透明度 */
+    radial-gradient(ellipse 800px 500px at 20% 15%,  rgba(139,58,58,0.08) 0%, transparent 55%),
+    radial-gradient(ellipse 600px 400px at 15% 82%,  rgba(166,94,46,0.07) 0%, transparent 55%),
+    radial-gradient(ellipse 450px 500px at 22% 50%,  rgba(74,107,74,0.04) 0%, transparent 55%),
+    radial-gradient(ellipse 350px 400px at 8%  45%,  rgba(74,107,138,0.03) 0%, transparent 50%),
+    radial-gradient(ellipse 400px 300px at 25% 30%,  rgba(166,94,46,0.03) 0%, transparent 50%),
+    /* 右半 */
+    radial-gradient(ellipse 750px 480px at 72% 18%,  rgba(139,58,58,0.08) 0%, transparent 55%),
+    radial-gradient(ellipse 650px 350px at 68% 78%,  rgba(166,94,46,0.07) 0%, transparent 55%),
+    radial-gradient(ellipse 400px 450px at 70% 52%,  rgba(74,107,74,0.04) 0%, transparent 55%),
+    radial-gradient(ellipse 380px 350px at 63% 42%,  rgba(74,107,138,0.03) 0%, transparent 50%),
+    radial-gradient(ellipse 350px 320px at 76% 35%,  rgba(166,94,46,0.03) 0%, transparent 50%);
 }
 :root.light-theme ::-webkit-scrollbar-track {
   background: var(--bg-secondary);
@@ -165,7 +188,7 @@ html, body {
   height: 100dvh;
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   font-size: clamp(14px, 1.8vw, 16px);
   line-height: 1.6;
   overflow: hidden;
@@ -239,36 +262,127 @@ kbd {
 /* Firefox scrollbar */
 * { scrollbar-width: thin; scrollbar-color: var(--bg-tertiary) var(--bg-primary); }
 
-/* ── Concrete Noise Overlay ── */
+/* ── Concrete Noise Overlay v2 —— 蠕动运算噪点 ── */
 .noise-bg {
   position: fixed; top: 0; left: 0;
   width: 100%; height: 100%;
   pointer-events: none; z-index: 50;
   opacity: 0.05;
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+  background-size: 256px 256px;
+  animation:
+    noiseCrawl 36s linear infinite,
+    noisePulse 13s ease-in-out infinite alternate;
 }
 
-/* ── Rust Gradient Overlay v2 ── */
+/* 噪点蠕动 —— 像是运算热噪声在表面爬行 */
+@keyframes noiseCrawl {
+  0%   { background-position: 0 0; }
+  50%  { background-position: 16px 8px; }
+  100% { background-position: 0 0; }
+}
+
+/* 噪点呼吸 —— 运算负载波动 */
+@keyframes noisePulse {
+  0%, 100% { opacity: 0.04; }
+  50%      { opacity: 0.07; }
+}
+
+/* ── Rust Gradient Overlay v5 —— 多层运算云层 ── */
 .rust-overlay {
   position: fixed; top: 0; left: 0;
   width: 100%; height: 100%;
   pointer-events: none; z-index: 40;
-  background:
-    radial-gradient(ellipse at 85% 15%, rgba(139,58,58,0.10) 0%, transparent 50%),
-    radial-gradient(ellipse at 15% 85%, rgba(166,94,46,0.08) 0%, transparent 50%),
-    radial-gradient(ellipse at 50% 50%, rgba(74,107,74,0.04) 0%, transparent 60%);
+  overflow: hidden;
+  animation: rustBreathe 9s ease-in-out infinite;
 }
 
-/* ── Scanline Effect ── */
+/* 200% 宽画布，内含两层云团，单向飘移无缝循环 */
+.rust-overlay::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0;
+  width: 200%; height: 100%;
+  background-image:
+    /* ══════ 左半（0%–100%视口） ══════ */
+    /* ① 深锈红——大块背景层 */
+    radial-gradient(ellipse 800px 500px at 20% 15%,  rgba(139,58,58,0.16) 0%, transparent 55%),
+    /* ② 锈橙——暖色主团 */
+    radial-gradient(ellipse 600px 400px at 15% 82%,  rgba(166,94,46,0.14) 0%, transparent 55%),
+    /* ③ 铜绿——冷色平衡 */
+    radial-gradient(ellipse 450px 500px at 22% 50%,  rgba(74,107,74,0.07) 0%, transparent 55%),
+    /* ④ 钢蓝——工业冷调点缀 */
+    radial-gradient(ellipse 350px 400px at 8%  45%,  rgba(74,107,138,0.05) 0%, transparent 50%),
+    /* ⑤ 暖琥珀——小团高光 */
+    radial-gradient(ellipse 400px 300px at 25% 30%,  rgba(166,94,46,0.06) 0%, transparent 50%),
+    /* ══════ 右半（100%–200%视口）——密度相同，位置微差 ══════ */
+    /* ① 深锈红复制 */
+    radial-gradient(ellipse 750px 480px at 72% 18%,  rgba(139,58,58,0.16) 0%, transparent 55%),
+    /* ② 锈橙复制 */
+    radial-gradient(ellipse 650px 350px at 68% 78%,  rgba(166,94,46,0.14) 0%, transparent 55%),
+    /* ③ 铜绿复制 */
+    radial-gradient(ellipse 400px 450px at 70% 52%,  rgba(74,107,74,0.07) 0%, transparent 55%),
+    /* ④ 钢蓝复制 */
+    radial-gradient(ellipse 380px 350px at 63% 42%,  rgba(74,107,138,0.05) 0%, transparent 50%),
+    /* ⑤ 暖琥珀复制 */
+    radial-gradient(ellipse 350px 320px at 76% 35%,  rgba(166,94,46,0.06) 0%, transparent 50%);
+  background-repeat: no-repeat;
+  animation: windDrift 150s linear infinite;
+}
+
+/* 单向飘移 —— 像风吹云层，150 秒一圈 */
+@keyframes windDrift {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+/* 呼吸涨落 —— 云层整体缓慢起伏 */
+@keyframes rustBreathe {
+  0%, 100% { opacity: 0.80; }
+  50%      { opacity: 1.00; }
+}
+
+/* ── Scanline Effect v3 —— 扫描失真 ── */
 .scanlines {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none; z-index: 45;
+  overflow: hidden;
+  /* 主扫描线 */
   background: repeating-linear-gradient(
     to bottom,
     transparent, transparent 2px,
     rgba(0,0,0,0.06) 2px, rgba(0,0,0,0.06) 4px
   );
-  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-  pointer-events: none; z-index: 45;
+  background-size: 100% 4px;
   opacity: 0.25;
+  animation: scanPulse 4s ease-in-out infinite alternate;
+}
+
+/* 扫描线脉冲 —— 模拟信号抖动 */
+@keyframes scanPulse {
+  0%, 100% { opacity: 0.22; }
+  50%      { opacity: 0.28; }
+}
+
+/* 干扰波 —— 一道极淡的横纹缓慢滚屏（CRT 滚动条干扰） */
+.scanlines::after {
+  content: '';
+  position: absolute; left: -2%; 
+  width: 104%; height: 5px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(139,58,58,0.04) 20%,
+    rgba(107,170,107,0.03) 50%,
+    rgba(139,58,58,0.04) 80%,
+    transparent 100%
+  );
+  animation: scanRoll 8s linear infinite;
+  filter: blur(1px);
+}
+
+@keyframes scanRoll {
+  0%   { top: -10px; }
+  100% { top: 110%; }
 }
 
 /* ── CRT Flicker ── */
@@ -448,9 +562,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .topbar::after {
   content: '';
   position: absolute;
-  bottom: -4px; left: 0;
-  width: 100%; height: 1px;
-  background: rgba(166, 94, 46, 0.15);
+  bottom: 0; left: 0;
+  width: 100%; height: 3px;
+  background: linear-gradient(90deg,
+    var(--accent-dark) 0%,
+    var(--accent) 30%,
+    var(--yellow) 50%,
+    var(--accent) 70%,
+    var(--accent-dark) 100%
+  );
+  opacity: 0.3;
+  pointer-events: none;
 }
 
 .topbar-left {
@@ -496,32 +618,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   align-items: center;
   gap: 5px;
   flex-shrink: 0;
-}
-
-.status-dot {
-  display: inline-block;
-  width: 9px; height: 9px;
-  border-radius: 0;
-  background: var(--green-bright);
-  box-shadow: 0 0 6px rgba(107, 170, 107, 0.4);
-  animation: statusPulse 2s ease-in-out infinite;
-  flex-shrink: 0;
-}
-@keyframes statusPulse {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.4; }
-}
-
-/* 断开连接状态（由 JS 控制） */
-.status-dot.disconnected {
-  background: var(--red);
-  box-shadow: 0 0 6px rgba(200, 66, 66, 0.4);
-  animation: none;
-}
-.status-dot.connecting {
-  background: var(--yellow);
-  box-shadow: 0 0 6px rgba(181, 137, 0, 0.4);
-  animation: statusPulse 0.6s ease-in-out infinite;
+  padding-left: 12px;
+  border-left: 2px solid var(--border);
+  margin-left: 4px;
 }
 
 .session-label {
@@ -596,21 +695,23 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   gap: 0;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
-  background: var(--bg-primary);
   position: relative;
-}
-
-/* Grid background——微妙的混凝土网格 */
-.messages-container::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  opacity: 0.06;
-  pointer-events: none;
+  /* 背景：纯色底色 + 多层网格线
+     网格线作为 background-image 绘制在底色之上，
+     任何半透明的子元素（消息气泡）都能自然透出网格 */
+  background-color: var(--bg-primary);
   background-image:
-    linear-gradient(var(--border) 1px, transparent 1px),
-    linear-gradient(90deg, var(--border) 1px, transparent 1px);
-  background-size: 40px 40px;
+    /* 主网格 40px */
+    linear-gradient(var(--grid-main) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-main) 1px, transparent 1px),
+    /* 次网格 10px */
+    linear-gradient(var(--grid-sub) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-sub) 1px, transparent 1px);
+  background-size:
+    40px 40px,
+    40px 40px,
+    10px 10px,
+    10px 10px;
 }
 
 /* 空状态——更精致 */
@@ -649,11 +750,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   display: flex;
   gap: clamp(8px, 1.5vw, 14px);
   padding: 5px 0 5px 0;
-  animation: msgFadeIn 0.3s ease-out;
+  animation: msgImpact 0.18s ease-out;
   transition: background 0.15s;
 }
 .msg:hover {
   background: rgba(255,255,255,0.02);
+}
+
+/* 消息冲击入场——不是淡入，是撞进来的 */
+@keyframes msgImpact {
+  0%   { opacity: 0; transform: translateX(-8px) scale(0.97); clip-path: inset(0 100% 0 0); }
+  50%  { opacity: 1; transform: translateX(2px) scale(1.01); }
+  100% { opacity: 1; transform: translateX(0) scale(1); clip-path: inset(0 0 0 0); }
 }
 
 @keyframes msgFadeIn {
@@ -688,11 +796,26 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   font-size: clamp(11px, 1.1vw, 14px);
 }
 
-/* ── tool 消息折叠 v2 ── */
+/* ── tool 消息折叠 v3 —— 数据表样式 ── */
 .tool-msg {
   cursor: pointer;
   margin-left: -12px;
   padding-left: 12px;
+  border-right: 1px solid rgba(61,61,61,0.08);
+  padding-right: 4px;
+  position: relative;
+}
+.tool-msg::before {
+  content: 'T';
+  position: absolute;
+  left: -4px;
+  top: 6px;
+  font-size: 7px;
+  font-weight: 700;
+  color: var(--yellow);
+  opacity: 0.2;
+  font-family: var(--font-mono);
+  letter-spacing: 0;
 }
 .tool-msg .tool-msg-toggle {
   display: flex;
@@ -777,6 +900,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 
 .msg[data-tool-state="failed"] {
   border-left: 3px solid var(--red);
+  animation: failSting 0.6s ease-out;
+}
+@keyframes failSting {
+  0%   { background: rgba(200, 66, 66, 0.3); transform: translateX(0); }
+  15%  { transform: translateX(-4px); }
+  30%  { transform: translateX(3px); }
+  45%  { transform: translateX(-2px); }
+  60%  { background: rgba(200, 66, 66, 0.08); transform: translateX(0); }
+  100% { background: transparent; }
 }
 .msg[data-tool-state="failed"] .tool-msg-toggle strong {
   color: var(--red);
@@ -834,10 +966,23 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 /* ── LLM 工具调用记录消息 ── */
 .assistant-toolcall-msg {
   border-left: 3px solid var(--purple) !important;
+  border-right: 1px solid rgba(61,61,61,0.08) !important;
   padding-left: 12px;
   background: linear-gradient(90deg, var(--purple-soft) 0%, transparent 60%);
   margin-left: -12px;
-  padding-right: 0;
+  padding-right: 4px;
+  position: relative;
+}
+.assistant-toolcall-msg::before {
+  content: '→';
+  position: absolute;
+  left: -4px;
+  top: 8px;
+  font-size: 7px;
+  font-weight: 700;
+  color: var(--purple);
+  opacity: 0.25;
+  font-family: var(--font-mono);
 }
 .assistant-toolcall-msg .msg-author {
   color: var(--purple) !important;
@@ -891,27 +1036,55 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   white-space: pre-wrap;
 }
 
-/* ── 消息左边界装饰 v2 ── */
+/* ── 消息左边界装饰 v3 —— 数据表样式 ── */
 .msg.user-msg {
   border-left: 3px solid var(--accent);
+  border-right: 1px solid rgba(61,61,61,0.08);
   padding-left: 12px;
   background: linear-gradient(90deg, var(--accent-soft) 0%, transparent 60%);
   margin-left: -12px;
-  padding-right: 0;
+  padding-right: 4px;
+  position: relative;
+}
+.msg.user-msg::before {
+  content: 'U';
+  position: absolute;
+  left: -4px;
+  top: 6px;
+  font-size: 7px;
+  font-weight: 700;
+  color: var(--accent);
+  opacity: 0.2;
+  font-family: var(--font-mono);
+  letter-spacing: 0;
 }
 .msg.assistant-msg {
   border-left: 3px solid var(--green);
+  border-right: 1px solid rgba(61,61,61,0.08);
   padding-left: 12px;
   background: linear-gradient(90deg, var(--green-soft) 0%, transparent 60%);
   margin-left: -12px;
-  padding-right: 0;
+  padding-right: 4px;
+  position: relative;
+}
+.msg.assistant-msg::before {
+  content: 'A';
+  position: absolute;
+  left: -4px;
+  top: 6px;
+  font-size: 7px;
+  font-weight: 700;
+  color: var(--green-bright);
+  opacity: 0.2;
+  font-family: var(--font-mono);
+  letter-spacing: 0;
 }
 
-/* ── 思考中动画 v2 ── */
+/* ── 思考中动画 v3 —— 信号波形 ── */
 .thinking-indicator {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   color: var(--text-secondary);
   font-size: clamp(12px, 1.2vw, 14px);
   padding: 10px 0 10px calc(clamp(30px, 3vw, 36px) + clamp(8px, 1.5vw, 14px));
@@ -919,20 +1092,40 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   position: relative;
   z-index: 1;
 }
-.thinking-dots span {
-  display: inline-block;
-  width: 6px; height: 6px;
-  background: var(--accent);
-  border-radius: 0;
-  animation: dotBounce 1.4s ease-in-out infinite both;
-  margin: 0 2px;
+.thinking-indicator .thinking-label {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-size: 0.78em;
+  color: var(--steel);
+  opacity: 0.7;
 }
-.thinking-dots span:nth-child(1) { animation-delay: -0.32s; }
-.thinking-dots span:nth-child(2) { animation-delay: -0.16s; }
-.thinking-dots span:nth-child(3) { animation-delay: 0s; }
-@keyframes dotBounce {
-  0%, 80%, 100% { transform: scale(0); }
-  40%           { transform: scale(1); }
+
+/* 波形 VU 表 —— 代替原有的弹跳圆点 */
+.thinking-wave {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+}
+.thinking-wave .wave-bar {
+  width: 4px;
+  background: var(--steel);
+  border-radius: 0;
+  animation: waveBar 0.9s ease-in-out infinite alternate;
+}
+.thinking-wave .wave-bar:nth-child(1)  { height: 6px;  animation-delay: 0.0s; }
+.thinking-wave .wave-bar:nth-child(2)  { height: 10px; animation-delay: 0.1s; }
+.thinking-wave .wave-bar:nth-child(3)  { height: 14px; animation-delay: 0.2s; }
+.thinking-wave .wave-bar:nth-child(4)  { height: 18px; animation-delay: 0.3s; }
+.thinking-wave .wave-bar:nth-child(5)  { height: 20px; animation-delay: 0.4s; }
+.thinking-wave .wave-bar:nth-child(6)  { height: 18px; animation-delay: 0.5s; }
+.thinking-wave .wave-bar:nth-child(7)  { height: 14px; animation-delay: 0.6s; }
+.thinking-wave .wave-bar:nth-child(8)  { height: 10px; animation-delay: 0.7s; }
+.thinking-wave .wave-bar:nth-child(9)  { height: 6px;  animation-delay: 0.8s; }
+@keyframes waveBar {
+  0%   { opacity: 0.2; transform: scaleY(0.5); }
+  100% { opacity: 1;   transform: scaleY(1);   }
 }
 
 /* ── 思考进度条 v2 ── */
@@ -1073,9 +1266,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   输入区域 v2
-   ═══════════════════════════════════════════════════════════════ */
-/* ═══════════════════════════════════════════════════════════════
+   ═══════════════════════════════════════════════════════════════
    输入区域 v3 — 一体化设计
    ═══════════════════════════════════════════════════════════════ */
 .input-area {
@@ -1110,6 +1301,50 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   align-items: stretch;
   gap: 6px;
   padding: 10px 14px 8px;
+}
+
+
+/* ── 控制台输入框容器 ── */
+.input-console {
+  position: relative;
+  flex: 1;
+  display: flex;
+}
+
+/* 提示符 ❯ — 固定在左上角，不跟随文本滚动 */
+.input-console::before {
+  content: '❯';
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 2;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 700;
+  opacity: 0.25;
+  pointer-events: none;
+  user-select: none;
+  transition: opacity 0.25s ease, color 0.25s ease;
+  line-height: 1.5;
+}
+
+/* 聚焦时提示符激活 — 钢蓝亮起 */
+.input-console:focus-within::before {
+  color: var(--steel);
+  opacity: 0.75;
+}
+
+/* 空内容 + 聚焦时，提示符脉冲 —— "等待输入" */
+.input-console:focus-within textarea:placeholder-shown + .input-console::before {
+  /* sibling trick won't work; use animation on the ::before directly */
+}
+.input-console:focus-within::before {
+  animation: consolePromptPulse 2.2s ease-in-out infinite;
+}
+@keyframes consolePromptPulse {
+  0%, 100% { opacity: 0.75; }
+  50%      { opacity: 0.35; }
 }
 
 /* ── 闪充按钮 v3 ── */
@@ -1147,7 +1382,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   background: var(--bg-primary);
   border: 2px solid var(--border);
   color: var(--text-primary);
-  padding: clamp(8px, 1.2vw, 12px) 14px;
+  padding: clamp(8px, 1.2vw, 12px) 14px clamp(8px, 1.2vw, 12px) 32px;
   font-size: clamp(13px, 1.4vw, 15px);
   font-family: var(--font-mono);
   resize: none;
@@ -1209,8 +1444,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   opacity: 0.4;
   cursor: not-allowed;
   transform: none !important;
-  box-shadow: var(--shadow-brutal-sm) !important;
-}
   box-shadow: var(--shadow-brutal-sm) !important;
 }
 
@@ -1683,6 +1916,210 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   升级一：活标志——迭代器核心符号
+   ═══════════════════════════════════════════════════════════════ */
+.live-symbol {
+  display: block;
+  overflow: visible;
+  filter: drop-shadow(0 0 4px rgba(139,58,58,0.2));
+  transition: filter 0.3s ease;
+}
+.live-symbol:hover {
+  filter: drop-shadow(0 0 10px rgba(166,94,46,0.5));
+}
+.live-symbol:hover .sym-core {
+  animation-play-state: paused;
+}
+
+/* 外壳 —— 缓慢起伏 */
+.sym-hull {
+  animation: hullPulse 6s ease-in-out infinite;
+}
+@keyframes hullPulse {
+  0%, 100% { opacity: 0.45; stroke-width: 1.3; }
+  50%      { opacity: 0.65; stroke-width: 1.5; }
+}
+
+/* 断裂环 —— 逆时针自转 */
+.sym-ring {
+  transform-origin: center;
+  animation: ringSpin 20s linear infinite;
+}
+@keyframes ringSpin {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(-360deg); }
+}
+
+/* 辐射线 —— 脉冲呼吸 */
+.sym-rays {
+  animation: raysPulse 4s ease-in-out infinite;
+}
+@keyframes raysPulse {
+  0%, 100% { opacity: 0.3; }
+  50%      { opacity: 0.55; }
+}
+
+/* 断裂线 —— 偶尔闪烁 */
+.sym-broken {
+  animation: brokenFlicker 8s ease-in-out infinite;
+}
+@keyframes brokenFlicker {
+  0%, 85%, 100% { opacity: 0.1; stroke-width: 0.6; }
+  90%           { opacity: 0.6; stroke-width: 1.4; }
+  95%           { opacity: 0.2; stroke-width: 0.8; }
+}
+
+/* 核心 —— 稳定呼吸发光 */
+.sym-core {
+  transform-origin: center;
+  animation: coreBreathe 3s ease-in-out infinite;
+}
+@keyframes coreBreathe {
+  0%, 100% { opacity: 0.08; transform: scale(1); }
+  50%      { opacity: 0.18; transform: scale(1.03); }
+}
+
+/* 中心光点 —— 明暗微动 */
+.sym-dot {
+  transform-origin: center;
+  animation: dotGlow 3s ease-in-out infinite;
+}
+@keyframes dotGlow {
+  0%, 100% { opacity: 0.5; r: 2.5; }
+  50%      { opacity: 0.9; r: 3; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   升级二：状态栏（信息密度层）
+   ── 状态栏 v3 —— 遥测数据条 ── */
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  height: 20px;
+  flex-shrink: 0;
+  background: var(--bg-primary);
+  border-top: 1px solid var(--border);
+  padding: 0 4px;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  color: var(--text-muted);
+  user-select: none;
+  letter-spacing: 0.5px;
+  overflow: hidden;
+}
+.status-bar::before {
+  content: 'TELM';
+  font-size: 7px;
+  color: var(--text-dim);
+  opacity: 0.2;
+  letter-spacing: 1px;
+  margin-right: 6px;
+  padding-right: 6px;
+  border-right: 1px solid rgba(61,61,61,0.1);
+}
+.status-item {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 6px;
+  border-right: 1px solid rgba(61,61,61,0.1);
+  white-space: nowrap;
+  gap: 3px;
+}
+.status-item:last-child {
+  border-right: none;
+  margin-left: auto;
+}
+.status-item.state {
+  color: var(--text-dim);
+}
+.status-item.latency {
+  min-width: 48px;
+}
+.status-item.latency.flash {
+  animation: latencyFlash 0.3s ease-out;
+}
+@keyframes latencyFlash {
+  0%   { color: var(--green-bright); }
+  100% { color: var(--text-muted); }
+}
+.status-item.tools.has-active {
+  color: var(--yellow);
+}
+.status-item.state.thinking {
+  color: var(--steel);
+}
+.status-item.state.processing {
+  color: var(--accent);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   升级三：垂直节奏体系
+   ═══════════════════════════════════════════════════════════════ */
+/* 基础 group 样式（默认无额外间距） */
+.msg-group { }
+
+/* Loose——对话消息（user ↔ assistant 配对） */
+.msg-group[data-rhythm="loose"] {
+  margin-bottom: 2px;
+  padding-bottom: 4px;
+}
+.msg-group[data-rhythm="loose"]::after {
+  content: '';
+  display: block;
+  height: 2px;
+  background: linear-gradient(90deg, transparent 10%, var(--border) 30%, var(--border) 70%, transparent 90%);
+  margin: 0 12px;
+  opacity: 0.35;
+}
+.msg-group[data-rhythm="loose"]:last-of-type::after {
+  display: none;
+}
+
+/* Tight——工具调用组 */
+.msg-group[data-rhythm="tight"] {
+  margin-bottom: 2px;
+  padding-bottom: 0;
+}
+.msg-group[data-rhythm="tight"]::after {
+  display: none;
+}
+
+/* Compact——历史回溯组 */
+.msg-group[data-rhythm="compact"] {
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+.msg-group[data-rhythm="compact"]::after {
+  display: none;
+}
+.msg-group[data-rhythm="compact"] .msg {
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+.msg-group[data-rhythm="compact"] .msg-header {
+  margin-bottom: 0;
+}
+.msg-group[data-rhythm="compact"] .msg-time {
+  font-size: 8px;
+}
+
+/* 亮色主题适配 */
+:root.light-theme .sym-hull {
+  opacity: 0.55;
+}
+:root.light-theme .sym-ring {
+  opacity: 0.6;
+}
+:root.light-theme .sym-rays {
+  opacity: 0.4;
+}
+:root.light-theme .status-bar {
+  border-top-color: var(--border-light);
+}
+
+/* ═══════════════════════════════════════════════════════════════
    响应式——大屏幕
    ═══════════════════════════════════════════════════════════════ */
 @media (min-width: 900px) {
@@ -1699,4 +2136,34 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 @media (max-width: 599px) {
   .topbar-btn .btn-label { display: none; }
   .topbar-btn { padding: 6px 8px; min-width: 40px; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   第三刀：消息交替错位——偶数/奇数 group 偏移
+   让消息列看起来像是手工堆叠的，不是网格排布的
+   ═══════════════════════════════════════════════════════════════ */
+.msg-group:nth-child(even) .msg.user-msg {
+  margin-left: -8px;
+  padding-left: 16px;
+}
+.msg-group:nth-child(odd) .msg.assistant-msg {
+  margin-left: -16px;
+  padding-left: 20px;
+}
+.msg-group:nth-child(even) .msg.tool-msg {
+  margin-left: -4px;
+  padding-left: 16px;
+}
+
+:root.light-theme .msg-group:nth-child(even) .msg.user-msg {
+  margin-left: -4px;
+  padding-left: 14px;
+}
+:root.light-theme .msg-group:nth-child(odd) .msg.assistant-msg {
+  margin-left: -10px;
+  padding-left: 16px;
+}
+:root.light-theme .msg-group:nth-child(even) .msg.tool-msg {
+  margin-left: -2px;
+  padding-left: 14px;
 }

@@ -8,6 +8,10 @@
 // ── 避免 done.final_content 与 llm_end.content 重复渲染 ──
 var _finalContentAlreadyShown = false;
 
+// ── WebSocket 延迟测量 ──
+var _lastPingTime = null;
+var _pingInterval = null;
+
 function withAuth(opts) {
   opts = opts || {};
   opts.headers = opts.headers || {};
@@ -105,12 +109,23 @@ function connectWebSocket() {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
+    // 启动延迟探测（每 10 秒 ping）
+    if (_pingInterval) clearInterval(_pingInterval);
+    _pingInterval = setInterval(function() {
+      try {
+        _lastPingTime = Date.now();
+        ws.send(JSON.stringify({ type: 'ping' }));
+      } catch(e) {}
+    }, 10000);
     loadSessionsList();
   };
 
   ws.onclose = function() {
     statusEl.textContent = '🔴 已断开';
     setProcessing(false);
+    _sbData.latency = null;
+    updateStatusBar();
+    if (_pingInterval) { clearInterval(_pingInterval); _pingInterval = null; }
     if (!reconnectTimer) {
       reconnectTimer = setTimeout(function() {
         reconnectTimer = null;
@@ -150,10 +165,18 @@ function handleEvent(data) {
       break;
 
     case 'ping':
-      try { ws.send(JSON.stringify({ type: 'ping' })); } catch(e) {}
+      try { ws.send(JSON.stringify({ type: 'pong' })); } catch(e) {}
       break;
 
     case 'pong':
+      if (_lastPingTime) {
+        _sbData.latency = Date.now() - _lastPingTime;
+        _lastPingTime = null;
+        updateStatusBar();
+        // 闪烁动画
+        var latEl = document.getElementById('sbLatency');
+        if (latEl) { latEl.classList.remove('flash'); void latEl.offsetWidth; latEl.classList.add('flash'); }
+      }
       break;
 
     case 'llm_start':
