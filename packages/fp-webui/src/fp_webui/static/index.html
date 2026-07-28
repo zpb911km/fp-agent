@@ -681,6 +681,136 @@
     font-size: 10px;
   }
 
+  /* ── 快捷命令面板（卡片式 · 触控优先） ── */
+  .cmd-palette {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    max-height: min(360px, 50vh);
+    overflow-y: auto;
+    background: var(--bg-secondary);
+    border: 2px solid var(--bg-tertiary);
+    box-shadow: 6px -4px 0 0 var(--shadow-color);
+    z-index: 100;
+    padding: 0;
+  }
+  .cmd-palette[hidden] { display: none; }
+  .cmd-palette-header {
+    padding: 10px 14px;
+    font-weight: 700;
+    font-size: 0.85em;
+    color: var(--text-dim);
+    background: var(--bg-primary);
+    border-bottom: 2px solid var(--bg-tertiary);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    letter-spacing: 0.3px;
+  }
+  .cmd-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(61,61,61,0.25);
+    transition: background 0.08s ease;
+    gap: 10px;
+    min-height: 48px;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .cmd-item:last-child { border-bottom: none; }
+  .cmd-item:active {
+    background: var(--accent-soft);
+    transform: scale(0.98);
+  }
+  .cmd-item:hover,
+  .cmd-item.highlighted {
+    background: var(--accent-soft);
+    border-left: 3px solid var(--accent);
+    padding-left: 11px;
+  }
+  .cmd-item-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    flex: 1;
+  }
+  .cmd-item-key {
+    font-weight: 700;
+    color: var(--accent);
+    font-size: 0.95em;
+    flex-shrink: 0;
+  }
+  .cmd-item-desc {
+    font-size: 0.78em;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* 二级菜单：返回项 */
+  .cmd-back {
+    border-bottom: 2px solid var(--bg-tertiary);
+    background: var(--bg-primary);
+    font-size: 0.9em;
+  }
+  .cmd-back:hover,
+  .cmd-back.highlighted {
+    border-left-color: var(--text-dim);
+    background: var(--bg-tertiary);
+  }
+  .cmd-back-arrow {
+    font-size: 1.2em;
+    margin-right: 4px;
+    color: var(--text-dim);
+  }
+  .cmd-back-label {
+    color: var(--text-dim);
+    font-weight: 600;
+    opacity: 0.7;
+  }
+
+  /* 二级菜单指示器 › */
+  .cmd-item-sub-indicator {
+    font-size: 1.3em;
+    color: var(--text-dim);
+    opacity: 0.4;
+    flex-shrink: 0;
+    margin-left: auto;
+  }
+
+  .cmd-empty {
+    padding: 24px 14px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.85em;
+  }
+
+  /* ⚡ 按钮 */
+  .cmd-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    border-right: 2px solid var(--bg-tertiary);
+    color: var(--text-dim);
+    width: var(--touch-min);
+    min-width: var(--touch-min);
+    height: var(--touch-min);
+    cursor: pointer;
+    font-size: 16px;
+    transition: all 0.1s ease;
+    flex-shrink: 0;
+    touch-action: manipulation;
+  }
+  .cmd-btn:hover { color: var(--accent); background: var(--bg-secondary); }
+
+  /* ── 错误消息 ─────────────────────────── */
+
   /* ── 错误消息 ─────────────────────────── */
   .error-msg {
     color: var(--red);
@@ -1157,6 +1287,7 @@
     <!-- ─── 输入区 ─── -->
     <div class="input-area" role="form" aria-label="消息输入">
       <div class="input-wrapper">
+        <button class="cmd-btn" id="cmdBtn" onclick="toggleCmdPalette()" title="快捷命令 (Ctrl+/)" aria-label="快捷命令" type="button">⚡</button>
         <textarea id="inputField" rows="1"
                   placeholder="输入指令..."
                   autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
@@ -1167,6 +1298,11 @@
         <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="发送 (Enter)" aria-label="发送消息">
           ➤
         </button>
+      </div>
+      <!-- 快捷命令浮层 -->
+      <div class="cmd-palette" id="cmdPalette" role="listbox" aria-label="快捷命令" hidden>
+        <div class="cmd-palette-header">⚡ 快捷命令</div>
+        <div class="cmd-palette-list" id="cmdList"></div>
       </div>
       <div class="input-hint">
         <span><kbd>Enter</kbd> 发送 · <kbd>Shift+Enter</kbd> 换行</span>
@@ -1187,6 +1323,8 @@
         <div class="no-sessions">加载中...</div>
       </div>
     </div>
+  </div>
+
   </div>
 
 <script>
@@ -1828,6 +1966,7 @@ messagesEl.addEventListener('click', function(e) {
 });
 
 function sendMessage() {
+  closeCmdPalette();
   var text = inputEl.value.trim();
   if (!text || processing || !ws || ws.readyState !== WebSocket.OPEN) return;
 
@@ -1858,13 +1997,249 @@ function sendMessage() {
   try { ws.send(JSON.stringify({ type: 'message', content: text })); } catch(e) { showError('发送失败'); setProcessing(false); }
 }
 
+// ── 快捷命令面板 ──
+
+var FALLBACK_COMMANDS = [
+  { name: '/help',    desc: '显示帮助信息' },
+  { name: '/new',     desc: '新建空白会话' },
+  { name: '/clear',   desc: '清空当前会话' },
+  { name: '/session', desc: '显示当前会话信息' },
+];
+
+var commandsCache = [];
+var cmdHighlightIdx = -1;
+var cmdMenuStack = [];  // [] = 顶层, [{parentName, subcommands}] = 二级菜单
+
+function toggleCmdPalette() {
+  var palette = document.getElementById('cmdPalette');
+  if (palette.hidden) {
+    palette.hidden = false;
+    cmdMenuStack = [];
+    commandsCache = FALLBACK_COMMANDS.slice();
+    cmdHighlightIdx = -1;
+    renderCmdList();
+    // 1. 优先尝试加载 commands.json（多级命令菜单）
+    fetch('/static/commands.json').then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function(data) {
+      if (Array.isArray(data) && data.length > 0) {
+        commandsCache = data;
+        renderCmdList();
+      }
+    }).catch(function() {
+      // 2. 失败则降级到 /api/commands（单级扁平列表）
+      authFetch('/api/commands').then(function(r) { return r.json(); }).then(function(data) {
+        if (data.commands && data.commands.length > 0) {
+          commandsCache = data.commands;
+          renderCmdList();
+        }
+      }).catch(function() {});
+    });
+  } else {
+    closeCmdPalette();
+  }
+}
+
+function closeCmdPalette() {
+  document.getElementById('cmdPalette').hidden = true;
+  cmdHighlightIdx = -1;
+  cmdMenuStack = [];
+}
+
+function cmdMenuBack() {
+  if (cmdMenuStack.length === 0) return;
+  cmdMenuStack.pop();
+  cmdHighlightIdx = -1;
+  renderCmdList();
+}
+
+function renderCmdList() {
+  var list = document.getElementById('cmdList');
+  if (!commandsCache || commandsCache.length === 0) {
+    list.innerHTML = '<div class="cmd-empty">暂无可用命令</div>';
+    return;
+  }
+
+  var items, parentName;
+  if (cmdMenuStack.length > 0) {
+    var state = cmdMenuStack[cmdMenuStack.length - 1];
+    items = state.subcommands;
+    parentName = state.parentName;
+  } else {
+    items = commandsCache;
+    parentName = null;
+  }
+
+  var html = '';
+  var offset = 0;
+
+  // 二级菜单：顶部返回项（highlightIdx = 0）
+  if (parentName) {
+    html += '<div class="cmd-item cmd-back' + (cmdHighlightIdx === 0 ? ' highlighted' : '') + '">' +
+      '<div class="cmd-item-left">' +
+        '<span class="cmd-back-arrow">←</span>' +
+        '<span class="cmd-back-label">' + escapeHtml(parentName) + '…</span>' +
+      '</div>' +
+    '</div>';
+    offset = 1;
+  }
+
+  html += items.map(function(cmd, i) {
+    var hl = (i + offset) === cmdHighlightIdx ? ' highlighted' : '';
+    var cmdName = cmd.name || '';
+    var cmdDesc = cmd.desc || cmd.description || '';
+    var hasSub = cmd.subcommands && cmd.subcommands.length > 0 && !parentName;
+    return '<div class="cmd-item' + hl + '" data-index="' + i + '">' +
+      '<div class="cmd-item-left">' +
+        '<span class="cmd-item-key">' + escapeHtml(cmdName) + '</span>' +
+        '<span class="cmd-item-desc">' + escapeHtml(cmdDesc) + '</span>' +
+      '</div>' +
+      (hasSub ? '<span class="cmd-item-sub-indicator">›</span>' : '') +
+    '</div>';
+  }).join('');
+
+  list.innerHTML = html;
+  var highlighted = list.querySelector('.highlighted');
+  if (highlighted) highlighted.scrollIntoView({ block: 'nearest' });
+}
+
+// 事件委托：点击命令项
+document.getElementById('cmdList').addEventListener('click', function(e) {
+  var item = e.target.closest('.cmd-item');
+  if (!item) return;
+  // 阻止冒泡到 document 的关闭处理器。
+  // selectCmd() 可能调用 renderCmdList() 替换 innerHTML，
+  // 导致 e.target 变成孤儿节点，closest('.input-area') 返回 null，
+  // 进而被 document 处理器误判为"点击外部"关闭面板。
+  e.stopPropagation();
+  // 返回按钮
+  if (item.classList.contains('cmd-back')) {
+    cmdMenuBack();
+    return;
+  }
+  var index = parseInt(item.getAttribute('data-index'), 10);
+  if (!isNaN(index)) selectCmd(index);
+});
+
+// 事件委托：hover 高亮（直接操作 class，不重建 DOM）
+document.getElementById('cmdList').addEventListener('mouseover', function(e) {
+  var item = e.target.closest('.cmd-item');
+  if (!item) return;
+  // 清除全部高亮
+  var all = document.querySelectorAll('.cmd-item.highlighted');
+  for (var j = 0; j < all.length; j++) all[j].classList.remove('highlighted');
+  // 高亮当前
+  item.classList.add('highlighted');
+  // 同步键盘导航索引
+  var items = document.querySelectorAll('.cmd-item');
+  for (var k = 0; k < items.length; k++) {
+    if (items[k] === item) { cmdHighlightIdx = k; break; }
+  }
+});
+// 鼠标离开列表 → 清除高亮
+document.getElementById('cmdList').addEventListener('mouseleave', function() {
+  var all = document.querySelectorAll('.cmd-item.highlighted');
+  for (var j = 0; j < all.length; j++) all[j].classList.remove('highlighted');
+  cmdHighlightIdx = -1;
+});
+
+function selectCmd(index) {
+  var items;
+  if (cmdMenuStack.length > 0) {
+    items = cmdMenuStack[cmdMenuStack.length - 1].subcommands;
+  } else {
+    items = commandsCache;
+  }
+  var cmd = items[index];
+  if (!cmd) return;
+
+  // 顶层且有子命令 → 进入二级菜单
+  if (cmdMenuStack.length === 0 && cmd.subcommands && cmd.subcommands.length > 0) {
+    cmdMenuStack.push({
+      parentName: cmd.name,
+      subcommands: cmd.subcommands
+    });
+    cmdHighlightIdx = -1;
+    renderCmdList();
+    return;
+  }
+
+  // 普通命令/子命令 → 补全到输入框
+  var text = (cmd.name || '') + ' ';
+  inputEl.value = text;
+  autoResize(inputEl);
+  var len = inputEl.value.length;
+  inputEl.setSelectionRange(len, len);
+  closeCmdPalette();
+  inputEl.focus();
+}
+
+function navigateCmdList(direction) {
+  if (!commandsCache || commandsCache.length === 0) return;
+  var total;
+  if (cmdMenuStack.length > 0) {
+    total = 1 + cmdMenuStack[cmdMenuStack.length - 1].subcommands.length;
+  } else {
+    total = commandsCache.length;
+  }
+  cmdHighlightIdx += direction;
+  if (cmdHighlightIdx < 0) cmdHighlightIdx = total - 1;
+  if (cmdHighlightIdx >= total) cmdHighlightIdx = 0;
+  renderCmdList();
+}
+
+function confirmCmdSelection() {
+  if (cmdHighlightIdx < 0) return;
+  // 二级菜单 highlightIdx = 0 → 返回
+  if (cmdMenuStack.length > 0 && cmdHighlightIdx === 0) {
+    cmdMenuBack();
+    return;
+  }
+  var actualIndex = cmdMenuStack.length > 0 ? cmdHighlightIdx - 1 : cmdHighlightIdx;
+  selectCmd(actualIndex);
+}
+
 function handleKeyDown(event) {
+  var palette = document.getElementById('cmdPalette');
+
+  // Ctrl+/ 切换快捷命令面板
+  if (event.ctrlKey && event.key === '/') {
+    event.preventDefault();
+    toggleCmdPalette();
+    return;
+  }
+
+  // 面板打开时：键盘导航
+  if (!palette.hidden) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      navigateCmdList(1);
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      navigateCmdList(-1);
+      return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      confirmCmdSelection();
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeCmdPalette();
+      return;
+    }
+  }
+
   // Enter 发送
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
     sendMessage();
   }
-  // Ctrl+Shift+C 中断（浏览器中 Ctrl+C 默认是复制，不覆盖）
+  // Ctrl+Shift+C 中断
   if (event.ctrlKey && event.shiftKey && (event.key === 'C' || event.key === 'c')) {
     event.preventDefault();
     if (processing) cancelMessage();
@@ -2267,9 +2642,23 @@ document.addEventListener('DOMContentLoaded', function() {
     if (e.target === e.currentTarget) closeSessions();
   });
 
-  // ESC 关闭模态框
+  // ESC 关闭（命令面板 → 会话模态框）
   document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') closeSessions();
+    if (e.key === 'Escape') {
+      if (!document.getElementById('cmdPalette').hidden) {
+        closeCmdPalette();
+      } else {
+        closeSessions();
+      }
+    }
+  });
+
+  // 点击输入区外部关闭命令面板
+  document.addEventListener('click', function(e) {
+    if (document.getElementById('cmdPalette').hidden) return;
+    if (!e.target.closest('.input-area')) {
+      closeCmdPalette();
+    }
   });
 
   // 窗口 resize 时保持滚动在底部（键盘弹出场景）

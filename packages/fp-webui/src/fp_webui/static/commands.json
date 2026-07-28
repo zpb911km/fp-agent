@@ -1,0 +1,41 @@
+[
+  { "name": "/back", "desc": "回退历史时刻",
+    "subcommands": [
+      { "name": "/back", "desc": "回退一步" },
+      { "name": "/back list", "desc": "列出所有历史时刻" },
+      { "name": "/back <N>", "desc": "回退到第 N 步" }
+    ]},
+  { "name": "/clear", "desc": "清空当前会话" },
+  { "name": "/compact", "desc": "压缩对话历史" },
+  { "name": "/exit", "desc": "退出程序" },
+  { "name": "/exit!", "desc": "核弹级退出（不留痕迹）" },
+  { "name": "/fork", "desc": "基于当前上下文新建会话" },
+  { "name": "/help", "desc": "显示帮助信息" },
+  { "name": "/history", "desc": "查看对话历史" },
+  { "name": "/new", "desc": "新建空白会话" },
+  { "name": "/option", "desc": "管理拓展机制",
+    "subcommands": [
+      { "name": "/option", "desc": "查看当前状态" },
+      { "name": "/option list", "desc": "列出所有插件" },
+      { "name": "/option enable", "desc": "启用插件" },
+      { "name": "/option disable", "desc": "禁用插件" },
+      { "name": "/option info", "desc": "查看插件信息" }
+    ]},
+  { "name": "/reload", "desc": "热重载 Agent" },
+  { "name": "/resume", "desc": "切换/删除历史会话",
+    "subcommands": [
+      { "name": "/resume", "desc": "当前会话" },
+      { "name": "/resume list", "desc": "列出所有会话" },
+      { "name": "/resume latest", "desc": "切换到最新" },
+      { "name": "/resume delete", "desc": "删除会话" }
+    ]},
+  { "name": "/sc", "desc": "短路已完成连通块",
+    "subcommands": [
+      { "name": "/sc", "desc": "压缩最近一个" },
+      { "name": "/sc list", "desc": "列出连通块" },
+      { "name": "/sc <N>", "desc": "压缩最近 N 个" },
+      { "name": "/sc #<N>", "desc": "指定编号压缩" }
+    ]},
+  { "name": "/session", "desc": "显示当前会话信息" },
+  { "name": "/token", "desc": "显示 Token 消耗统计" }
+]
