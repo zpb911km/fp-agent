@@ -154,11 +154,11 @@ class AgentReloader:
             if result is not None and hasattr(result, "__await__"):
                 await result
 
-        # ── 2. 保存旧会话 ──
+        # ── 2. 保存旧会话（上下文 + 摘要） ──
         old_sid: str | None = None
         if agent is not None:
             old_sid = agent.state.session.session_id
-            agent.state.session.save_context(agent.state.conversation.messages)
+            agent.state.session.save_and_summarize(agent.state.conversation.to_serializable(), old_sid)
 
         # ── 3. 关闭旧 Agent（静默，不打印关闭面板） ──
         if agent is not None:

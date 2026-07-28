@@ -299,20 +299,14 @@ class Agent:
 
         summary = ""
         if not self.state.nuclear_exit:
-            last_msgs = self._conv.get_non_system_messages()
-            if last_msgs:
-                last_user = next((m for m in reversed(last_msgs) if m["role"] == "user"), None)
-                if last_user:
-                    summary = last_user.get("content", "").strip().replace("\n", " ")[:20]
-                    self.session.update_meta(summary=summary)
+            # 统一入口：保存上下文 + 生成摘要
+            messages = self._conv.to_serializable()
+            summary = self.session.save_and_summarize(messages)
 
             # 保存 token 消耗到会话 meta
             token_data = self._token_tracker.to_dict()
             if token_data.get("total", {}).get("call_count", 0) > 0:
                 self.session.update_meta(token_usage=token_data)
-
-        if not self.state.nuclear_exit:
-            self.session.save_context(self._conv.to_serializable())
 
         # 触发 shutdown 回调（终端用于渲染退出面板）
         if self._shutdown_callback and not getattr(self.state, "silent_shutdown", False):

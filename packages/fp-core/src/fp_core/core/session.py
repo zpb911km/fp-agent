@@ -353,6 +353,38 @@ class SessionManager:
         """获取当前会话的 meta 信息（只读视图）"""
         return dict(self._meta)
 
+    def save_and_summarize(self, messages: list[dict], session_id: str | None = None) -> str:
+        """保存会话上下文并生成摘要（统一入口）。
+
+        所有会话切换/退出路径都应调用此方法，确保摘要生成逻辑一致。
+        摘要策略：取最后一条用户消息的前 50 字符，换行转空格。
+
+        Args:
+            messages: to_serializable() 输出的非 system 消息列表
+            session_id: 目标会话 ID（None 表示当前会话）
+
+        Returns:
+            生成的摘要文本
+        """
+        # 1. 持久化消息
+        self.save_context(messages)
+
+        # 2. 从最后一条用户消息生成摘要
+        summary = ""
+        last_user = next(
+            (m for m in reversed(messages) if m.get("role") == "user"),
+            None,
+        )
+        if last_user:
+            content = last_user.get("content", "")
+            if content:
+                summary = content.strip().replace("\n", " ")[:50]
+
+        # 3. 写回 meta
+        target_sid = session_id or self._session_id
+        self.update_meta(target_sid, summary=summary)
+        return summary
+
     def update_meta(self, sid: str | None = None, **kwargs):
         """更新指定会话的内嵌 meta 字段。"""
         sid = sid or self._session_id

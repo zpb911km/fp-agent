@@ -114,6 +114,8 @@ async def execute(state, arg: str) -> tuple[bool, str]:
 
     # ── /resume latest ─────────────────────────────────────────
     if arg == "latest":
+        # 保存当前会话的上下文和摘要，再切换
+        state.session.save_and_summarize(state.conversation.to_serializable())
         if state.session.resume_latest():
             _rebuild_context(state)
             return (True, f"📂 已切换到最新会话: `{state.session_id}`")
@@ -123,6 +125,8 @@ async def execute(state, arg: str) -> tuple[bool, str]:
     sid = _resolve_sid(state, arg, exclude_current=False)
     if sid is None:
         return (True, f"❌ 序号/会话 `{arg}` 无效。使用 `/resume list` 查看可用会话")
+    # 保存当前会话的上下文和摘要，再切换
+    state.session.save_and_summarize(state.conversation.to_serializable())
     if state.session.switch_session(sid):
         _rebuild_context(state)
         return (True, f"📂 已切换到会话: `{sid}`")
