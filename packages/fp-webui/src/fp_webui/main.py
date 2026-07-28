@@ -244,6 +244,7 @@ class WebUIPlugin(Plugin):
             "tool_call",
             name=kwargs.get("tool_name", ""),
             args=kwargs.get("tool_args", ""),
+            tool_call_id=kwargs.get("tool_call_id", ""),
         )
 
     async def _on_tool_result(self, ctx: HookContext, **kwargs):
@@ -253,6 +254,7 @@ class WebUIPlugin(Plugin):
             "tool_result",
             name=kwargs.get("tool_name", ""),
             result=(result[:200] + "...") if len(result) > 200 else result,
+            tool_call_id=kwargs.get("tool_call_id", ""),
         )
 
     async def _on_error(self, ctx: HookContext, **kwargs):
