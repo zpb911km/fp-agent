@@ -2,7 +2,7 @@
   { "name": "/back", "desc": "回退历史时刻",
     "subcommands": [
       { "name": "/back", "desc": "回退一步" },
-      { "name": "/back list", "desc": "列出所有历史时刻" },
+      { "name": "/back list", "desc": "列出所有历史时刻" }
     ]},
   { "name": "/clear", "desc": "清空当前会话" },
   { "name": "/compact", "desc": "压缩对话历史" },

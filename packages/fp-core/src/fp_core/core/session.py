@@ -308,6 +308,8 @@ class SessionManager:
 
     def save_context(self, context: list[dict[str, Any]]):
         """将完整上下文写入文件。context 应为 to_serializable() 的输出（无 system prompt）。"""
+        # 防御性过滤：防止误传入 system 消息
+        context = [m for m in context if m.get("role") != "system"]
         path = self._session_path()
 
         if not context:
@@ -342,6 +344,8 @@ class SessionManager:
                     line = line.strip()
                     if line:
                         msg = json.loads(line)
+                        if msg.get("role") == "system":
+                            continue
                         context.append(msg)
             except Exception:
                 pass

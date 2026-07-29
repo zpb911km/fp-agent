@@ -439,6 +439,36 @@ async def list_sessions():
     return {"sessions": result}
 
 
+@app.get("/api/commands")
+async def list_commands():
+    """返回快捷命令列表（前端命令面板降级使用）"""
+    import json as _json
+
+    _cmd_path = os.path.join(_static_dir, "commands.json")
+    if os.path.exists(_cmd_path):
+        try:
+            with open(_cmd_path, encoding="utf-8") as f:
+                data = _json.load(f)
+            if isinstance(data, list):
+                return {"commands": data}
+        except Exception:
+            pass
+
+    # 降级：返回硬编码的常用命令
+    return {
+        "commands": [
+            {"name": "/help", "desc": "显示帮助信息"},
+            {"name": "/new", "desc": "新建空白会话"},
+            {"name": "/clear", "desc": "清空当前会话"},
+            {"name": "/session", "desc": "显示当前会话信息"},
+            {"name": "/history", "desc": "查看对话历史"},
+            {"name": "/exit", "desc": "退出程序"},
+            {"name": "/reload", "desc": "热重载 Agent"},
+            {"name": "/token", "desc": "显示 Token 消耗统计"},
+        ]
+    }
+
+
 # ════════════════════════════════════════════════════════════
 # 4a. 新建 Agent（shutdown 旧实例，创建全新实例）
 # ════════════════════════════════════════════════════════════
@@ -469,7 +499,7 @@ async def new_agent():
         # ── 保存旧会话并 shutdown 旧 Agent ──
         if _agent is not None:
             try:
-                _agent.state.session.save_context(_agent.state.conversation.messages)
+                _agent.state.session.save_context(_agent.state.conversation.to_serializable())
                 await _agent.shutdown()
             except Exception as e:
                 get_logger().warning(f"[WebUI] ⚠️ 旧 Agent shutdown 时发生异常: {e}")
@@ -539,7 +569,7 @@ async def create_new_session():
     old_context = agent.state.conversation.messages  # 浅拷贝
 
     # 保存当前会话上下文
-    agent.state.session.save_context(agent.state.conversation.messages)
+    agent.state.session.save_context(agent.state.conversation.to_serializable())
 
     # 创建新会话（自动切换到新会话）
     new_sid = agent.session.create_session()
@@ -793,7 +823,7 @@ async def switch_session_endpoint(session_id: str):
     old_context = agent.state.conversation.messages  # 浅拷贝
 
     # 保存当前会话
-    agent.state.session.save_context(agent.state.conversation.messages)
+    agent.state.session.save_context(agent.state.conversation.to_serializable())
 
     if not agent.session.switch_session(session_id):
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
@@ -929,7 +959,7 @@ async def reload_agent():
         # ── 保存旧会话并关闭旧 Agent ──
         old_sid: str | None = None
         if _agent is not None:
-            _agent.state.session.save_context(_agent.state.conversation.messages)
+            _agent.state.session.save_context(_agent.state.conversation.to_serializable())
             old_sid = _agent.state.session.session_id
             # 静默容错
             with suppress(Exception):

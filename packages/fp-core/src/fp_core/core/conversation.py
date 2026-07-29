@@ -60,7 +60,9 @@ class ConversationState:
             system_prompt: 新的 system prompt
             non_system_messages: 非 system 消息列表（每条 dict，会被拷贝）
         """
-        self._messages = [{"role": "system", "content": system_prompt}] + [dict(m) for m in non_system_messages]
+        # 防御性过滤：防止误传入的 system 消息污染上下文
+        cleaned = [m for m in non_system_messages if m.get("role") != "system"]
+        self._messages = [{"role": "system", "content": system_prompt}] + [dict(m) for m in cleaned]
 
     def append(self, message: dict):
         """追加一条消息"""

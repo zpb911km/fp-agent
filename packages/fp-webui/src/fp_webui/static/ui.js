@@ -512,7 +512,7 @@ function toggleCmdPalette() {
     cmdHighlightIdx = -1;
     renderCmdList();
     // 1. 优先尝试加载 commands.json（多级命令菜单）
-    fetch('/static/commands.json').then(function(r) {
+    fetch('/static/commands.json?_t=' + Date.now()).then(function(r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
     }).then(function(data) {
