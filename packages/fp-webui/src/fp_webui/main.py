@@ -441,32 +441,11 @@ async def list_sessions():
 
 @app.get("/api/commands")
 async def list_commands():
-    """返回快捷命令列表（前端命令面板降级使用）"""
-    import json as _json
+    """返回快捷命令列表（从 fp-core 命令注册表动态获取，自动适配新增命令）"""
+    from fp_core.commands import get_all_commands
 
-    _cmd_path = os.path.join(_static_dir, "commands.json")
-    if os.path.exists(_cmd_path):
-        try:
-            with open(_cmd_path, encoding="utf-8") as f:
-                data = _json.load(f)
-            if isinstance(data, list):
-                return {"commands": data}
-        except Exception:
-            pass
-
-    # 降级：返回硬编码的常用命令
-    return {
-        "commands": [
-            {"name": "/help", "desc": "显示帮助信息"},
-            {"name": "/new", "desc": "新建空白会话"},
-            {"name": "/clear", "desc": "清空当前会话"},
-            {"name": "/session", "desc": "显示当前会话信息"},
-            {"name": "/history", "desc": "查看对话历史"},
-            {"name": "/exit", "desc": "退出程序"},
-            {"name": "/reload", "desc": "热重载 Agent"},
-            {"name": "/token", "desc": "显示 Token 消耗统计"},
-        ]
-    }
+    cmds = get_all_commands()
+    return {"commands": [{"name": f"/{name}", "desc": desc} for name, desc in cmds.items()]}
 
 
 # ════════════════════════════════════════════════════════════

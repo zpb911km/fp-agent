@@ -492,42 +492,24 @@ function clearUI() {
 
 // ── WebSocket ──
 
-var FALLBACK_COMMANDS = [
-  { name: '/help',    desc: '显示帮助信息' },
-  { name: '/new',     desc: '新建空白会话' },
-  { name: '/clear',   desc: '清空当前会话' },
-  { name: '/session', desc: '显示当前会话信息' },
-];
-
 var commandsCache = [];
 var cmdHighlightIdx = -1;
-var cmdMenuStack = [];  // [] = 顶层, [{parentName, subcommands}] = 二级菜单
 
 function toggleCmdPalette() {
   var palette = document.getElementById('cmdPalette');
   if (palette.hidden) {
     palette.hidden = false;
-    cmdMenuStack = [];
-    commandsCache = FALLBACK_COMMANDS.slice();
+    commandsCache = [];
     cmdHighlightIdx = -1;
     renderCmdList();
-    // 1. 优先尝试加载 commands.json（多级命令菜单）
-    fetch('/static/commands.json?_t=' + Date.now()).then(function(r) {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
-    }).then(function(data) {
-      if (Array.isArray(data) && data.length > 0) {
-        commandsCache = data;
+    // 从 fp-core 后端接口获取命令列表（动态，自动适配新增命令）
+    authFetch('/api/commands').then(function(r) { return r.json(); }).then(function(data) {
+      if (data.commands && data.commands.length > 0) {
+        commandsCache = data.commands;
         renderCmdList();
       }
-    }).catch(function() {
-      // 2. 失败则降级到 /api/commands（单级扁平列表）
-      authFetch('/api/commands').then(function(r) { return r.json(); }).then(function(data) {
-        if (data.commands && data.commands.length > 0) {
-          commandsCache = data.commands;
-          renderCmdList();
-        }
-      }).catch(function() {});
+    }).catch(function(e) {
+      console.warn('[CmdPalette] 获取命令列表失败:', e);
     });
   } else {
     closeCmdPalette();
@@ -537,14 +519,6 @@ function toggleCmdPalette() {
 function closeCmdPalette() {
   document.getElementById('cmdPalette').hidden = true;
   cmdHighlightIdx = -1;
-  cmdMenuStack = [];
-}
-
-function cmdMenuBack() {
-  if (cmdMenuStack.length === 0) return;
-  cmdMenuStack.pop();
-  cmdHighlightIdx = -1;
-  renderCmdList();
 }
 
 function renderCmdList() {
@@ -554,41 +528,15 @@ function renderCmdList() {
     return;
   }
 
-  var items, parentName;
-  if (cmdMenuStack.length > 0) {
-    var state = cmdMenuStack[cmdMenuStack.length - 1];
-    items = state.subcommands;
-    parentName = state.parentName;
-  } else {
-    items = commandsCache;
-    parentName = null;
-  }
-
-  var html = '';
-  var offset = 0;
-
-  // 二级菜单：顶部返回项（highlightIdx = 0）
-  if (parentName) {
-    html += '<div class="cmd-item cmd-back' + (cmdHighlightIdx === 0 ? ' highlighted' : '') + '">' +
-      '<div class="cmd-item-left">' +
-        '<span class="cmd-back-arrow">←</span>' +
-        '<span class="cmd-back-label">' + escapeHtml(parentName) + '…</span>' +
-      '</div>' +
-    '</div>';
-    offset = 1;
-  }
-
-  html += items.map(function(cmd, i) {
-    var hl = (i + offset) === cmdHighlightIdx ? ' highlighted' : '';
+  var html = commandsCache.map(function(cmd, i) {
+    var hl = i === cmdHighlightIdx ? ' highlighted' : '';
     var cmdName = cmd.name || '';
     var cmdDesc = cmd.desc || cmd.description || '';
-    var hasSub = cmd.subcommands && cmd.subcommands.length > 0 && !parentName;
     return '<div class="cmd-item' + hl + '" data-index="' + i + '">' +
       '<div class="cmd-item-left">' +
         '<span class="cmd-item-key">' + escapeHtml(cmdName) + '</span>' +
         '<span class="cmd-item-desc">' + escapeHtml(cmdDesc) + '</span>' +
       '</div>' +
-      (hasSub ? '<span class="cmd-item-sub-indicator">›</span>' : '') +
     '</div>';
   }).join('');
 
@@ -606,11 +554,6 @@ document.getElementById('cmdList').addEventListener('click', function(e) {
   // 导致 e.target 变成孤儿节点，closest('.input-area') 返回 null，
   // 进而被 document 处理器误判为"点击外部"关闭面板。
   e.stopPropagation();
-  // 返回按钮
-  if (item.classList.contains('cmd-back')) {
-    cmdMenuBack();
-    return;
-  }
   var index = parseInt(item.getAttribute('data-index'), 10);
   if (!isNaN(index)) selectCmd(index);
 });
@@ -638,27 +581,10 @@ document.getElementById('cmdList').addEventListener('mouseleave', function() {
 });
 
 function selectCmd(index) {
-  var items;
-  if (cmdMenuStack.length > 0) {
-    items = cmdMenuStack[cmdMenuStack.length - 1].subcommands;
-  } else {
-    items = commandsCache;
-  }
-  var cmd = items[index];
+  var cmd = commandsCache[index];
   if (!cmd) return;
 
-  // 顶层且有子命令 → 进入二级菜单
-  if (cmdMenuStack.length === 0 && cmd.subcommands && cmd.subcommands.length > 0) {
-    cmdMenuStack.push({
-      parentName: cmd.name,
-      subcommands: cmd.subcommands
-    });
-    cmdHighlightIdx = -1;
-    renderCmdList();
-    return;
-  }
-
-  // 普通命令/子命令 → 补全到输入框
+  // 填入输入框
   var text = (cmd.name || '') + ' ';
   inputEl.value = text;
   autoResize(inputEl);
@@ -670,12 +596,7 @@ function selectCmd(index) {
 
 function navigateCmdList(direction) {
   if (!commandsCache || commandsCache.length === 0) return;
-  var total;
-  if (cmdMenuStack.length > 0) {
-    total = 1 + cmdMenuStack[cmdMenuStack.length - 1].subcommands.length;
-  } else {
-    total = commandsCache.length;
-  }
+  var total = commandsCache.length;
   cmdHighlightIdx += direction;
   if (cmdHighlightIdx < 0) cmdHighlightIdx = total - 1;
   if (cmdHighlightIdx >= total) cmdHighlightIdx = 0;
@@ -684,13 +605,7 @@ function navigateCmdList(direction) {
 
 function confirmCmdSelection() {
   if (cmdHighlightIdx < 0) return;
-  // 二级菜单 highlightIdx = 0 → 返回
-  if (cmdMenuStack.length > 0 && cmdHighlightIdx === 0) {
-    cmdMenuBack();
-    return;
-  }
-  var actualIndex = cmdMenuStack.length > 0 ? cmdHighlightIdx - 1 : cmdHighlightIdx;
-  selectCmd(actualIndex);
+  selectCmd(cmdHighlightIdx);
 }
 
 function addSystemMessage(text) {
