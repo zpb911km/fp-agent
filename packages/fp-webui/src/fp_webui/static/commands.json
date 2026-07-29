@@ -3,7 +3,6 @@
     "subcommands": [
       { "name": "/back", "desc": "回退一步" },
       { "name": "/back list", "desc": "列出所有历史时刻" },
-      { "name": "/back <N>", "desc": "回退到第 N 步" }
     ]},
   { "name": "/clear", "desc": "清空当前会话" },
   { "name": "/compact", "desc": "压缩对话历史" },
@@ -32,9 +31,7 @@
   { "name": "/sc", "desc": "短路已完成连通块",
     "subcommands": [
       { "name": "/sc", "desc": "压缩最近一个" },
-      { "name": "/sc list", "desc": "列出连通块" },
-      { "name": "/sc <N>", "desc": "压缩最近 N 个" },
-      { "name": "/sc #<N>", "desc": "指定编号压缩" }
+      { "name": "/sc list", "desc": "列出连通块" }
     ]},
   { "name": "/session", "desc": "显示当前会话信息" },
   { "name": "/token", "desc": "显示 Token 消耗统计" }

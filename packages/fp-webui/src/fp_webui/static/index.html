@@ -31,36 +31,11 @@
 <body class="crt-flicker">
 
   <!-- ═══ 装饰层 ═══ -->
-  <div class="noise-bg"></div>
-  <div class="rust-overlay"></div>
-  <div class="scanlines"></div>
-
   <!-- ═══ 登录遮罩层 ═══ -->
   <div class="auth-overlay" id="authOverlay" role="dialog" aria-label="登录验证">
     <div class="auth-box">
       <div class="logo-icon">
-        <svg class="live-symbol" viewBox="0 0 48 48" width="52" height="54" aria-label="Five Pebbles">
-          <polygon class="sym-hull" points="24,2 44,13 44,35 24,46 4,35 4,13"
-                   fill="none" stroke="var(--accent-dark)" stroke-width="1.3" opacity="0.45"/>
-          <circle class="sym-ring" cx="24" cy="24" r="13"
-                  fill="none" stroke="var(--accent)" stroke-width="1"
-                  stroke-dasharray="3 4" opacity="0.5"/>
-          <g class="sym-rays" fill="none" stroke="var(--accent)" stroke-width="0.8" opacity="0.35">
-            <line x1="24" y1="24" x2="24" y2="4"/>
-            <line x1="24" y1="24" x2="42" y2="14"/>
-            <line x1="24" y1="24" x2="42" y2="36"/>
-            <line x1="24" y1="24" x2="24" y2="46"/>
-            <line x1="24" y1="24" x2="6" y2="36"/>
-            <line class="sym-broken" x1="24" y1="24" x2="8" y2="14"
-                  stroke="var(--accent-dark)" stroke-width="0.8"
-                  stroke-dasharray="2 3" opacity="0.25"/>
-          </g>
-          <polygon class="sym-core" points="24,13 33,24 24,35 15,24"
-                   fill="var(--accent)" opacity="0.08"
-                   stroke="var(--accent-dark)" stroke-width="1.2"/>
-          <circle class="sym-dot" cx="24" cy="24" r="2.5"
-                  fill="var(--accent)" opacity="0.7"/>
-        </svg>
+        <img src="/static/live-symbol.svg" class="live-symbol" width="52" height="54" alt="Five Pebbles">
       </div>
       <h1>Five Pebbles</h1>
       <p>请输入启动 Token 以连接</p>
@@ -87,34 +62,7 @@
     <header class="topbar" role="banner">
       <div class="topbar-left">
         <span class="logo-icon" aria-hidden="true">
-          <svg class="live-symbol" viewBox="0 0 48 48" width="28" height="28" aria-label="Five Pebbles">
-            <!-- 腔室外壳 —— 六边形结构 -->
-            <polygon class="sym-hull" points="24,2 44,13 44,35 24,46 4,35 4,13"
-                     fill="none" stroke="var(--accent-dark)" stroke-width="1.3" opacity="0.45"/>
-            <!-- 断裂的数据环流 -->
-            <circle class="sym-ring" cx="24" cy="24" r="13"
-                    fill="none" stroke="var(--accent)" stroke-width="1"
-                    stroke-dasharray="3 4" opacity="0.5"/>
-            <!-- 辐射连接线 —— 6 条，其中一条断裂 -->
-            <g class="sym-rays" fill="none" stroke="var(--accent)" stroke-width="0.8" opacity="0.35">
-              <line x1="24" y1="24" x2="24" y2="4"/>
-              <line x1="24" y1="24" x2="42" y2="14"/>
-              <line x1="24" y1="24" x2="42" y2="36"/>
-              <line x1="24" y1="24" x2="24" y2="46"/>
-              <line x1="24" y1="24" x2="6" y2="36"/>
-              <!-- 断裂的第六条 —— 偏移 + 虚线 -->
-              <line class="sym-broken" x1="24" y1="24" x2="8" y2="14"
-                    stroke="var(--accent-dark)" stroke-width="0.8"
-                    stroke-dasharray="2 3" opacity="0.25"/>
-            </g>
-            <!-- 核心处理器 —— 菱形 -->
-            <polygon class="sym-core" points="24,13 33,24 24,35 15,24"
-                     fill="var(--accent)" opacity="0.08"
-                     stroke="var(--accent-dark)" stroke-width="1.2"/>
-            <!-- 核心发光点 -->
-            <circle class="sym-dot" cx="24" cy="24" r="2.5"
-                    fill="var(--accent)" opacity="0.7"/>
-          </svg>
+          <img src="/static/live-symbol.svg" class="live-symbol" width="28" height="28" alt="Five Pebbles" aria-hidden="true">
         </span>
         <span class="logo">
           <span class="logo-full"><span>Five</span> Pebbles</span>
