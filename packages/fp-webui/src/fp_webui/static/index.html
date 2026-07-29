@@ -11,7 +11,7 @@
 <link rel="icon" type="image/png" href="/static/favicon.png">
 
 <!-- 样式 -->
-<link rel="stylesheet" href="/static/style.css?_t=20260729">
+<link rel="stylesheet" href="/static/style.css?_t=20260729v5">
 
 <!-- Markdown 渲染 -->
 <script src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js" defer></script>
@@ -31,12 +31,57 @@
 <body class="crt-flicker">
 
   <!-- ═══ 装饰层 ═══ -->
+
+  <!-- ─── 光环背景（弹性稳态环系统） ─── -->
+  <div id="halo-bg" data-state="idle" aria-hidden="true">
+    <svg id="halo-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" preserveAspectRatio="xMidYMid meet">
+      <defs>
+        <filter id="ringGlow" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur"/>
+          <feMerge>
+            <feMergeNode in="blur"/>
+            <feMergeNode in="SourceGraphic"/>
+          </feMerge>
+        </filter>
+      </defs>
+      <style>
+        .h-glow   { fill: none; stroke-linecap: round; }
+        .h-sparse { fill: none; stroke-linecap: butt; opacity: 0.8; }
+        .h-ring   { fill: none; opacity: 0.6; }
+        .h-paired { fill: none; stroke-linecap: butt; opacity: 0.8; }
+        .h-dense  { fill: none; stroke-linecap: butt; opacity: 0.8; }
+        .h-sparse, .h-paired, .h-dense { transform-origin: 200px 200px; }
+
+        .h-glow   { animation: flicker-glow 6s infinite; }
+        .h-sparse { animation: flicker-sparse 10s infinite, rotate-sparse 46s infinite; }
+        .h-ring   { animation: flicker-ring 14s infinite; }
+        .h-paired { animation: flicker-paired 22s infinite, rotate-paired 58s infinite; }
+        .h-dense  { animation: flicker-dense 26s infinite, rotate-dense 62s infinite; }
+
+        @keyframes flicker-glow { 0%,100%{opacity:.4} 42%{opacity:.4} 43%{opacity:0} 44%{opacity:.4} 45%{opacity:.1} 46%{opacity:.4} 78%{opacity:.4} 79%{opacity:0} 80%{opacity:.4} }
+        @keyframes flicker-sparse { 0%,100%{opacity:.8} 30%{opacity:.8} 31%{opacity:0} 32%{opacity:.8} 33%{opacity:.1} 34%{opacity:.8} 65%{opacity:.8} 66%{opacity:0} 67%{opacity:.8} }
+        @keyframes flicker-ring { 0%,100%{opacity:.6} 53%{opacity:.6} 54%{opacity:0} 55%{opacity:.6} 89%{opacity:.6} 90%{opacity:.1} 91%{opacity:.6} }
+        @keyframes flicker-paired { 0%,100%{opacity:.8} 23%{opacity:.8} 24%{opacity:0} 25%{opacity:.8} 26%{opacity:.1} 27%{opacity:.8} 61%{opacity:.8} 62%{opacity:0} 63%{opacity:.8} }
+        @keyframes flicker-dense { 0%,100%{opacity:.8} 17%{opacity:.8} 18%{opacity:0} 19%{opacity:.8} 47%{opacity:.8} 48%{opacity:.1} 49%{opacity:.8} 73%{opacity:.8} 74%{opacity:0} 75%{opacity:.8} }
+
+        @keyframes rotate-sparse { 0%,10%{transform:rotate(0deg)} 10%{animation-timing-function:cubic-bezier(.4,0,.2,1)} 20%{transform:rotate(60deg)} 20%,30%{transform:rotate(60deg)} 30%{animation-timing-function:cubic-bezier(.4,0,.2,1)} 45%{transform:rotate(120deg)} 45%,60%{transform:rotate(120deg)} 60%{animation-timing-function:cubic-bezier(.4,0,.2,1)} 75%{transform:rotate(240deg)} 75%,90%{transform:rotate(240deg)} 90%{animation-timing-function:cubic-bezier(.4,0,.2,1)} 100%{transform:rotate(360deg)} }
+        @keyframes rotate-paired { 0%,15%{transform:rotate(0deg)} 15%{animation-timing-function:cubic-bezier(.4,0,.2,1)} 25%{transform:rotate(-90deg)} 25%,40%{transform:rotate(-90deg)} 40%{animation-timing-function:cubic-bezier(.4,0,.2,1)} 55%{transform:rotate(-180deg)} 55%,70%{transform:rotate(-180deg)} 70%{animation-timing-function:cubic-bezier(.4,0,.2,1)} 85%{transform:rotate(-270deg)} 85%,95%{transform:rotate(-270deg)} 95%{animation-timing-function:cubic-bezier(.4,0,.2,1)} 100%{transform:rotate(-360deg)} }
+
+        @keyframes rotate-dense { 0%,5%{transform:rotate(0deg)} 5%{animation-timing-function:cubic-bezier(.4,0,.2,1)} 15%{transform:rotate(45deg)} 15%,25%{transform:rotate(45deg)} 25%{animation-timing-function:cubic-bezier(.4,0,.2,1)} 35%{transform:rotate(90deg)} 35%,50%{transform:rotate(90deg)} 50%{animation-timing-function:cubic-bezier(.4,0,.2,1)} 65%{transform:rotate(180deg)} 65%,80%{transform:rotate(180deg)} 80%{animation-timing-function:cubic-bezier(.4,0,.2,1)} 90%{transform:rotate(270deg)} 90%,95%{transform:rotate(270deg)} 95%{animation-timing-function:cubic-bezier(.4,0,.2,1)} 100%{transform:rotate(360deg)} }
+      </style>
+      <g filter="url(#ringGlow)">
+        <circle id="l2" class="h-glow" cx="200" cy="200" r="41" stroke-width="82" stroke="#8fb3a6"/>
+        <circle id="l3" class="h-sparse" cx="200" cy="200" r="122" stroke-width="10" pathLength="360" stroke-dasharray="1.1 18.9" stroke="#cfe7df"/>
+        <circle id="l4" class="h-ring" cx="200" cy="200" r="137" stroke-width="2" stroke="#bfe0d6"/>
+        <circle id="l5" class="h-paired" cx="200" cy="200" r="157" stroke-width="12" pathLength="360" stroke-dasharray="1 2.6 1 19.4" stroke="#d6ece4"/>
+        <circle id="l6" class="h-dense" cx="200" cy="200" r="177" stroke-width="8" pathLength="360" stroke-dasharray="0.65 4.35" stroke="#c4e0d8"/>
+      </g>
+    </svg>
+  </div>
+
   <!-- ═══ 登录遮罩层 ═══ -->
   <div class="auth-overlay" id="authOverlay" role="dialog" aria-label="登录验证">
     <div class="auth-box">
-      <div class="logo-icon">
-        <img src="/static/live-symbol.svg" class="live-symbol" width="52" height="54" alt="Five Pebbles">
-      </div>
       <h1>Five Pebbles</h1>
       <p>请输入启动 Token 以连接</p>
       <div class="token-hint">
@@ -61,9 +106,6 @@
     <!-- ─── 顶栏 ─── -->
     <header class="topbar" role="banner">
       <div class="topbar-left">
-        <span class="logo-icon" aria-hidden="true">
-          <img src="/static/live-symbol.svg" class="live-symbol" width="28" height="28" alt="Five Pebbles" aria-hidden="true">
-        </span>
         <span class="logo">
           <span class="logo-full"><span>Five</span> Pebbles</span>
           <span class="logo-short"><span>F</span>P</span>
@@ -147,7 +189,7 @@
   <!-- ════════════════════════════════════════
        脚本加载（顺序重要：ui.js → app.js）
        ════════════════════════════════════════ -->
-  <script src="/static/ui.js?_t=20260729"></script>
-  <script src="/static/app.js?_t=20260729"></script>
+  <script src="/static/ui.js?_t=20260729v4"></script>
+  <script src="/static/app.js?_t=20260729v4"></script>
 </body>
 </html>

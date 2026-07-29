@@ -159,6 +159,45 @@ html, body, .topbar, .messages-container, .input-area, .input-hint,
   background: #faf7f0;
 }
 
+/* ═══════════════════════════════════════════════════════════════
+/* ═══════════════════════════════════════════════════════════════
+   光环背景 — 弹性稳态环系统
+   空闲（冷青）↔ 思考（暖橙）双色切换
+   ═══════════════════════════════════════════════════════════════ */
+
+#halo-bg {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.25;
+  transition: opacity 1.8s ease;
+  overflow: hidden;
+}
+
+#halo-bg[data-state="thinking"] {
+  opacity: 0.40;
+}
+
+#halo-bg svg {
+  position: absolute;
+  width: clamp(450px, 75vw, 1000px);
+  height: clamp(450px, 75vw, 1000px);
+  left: calc(80vw - clamp(225px, 37.5vw, 500px));
+  top: calc(20vh - clamp(225px, 37.5vw, 500px));
+  overflow: visible;
+  will-change: filter;
+}
+
+:root.light-theme #halo-bg {
+  opacity: 0.25;
+}
+
+:root.light-theme #halo-bg[data-state="thinking"] {
+  opacity: 0.40;
+}
+
+
 /* ── Base ── */
 /* ── Base ── */
 html {
@@ -168,7 +207,17 @@ html {
 
 html, body {
   height: 100dvh;
-  background: var(--bg-primary);
+  background-color: var(--bg-primary);
+  background-image:
+    linear-gradient(var(--grid-main) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-main) 1px, transparent 1px),
+    linear-gradient(var(--grid-sub) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-sub) 1px, transparent 1px);
+  background-size:
+    40px 40px,
+    40px 40px,
+    10px 10px,
+    10px 10px;
   color: var(--text-primary);
   font-family: var(--font-body);
   font-size: clamp(14px, 1.8vw, 16px);
@@ -368,6 +417,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   height: -webkit-fill-available;
   margin: 0 auto;
   position: relative;
+  z-index: 1;
+  /* 背景透明 — 背景与网格已移至 body，
+     使得 #halo-bg 可以在背后浮现 */
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -540,22 +592,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   position: relative;
-  /* 背景：纯色底色 + 多层网格线
-     网格线作为 background-image 绘制在底色之上，
-     任何半透明的子元素（消息气泡）都能自然透出网格 */
-  background-color: var(--bg-primary);
-  background-image:
-    /* 主网格 40px */
-    linear-gradient(var(--grid-main) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid-main) 1px, transparent 1px),
-    /* 次网格 10px */
-    linear-gradient(var(--grid-sub) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid-sub) 1px, transparent 1px);
-  background-size:
-    40px 40px,
-    40px 40px,
-    10px 10px,
-    10px 10px;
 }
 
 /* 空状态——更精致 */
@@ -813,14 +849,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   border-right: 1px solid rgba(61,61,61,0.08) !important;
   padding-left: 12px;
   background: linear-gradient(90deg, var(--purple-soft) 0%, transparent 60%);
-  margin-left: -12px;
+  padding-right: 4px;
   padding-right: 4px;
   position: relative;
 }
 .assistant-toolcall-msg::before {
   content: '→';
   position: absolute;
-  left: -4px;
+  left: 4px;
   top: 8px;
   font-size: 7px;
   font-weight: 700;
@@ -886,14 +922,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   border-right: 1px solid rgba(61,61,61,0.08);
   padding-left: 12px;
   background: linear-gradient(90deg, var(--accent-soft) 0%, transparent 60%);
-  margin-left: -12px;
+  padding-right: 4px;
   padding-right: 4px;
   position: relative;
 }
 .msg.user-msg::before {
   content: 'U';
   position: absolute;
-  left: -4px;
+  left: 4px;
   top: 6px;
   font-size: 7px;
   font-weight: 700;
@@ -907,14 +943,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   border-right: 1px solid rgba(61,61,61,0.08);
   padding-left: 12px;
   background: linear-gradient(90deg, var(--green-soft) 0%, transparent 60%);
-  margin-left: -12px;
   padding-right: 4px;
   position: relative;
 }
 .msg.assistant-msg::before {
   content: 'A';
   position: absolute;
-  left: -4px;
+  left: 4px;
   top: 6px;
   font-size: 7px;
   font-weight: 700;
@@ -1718,8 +1753,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   .cmd-palette { margin: 0 20px; }
   .input-hint { padding: 4px 20px calc(4px + var(--safe-bottom)); }
 
-  .msg.assistant-msg,
-  .msg.user-msg { margin-left: 0px; }
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1875,3 +1908,4 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   .topbar-btn .btn-label { display: none; }
   .topbar-btn { padding: 6px 8px; min-width: 40px; }
 }
+

@@ -789,3 +789,233 @@ function renderHistoryMessages(sid, messages) {
   scrollToBottom();
 }
 
+/* ═══════════════════════════════════════════════════════════
+   光环背景 — 弹性稳态环系统
+   空闲（冷青）↔ 思考（暖橙）双色切换
+   ═══════════════════════════════════════════════════════════ */
+
+(function() {
+  'use strict';
+
+  var haloEl = document.getElementById('halo-bg');
+  if (!haloEl) return;
+
+  // ── 色板 ──
+  var COLORS = {
+    idle: {
+      glow:   '#8fb3a6',
+      sparse: '#cfe7df',
+      ring:   '#bfe0d6',
+      paired: '#d6ece4',
+      dense:  '#c4e0d8'
+    },
+    thinking: {
+      glow:   '#a65e2e',
+      sparse: '#c47a3e',
+      ring:   '#d48a4a',
+      paired: '#e8a060',
+      dense:  '#f0b878'
+    }
+  };
+
+  // ── 浅色主题色板（在 #f4efe9 暖白底上需要更深、更饱和）──
+  var COLORS_LIGHT = {
+    idle: {
+      glow:   '#4a7a6a',
+      sparse: '#6aae98',
+      ring:   '#589e88',
+      paired: '#7abcac',
+      dense:  '#66b4a0'
+    },
+    thinking: {
+      glow:   '#7a3a1a',
+      sparse: '#9a5a2e',
+      ring:   '#aa6a3a',
+      paired: '#c08050',
+      dense:  '#d09060'
+    }
+  };
+
+  // ring DOM 元素的类名 → 属性名映射
+  var RING_CLASSES = [
+    { cls: 'h-glow',   attr: 'glow'   },
+    { cls: 'h-sparse', attr: 'sparse' },
+    { cls: 'h-ring',   attr: 'ring'   },
+    { cls: 'h-paired', attr: 'paired' },
+    { cls: 'h-dense',  attr: 'dense'  }
+  ];
+
+  function isLightTheme() {
+    return document.documentElement.classList.contains('light-theme');
+  }
+
+  function applyColors(state) {
+    var paletteSet = isLightTheme() ? COLORS_LIGHT : COLORS;
+    var palette = paletteSet[state] || paletteSet.idle;
+    RING_CLASSES.forEach(function(ring) {
+      var els = haloEl.querySelectorAll('.' + ring.cls);
+      var color = palette[ring.attr];
+      for (var i = 0; i < els.length; i++) {
+        els[i].setAttribute('stroke', color);
+      }
+    });
+    haloEl.setAttribute('data-state', state);
+  }
+
+  // ── 双色状态切换：监听 _sbData.state ──
+  function syncHaloState() {
+    if (!haloEl) return;
+    var isThinking = (_sbData.state === 'thinking' || _sbData.state === 'processing');
+    applyColors(isThinking ? 'thinking' : 'idle');
+  }
+
+  // ── 主题切换时自动刷新颜色 ──
+  var themeObserver = new MutationObserver(function() {
+    syncHaloState();
+  });
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+
+  // 初始同步
+  syncHaloState();
+
+  // 拦截 setProcessing & showThinking 原始函数，确保状态同步
+  var origSetProcessing = window.setProcessing;
+  window.setProcessing = function(state) {
+    if (origSetProcessing) origSetProcessing(state);
+    syncHaloState();
+  };
+
+  var origShowThinking = window.showThinking;
+  window.showThinking = function() {
+    if (origShowThinking) origShowThinking();
+    syncHaloState();
+  };
+
+  var origRemoveThinking = window.removeThinking;
+  window.removeThinking = function() {
+    if (origRemoveThinking) origRemoveThinking();
+    requestAnimationFrame(syncHaloState);
+  };
+
+  const GAP = 3;
+  const MIN_THICKNESS = 1.5;
+  const MAX_R = 195;
+
+  const layers = [
+    { id:'l2', iInt:2200, oInt:3100, tDur:600 },
+    { id:'l3', iInt:2800, oInt:3700, tDur:500 },
+    { id:'l4', iInt:3400, oInt:4300, tDur:450 },
+    { id:'l5', iInt:4100, oInt:5200, tDur:550 },
+    { id:'l6', iInt:4800, oInt:6100, tDur:500 },
+  ];
+
+  const els = layers.map(l => document.getElementById(l.id));
+
+  // 初始位置（只决定了开局，之后系统自由漂移）
+  const initBounds = [
+    { i: 20, o: 80 }, { i: 115, o: 125 }, { i: 136, o: 138 },
+    { i: 150, o: 162 }, { i: 175, o: 185 }
+  ];
+
+  const state = layers.map((l, idx) => ({
+    inner: {
+      current: initBounds[idx].i, target: initBounds[idx].i, from: initBounds[idx].i,
+      startTime: 0, dur: l.tDur, nextPulse: 0, interval: l.iInt, tDur: l.tDur
+    },
+    outer: {
+      current: initBounds[idx].o, target: initBounds[idx].o, from: initBounds[idx].o,
+      startTime: 0, dur: l.tDur, nextPulse: 0, interval: l.oInt, tDur: l.tDur
+    },
+  }));
+
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+  function nextPulseTime(now, avgInterval) {
+    return now + avgInterval * (0.3 + Math.random() * 2.2);
+  }
+
+  const now0 = performance.now();
+  state.forEach(s => {
+    s.inner.nextPulse = now0 + Math.random() * s.inner.interval;
+    s.outer.nextPulse = now0 + Math.random() * s.outer.interval;
+  });
+
+  function updateChannel(ch, now, layerIndex, channelType) {
+    if (now >= ch.nextPulse) {
+      ch.from = ch.current;
+
+      // 根据所有环的实时位置计算合法范围
+      const bounds = state.map(s => ({ i: s.inner.current, o: s.outer.current }));
+      let dynMin, dynMax;
+
+      if (channelType === 'inner') {
+        dynMin = (layerIndex === 0) ? 0 : bounds[layerIndex - 1].o + GAP;
+        const maxBySelf = bounds[layerIndex].o - MIN_THICKNESS;
+        const maxByOuter = (layerIndex === 4) ? MAX_R - MIN_THICKNESS : bounds[layerIndex + 1].i - GAP - MIN_THICKNESS;
+        dynMax = Math.min(maxBySelf, maxByOuter);
+      } else {
+        dynMin = bounds[layerIndex].i + MIN_THICKNESS;
+        dynMax = (layerIndex === 4) ? MAX_R : bounds[layerIndex + 1].i - GAP;
+      }
+
+      // 空间被挤压到连最小厚度都放不下 → 跳过本次脉冲
+      if (dynMin > dynMax) {
+        ch.nextPulse = nextPulseTime(now, ch.interval);
+        return;
+      }
+
+      // ★ 完全随机，无 rest 偏向 —— 长时运行会探索所有可能态
+      ch.target = dynMin + Math.random() * (dynMax - dynMin);
+      ch.startTime = now;
+      ch.dur = ch.tDur * (0.6 + Math.random() * 0.8);
+      ch.nextPulse = nextPulseTime(now + ch.dur, ch.interval);
+    }
+
+    if (now < ch.startTime + ch.dur) {
+      const progress = (now - ch.startTime) / ch.dur;
+      const eased = easeOutCubic(Math.min(progress, 1));
+      ch.current = ch.from + (ch.target - ch.from) * eased;
+    } else {
+      ch.current = ch.target;
+    }
+  }
+
+  function tick(now) {
+    for (let i = 0; i < state.length; i++) {
+      updateChannel(state[i].inner, now, i, 'inner');
+      updateChannel(state[i].outer, now, i, 'outer');
+    }
+
+    // 约束传播：防止缓动过渡中穿模
+    for (let iter = 0; iter < 3; iter++) {
+      for (let i = 0; i < state.length; i++) {
+        if (i === 0) state[i].inner.current = Math.max(0, state[i].inner.current);
+        else state[i].inner.current = Math.max(state[i-1].outer.current + GAP, state[i].inner.current);
+
+        if (i === state.length - 1) state[i].outer.current = Math.min(MAX_R, state[i].outer.current);
+        else state[i].outer.current = Math.min(state[i+1].inner.current - GAP, state[i].outer.current);
+
+        if (state[i].outer.current < state[i].inner.current + MIN_THICKNESS) {
+          if (i === state.length - 1 || state[i].outer.current + MIN_THICKNESS <= state[i+1].inner.current - GAP) {
+            state[i].outer.current = state[i].inner.current + MIN_THICKNESS;
+          } else {
+            state[i].inner.current = state[i].outer.current - MIN_THICKNESS;
+          }
+        }
+      }
+    }
+
+    for (let i = 0; i < state.length; i++) {
+      const cInner = state[i].inner.current;
+      const cOuter = state[i].outer.current;
+      if (els[i]) {
+        els[i].setAttribute('r', ((cInner + cOuter) / 2).toFixed(2));
+        els[i].setAttribute('stroke-width', Math.max(cOuter - cInner, 0.1).toFixed(2));
+      }
+    }
+
+    requestAnimationFrame(tick);
+  }
+
+  requestAnimationFrame(tick);
+})();
+
