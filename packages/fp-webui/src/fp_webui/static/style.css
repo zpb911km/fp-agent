@@ -1214,10 +1214,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   opacity: 0.75;
 }
 
-/* 空内容 + 聚焦时，提示符脉冲 —— "等待输入" */
-.input-console:focus-within textarea:placeholder-shown + .input-console::before {
-  /* sibling trick won't work; use animation on the ::before directly */
-}
 .input-console:focus-within::before {
   animation: consolePromptPulse 2.2s ease-in-out infinite;
 }
@@ -1535,6 +1531,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   text-align: center;
   letter-spacing: 3px;
   -webkit-appearance: none;
+  appearance: none;
   box-shadow: var(--shadow-inset);
 }
 .auth-input:focus {
@@ -1839,7 +1836,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
    升级三：垂直节奏体系
    ═══════════════════════════════════════════════════════════════ */
 /* 基础 group 样式（默认无额外间距） */
-.msg-group { }
 
 /* Loose——对话消息（user ↔ assistant 配对） */
 .msg-group[data-rhythm="loose"] {

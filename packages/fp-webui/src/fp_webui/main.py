@@ -44,6 +44,8 @@ except ImportError as e:
     sys.exit(1)
 
 # ── Agent 核心导入 ──────────────────────────────────────
+# 注意：运行时创建 Agent 实例应使用本地 re-import（确保 reload 后拿到最新类）。
+# 这里的顶层 import 仅用于类型标注。
 from fp_core.core.agent import Agent
 from fp_core.core.io import RestIO, WebSocketIO
 from fp_core.core.lifecycle import HookContext, LifecycleHook
@@ -60,6 +62,10 @@ class EventBus:
     异步事件总线，用于 Agent 生命周期事件 → WebSocket 的桥梁。
 
     支持多个订阅者（多个 WebSocket 连接），自动清理断开连接。
+
+    背压保护：
+      队列（maxsize=1024）满时不丢弃订阅者，而是丢弃最旧事件，
+      保证订阅者始终能拿到最新事件，且不会失去连接。
     """
 
     def __init__(self):
@@ -70,7 +76,7 @@ class EventBus:
         """订阅事件流，返回 (subscriber_id, queue)"""
         sub_id = f"sub_{self._next_id}"
         self._next_id += 1
-        q: asyncio.Queue = asyncio.Queue(maxsize=256)
+        q: asyncio.Queue = asyncio.Queue(maxsize=1024)
         self._subscribers[sub_id] = q
         return sub_id, q
 
@@ -79,15 +85,25 @@ class EventBus:
         self._subscribers.pop(sub_id, None)
 
     async def publish(self, event: dict):
-        """向所有订阅者推送事件"""
+        """向所有订阅者推送事件
+
+        背压策略：队列满时丢弃最旧事件（get_nowait），而非丢弃订阅者。
+        确保订阅者不会因消费慢而被静默移除。
+        """
         dead_subs: list[str] = []
         for sub_id, q in self._subscribers.items():
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
-                dead_subs.append(sub_id)  # 消费太慢，断开
+                try:
+                    q.get_nowait()  # 丢弃最旧事件
+                    q.put_nowait(event)  # 重试放入最新事件
+                    get_logger().warning(f"[EventBus] ⚠️ 订阅者 {sub_id} 队列满，已丢弃最旧事件")
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    dead_subs.append(sub_id)  # 保护性断开
         for sub_id in dead_subs:
             self._subscribers.pop(sub_id, None)
+            get_logger().warning(f"[EventBus] ⚠️ 订阅者 {sub_id} 因队列异常已被断开")
 
     @property
     def subscriber_count(self) -> int:
@@ -282,12 +298,18 @@ _agent_lock = asyncio.Lock()
 
 
 async def get_agent() -> Agent:
-    """获取或创建全局 Agent 实例（延迟初始化）"""
+    """获取或创建全局 Agent 实例（延迟初始化）
+
+    每次创建前需本地 re-import Agent 类，确保 reload 后用的是新版。
+    """
     global _agent
     if _agent is None:
         async with _agent_lock:
             if _agent is None:
-                _agent = Agent(enable_log=False)
+                # 本地 import：即使 reload 后模块缓存已更新，这里取到的总是最新类
+                from fp_core.core.agent import Agent as _AgentClass
+
+                _agent = _AgentClass(enable_log=False)
                 # 注册 WebUI 桥接插件
                 webui_plugin = WebUIPlugin()
                 _agent.plugins.register(webui_plugin)
@@ -449,46 +471,57 @@ async def list_commands():
 
 
 # ════════════════════════════════════════════════════════════
-# 4a. 新建 Agent（shutdown 旧实例，创建全新实例）
+# 4a. Agent 替换核心逻辑（新建 / 重载共享）
 # ════════════════════════════════════════════════════════════
 
 
-@app.post("/api/agent/new")
-async def new_agent():
+async def _replace_agent(
+    *,
+    reload_modules: bool = False,
+    restore_session: bool = True,
+) -> dict:
     """
-    创建全新 Agent 实例。
+    替换全局 Agent 实例的核心逻辑。
 
-    流程：
-      1. shutdown 旧 Agent（保存当前会话后优雅退出）
-      2. 创建新 Agent 实例
-      3. 注册 WebUIPlugin 桥接插件
-      4. 创建全新的会话（清空上下文）
-      5. 通过 EventBus 通知前端刷新
+    Args:
+        reload_modules: 是否先热重载所有核心模块（/reload 用）
+        restore_session: 是否恢复旧会话（/reload 用；新建 Agent 用 False）
 
-    这是真正的"重置"——所有内存状态被清空，所有模块被重新加载，
-    相当于 Agent 刚启动时的状态。
+    安全保证：
+      - 如果 Agent 正在处理请求，返回 409 拒绝
+      - 重载期间 _agent 被设为 None
+      - 模块重载失败时 _agent 保持 None，get_agent() 自动创建新实例
+      - 活跃的 WebSocket 连接保有旧 agent 对象引用，仍可继续工作
     """
     global _agent
 
-    # ── 检查是否正在处理 ──
     if _agent is not None and _agent.is_processing:
         raise HTTPException(status_code=409, detail="Agent 正在处理请求，请稍后重试")
 
     async with _agent_lock:
         # ── 保存旧会话并 shutdown 旧 Agent ──
+        old_sid: str | None = None
         if _agent is not None:
-            try:
-                _agent.state.session.save_context(_agent.state.conversation.to_serializable())
+            _agent.state.session.save_context(_agent.state.conversation.to_serializable())
+            old_sid = _agent.state.session.session_id
+            with suppress(Exception):
                 await _agent.shutdown()
-            except Exception as e:
-                get_logger().warning(f"[WebUI] ⚠️ 旧 Agent shutdown 时发生异常: {e}")
             _agent = None
 
         # ── 通知前端准备重连 ──
+        label = "重载" if reload_modules else "新建"
         await event_bus.publish({
             "type": "reload",
-            "message": "🔄 新建 Agent 中，连接即将断开",
+            "message": f"🔄 Agent 正在{label}，连接即将断开",
         })
+
+        # ── 热重载所有模块（仅 /reload） ──
+        if reload_modules:
+            try:
+                _reload_modules()
+            except RuntimeError as e:
+                get_logger().error(f"[WebUI] ❌ 模块重载失败: {e}")
+                raise HTTPException(status_code=500, detail=f"模块重载失败: {e}") from e
 
         # ── 重新导入 Agent 类（确保获取最新代码） ──
         from fp_core.core.agent import Agent as NewAgent
@@ -496,32 +529,45 @@ async def new_agent():
         # ── 创建新 Agent ──
         try:
             _agent = NewAgent(enable_log=False)
-            webui_plugin = WebUIPlugin()
-            _agent.plugins.register(webui_plugin)
+            _agent.plugins.register(WebUIPlugin())
             await _agent.ensure_initialized()
         except Exception as e:
             get_logger().error(f"[WebUI] ❌ 新 Agent 创建失败: {e}")
             _agent = None
             raise HTTPException(status_code=500, detail=f"新 Agent 创建失败: {e}") from e
 
-        # ── 使用 Agent 构造函数已创建的新会话 ──
-        # NewAgent() 的 SessionManager(resume=None) 中已调用 _init_session()
-        # 生成了全新会话，此处只需重建 context 即可
-        try:
-            from fp_core.core.prompt_builder import PromptBuilder
+        # ── 会话管理：恢复旧会话 / 创建新会话 ──
+        from fp_core.core.prompt_builder import PromptBuilder
 
-            prompt = PromptBuilder().build_system_prompt()
-            _agent.state.conversation.reset(prompt)
-            saved = _agent.state.session.load_context(prompt)
-            if len(saved) > 1:
-                _agent.state.conversation.replace_all(saved)
-            new_sid = _agent.state.session.session_id
-            get_logger().info(f"[WebUI] 🆕 已使用新会话: {new_sid}")
-        except Exception as e:
-            get_logger().error(f"[WebUI] ❌ 新会话初始化失败: {e}")
-            raise HTTPException(status_code=500, detail=f"新会话初始化失败: {e}") from e
+        if restore_session and old_sid:
+            try:
+                _agent.state.session.switch_session(old_sid)
+                prompt = PromptBuilder().build_system_prompt()
+                _agent.state.conversation.reset(prompt)
+                saved = _agent.state.session.load_context(prompt)
+                if len(saved) > 1:
+                    _agent.state.conversation.replace_all(saved)
+                get_logger().info(f"[WebUI] 🔄 已恢复会话: {old_sid}")
+            except Exception as e:
+                get_logger().warning(f"[WebUI] ⚠️ 会话恢复失败: {e}")
+        else:
+            # 新 Agent 构造函数已创建会话，只需重建 context
+            try:
+                prompt = PromptBuilder().build_system_prompt()
+                _agent.state.conversation.reset(prompt)
+                saved = _agent.state.session.load_context(prompt)
+                if len(saved) > 1:
+                    _agent.state.conversation.replace_all(saved)
+                new_sid = _agent.state.session.session_id
+                get_logger().info(f"[WebUI] 🆕 已使用新会话: {new_sid}")
+            except Exception as e:
+                get_logger().error(f"[WebUI] ❌ 新会话初始化失败: {e}")
+                raise HTTPException(status_code=500, detail=f"新会话初始化失败: {e}") from e
 
-        get_logger().info(f"[WebUI] 🆕 Agent 新建完成 (model={_agent.model}, session={_agent.session.session_id})")
+        get_logger().info(
+            f"[WebUI] {'🔄' if reload_modules else '🆕'} Agent {'重载' if reload_modules else '新建'}完成 "
+            f"(model={_agent.model}, session={_agent.session.session_id})"
+        )
 
         # ── 稍等片刻，让前端收到 reload 事件后再推送 done ──
         await asyncio.sleep(0.3)
@@ -536,6 +582,16 @@ async def new_agent():
         "session_id": _agent.session.session_id,
         "model": _agent.model,
     }
+
+
+@app.post("/api/agent/new")
+async def new_agent():
+    """
+    创建全新 Agent 实例（不重载模块、不恢复旧会话）。
+
+    相当于 Agent 刚启动时的状态，所有内存状态被清空。
+    """
+    return await _replace_agent(reload_modules=False, restore_session=False)
 
 
 @app.post("/api/sessions")
@@ -910,101 +966,13 @@ def _reload_modules():
 @app.post("/api/reload")
 async def reload_agent():
     """
-    热重载 Agent：在不重启服务器的前提下，刷新所有核心代码并创建新 Agent。
+    热重载 Agent：刷新所有核心代码后创建新 Agent，保留会话上下文。
 
-    流程：
-      1. 保存当前会话上下文到文件
-      2. 关闭旧 Agent（释放 LLM 客户端连接）
-      3. importlib.reload 所有关键模块（按依赖顺序）
-      4. 创建新 Agent 实例
-      5. 注册 WebUIPlugin 桥接插件
-      6. 恢复原会话上下文
-      7. 替换全局 _agent 引用
-      8. 通过 EventBus 通知各 WebSocket 客户端重连
-
-    安全保证：
-      - 如果 Agent 正在处理请求，返回 409 拒绝重载
-      - 重载期间 _agent 被设为 None，get_agent() 会等待锁
-      - 如果重载过程中任何模块 reload 失败，_agent 保持为 None，get_agent() 自动创建新实例
-      - 活跃的 WebSocket 连接保有旧的 agent 对象引用，仍可继续工作
+    与 `/api/agent/new` 的区别：
+      - 本接口 importlib.reload 所有核心模块（命令/工具/LLM 客户端等）
+      - 本接口会恢复旧会话
     """
-    global _agent
-
-    # ── 检查是否正在处理 ──
-    if _agent is not None and _agent.is_processing:
-        raise HTTPException(status_code=409, detail="Agent 正在处理请求，请稍后重试")
-
-    async with _agent_lock:
-        # ── 保存旧会话并关闭旧 Agent ──
-        old_sid: str | None = None
-        if _agent is not None:
-            _agent.state.session.save_context(_agent.state.conversation.to_serializable())
-            old_sid = _agent.state.session.session_id
-            # 静默容错
-            with suppress(Exception):
-                await _agent.shutdown()
-            _agent = None
-
-        # ── 通知前端准备重连 ──
-        await event_bus.publish({
-            "type": "reload",
-            "message": "🔄 Agent 正在重载，连接即将断开",
-        })
-
-        # ── 热重载所有模块 ──
-        try:
-            _reload_modules()
-        except RuntimeError as e:
-            get_logger().error(f"[WebUI] ❌ 模块重载失败: {e}")
-            # _agent 保持 None，后续请求会通过 get_agent() 自动创建
-            raise HTTPException(status_code=500, detail=f"模块重载失败: {e}") from e
-
-        # ── 重新导入 Agent 类 ──
-        # 注意：main.py 顶部 from fp_core.core.agent import Agent 是旧引用，
-        # 必须重新 import 才能获得重载后的类
-        from fp_core.core.agent import Agent as NewAgent
-
-        # ── 创建新 Agent ──
-        try:
-            _agent = NewAgent(enable_log=False)
-            webui_plugin = WebUIPlugin()
-            _agent.plugins.register(webui_plugin)
-            await _agent.ensure_initialized()
-        except Exception as e:
-            get_logger().error(f"[WebUI] ❌ 新 Agent 创建失败: {e}")
-            _agent = None
-            raise HTTPException(status_code=500, detail=f"新 Agent 创建失败: {e}") from e
-
-        # ── 恢复旧会话 ──
-        if old_sid:
-            try:
-                _agent.state.session.switch_session(old_sid)
-                from fp_core.core.prompt_builder import PromptBuilder
-
-                prompt = PromptBuilder().build_system_prompt()
-                _agent.state.conversation.reset(prompt)
-                saved = _agent.state.session.load_context(prompt)
-                if len(saved) > 1:
-                    _agent.state.conversation.replace_all(saved)
-                get_logger().info(f"[WebUI] 🔄 已恢复会话: {old_sid}")
-            except Exception as e:
-                get_logger().warning(f"[WebUI] ⚠️ 会话恢复失败: {e}")
-
-        get_logger().info(f"[WebUI] 🔄 Agent 重载完成 (model={_agent.model}, session={_agent.session.session_id})")
-
-        # ── 稍等片刻，让前端收到 reload 事件后再推送 done ──
-        await asyncio.sleep(0.3)
-        await event_bus.publish({
-            "type": "reload_done",
-            "session_id": _agent.session.session_id,
-            "model": _agent.model,
-        })
-
-    return {
-        "status": "ok",
-        "session_id": _agent.session.session_id,
-        "model": _agent.model,
-    }
+    return await _replace_agent(reload_modules=True, restore_session=True)
 
 
 # ════════════════════════════════════════════════════════════
@@ -1118,6 +1086,21 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
                     """处理消息并通过 EventBus 推送结果"""
                     try:
                         response = await agent.process(msg, io=io)
+                        # ── 热重载检测：/reload 命令已将新 Agent 存入 state._reload_result ──
+                        # CLI (fp-terminal) 和 ACP 在 process() 返回后都有同样的检测逻辑。
+                        # 此处必须同步检查并交换全局 _agent 引用，否则下次消息会发给已 shutdown
+                        # 的旧 Agent，导致 I/O 静默失效。
+                        reload_data = getattr(agent.state, "_reload_result", None)
+                        if reload_data is not None:
+                            new_agent, info = reload_data
+                            agent.state._reload_result = None  # 防止重复消费
+                            global _agent
+                            _agent = new_agent
+                            get_logger().info(
+                                f"[WebUI] 🔄 WebSocket 通道已切换到新 Agent "
+                                f"(model={info['model']}, session={info['session_id']})"
+                            )
+                            agent = new_agent  # 让后续代码使用新 Agent 的引用
                         # 检查是否被用户主动中断（工具执行中 task.cancel()）
                         # agent._cancelled_by_user 在 agent._process_inner 的
                         # except 块中被设为 True，process() 返回后检查此标记。

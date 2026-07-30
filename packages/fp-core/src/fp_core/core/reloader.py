@@ -20,10 +20,13 @@ import importlib
 import os
 import sys
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fp_core.logger import get_logger
 from fp_core.plugins.base.plugin import Plugin
+
+if TYPE_CHECKING:
+    from fp_core.core.io import IOChannel
 
 # ── 模块重载列表（按依赖顺序） ────────────────────────────────
 # 第 1 层：无项目内部依赖
@@ -119,6 +122,8 @@ class AgentReloader:
     async def reload(
         agent: Any,
         extra_plugins: list[Plugin] | None = None,
+        io: "IOChannel | None" = None,
+        on_shutdown: Any | None = None,
         before_reload: Callable[[], Awaitable[None] | None] | None = None,
         after_reload: Callable[[Any], Awaitable[None] | None] | None = None,
     ) -> tuple[Any, dict[str, Any]]:
@@ -138,6 +143,8 @@ class AgentReloader:
         Args:
             agent: 旧 Agent 实例
             extra_plugins: 需要额外注册的插件实例列表
+            io: IO 通道实例。不传则新 Agent 使用默认静默 IOChannel()
+            on_shutdown: shutdown 回调。不传则新 Agent 不使用关闭回调
             before_reload: 重载前回调（可做异步通知）
             after_reload: 重载完毕回调（接收新 Agent）
 
@@ -181,7 +188,7 @@ class AgentReloader:
         _old_quiet = os.environ.get("FP_SUBAGENT_QUIET")
         os.environ["FP_SUBAGENT_QUIET"] = "1"
         try:
-            new_agent = _NewAgent(enable_log=False)
+            new_agent = _NewAgent(enable_log=False, io=io, on_shutdown=on_shutdown)
         finally:
             if _old_quiet:
                 os.environ["FP_SUBAGENT_QUIET"] = _old_quiet

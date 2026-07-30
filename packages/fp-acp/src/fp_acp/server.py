@@ -189,6 +189,18 @@ class ACPServer:
         self._register_follow_hooks()
 
     # ═══════════════════════════════════════════════════════
+    # 工具追踪状态管理
+    # ═══════════════════════════════════════════════════════
+
+    def _reset_tool_state(self):
+        """重置工具调用追踪状态（重载后调用，清除旧 agent 的残留数据）"""
+        self._tool_call_counter = 0
+        self._active_tool_call_ids.clear()
+        self._last_edit_args = None
+        self._last_read_path = None
+        self._last_write_path = None
+
+    # ═══════════════════════════════════════════════════════
     # "Follow Agent" — 让 IDE 跟踪 Agent 文件操作
     # ═══════════════════════════════════════════════════════
 
@@ -889,6 +901,8 @@ class ACPServer:
                     new_agent, info = reload_data
                     self._agent.state._reload_result = None
                     self._agent = new_agent
+                    self._session_id = self._agent.session.session_id
+                    self._reset_tool_state()
                     self._register_follow_hooks()
                     self._log(f"🔄 Agent 已热重载 (model={info['model']})")
 
@@ -915,7 +929,9 @@ class ACPServer:
                 new_agent, info = reload_data
                 self._agent.state._reload_result = None  # 防止重复消费
                 self._agent = new_agent
+                self._session_id = self._agent.session.session_id
                 # 新 Agent 有全新的 lifecycle 实例，需重新注册 Follow Agent 钩子
+                self._reset_tool_state()
                 self._register_follow_hooks()
                 self._log(f"🔄 Agent 已热重载 (model={info['model']}, session={info['session_id']})")
 

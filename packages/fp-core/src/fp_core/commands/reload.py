@@ -44,8 +44,12 @@ async def execute(state, arg: str) -> tuple[bool, str]:
 
     t0 = time.time()
 
+    # ── 从旧 agent 提取 IO 通道和 shutdown 回调，传给新 Agent ──
+    old_io = state.io
+    old_shutdown = getattr(state.agent, "_shutdown_callback", None) if state.agent else None
+
     try:
-        new_agent, info = await AgentReloader.reload(state.agent)
+        new_agent, info = await AgentReloader.reload(state.agent, io=old_io, on_shutdown=old_shutdown)
     except RuntimeError as e:
         return (True, f"❌ 重载失败: {e}")
 
@@ -63,6 +67,5 @@ async def execute(state, arg: str) -> tuple[bool, str]:
         f"| 模型 | `{info['model']}` |",
         f"| 会话 | `{info['session_id']}` {session_status} |",
         "",
-        "> 外层循环检测到 `state._reload_result` 后将自动交换 Agent 引用。",
     ]
     return (True, "\n".join(lines))
