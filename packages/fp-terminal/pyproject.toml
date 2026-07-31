@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fp-terminal"
 dynamic = ["version"]
-description = "五块卵石 - 终端 REPL"
+description = "FP - 终端 REPL"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

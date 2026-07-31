@@ -1,4 +1,4 @@
-"""fp-core - 五块卵石 Agent 引擎"""
+"""fp-core - FP Agent 引擎"""
 
 __license__ = "MIT"
 __author__ = "zpb"

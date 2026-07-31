@@ -1,4 +1,4 @@
-# fp-webui — 五块卵石 Web 界面
+# fp-webui — FP Web 界面
 
 [![PyPI](https://img.shields.io/pypi/v/fp-webui)](https://pypi.org/project/fp-webui/)
 [![Python](https://img.shields.io/pypi/pyversions/fp-webui)](https://pypi.org/project/fp-webui/)
@@ -6,7 +6,7 @@
 
 ## 简介
 
-**fp-webui** 是五块卵石（Five Pebbles）Agent 框架的 Web 图形界面。基于 FastAPI + Uvicorn 构建，提供浏览器端的 Agent 交互体验，支持实时流式对话、会话管理、配置调整等。
+**fp-webui** 是FPAgent 框架的 Web 图形界面。基于 FastAPI + Uvicorn 构建，提供浏览器端的 Agent 交互体验，支持实时流式对话、会话管理、配置调整等。
 
 > 通过 `pip install fp-agent[webui]` 或 `pip install fp-webui` 安装。
 
@@ -58,7 +58,7 @@ fp-webui --host 0.0.0.0 --port 8080
 ### 启动输出
 
 ```
-╭─ Five Pebbles WebUI ─────────────────────╮
+╭─ FP WebUI ─────────────────────╮
 │                                           │
 │  地址: http://localhost:7860              │
 │  共享: http://192.168.1.100:7860          │
@@ -75,11 +75,11 @@ fp-webui --host 0.0.0.0 --port 8080
 
 ```
 ┌─────────────────────────────────────────┐
-│  🤖 五块卵石                    [⚙] [🌙] │
+│  🤖 FP                    [⚙] [🌙] │
 ├─────────────────────────────────────────┤
 │                                         │
 │  ┌─────────────────────────────────┐   │
-│  │ 你好！我是五块卵石，有什么可以    │   │
+│  │ 你好！我是 FP，有什么可以    │   │
 │  │ 帮你的？                        │   │
 │  └─────────────────────────────────┘   │
 │                                         │

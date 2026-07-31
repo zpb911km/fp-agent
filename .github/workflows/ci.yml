@@ -1,4 +1,4 @@
-# CI — 五块卵石代码质量检查
+# CI — FP代码质量检查
 #
 # 每次 push / PR 自动运行：
 #   1. ruff lint + format 检查

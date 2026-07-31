@@ -1,4 +1,4 @@
-# fp-acp — 五块卵石 ACP 通信协议
+# fp-acp — FP ACP 通信协议
 
 [![PyPI](https://img.shields.io/pypi/v/fp-acp)](https://pypi.org/project/fp-acp/)
 [![Python](https://img.shields.io/pypi/pyversions/fp-acp)](https://pypi.org/project/fp-acp/)
@@ -6,7 +6,7 @@
 
 ## 简介
 
-**fp-acp** 实现了五块卵石（Five Pebbles）的 Agent Communication Protocol（ACP），一个基于 **JSON-RPC 2.0** 的通信协议。它允许外部进程（IDE 插件、其他 Agent、自动化脚本）通过标准化的 API 与 Agent 交互。
+**fp-acp** 实现了 FP 的 Agent Communication Protocol（ACP），一个基于 **JSON-RPC 2.0** 的通信协议。它允许外部进程（IDE 插件、其他 Agent、自动化脚本）通过标准化的 API 与 Agent 交互。
 
 > 通过 `pip install fp-agent[acp]` 或 `pip install fp-acp` 安装。
 
@@ -57,7 +57,7 @@ fp-acp --host 127.0.0.1 --port 9090
 启动日志：
 
 ```
-╭─ Five Pebbles ACP Server ────────────────╮
+╭─ FP ACP Server ────────────────╮
 │                                           │
 │  监听地址: tcp://127.0.0.1:9090          │
 │  协议: JSON-RPC 2.0                      │
@@ -115,7 +115,7 @@ curl -X POST http://127.0.0.1:9090 \
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "response": "你好！我是五块卵石，一个基于生命周期钩子的插件化 Agent。"
+    "response": "你好！我是 FP，一个基于生命周期钩子的插件化 Agent。"
   }
 }
 ```
@@ -146,7 +146,7 @@ print(tools)
 通过 ACP，VS Code 扩展可以直接调用 Agent 进行代码审查、重构建议、自动补全：
 
 ```
-用户选中代码 → 右键 "Ask Five Pebbles" → ACP Server 返回分析结果
+用户选中代码 → 右键 "Ask FP" → ACP Server 返回分析结果
 ```
 
 ### 2. 多 Agent 协作

@@ -1,4 +1,4 @@
-# Release — 五块卵石发布到 PyPI
+# Release — FP发布到 PyPI
 #
 # 触发方式：
 #   1. 自动：推送版本标签时（如 git tag 0.2.0 && git push --tags）

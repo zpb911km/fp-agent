@@ -1,5 +1,5 @@
 """
-display.py — Five Pebbles 显示模块（fp-terminal 版）
+display.py — FP 显示模块（fp-terminal 版）
 
 将 6 类输出 (A操作反馈/B行为提示/C异常警示/D LLM流/E系统日志/🎨仪式感)
 统一着色输出到终端。所有颜色、样式、截断长度均从 config.json
@@ -419,9 +419,9 @@ def startup(model: str, resume: bool = False):
     if _silent():
         return
     if resume:
-        print(apply_style(f"🤖 Five Pebbles 已续会话 (模型: {model})", "startup"))
+        print(apply_style(f"🤖 FP 已续会话 (模型: {model})", "startup"))
     else:
-        print(apply_style(f"🤖 Five Pebbles 已启动 (模型: {model})", "startup"))
+        print(apply_style(f"🤖 FP 已启动 (模型: {model})", "startup"))
     print()
 
 
@@ -542,7 +542,7 @@ def _build_startup_frame(model: str, resume: bool) -> tuple[list[str], int]:
     model_display = model if model else "(none)"
     status = "Resume Session" if resume else "New Session"
     ver_str = f"v{ver}"
-    title = "Five Pebbles"
+    title = "FP"
 
     PANEL_W = 50
     BORDER = "  +" + "=" * (PANEL_W - 4) + "+"

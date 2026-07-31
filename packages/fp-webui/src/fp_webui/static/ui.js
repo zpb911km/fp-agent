@@ -1,12 +1,12 @@
 /* ═══════════════════════════════════════════════════════════
-   Five Pebbles WebUI — UI 渲染层
+   FP WebUI — UI 渲染层
    从 index.html 拆分，2026-07-28
    包含: 共享状态 / DOM 渲染 / 命令面板 / 消息构建
    ═══════════════════════════════════════════════════════════ */
 // @ts-nocheck
 
 /* ═══════════════════════════════════════════════════════════
-   Five Pebbles WebUI — 前端逻辑
+   FP WebUI — 前端逻辑
    ═══════════════════════════════════════════════════════════ */
 
 // ── 状态 ──
@@ -231,7 +231,7 @@ function addAssistantMessage(content) {
     '</div>' +
     '<div class="msg-body">' +
       '<div class="msg-header">' +
-        '<span class="msg-author assistant">FIVE PEBBLES</span>' +
+        '<span class="msg-author assistant">FP</span>' +
         '<span class="msg-time">' + formatTime(Date.now()/1000) + '</span>' +
         '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>' +
         '<button class="copy-btn" title="复制消息内容" aria-label="复制消息内容">📋</button>' +
@@ -268,7 +268,7 @@ function addAssistantToolCallMsg(toolNames) {
     '</div>' +
     '<div class="msg-body">' +
       '<div class="msg-header">' +
-        '<span class="msg-author assistant">FIVE PEBBLES</span>' +
+        '<span class="msg-author assistant">FP</span>' +
         '<span class="msg-time">' + formatTime(Date.now()/1000) + '</span>' +
         '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>' +
         '<button class="copy-btn" title="复制消息内容" aria-label="复制消息内容">📋</button>' +
@@ -724,7 +724,7 @@ function renderHistoryMessages(sid, messages) {
         '</div>' +
         '<div class="msg-body">' +
           '<div class="msg-header">' +
-            '<span class="msg-author assistant">FIVE PEBBLES</span>' +
+            '<span class="msg-author assistant">FP</span>' +
             '<span class="msg-time">#' + (msg.index || '?') + '</span>' +
             (msg.index ? '<button class="backtrack-btn" title="回溯到此位置" data-index="' + msg.index + '" aria-label="回溯到位置 ' + msg.index + '">↩ 回溯</button>' : '') +
             '<button class="copy-btn" title="复制消息内容" aria-label="复制消息内容">📋</button>' +
@@ -747,7 +747,7 @@ function renderHistoryMessages(sid, messages) {
       if (msg.role === 'user') {
         roleConfig = { avatar: '👤', author: 'OPERATOR', cls: 'user' };
       } else {
-        roleConfig = { avatar: '<img src=\"/static/favicon.png\" width=\"18\" height=\"19\" alt=\"\" style=\"vertical-align:middle\">', author: 'FIVE PEBBLES', cls: 'assistant' };
+        roleConfig = { avatar: '<img src=\"/static/favicon.png\" width=\"18\" height=\"19\" alt=\"\" style=\"vertical-align:middle\">', author: 'FP', cls: 'assistant' };
       }
 
       var avatarHtml = '<div class="msg-avatar ' + roleConfig.cls + '" aria-hidden="true">' + roleConfig.avatar + '</div>';

@@ -1,4 +1,4 @@
-# fp-core — 五块卵石 Agent 引擎
+# fp-core — FP Agent 引擎
 
 [![PyPI](https://img.shields.io/pypi/v/fp-core)](https://pypi.org/project/fp-core/)
 [![Python](https://img.shields.io/pypi/pyversions/fp-core)](https://pypi.org/project/fp-core/)
@@ -6,7 +6,7 @@
 
 ## 简介
 
-**fp-core** 是五块卵石（Five Pebbles）Agent 框架的核心引擎。它提供了 Agent 生命周期管理、LLM 交互、工具执行、会话管理及插件化扩展等基础能力，是整个框架的基石。
+**fp-core** 是FPAgent 框架的核心引擎。它提供了 Agent 生命周期管理、LLM 交互、工具执行、会话管理及插件化扩展等基础能力，是整个框架的基石。
 
 > 如果你只是**使用** Agent，请安装 [`fp`](https://pypi.org/project/fp/) 主包；如果你要**自定义/扩展** Agent 行为，你正在正确的地方。
 

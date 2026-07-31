@@ -183,7 +183,7 @@ async def main():
     """主入口"""
     import argparse
 
-    parser = argparse.ArgumentParser(description="五块卵石 - AI Agent 命令行界面")
+    parser = argparse.ArgumentParser(description="FP - AI Agent 命令行界面")
     parser.add_argument("-m", "--message", help="单次消息模式")
     parser.add_argument(
         "-r", "--resume", nargs="?", const="auto", default=None, metavar="SESSION_ID", help="恢复历史会话"

@@ -1,5 +1,5 @@
 """
-Five Pebbles — WebUI 服务器
+FP — WebUI 服务器
 ================================
 
 插件模式的 Web 用户界面，不修改 core/ 中的任何代码。
@@ -327,7 +327,7 @@ async def get_agent() -> Agent:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI 生命周期：启动时初始化 Agent，关闭时清理"""
-    get_logger().info("[WebUI] 🚀 Five Pebbles WebUI 启动中...")
+    get_logger().info("[WebUI] 🚀 FP WebUI 启动中...")
 
     # Agent 延迟初始化，第一次请求时创建
     yield
@@ -344,8 +344,8 @@ async def lifespan(app: FastAPI):
 # ── FastAPI 实例 ─────────────────────────────────────────
 
 app = FastAPI(
-    title="Five Pebbles WebUI",
-    description="五块卵石 AI Agent 的 Web 界面",
+    title="FP WebUI",
+    description="FP AI Agent 的 Web 界面",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -1244,11 +1244,11 @@ async def index():
     return HTMLResponse("""
     <!DOCTYPE html>
     <html>
-    <head><meta charset="utf-8"><title>Five Pebbles WebUI</title></head>
+    <head><meta charset="utf-8"><title>FP WebUI</title></head>
     <body style="background:#1a1a2e;color:#e0e0e0;font-family:sans-serif;
           display:flex;align-items:center;justify-content:center;height:100vh;">
       <div style="text-align:center">
-        <h1> Five Pebbles WebUI</h1>
+        <h1> FP WebUI</h1>
         <p>API 服务器已启动。</p>
         <p>访问 <a href="/api/health" style="color:#00bcd4">/api/health</a> 检查状态</p>
         <p>前端文件位于: <code>app/static/index.html</code></p>
@@ -1319,7 +1319,7 @@ _UVICORN_LOG_CONFIG: dict = {
 
 def main():
     """启动 WebUI 服务器"""
-    parser = argparse.ArgumentParser(description="Five Pebbles WebUI")
+    parser = argparse.ArgumentParser(description="FP WebUI")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
     parser.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765）")
     parser.add_argument("--reload", action="store_true", help="启用热重载（开发用）")
@@ -1334,7 +1334,7 @@ def main():
     base_url = f"http://{display_ip}:{args.port}/"
 
     print()
-    print("🤖 Five Pebbles WebUI")
+    print("🤖 FP WebUI")
     print()
     if args.host == "0.0.0.0":
         print("  ⚠️  已监听 0.0.0.0，局域网设备可访问此服务")

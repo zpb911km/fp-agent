@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-bump_docs.py — 五块卵石文档版本同步工具
+bump_docs.py — FP 文档版本同步工具
 
 用法:
     python scripts/bump_docs.py 0.2.0              # 默认使用当天日期
@@ -154,7 +154,7 @@ def update_version_refs(version: str) -> int:
 def main() -> None:
     version, release_date = parse_args()
 
-    print("\n🔧 五块卵石 文档版本同步工具")
+    print("\n🔧 FP 文档版本同步工具")
     print(f"   版本: {version}")
     print(f"   日期: {release_date}\n")
 

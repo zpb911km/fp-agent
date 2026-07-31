@@ -2,7 +2,7 @@
 ACP Server — Agent Client Protocol 实现 (v1 兼容)
 ==================================================
 
-将 Five Pebbles 作为 ACP Server 接入 IDE（Zed / VS Code / JetBrains 等）。
+将 FP 作为 ACP Server 接入 IDE（Zed / VS Code / JetBrains 等）。
 
 协议规范：https://agentclientprotocol.com/protocol/v1
 参考实现：https://github.com/agentclientprotocol/agent-client-protocol
@@ -14,7 +14,7 @@ ACP Server — Agent Client Protocol 实现 (v1 兼容)
   ACP Server（本文件）
       │  redirect_stdout → stderr（日志/display）
       ▼
-  Agent.process()   ← 五块卵石核心
+  Agent.process()   ← FP 核心
 
 关键修正 (v1)：
   - protocolVersion: 1 (integer, 不是字符串)
@@ -742,8 +742,8 @@ class ACPServer:
                 },
             },
             "agentInfo": {
-                "name": "five-pebbles",
-                "title": "Five Pebbles",
+                "name": "fp",
+                "title": "FP",
                 "version": "0.1.0",
             },
             "authMethods": [],
@@ -1102,7 +1102,7 @@ class ACPServer:
                     "sessionUpdate": "plan",
                     "entries": [
                         {
-                            "content": "五块卵石正在思考...",
+                            "content": "FP 正在思考...",
                             "priority": "high",
                             "status": "running",
                         },

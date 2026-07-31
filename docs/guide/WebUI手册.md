@@ -1,4 +1,4 @@
-# Five Pebbles WebUI 使用手册
+# FP WebUI 使用手册
 
 > **版本**: 1.0.0  
 > **文件**: `fp_webui/main.py` + `fp_webui/static/index.html`  
@@ -23,7 +23,7 @@
 
 ## 1. 概述
 
-WebUI 是 Five Pebbles 的**浏览器界面**，以插件模式运行在 Agent 核心之上，**不修改** `fp_core/core/` 中的任何代码。
+WebUI 是 FP 的**浏览器界面**，以插件模式运行在 Agent 核心之上，**不修改** `fp_core/core/` 中的任何代码。
 
 它提供了：
 
@@ -248,7 +248,7 @@ FastAPI 的 `@app.middleware("http")`，拦截所有 `/api/*` 请求（白名单
 
 // 响应
 {
-  "response": "你好！我是 Five Pebbles...",
+  "response": "你好！我是 FP...",
   "session_id": "session_xxx"
 }
 ```

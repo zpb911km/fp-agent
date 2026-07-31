@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fp-core"
 dynamic = ["version"]
-description = "五块卵石 Agent 引擎 - 基于生命周期钩子的插件化 Agent 核心"
+description = "FP Agent 引擎 - 基于生命周期钩子的插件化 Agent 核心"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fp-webui"
 dynamic = ["version"]
-description = "五块卵石 - Web 界面"
+description = "FP - Web 界面"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

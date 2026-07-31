@@ -1,4 +1,4 @@
-# Five Pebbles（五块卵石）
+# FP
 
 [![PyPI](https://img.shields.io/pypi/v/fp)](https://pypi.org/project/fp/)
 [![Python](https://img.shields.io/pypi/pyversions/fp)](https://pypi.org/project/fp/)
@@ -6,7 +6,7 @@
 
 ## 简介
 
-**五块卵石（Five Pebbles）** 是一个基于生命周期钩子的插件化 Agent 框架。它提供了灵活、可扩展的方式来构建和运行 AI Agent，支持终端 REPL、Web 界面和远程协议调用等多种交互方式。
+**FP** 是一个基于生命周期钩子的插件化 Agent 框架。它提供了灵活、可扩展的方式来构建和运行 AI Agent，支持终端 REPL、Web 界面和远程协议调用等多种交互方式。
 
 > 灵感来源于《Rain World》中的迭代器「五块卵石」—— 冷静、理性、追求优雅的解决方案。
 

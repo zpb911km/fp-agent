@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fp-acp"
 dynamic = ["version"]
-description = "五块卵石 - ACP Server (JSON-RPC 2.0)"
+description = "FP - ACP Server (JSON-RPC 2.0)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
