@@ -23,6 +23,7 @@ Five Pebbles — WebUI 服务器
 import argparse
 import asyncio
 import json
+import logging
 import os
 import secrets
 import socket
@@ -1264,6 +1265,50 @@ async def index():
 # ════════════════════════════════════════════════════════════
 
 
+class _UvicornBannerFilter(logging.Filter):
+    """过滤 uvicorn 自带的启动横幅（会显示监听地址 0.0.0.0，改用自定义横幅）"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "Uvicorn running on" not in record.getMessage()
+
+
+# 定制 uvicorn 日志：保留错误/访问日志，去掉启动横幅
+_UVICORN_LOG_CONFIG: dict = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {"no_banner": {"()": _UvicornBannerFilter}},
+    "formatters": {
+        "default": {
+            "()": "uvicorn.logging.DefaultFormatter",
+            "fmt": "%(levelprefix)s %(message)s",
+            "use_colors": None,
+        },
+        "access": {
+            "()": "uvicorn.logging.AccessFormatter",
+            "fmt": '%(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
+        },
+    },
+    "handlers": {
+        "default": {
+            "formatter": "default",
+            "class": "logging.StreamHandler",
+            "stream": "ext://sys.stderr",
+            "filters": ["no_banner"],
+        },
+        "access": {
+            "formatter": "access",
+            "class": "logging.StreamHandler",
+            "stream": "ext://sys.stderr",
+        },
+    },
+    "loggers": {
+        "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": False},
+        "uvicorn.error": {"handlers": ["default"], "level": "INFO", "propagate": False},
+        "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
+    },
+}
+
+
 def main():
     """启动 WebUI 服务器"""
     parser = argparse.ArgumentParser(description="Five Pebbles WebUI")
@@ -1284,17 +1329,17 @@ def main():
     print("🤖 Five Pebbles WebUI")
     print()
     if args.host == "0.0.0.0":
-        get_logger().warning("  ⚠️  已监听 0.0.0.0，局域网设备可访问此服务")
-        get_logger().warning("  ⚠️  请妥善保管 Token，建议使用 HTTPS 反向代理")
+        print("  ⚠️  已监听 0.0.0.0，局域网设备可访问此服务")
+        print("  ⚠️  请妥善保管 Token，建议使用 HTTPS 反向代理")
         print()
-    get_logger().info(f"  🌐  WebUI: {base_url}")
-    get_logger().info(f"  🔌  WS:    ws://{display_ip}:{args.port}/ws/chat")
-    get_logger().info(f"  📡  API:   {base_url}api/health")
+    print(f"  🌐  WebUI: {base_url}")
+    print(f"  🔌  WS:    ws://{display_ip}:{args.port}/ws/chat")
+    print(f"  📡  API:   {base_url}api/health")
     print()
     # 显示 Token（从文件读，确保与文件一致）
     display_token = _load_or_create_token()
-    get_logger().info(f"  🔑  启动 Token: ...{display_token[-4:]}")
-    get_logger().info(f"  📄  Token 文件: {_TOKEN_FILE}  （cat 查看完整 Token）")
+    print(f"  🔑  启动 Token: ...{display_token[-4:]}")
+    print(f"  📄  Token 文件: {_TOKEN_FILE}  （cat 查看完整 Token）")
     print()
 
     uvicorn.run(
@@ -1304,6 +1349,7 @@ def main():
         reload=args.reload,
         log_level="info",
         access_log=False,  # 关闭 uvicorn 默认访问日志，改由脱敏中间件记录
+        log_config=_UVICORN_LOG_CONFIG,  # 过滤启动横幅（避免显示 0.0.0.0）
     )
 
 
