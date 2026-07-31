@@ -25,9 +25,11 @@ import asyncio
 import json
 import os
 import secrets
+import socket
 import sys
 import time
 from contextlib import asynccontextmanager, suppress
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from fp_core.platform_utils import get_data_dir
 
@@ -363,6 +365,56 @@ async def auth_middleware(request: Request, call_next):
         if not auth or auth != expected:
             return JSONResponse(status_code=401, content={"detail": "未授权，请先登录"})
     return await call_next(request)
+
+
+# ── 访问日志（URL 脱敏，防止 token 明文泄露） ────────────
+
+_SENSITIVE_QUERY_KEYS = {"token", "key", "secret", "password", "access_token"}
+
+
+def _sanitize_url(url: str) -> str:
+    """脱敏 URL：将 query 中的敏感参数（token 等）打码，防止日志泄露"""
+    parts = urlsplit(url)
+    params = parse_qsl(parts.query, keep_blank_values=True)
+    masked = [(k, "***" if k.lower() in _SENSITIVE_QUERY_KEYS else v) for k, v in params]
+    query = urlencode(masked)
+    return parts.path + (f"?{query}" if query else "")
+
+
+def _get_lan_ip() -> str:
+    """获取本机局域网 IP（0.0.0.0 监听时用于展示可访问地址）"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # UDP connect 不真正发包，仅让内核选择路由并返回本机 IP
+        s.connect(("192.168.255.255", 1))
+        ip = s.getsockname()[0]
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+    finally:
+        s.close()
+    return "127.0.0.1"
+
+
+@app.middleware("http")
+async def access_log_middleware(request: Request, call_next):
+    """记录访问日志，URL 脱敏（不暴露 query 中的 token）"""
+    start = time.monotonic()
+    method = request.method
+    path = _sanitize_url(str(request.url))
+    is_ws = request.headers.get("upgrade", "").lower() == "websocket"
+
+    if is_ws:
+        # WebSocket 握手：立即记录（避免阻塞到连接关闭）
+        get_logger().info(f"[WebUI] {method} {path}（WS 连接）")
+        response = await call_next(request)
+        return response
+
+    response = await call_next(request)
+    duration_ms = (time.monotonic() - start) * 1000
+    get_logger().info(f"[WebUI] {method} {path} → {response.status_code}（{duration_ms:.0f}ms）")
+    return response
 
 
 # ════════════════════════════════════════════════════════════
@@ -1009,6 +1061,10 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
         await websocket.close(code=4001)
         return
 
+    # 记录连接（不打印 token）
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    get_logger().info(f"[WebUI] WS 连接: {client_ip} → /ws/chat（已认证）")
+
     # 订阅事件总线
     sub_id, event_queue = event_bus.subscribe()
 
@@ -1220,6 +1276,10 @@ def main():
     if args.expose:
         args.host = "0.0.0.0"
 
+    # 确定对外展示的地址（0.0.0.0 → 探测局域网 IP，浏览器才能访问）
+    display_ip = _get_lan_ip() if args.host == "0.0.0.0" else args.host
+    base_url = f"http://{display_ip}:{args.port}/"
+
     print()
     print("🤖 Five Pebbles WebUI")
     print()
@@ -1227,9 +1287,9 @@ def main():
         get_logger().warning("  ⚠️  已监听 0.0.0.0，局域网设备可访问此服务")
         get_logger().warning("  ⚠️  请妥善保管 Token，建议使用 HTTPS 反向代理")
         print()
-    get_logger().info(f"  🌐  WebUI: http://{args.host}:{args.port}")
-    get_logger().info(f"  🔌  WS:    ws://{args.host}:{args.port}/ws/chat")
-    get_logger().info(f"  📡  API:   http://{args.host}:{args.port}/api/health")
+    get_logger().info(f"  🌐  WebUI: {base_url}")
+    get_logger().info(f"  🔌  WS:    ws://{display_ip}:{args.port}/ws/chat")
+    get_logger().info(f"  📡  API:   {base_url}api/health")
     print()
     # 显示 Token（从文件读，确保与文件一致）
     display_token = _load_or_create_token()
@@ -1243,6 +1303,7 @@ def main():
         port=args.port,
         reload=args.reload,
         log_level="info",
+        access_log=False,  # 关闭 uvicorn 默认访问日志，改由脱敏中间件记录
     )
 
 
