@@ -6,16 +6,22 @@
 - read_file: 文件读取（注册到哈希表，供编辑校验）
 - write_file: 文件写入（自动注册哈希）
 - edit_file: 纯字符串替换，通过文件哈希标识目标（必须 read_file 后操作）
+
+设计要点：
+- 工具声明采用单一数据源：ToolSpec/ParamSpec 同时驱动 OpenAI schema 生成与参数路由，
+  杜绝"schema 与执行函数双份手写"导致的漂移。
+- 文件哈希 = md5(路径 + 内容)，(path, content) 联合身份唯一：
+  两个内容相同但路径不同的文件哈希必然不同，杜绝内容寻址冲突。
 """
 
 import asyncio
-import contextlib
-import glob
 import hashlib
 import locale
 import os
 import tempfile
 import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from fp_core.platform_utils import find_bash, is_windows
@@ -23,9 +29,14 @@ from fp_core.platform_utils import find_bash, is_windows
 # ── 辅助函数 ─────────────────────────────────────────────────────────────
 
 
-def _compute_file_hash(content: str) -> str:
-    """计算文件内容的短哈希（6 字符），用于陈旧编辑检测"""
-    return hashlib.md5(content.encode("utf-8")).hexdigest()[:6]
+def _compute_file_hash(file_path: str, content: str) -> str:
+    """计算文件的短哈希（6 字符），用于陈旧编辑检测。
+
+    将路径拼入内容哈希，形成 (path, content) 联合身份：
+    - 两个内容相同但路径不同的文件 → 哈希不同（杜绝内容寻址冲突）
+    - 同一文件内容变化 → 哈希变化（陈旧检测仍有效）
+    """
+    return hashlib.md5(f"{file_path}\n{content}".encode()).hexdigest()[:6]
 
 
 # ── 文件注册表：hash → path ─────────────────────────────────────────────
@@ -35,90 +46,55 @@ def _compute_file_hash(content: str) -> str:
 _file_registry: dict[str, str] = {}
 
 
-# ── 核心工具定义（OpenAI function calling schema） ──────────────────────
-
-CORE_TOOL_DEFINITIONS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "执行 shell 命令。小输出直接返回，大输出(≥3K)自动保存文件+返回预览。超时 300 秒。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "要执行的 shell 命令"},
-                },
-                "required": ["command"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "读取文件内容。默认返回前 200 行（limit=200），超出提示继续读取。"
-            "末尾附带文件哈希，供 edit_file 的 file_hash 参数做陈旧检测。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string", "description": "文件绝对路径"},
-                    "offset": {"type": "integer", "description": "起始行号（从 0 开始，不传则从头）"},
-                    "limit": {"type": "integer", "description": "最多读取行数（默认 200，上限 500）"},
-                },
-                "required": ["file_path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "创建新文件或覆盖已有文件",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string", "description": "文件绝对路径"},
-                    "content": {"type": "string", "description": "文件内容"},
-                },
-                "required": ["file_path", "content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "edit_file",
-            "description": "通过文件哈希标识目标文件，对文件进行精确字符串替换。\n"
-            "流程：① read_file 读取 → ② 记录返回的【文件哈希】→ ③ 传入该哈希 + old_string + new_string 编辑。\n"
-            "安全：只有 read_file 或 write_file 注册过的文件才能被编辑，\n"
-            "哈希不匹配自动拒绝（文件已被外部修改，需重新读取）。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_hash": {
-                        "type": "string",
-                        "description": "文件的哈希标识（6字符，read_file 末尾返回的【文件哈希】）。"
-                        "必需：只有此 hash 在文件注册表中存在且匹配当前文件内容时编辑才生效。",
-                    },
-                    "old_string": {
-                        "type": "string",
-                        "description": "需要被替换的已有文本，必须与文件中内容完全一致（含缩进）。",
-                    },
-                    "new_string": {
-                        "type": "string",
-                        "description": "替换后的新内容。",
-                    },
-                },
-                "required": ["file_hash", "old_string", "new_string"],
-            },
-        },
-    },
-]
+# ── 工具规格：单一数据源（schema 与路由均由它生成） ─────────────────────
 
 
-def get_core_definitions() -> list:
-    """返回核心工具的 OpenAI schema 定义"""
-    return list(CORE_TOOL_DEFINITIONS)
+@dataclass
+class ParamSpec:
+    """工具参数的声明（单一数据源）"""
+
+    name: str
+    type: str
+    required: bool
+    description: str
+
+    def to_openai(self) -> dict:
+        return {"type": self.type, "description": self.description}
+
+
+@dataclass
+class ToolSpec:
+    """工具声明：名称/描述/参数 + 执行处理器"""
+
+    name: str
+    description: str
+    params: list[ParamSpec]
+    handler: Callable[..., Awaitable[Any]]
+
+    def to_openai_schema(self) -> dict:
+        """从声明生成 OpenAI function calling schema"""
+        properties = {p.name: p.to_openai() for p in self.params}
+        required = [p.name for p in self.params if p.required]
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required,
+                },
+            },
+        }
+
+    async def run(self, params: dict[str, Any]) -> Any:
+        """从参数字典路由：校验必填项 → 提取参数 → 调用底层处理器"""
+        missing = [p.name for p in self.params if p.required and p.name not in params]
+        if missing:
+            raise ValueError(f"工具 {self.name} 缺少必填参数: {', '.join(missing)}")
+        kwargs = {p.name: params.get(p.name) for p in self.params}
+        return await self.handler(**kwargs)
 
 
 # ── 工具执行函数 ─────────────────────────────────────────────────────────
@@ -128,11 +104,6 @@ async def _execute_bash(command: str) -> str:
     """异步执行 shell 命令"""
     if not command:
         raise ValueError("bash 工具需要 command 参数")
-
-    tmpdir = tempfile.gettempdir()
-    for f in glob.glob(os.path.join(tmpdir, "fp_bash_*.log")):
-        with contextlib.suppress(OSError):
-            os.unlink(f)
 
     cmd_prefix = ""
     start_time = time.monotonic()
@@ -221,7 +192,7 @@ async def _execute_read_file(file_path: str, offset: int | None = None, limit: i
                 all_lines = f.readlines()
             total_lines = len(all_lines)
             full_content = "".join(all_lines)
-            file_hash = _compute_file_hash(full_content)
+            file_hash = _compute_file_hash(file_path, full_content)
             _file_registry[file_hash] = file_path
 
             lines = all_lines[offset:] if offset else list(all_lines)
@@ -278,7 +249,12 @@ async def _execute_write_file(file_path: str, content: str) -> str:
                 f.write(content)
 
         await loop.run_in_executor(None, _write)
-        new_hash = _compute_file_hash(content)
+
+        # 清理该路径的旧注册条目，避免失效哈希残留
+        for old_hash in [h for h, p in list(_file_registry.items()) if p == file_path]:
+            del _file_registry[old_hash]
+
+        new_hash = _compute_file_hash(file_path, content)
         _file_registry[new_hash] = file_path
         return f"文件已写入: {file_path}  哈希: {new_hash}"
     except Exception as e:
@@ -328,7 +304,7 @@ async def _execute_edit_file(
                 return f"错误：文件不存在 {file_path}（已从注册表移除）"
 
             # 哈希校验（陈旧检测）
-            current_hash = _compute_file_hash(content)
+            current_hash = _compute_file_hash(file_path, content)
             if current_hash != file_hash:
                 _file_registry.pop(file_hash, None)
                 if current_hash in _file_registry:
@@ -353,7 +329,7 @@ async def _execute_edit_file(
 
             # 更新注册表
             _file_registry.pop(file_hash, None)
-            new_hash = _compute_file_hash(new_content)
+            new_hash = _compute_file_hash(file_path, new_content)
             _file_registry[new_hash] = file_path
 
             return f"✅ 文件已修改: {file_path}\n  新哈希: {new_hash}"
@@ -361,6 +337,74 @@ async def _execute_edit_file(
         return await loop.run_in_executor(None, _edit)
     except Exception as e:
         return f"错误：{e}"
+
+
+# ── 工具声明（单一数据源） ───────────────────────────────────────────────
+
+CORE_TOOLS: list[ToolSpec] = [
+    ToolSpec(
+        name="bash",
+        description="执行 shell 命令。小输出直接返回，大输出(≥3K)自动保存文件+返回预览。超时 300 秒。",
+        params=[ParamSpec("command", "string", True, "要执行的 shell 命令")],
+        handler=_execute_bash,
+    ),
+    ToolSpec(
+        name="read_file",
+        description="读取文件内容。默认返回前 200 行（limit=200），超出提示继续读取。"
+        "末尾附带文件哈希，供 edit_file 的 file_hash 参数做陈旧检测。",
+        params=[
+            ParamSpec("file_path", "string", True, "文件绝对路径"),
+            ParamSpec("offset", "integer", False, "起始行号（从 0 开始，不传则从头）"),
+            ParamSpec("limit", "integer", False, "最多读取行数（默认 200，上限 500）"),
+        ],
+        handler=_execute_read_file,
+    ),
+    ToolSpec(
+        name="write_file",
+        description="创建新文件或覆盖已有文件",
+        params=[
+            ParamSpec("file_path", "string", True, "文件绝对路径"),
+            ParamSpec("content", "string", True, "文件内容"),
+        ],
+        handler=_execute_write_file,
+    ),
+    ToolSpec(
+        name="edit_file",
+        description="通过文件哈希标识目标文件，对文件进行精确字符串替换。\n"
+        "流程：① read_file 读取 → ② 记录返回的【文件哈希】→ ③ 传入该哈希 + old_string + new_string 编辑。\n"
+        "安全：只有 read_file 或 write_file 注册过的文件才能被编辑，\n"
+        "哈希不匹配自动拒绝（文件已被外部修改，需重新读取）。",
+        params=[
+            ParamSpec(
+                "file_hash",
+                "string",
+                True,
+                "文件的哈希标识（6字符，read_file 末尾返回的【文件哈希】）。"
+                "必需：只有此 hash 在文件注册表中存在且匹配当前文件内容时编辑才生效。",
+            ),
+            ParamSpec(
+                "old_string",
+                "string",
+                True,
+                "需要被替换的已有文本，必须与文件中内容完全一致（含缩进）。",
+            ),
+            ParamSpec(
+                "new_string",
+                "string",
+                True,
+                "替换后的新内容。",
+            ),
+        ],
+        handler=_execute_edit_file,
+    ),
+]
+
+_TOOL_INDEX: dict[str, ToolSpec] = {t.name: t for t in CORE_TOOLS}
+
+
+def get_core_definitions() -> list:
+    """返回核心工具的 OpenAI schema 定义（由 ToolSpec 单一数据源生成）"""
+    return [t.to_openai_schema() for t in CORE_TOOLS]
 
 
 async def execute_core_tool(tool_name: str, params: dict[str, Any]) -> Any:
@@ -374,24 +418,7 @@ async def execute_core_tool(tool_name: str, params: dict[str, Any]) -> Any:
     Returns:
         执行结果
     """
-    if tool_name == "bash":
-        return await _execute_bash(params.get("command", ""))
-    elif tool_name == "read_file":
-        return await _execute_read_file(
-            params.get("file_path", ""),
-            params.get("offset"),
-            params.get("limit"),
-        )
-    elif tool_name == "write_file":
-        return await _execute_write_file(
-            params.get("file_path", ""),
-            params.get("content", ""),
-        )
-    elif tool_name == "edit_file":
-        return await _execute_edit_file(
-            file_hash=params.get("file_hash", ""),
-            old_string=params.get("old_string", ""),
-            new_string=params.get("new_string", ""),
-        )
-    else:
+    spec = _TOOL_INDEX.get(tool_name)
+    if spec is None:
         raise ValueError(f"未知核心工具：{tool_name}")
+    return await spec.run(params)
