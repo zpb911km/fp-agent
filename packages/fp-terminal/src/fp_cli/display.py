@@ -206,6 +206,16 @@ class LLMStreamer:
         stream.end()
     """
 
+    # 类级锁：跨实例共享（streamer 可能被重建），串行化工具调用/结果输出，
+    # 避免并行工具调用时多个 tool() 协程片段交错挤在同一行。
+    _tool_lock: asyncio.Lock | None = None
+
+    @classmethod
+    def _get_tool_lock(cls) -> asyncio.Lock:
+        if cls._tool_lock is None:
+            cls._tool_lock = asyncio.Lock()
+        return cls._tool_lock
+
     def __init__(self, silent: bool = False):
         self.silent = silent or _FP_SILENT
         self._thinking = False
@@ -237,6 +247,20 @@ class LLMStreamer:
             self._live.__enter__()
         except Exception:
             self._live = None
+
+    def _clear_live(self):
+        """清空 Live 画布内容。
+
+        rich Live 默认 (transient=False) 在 stop 时会保留最后一帧，因此
+        需要清空思考/内容后再退出，否则思考行会残留在屏幕上。
+        """
+        if self._live is not None:
+            try:
+                from rich.text import Text
+
+                self._live.update(Text(""))
+            except Exception:
+                pass
 
     def _exit_live(self):
         """安全退出 Live 上下文"""
@@ -328,13 +352,7 @@ class LLMStreamer:
         # 从思考阶段切换到内容阶段：清空 Live 画布
         if self._thinking:
             self._thinking = False
-            if self._live:
-                try:
-                    from rich.text import Text
-
-                    self._live.update(Text(""))
-                except Exception:
-                    pass
+            self._clear_live()
 
         self._buffer += text
         self._has_content = True
@@ -352,21 +370,39 @@ class LLMStreamer:
     async def tool(self, name: str, args) -> None:
         """工具调用阶段：覆盖思考信息，逐段流式展开格式化工具行。
 
-        进入工具调用时若正在思考（Live 画布），先清空并退出 Live，
-        避免思考内容与工具行纠缠；之后若有新思考会重新创建 Live。
+        通过类级锁串行化输出：并行工具调用时每个工具独占一行、片段不交错，
+        先后调用的工具行按顺序依次完整展示。进入工具调用时若正在思考
+        （Live 画布），先清空并退出 Live，避免思考内容与工具行纠缠；
+        之后若有新思考会重新创建 Live。
         """
         if self.silent:
             return
-        if self._live is not None:
-            self._exit_live()
-        self._thinking = False
-        segs = _tool_parts(name, args)
-        styled_segs = [apply_style(seg, "llm_tool") for seg in segs]
-        for i, seg in enumerate(styled_segs):
-            self._safe_print(seg, end="", flush=True)
-            if i < len(segs) - 1:
-                await asyncio.sleep(_TOOL_PART_DELAY)
-        self._safe_print()  # 换行
+        async with LLMStreamer._get_tool_lock():
+            if self._live is not None:
+                # 先清空思考画布再退出（rich Live 默认保留最后一帧，
+                # 否则调用工具前的思考会残留覆盖不到）
+                self._clear_live()
+                self._exit_live()
+            self._thinking = False
+            segs = _tool_parts(name, args)
+            styled_segs = [apply_style(seg, "llm_tool") for seg in segs]
+            for i, seg in enumerate(styled_segs):
+                self._safe_print(seg, end="", flush=True)
+                if i < len(segs) - 1:
+                    await asyncio.sleep(_TOOL_PART_DELAY)
+            self._safe_print()  # 换行
+
+    async def tool_result_line(self, result: str) -> None:
+        """工具结果行：与工具行共用同一把锁串行输出。
+
+        保证结果不会插入尚未换行的工具行中间；并行工具的结果按完成顺序
+        依次独占一行展示（截断规则与 llm_tool 配置一致）。
+        """
+        if self.silent:
+            return
+        async with LLMStreamer._get_tool_lock():
+            text = truncate(f"  📋  {result.strip()}", "llm_tool")
+            self._safe_print(apply_style(text, "llm_tool"))
 
     def end(self, interrupted: bool = False):
         """结束流式输出
@@ -382,6 +418,12 @@ class LLMStreamer:
             return
 
         if self._live:
+            # 只有纯思考（尚未输出内容）时先清空再退出：
+            # rich Live 默认保留最后一帧，否则思考残留屏幕
+            # （如思考→工具调用，stream_end() 退出后 tool() 会重建新 streamer）；
+            # 若已输出内容则保留最后一帧，不清空。
+            if not self._has_content:
+                self._clear_live()
             self._exit_live()
         elif self._thinking:
             # 清空思考行（防止残留空行）

@@ -84,9 +84,11 @@ class CLIIO(IOChannel):
         asyncio.create_task(self._streamer.tool(name, args))
 
     def tool_result(self, result: str):
-        from fp_cli import display as d
+        from fp_cli.display import _FP_SILENT, LLMStreamer
 
-        d.llm_tool(f"  📋  {result.strip()}")
+        if self._streamer is None:
+            self._streamer = LLMStreamer(silent=_FP_SILENT)
+        asyncio.create_task(self._streamer.tool_result_line(result))
 
     # ── 交互式输入 ───────────────────────────────────
 
