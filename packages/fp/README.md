@@ -72,6 +72,16 @@ fp
 >> 请用 Python 写一个斐波那契数列生成器
 ```
 
+### 离线文档
+
+```bash
+fp docs            # 打开随包安装的离线文档目录
+fp docs --list     # 列出文档目录树
+fp docs --path     # 仅打印文档路径
+```
+
+离线文档随包分发在 `site-packages/fp/docs/`，无网络时也可查阅。
+
 ### Web 界面
 
 ```bash

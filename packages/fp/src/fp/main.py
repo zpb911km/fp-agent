@@ -7,11 +7,18 @@ import sys
 
 
 def main():
-    from fp.version_checker import check_updates_background
-
-    check_updates_background()
-
     parser = argparse.ArgumentParser("fp")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=["docs"],
+        help="子命令：docs — 查看离线文档（等价于 fp --docs）",
+    )
+    parser.add_argument(
+        "--docs",
+        action="store_true",
+        help="查看离线文档（等价于 fp docs）",
+    )
     parser.add_argument(
         "--mode",
         "-m",
@@ -34,6 +41,16 @@ def main():
     )
 
     args, rest = parser.parse_known_args()
+
+    # ── 子命令：fp docs / fp --docs — 查看离线文档（不触发更新检查） ──
+    if args.command == "docs" or args.docs:
+        from fp.docs import open_docs
+
+        sys.exit(open_docs(*rest))
+
+    from fp.version_checker import check_updates_background
+
+    check_updates_background()
 
     if args.version:
         from fp_core import __version__

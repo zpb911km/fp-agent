@@ -70,6 +70,13 @@ jobs:
             echo "⚠️ 未检测到 git tag（release 工作流不应该出现这种情况）"
           fi
 
+      - name: 📚 注入文档到主包（随包分发，支持离线查看）
+        run: |
+          rm -rf packages/fp/src/fp/docs
+          cp -r docs packages/fp/src/fp/docs
+          test -f packages/fp/src/fp/docs/README.md && echo "✅ 文档已注入 packages/fp/src/fp/docs/"
+          echo "文档文件数: $(find packages/fp/src/fp/docs -type f | wc -l)"
+
       - name: 📦 构建所有子包
         run: |
           mkdir -p dist
@@ -80,6 +87,18 @@ jobs:
           done
           echo "=== 汇总产物 ==="
           ls -la dist/
+
+      - name: 🔍 校验 wheel 包含离线文档
+        run: |
+          for whl in dist/fp_agent-*.whl; do
+            if unzip -l "$whl" | grep -q "fp/docs/README.md"; then
+              echo "✅ $whl 包含离线文档"
+              unzip -l "$whl" | grep -c "fp/docs/" | xargs echo "   文档文件数:"
+            else
+              echo "❌ $whl 缺少离线文档！"
+              exit 1
+            fi
+          done
 
       - name: 📦 上传构建产物
         uses: actions/upload-artifact@v4

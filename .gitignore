@@ -94,3 +94,6 @@ packages/*/*.egg-info/
 
 # WebUI 静态资源 — favicon 不被 *.png 规则屏蔽
 !packages/fp-webui/src/fp_webui/static/favicon.png
+
+# 发布时注入的离线文档（构建产物，勿提交）
+packages/fp/src/fp/docs/

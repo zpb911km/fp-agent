@@ -37,6 +37,10 @@ fp = "fp.main:main"
 where = ["src"]
 include = ["fp*"]
 
+# 离线文档：发布时由 release.yml 将根 docs/ 注入到 src/fp/docs/ 后随包分发
+[tool.setuptools.package-data]
+"fp" = ["docs/*", "docs/**/*"]
+
 [project.urls]
 Homepage = "https://github.com/zpb911km/fp-agent"
 Repository = "https://github.com/zpb911km/fp-agent"
