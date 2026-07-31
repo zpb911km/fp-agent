@@ -7,12 +7,9 @@ import sys
 
 
 def main():
-    parser = argparse.ArgumentParser("fp")
-    parser.add_argument(
-        "command",
-        nargs="?",
-        choices=["docs"],
-        help="子命令：docs — 查看离线文档（等价于 fp --docs）",
+    parser = argparse.ArgumentParser(
+        "fp",
+        epilog="子命令：fp docs — 查看离线文档（等价于 fp --docs）",
     )
     parser.add_argument(
         "--docs",
@@ -43,7 +40,17 @@ def main():
     args, rest = parser.parse_known_args()
 
     # ── 子命令：fp docs / fp --docs — 查看离线文档（不触发更新检查） ──
-    if args.command == "docs" or args.docs:
+    # 注意：不能用 argparse 位置参数实现 fp docs——
+    # 位置参数（nargs="?"）会吞掉透传给子包的首个非选项参数
+    # （如 fp -r s_xxx 中的 s_xxx）并触发 choices 校验，破坏参数透传。
+    # 这里手动识别 rest 首项是否为 "docs"。
+    if rest[:1] == ["docs"]:
+        rest = rest[1:]
+        is_docs = True
+    else:
+        is_docs = False
+
+    if args.docs or is_docs:
         from fp.docs import open_docs
 
         sys.exit(open_docs(*rest))
