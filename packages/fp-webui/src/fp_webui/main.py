@@ -1269,7 +1269,12 @@ class _UvicornBannerFilter(logging.Filter):
     """过滤 uvicorn 自带的启动横幅（会显示监听地址 0.0.0.0，改用自定义横幅）"""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return "Uvicorn running on" not in record.getMessage()
+        msg = record.getMessage()
+        # 过滤三类噪音：启动横幅（0.0.0.0）、WS 握手日志（token 明文）、
+        # websockets 库连接开关（经 uvicorn.error 透传）
+        return not (
+            "Uvicorn running on" in msg or '"WebSocket ' in msg or msg in ("connection open", "connection closed")
+        )
 
 
 # 定制 uvicorn 日志：保留错误/访问日志，去掉启动横幅
@@ -1304,7 +1309,10 @@ _UVICORN_LOG_CONFIG: dict = {
     "loggers": {
         "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": False},
         "uvicorn.error": {"handlers": ["default"], "level": "INFO", "propagate": False},
-        "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
+        # uvicorn.access 拉高到 WARNING：其访问日志含 token 明文，交自研脱敏中间件
+        "uvicorn.access": {"handlers": ["access"], "level": "WARNING", "propagate": False},
+        # websockets 库的 "connection open/closed" 噪音
+        "websockets.server": {"handlers": ["default"], "level": "WARNING", "propagate": False},
     },
 }
 
@@ -1347,9 +1355,11 @@ def main():
         host=args.host,
         port=args.port,
         reload=args.reload,
-        log_level="info",
+        # 注意：不传 log_level！uvicorn 会用它把 uvicorn.error/access
+        # 强制覆盖回 INFO，导致 WS 握手日志（含 token 明文）重新出现。
+        # 日志级别完全由 _UVICORN_LOG_CONFIG 控制。
         access_log=False,  # 关闭 uvicorn 默认访问日志，改由脱敏中间件记录
-        log_config=_UVICORN_LOG_CONFIG,  # 过滤启动横幅（避免显示 0.0.0.0）
+        log_config=_UVICORN_LOG_CONFIG,  # 过滤启动横幅 + WS token 明文
     )
 
 
