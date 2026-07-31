@@ -232,6 +232,7 @@ class Completions:
             "model": model,
             "messages": messages,
             "stream": True,
+            "stream_options": {"include_usage": True},  # ← 关键：启用流式响应中的 usage 统计
         }
         if temperature is not None:
             body["temperature"] = temperature

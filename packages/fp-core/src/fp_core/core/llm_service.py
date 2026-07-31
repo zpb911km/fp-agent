@@ -200,11 +200,10 @@ class LLMService:
                     if tc.get("function", {}).get("arguments"):
                         acc["function"]["arguments"] += tc["function"]["arguments"]
 
-            # ── finish_reason + usage ──
-            if chunk.finish_reason is not None:
-                final_usage = chunk.usage  # 可能为 None
-                if final_usage:
-                    yield StreamEvent(type="usage", data=final_usage)
+            # ── usage（可能在任意 chunk 中出现，通常在最后一个或倒数第二个） ──
+            if chunk.usage:
+                final_usage = chunk.usage
+                yield StreamEvent(type="usage", data=final_usage)
 
         # ── 构造完整 assistant_msg ──
         content = "".join(content_chunks)
@@ -222,6 +221,10 @@ class LLMService:
                 for idx in sorted(tool_call_acc.keys())
                 for acc in [tool_call_acc[idx]]
             ]
+
+        # ── 发送 usage 事件（可能为 None） ──
+        if final_usage:
+            yield StreamEvent(type="usage", data=final_usage)
 
         yield StreamEvent(type="done", data=msg)
 
