@@ -53,17 +53,19 @@ class CLIIO(IOChannel):
     # ── 流式输出 ─────────────────────────────────────
 
     def stream_think(self, token: str):
+        from fp_cli import _FP_SILENT
         from fp_cli import display as d
 
         if self._streamer is None:
-            self._streamer = d.LLMStreamer(silent=False)
+            self._streamer = d.LLMStreamer(silent=_FP_SILENT)
         self._streamer.think(token)
 
     def stream_write(self, content: str):
+        from fp_cli import _FP_SILENT
         from fp_cli import display as d
 
         if self._streamer is None:
-            self._streamer = d.LLMStreamer(silent=False)
+            self._streamer = d.LLMStreamer(silent=_FP_SILENT)
         self._streamer.write(content)
 
     def stream_reset(self):
@@ -77,11 +79,12 @@ class CLIIO(IOChannel):
     # ── 工具调用展示 ─────────────────────────────────
 
     def tool_call(self, name: str, args: dict):
+        from fp_cli import _FP_SILENT
         from fp_cli import display as d
 
         if self._streamer is None:
-            self._streamer = d.LLMStreamer(silent=False)
-        self._streamer.tool(name, args)
+            self._streamer = d.LLMStreamer(silent=_FP_SILENT)
+        asyncio.create_task(self._streamer.tool(name, args))
 
     def tool_result(self, result: str):
         from fp_cli import display as d

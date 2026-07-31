@@ -109,6 +109,7 @@ def llm_tool(msg: str):
 
 _STR_MAX = 60  # 单个字符串值最大长度
 _STRUCT_MAX = 400  # 嵌套 dict/list 展开后整体最大长度
+_TOOL_PART_DELAY = 0.02  # 工具调用行逐段流式展开的间隔（秒）
 
 
 def _trunc_str(s: str, limit: int) -> str:
@@ -117,37 +118,58 @@ def _trunc_str(s: str, limit: int) -> str:
     return repr(s[:limit]) + f"… <+{len(s) - limit} chars>"
 
 
+def _trunc_struct(s: str, limit: int) -> str:
+    """截断已展开的结构内文（不套 repr 引号，保持与顶层一致的 key=value 风格）"""
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"… <+{len(s) - limit} chars>"
+
+
 def _fmt_tool_value(v, max_str: int = _STR_MAX, max_struct: int = _STRUCT_MAX) -> str:
-    """递归格式化工具参数值：长字符串按项目截断，保持 dict/list 结构"""
+    """递归格式化工具参数值：长字符串按项目截断，保持 dict/list 结构。
+
+    嵌套 dict/list 展开后整体超长时仅截断内文并标注，保留 {}/[] 结构括号与
+    key，使嵌套结构呈现与顶层参数一致的 ``key=value`` 风格（无多余引号）。
+    """
     if isinstance(v, str):
         return _trunc_str(v, max_str)
     if v is None or isinstance(v, (bool, int, float)):
         return repr(v)
     if isinstance(v, dict):
         inner = ", ".join(f"{k}={_fmt_tool_value(x, max_str, max_struct)}" for k, x in v.items())
-        return _trunc_str(f"{{{inner}}}", max_struct)
+        return f"{{{_trunc_struct(inner, max_struct)}}}"
     if isinstance(v, (list, tuple)):
         inner = ", ".join(_fmt_tool_value(x, max_str, max_struct) for x in v)
-        return _trunc_str(f"[{inner}]", max_struct)
+        return f"[{_trunc_struct(inner, max_struct)}]"
     return _trunc_str(str(v), max_str)
 
 
-def format_tool_call(name: str, args) -> str:
-    """将工具调用格式化为单行可读形式。
+def _tool_parts(name: str, args) -> list[str]:
+    """将工具调用拆分为可流式展示的片段：前缀 → 各参数 → 后缀。
 
     args 可为 dict（已解析）或字符串（未解析/流式不完整 JSON）。
-    解析失败时降级为原始展示，不因结构不完整而崩溃。
+    解析失败时降级为单段（原始 JSON 经结构级截断），不因结构不完整而崩溃。
     """
     if isinstance(args, str):
         try:
             args = json.loads(args)
         except (json.JSONDecodeError, TypeError):
-            return f"  🛠️  {name}({args})"
+            return [f"  🛠️  {name}({_trunc_struct(args, _STRUCT_MAX)})"]
     if not isinstance(args, dict):
-        return f"  🛠️  {name}({args})"
+        return [f"  🛠️  {name}({args})"]
 
-    parts = [f"{k}={_fmt_tool_value(v)}" for k, v in args.items()]
-    return f"  🛠️  {name}({', '.join(parts)})"
+    segs = [f"  🛠️  {name}("]
+    for i, (k, v) in enumerate(args.items()):
+        if i:
+            segs.append(", ")
+        segs.append(f"{k}={_fmt_tool_value(v)}")
+    segs.append(")")
+    return segs
+
+
+def format_tool_call(name: str, args) -> str:
+    """将工具调用格式化为单行可读形式（供一次性打印场景使用）。"""
+    return "".join(_tool_parts(name, args))
 
 
 def llm_output(text: str):
@@ -174,7 +196,7 @@ class LLMStreamer:
     """
 
     def __init__(self, silent: bool = False):
-        self.silent = silent
+        self.silent = silent or _FP_SILENT
         self._thinking = False
         self._has_content = False
         self._buffer = ""
@@ -316,8 +338,8 @@ class LLMStreamer:
             except Exception:
                 pass
 
-    def tool(self, name: str, args) -> None:
-        """工具调用阶段：覆盖思考信息，一次性打印格式化工具行。
+    async def tool(self, name: str, args) -> None:
+        """工具调用阶段：覆盖思考信息，逐段流式展开格式化工具行。
 
         进入工具调用时若正在思考（Live 画布），先清空并退出 Live，
         避免思考内容与工具行纠缠；之后若有新思考会重新创建 Live。
@@ -327,7 +349,13 @@ class LLMStreamer:
         if self._live is not None:
             self._exit_live()
         self._thinking = False
-        self._safe_print(format_tool_call(name, args))
+        segs = _tool_parts(name, args)
+        styled_segs = [apply_style(seg, "llm_tool") for seg in segs]
+        for i, seg in enumerate(styled_segs):
+            self._safe_print(seg, end="", flush=True)
+            if i < len(segs) - 1:
+                await asyncio.sleep(_TOOL_PART_DELAY)
+        self._safe_print()  # 换行
 
     def end(self, interrupted: bool = False):
         """结束流式输出
@@ -345,7 +373,10 @@ class LLMStreamer:
         if self._live:
             self._exit_live()
         elif self._thinking:
-            self._safe_print(apply_style("", "llm_thought"))
+            # 清空思考行（防止残留空行）
+
+            clear = "\r" + " " * (max(len(self.thinking), 10)) + "\r"
+            self._safe_print(clear)
 
         self._buffer = ""
         self._has_content = False
