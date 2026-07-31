@@ -89,9 +89,20 @@ class InputHandler:
     """交互式输入（prompt_toolkit 封装，支持历史/斜杠补全）"""
 
     def __init__(self, prompt: str = "(Agent) > "):
-        self.prompt = prompt
+        self._plain_prompt = prompt
+        self.prompt = self._build_prompt(prompt)
         self._session = None
         self._init_session()
+
+    @staticmethod
+    def _build_prompt(fallback: str):
+        """构建亮青 ❯ 现代 prompt；prompt_toolkit 不可用时回退纯文本"""
+        try:
+            from prompt_toolkit.formatted_text import HTML
+
+            return HTML("<ansicyan><b>❯ </b></ansicyan>")
+        except ImportError:
+            return fallback
 
     def _build_key_bindings(self):
         """自定义键绑定：Tab 确认补全（而非循环选择下一个）"""
@@ -147,7 +158,8 @@ class InputHandler:
     async def prompt_async(self) -> str:
         if self._session:
             return await self._session.prompt_async(self.prompt)
-        return input(self.prompt)
+        prompt_text = self.prompt if isinstance(self.prompt, str) else self._plain_prompt
+        return input(prompt_text)
 
 
 def _raw_sigint_handler(signum, frame):
@@ -207,7 +219,6 @@ async def main():
 
     if not os.environ.get("FP_SUBAGENT_QUIET"):
         display.print_logo(model=agent.model, resume=args.resume)
-        display.startup(agent.model, resume=args.resume)
 
     if args.message:
         if os.environ.get("FP_SUBAGENT_SILENT"):

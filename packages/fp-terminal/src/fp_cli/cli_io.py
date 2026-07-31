@@ -77,12 +77,11 @@ class CLIIO(IOChannel):
     # ── 工具调用展示 ─────────────────────────────────
 
     def tool_call(self, name: str, args: dict):
-        import json
-
         from fp_cli import display as d
 
-        safe_args = {k: str(v) for k, v in args.items()}
-        d.llm_tool(f"  🛠️  {name}({json.dumps(safe_args, ensure_ascii=False)})")
+        if self._streamer is None:
+            self._streamer = d.LLMStreamer(silent=False)
+        self._streamer.tool(name, args)
 
     def tool_result(self, result: str):
         from fp_cli import display as d

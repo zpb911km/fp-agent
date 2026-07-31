@@ -8,6 +8,7 @@ display.py — Five Pebbles 显示模块（fp-terminal 版）
 
 import asyncio
 import contextlib
+import json
 import os
 import sys
 import time
@@ -100,6 +101,53 @@ def llm_tool(msg: str):
         return
     text = truncate(msg, "llm_tool")
     print(apply_style(text, "llm_tool"))
+
+
+# ── 工具调用格式化：单行折叠 + 项目级截断 ─────────────────────────────
+# 参数值超长时只截断超长项目（保持 JSON 结构/key 完整），
+# 而非从中间砍断整个字符串。
+
+_STR_MAX = 60  # 单个字符串值最大长度
+_STRUCT_MAX = 400  # 嵌套 dict/list 展开后整体最大长度
+
+
+def _trunc_str(s: str, limit: int) -> str:
+    if len(s) <= limit:
+        return repr(s)
+    return repr(s[:limit]) + f"… <+{len(s) - limit} chars>"
+
+
+def _fmt_tool_value(v, max_str: int = _STR_MAX, max_struct: int = _STRUCT_MAX) -> str:
+    """递归格式化工具参数值：长字符串按项目截断，保持 dict/list 结构"""
+    if isinstance(v, str):
+        return _trunc_str(v, max_str)
+    if v is None or isinstance(v, (bool, int, float)):
+        return repr(v)
+    if isinstance(v, dict):
+        inner = ", ".join(f"{k}={_fmt_tool_value(x, max_str, max_struct)}" for k, x in v.items())
+        return _trunc_str(f"{{{inner}}}", max_struct)
+    if isinstance(v, (list, tuple)):
+        inner = ", ".join(_fmt_tool_value(x, max_str, max_struct) for x in v)
+        return _trunc_str(f"[{inner}]", max_struct)
+    return _trunc_str(str(v), max_str)
+
+
+def format_tool_call(name: str, args) -> str:
+    """将工具调用格式化为单行可读形式。
+
+    args 可为 dict（已解析）或字符串（未解析/流式不完整 JSON）。
+    解析失败时降级为原始展示，不因结构不完整而崩溃。
+    """
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (json.JSONDecodeError, TypeError):
+            return f"  🛠️  {name}({args})"
+    if not isinstance(args, dict):
+        return f"  🛠️  {name}({args})"
+
+    parts = [f"{k}={_fmt_tool_value(v)}" for k, v in args.items()]
+    return f"  🛠️  {name}({', '.join(parts)})"
 
 
 def llm_output(text: str):
@@ -268,6 +316,19 @@ class LLMStreamer:
             except Exception:
                 pass
 
+    def tool(self, name: str, args) -> None:
+        """工具调用阶段：覆盖思考信息，一次性打印格式化工具行。
+
+        进入工具调用时若正在思考（Live 画布），先清空并退出 Live，
+        避免思考内容与工具行纠缠；之后若有新思考会重新创建 Live。
+        """
+        if self.silent:
+            return
+        if self._live is not None:
+            self._exit_live()
+        self._thinking = False
+        self._safe_print(format_tool_call(name, args))
+
     def end(self, interrupted: bool = False):
         """结束流式输出
 
@@ -398,7 +459,6 @@ def shutdown_panel(
             print(tb(text))
     print(f"╚{sep}╝")
     print()
-    print("👋  再见！")
 
 
 def _logo_gradient_color(ratio: float) -> str:
