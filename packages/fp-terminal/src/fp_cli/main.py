@@ -238,7 +238,12 @@ async def main():
         print()
 
         try:
+            line_open = False  # 是否有未配对的"上线"（空输入时不重画）
             while True:
+                if not line_open:
+                    display.divider()  # 输入块上方青色隔离线
+                    line_open = True
+
                 try:
                     user_input = await inp.prompt_async()
                 except (EOFError, KeyboardInterrupt):
@@ -247,6 +252,10 @@ async def main():
 
                 if not user_input.strip():
                     continue
+
+                print()  # 换行，与输入行分隔
+                display.divider()  # 输入块下方青色隔离线
+                line_open = False
 
                 try:
                     response = await agent.process(user_input)

@@ -57,6 +57,17 @@ def hint(msg: str):
     print(apply_style(msg, "hint"))
 
 
+def divider(char: str = "─"):
+    """青色全宽隔离线（撑满终端宽度），用于分隔输入与回复区块"""
+    if _silent():
+        return
+    try:
+        width = os.get_terminal_size().columns
+    except OSError:
+        width = 80
+    print(apply_style(char * width, "hint"))
+
+
 # ═══════════════════════════════════════════════════════════
 # C. 异常警示 — 非预期路径
 #   注册名称: "error", "warning"
