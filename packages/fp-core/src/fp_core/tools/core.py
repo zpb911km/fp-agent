@@ -15,9 +15,11 @@
 """
 
 import asyncio
+import contextlib
 import hashlib
 import locale
 import os
+import signal
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
@@ -100,83 +102,119 @@ class ToolSpec:
 # ── 工具执行函数 ─────────────────────────────────────────────────────────
 
 
+async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    """击杀整个进程组（shell 及其所有子进程），防止孤儿泄漏。
+
+    必须配合 start_new_session=True 使用：子进程独立会话/进程组，
+    killpg(proc.pid) 只杀该组，不波及宿主进程。
+    """
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError) as e:
+        # 进程组已不存在（恰好退出）→ 忽略；权限不足 → 退化为只杀主进程
+        if isinstance(e, PermissionError):
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+
+
 async def _execute_bash(command: str) -> str:
-    """异步执行 shell 命令"""
+    """异步执行 shell 命令。
+
+    方案：stdout/stderr 重定向到临时文件而非 PIPE——
+    - PIPE 的 wait()/communicate() 会隐式等待管道 EOF：`sleep 50 &` 后台进程
+      继承管道写端，导致 bash 工具无谓阻塞（等后台进程结束）。
+    - 文件重定向后 _pipes 为空，wait() 只等进程退出，后台命令即时返回；
+      同时天然规避管道 64KB 死锁，大输出由文件承载。
+    - 配合 start_new_session=True（独立进程组）+ killpg 击杀，SIGINT/超时
+      时 shell 与子进程一并清理，不挂死、不泄漏。
+    """
     if not command:
         raise ValueError("bash 工具需要 command 参数")
 
     cmd_prefix = ""
     start_time = time.monotonic()
-    try:
-        if is_windows():
-            bash_path = find_bash()
-            if bash_path:
-                proc = await asyncio.create_subprocess_exec(
-                    bash_path,
-                    "-c",
-                    command,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-            else:
-                cmd = f"chcp 65001 >nul & {command}"
-                proc = await asyncio.create_subprocess_shell(
-                    cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                cmd_prefix = "[cmd.exe 回退] "
-        else:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
+    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-        except TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return "错误：命令执行超时（300秒）"
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            proc.kill()
-            await proc.wait()
-            raise
+            if is_windows():
+                bash_path = find_bash()
+                if bash_path:
+                    proc = await asyncio.create_subprocess_exec(
+                        bash_path,
+                        "-c",
+                        command,
+                        stdout=out_f,
+                        stderr=err_f,
+                        start_new_session=True,
+                    )
+                else:
+                    cmd = f"chcp 65001 >nul & {command}"
+                    proc = await asyncio.create_subprocess_shell(
+                        cmd,
+                        stdout=out_f,
+                        stderr=err_f,
+                        start_new_session=True,
+                    )
+                    cmd_prefix = "[cmd.exe 回退] "
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=out_f,
+                    stderr=err_f,
+                    start_new_session=True,
+                )
 
-        duration = time.monotonic() - start_time
-        output = stdout.decode("utf-8", errors="replace")
-        stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
-        if stderr_text.strip():
-            output = f"{output}\n[stderr]\n{stderr_text}" if output else f"[stderr]\n{stderr_text}"
+            try:
+                returncode = await asyncio.wait_for(proc.wait(), timeout=300)
+            except TimeoutError:
+                await _kill_process_group(proc)
+                with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                    await asyncio.wait_for(proc.wait(), timeout=2)
+                return "错误：命令执行超时（300秒）"
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                await _kill_process_group(proc)
+                with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                    await asyncio.wait_for(proc.wait(), timeout=2)
+                raise
 
-        if cmd_prefix and output.strip():
-            if "\ufffd" in output:
-                enc = locale.getpreferredencoding()
-                output = stdout.decode(enc, errors="replace")
-                if stderr:
-                    stderr_text2 = stderr.decode(enc, errors="replace")
-                    if stderr_text2.strip():
-                        output += f"\n[stderr]\n{stderr_text2}"
-            return cmd_prefix + output.lstrip()
+            duration = time.monotonic() - start_time
+            out_f.seek(0)
+            err_f.seek(0)
+            output = out_f.read().decode("utf-8", errors="replace")
+            stderr_text = err_f.read().decode("utf-8", errors="replace") if err_f else ""
+            if stderr_text.strip():
+                output = f"{output}\n[stderr]\n{stderr_text}" if output else f"[stderr]\n{stderr_text}"
 
-        if proc.returncode != 0:
-            return f"❌ 命令执行失败（exit={proc.returncode}，{duration:.1f}s）\n命令: {command}\n{output}"
-        if len(output) < 3000:
-            return output
+            if cmd_prefix and output.strip():
+                if "\ufffd" in output:
+                    enc = locale.getpreferredencoding()
+                    out_f.seek(0)
+                    output = out_f.read().decode(enc, errors="replace")
+                    if err_f:
+                        err_f.seek(0)
+                        stderr_text2 = err_f.read().decode(enc, errors="replace")
+                        if stderr_text2.strip():
+                            output += f"\n[stderr]\n{stderr_text2}"
+                return cmd_prefix + output.lstrip()
 
-        _fd, _path = tempfile.mkstemp(prefix="fp_bash_", suffix=".log")
-        with os.fdopen(_fd, "w", encoding="utf-8") as _f:
-            _f.write(output)
-        preview = output[:200]
-        return (
-            f"✅ 命令执行成功（exit=0，{duration:.1f}s）\n"
-            f"输出较长（{len(output)} 字符），已保存至 {_path}\n\n"
-            f"前 200 字符预览：\n────────────────────────\n{preview}\n"
-            f"────────────────────────\n\n需要完整内容 → read_file({_path!r})"
-        )
-    except Exception as e:
-        return f"错误：{e}"
+            if returncode != 0:
+                return f"❌ 命令执行失败（exit={returncode}，{duration:.1f}s）\n命令: {command}\n{output}"
+            if len(output) < 3000:
+                return output
+
+            _fd, _path = tempfile.mkstemp(prefix="fp_bash_", suffix=".log")
+            with os.fdopen(_fd, "w", encoding="utf-8") as _f:
+                _f.write(output)
+            preview = output[:200]
+            return (
+                f"✅ 命令执行成功（exit=0，{duration:.1f}s）\n"
+                f"输出较长（{len(output)} 字符），已保存至 {_path}\n\n"
+                f"前 200 字符预览：\n────────────────────────\n{preview}\n"
+                f"────────────────────────\n\n需要完整内容 → read_file({_path!r})"
+            )
+        except Exception as e:
+            return f"错误：{e}"
 
 
 async def _execute_read_file(file_path: str, offset: int | None = None, limit: int | None = None) -> str:
