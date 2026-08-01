@@ -179,6 +179,20 @@ def _raw_sigint_handler(signum, frame):
         _current_agent.cancel()
 
 
+def _raw_sigterm_handler(signum, frame):
+    """SIGTERM 处理器：软中断（仅设置 agent 中断标记，不 cancel asyncio 任务）。
+
+    与 SIGINT 不同：subagent 超时时父进程先 terminate() 发 SIGTERM，
+    若像 SIGINT 一样 cancel 所有任务，main task 会被标记取消，
+    导致 try/finally 里的 `await agent.shutdown()` 立即抛 CancelledError，
+    无法执行 save_and_summarize 写摘要。
+    软中断让 process 在 _check_interrupted() 检查点优雅退出，
+    finally → shutdown 可完整执行。
+    """
+    if _current_agent is not None:
+        _current_agent.cancel()
+
+
 async def main():
     """主入口"""
     import argparse
@@ -201,7 +215,22 @@ async def main():
 
     from fp_core.core.agent import Agent
 
-    agent = Agent(resume=args.resume, io=CLIIO(), on_shutdown=display.shutdown_panel)
+    # subagent 子进程：使用父进程预生成的会话 ID（父进程据此兜底补写 meta）
+    _sub_sid = os.environ.get("FP_SUBAGENT_SID") or None
+    agent = Agent(
+        resume=args.resume,
+        session_id=_sub_sid,
+        io=CLIIO(),
+        on_shutdown=display.shutdown_panel,
+    )
+
+    # subagent 标记：子进程自身先写 source + parent_sid（父进程会在结束时兜底）
+    if os.environ.get("FP_IS_SUBAGENT") == "1":
+        _parent_sid = os.environ.get("FP_SUBAGENT_PARENT_SID") or ""
+        _sub_meta: dict = {"source": "subagent"}
+        if _parent_sid:
+            _sub_meta["parent_sid"] = _parent_sid
+        agent.session.update_meta(**_sub_meta)
 
     # ── 挂接到模块变量，供信号处理器跨线程访问 ──────────
     global _current_agent
@@ -216,78 +245,85 @@ async def main():
     #   通过 asyncio.all_tasks().cancel() 注入 CancelledError。
     # agent._stream_chat 的 try/except 负责优雅捕获中断。
     signal.signal(signal.SIGINT, _raw_sigint_handler)
+    # SIGTERM 同样走优雅取消：父进程 subagent 超时先 terminate()，
+    # 让子进程有机会走 finally → shutdown → save_and_summarize 写摘要。
+    # 使用专用软中断 handler（不 cancel task，否则 finally 里的 await 会中断）。
+    signal.signal(signal.SIGTERM, _raw_sigterm_handler)
 
     if not os.environ.get("FP_SUBAGENT_QUIET"):
         display.print_logo(model=agent.model, resume=args.resume)
 
-    if args.message:
-        if os.environ.get("FP_SUBAGENT_SILENT"):
-            response = await agent.process(args.message)
-            print(response.content, end="")
+    try:
+        if args.message:
+            if os.environ.get("FP_SUBAGENT_SILENT"):
+                response = await agent.process(args.message)
+                print(response.content, end="")
+            else:
+                print(f"> {args.message}")
+                response = await agent.process(args.message)
+                print(f"\nAgent: {response.content}")
         else:
-            print(f"> {args.message}")
-            response = await agent.process(args.message)
-            print(f"\nAgent: {response.content}")
-    else:
-        inp = InputHandler()
+            inp = InputHandler()
 
-        if args.resume:
-            display.hint(f"💡 续会话: {agent.session.session_id}，输入 /help 查看命令")
-        else:
-            display.hint("💡 输入 /help 查看命令，/resume 可回到历史会话")
-        print()
-
-        try:
-            line_open = False  # 是否有未配对的"上线"（空输入时不重画）
-            while True:
-                if not line_open:
-                    display.divider()  # 输入块上方青色隔离线
-                    line_open = True
-
-                try:
-                    user_input = await inp.prompt_async()
-                except (EOFError, KeyboardInterrupt):
-                    print()
-                    break
-
-                if not user_input.strip():
-                    continue
-
-                print()  # 换行，与输入行分隔
-                display.divider()  # 输入块下方青色隔离线
-                line_open = False
-
-                try:
-                    response = await agent.process(user_input)
-
-                    # ── 热重载检测：/reload 命令已将新 Agent 存入 state._reload_result ──
-                    reload_data = getattr(agent.state, "_reload_result", None)
-                    if reload_data is not None:
-                        new_agent, info = reload_data
-                        agent.state._reload_result = None  # 防止重复消费
-                        agent = new_agent
-                        _current_agent = agent
-                        display.info(f"🔄 Agent 已切换 (model={info['model']}, session={info['session_id']})")
-
-                    # 命令输出：由 response.content 单一通路传递，不再由命令内部 display
-                    # 此处用 rich Markdown 渲染（terminal 唯一消费点）
-                    if user_input.strip().startswith("/") and response.content:
-                        try:
-                            from rich.console import Console
-                            from rich.markdown import Markdown
-
-                            Console().print(Markdown(response.content))
-                        except ImportError:
-                            print(response.content)
-                except (SystemExit, asyncio.CancelledError):
-                    break
-                except Exception as e:
-                    display.error(f"错误: {e}")
-                    print()
-        except KeyboardInterrupt:
+            if args.resume:
+                display.hint(f"💡 续会话: {agent.session.session_id}，输入 /help 查看命令")
+            else:
+                display.hint("💡 输入 /help 查看命令，/resume 可回到历史会话")
             print()
 
-    await agent.shutdown()
+            try:
+                line_open = False  # 是否有未配对的"上线"（空输入时不重画）
+                while True:
+                    if not line_open:
+                        display.divider()  # 输入块上方青色隔离线
+                        line_open = True
+
+                    try:
+                        user_input = await inp.prompt_async()
+                    except (EOFError, KeyboardInterrupt):
+                        print()
+                        break
+
+                    if not user_input.strip():
+                        continue
+
+                    print()  # 换行，与输入行分隔
+                    display.divider()  # 输入块下方青色隔离线
+                    line_open = False
+
+                    try:
+                        response = await agent.process(user_input)
+
+                        # ── 热重载检测：/reload 命令已将新 Agent 存入 state._reload_result ──
+                        reload_data = getattr(agent.state, "_reload_result", None)
+                        if reload_data is not None:
+                            new_agent, info = reload_data
+                            agent.state._reload_result = None  # 防止重复消费
+                            agent = new_agent
+                            _current_agent = agent
+                            display.info(f"🔄 Agent 已切换 (model={info['model']}, session={info['session_id']})")
+
+                        # 命令输出：由 response.content 单一通路传递，不再由命令内部 display
+                        # 此处用 rich Markdown 渲染（terminal 唯一消费点）
+                        if user_input.strip().startswith("/") and response.content:
+                            try:
+                                from rich.console import Console
+                                from rich.markdown import Markdown
+
+                                Console().print(Markdown(response.content))
+                            except ImportError:
+                                print(response.content)
+                    except (SystemExit, asyncio.CancelledError):
+                        break
+                    except Exception as e:
+                        display.error(f"错误: {e}")
+                        print()
+            except KeyboardInterrupt:
+                print()
+    finally:
+        # 保证 shutdown 一定执行：subagent 子进程无论何种退出路径
+        # 都能走到 save_and_summarize（生成摘要 + 保存上下文）
+        await agent.shutdown()
 
 
 if __name__ == "__main__":

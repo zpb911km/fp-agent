@@ -102,6 +102,7 @@ class Agent:
         self,
         enable_log: bool = False,
         resume: str | None = None,
+        session_id: str | None = None,
         io: IOChannel | None = None,
         tool_executor: ToolExecutor | None = None,
         prompt_builder: PromptBuilder | None = None,
@@ -175,7 +176,8 @@ class Agent:
         self._conv = ConversationState(initial_prompt)
 
         # SessionManager：持久化（不再持有 _context）
-        self.session = session.SessionManager(resume=resume)
+        # session_id 非空时使用预置 sid（subagent 场景：父进程预生成，便于兜底补写）
+        self.session = session.SessionManager(resume=resume, new_sid=session_id)
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
 
         if not os.environ.get("FP_SUBAGENT_QUIET"):

@@ -126,6 +126,44 @@ def _find_latest_session() -> str | None:
     return latest_sid
 
 
+def update_session_meta(sid: str, **kwargs) -> bool:
+    """模块级函数：更新指定会话的 meta 字段（不依赖 SessionManager 实例）。
+
+    与 SessionManager.update_meta 不同，本函数在会话文件不存在时
+    会自动创建文件（用于 subagent 兜底：子进程被 SIGKILL 后补写 meta）。
+    """
+    path = _session_path(sid)
+    meta = _read_meta_from_file(path)
+    if meta is None:
+        meta = _default_meta(sid)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(meta, ensure_ascii=False) + "\n")
+        except Exception:
+            return False
+    meta.update(kwargs)
+    meta["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return _write_meta_to_file(path, meta)
+
+
+# ── 模块级"当前会话"注册 ─────────────────────────
+# 供同进程内的其他模块（如 subagent 插件）读取当前活动会话 ID。
+# 多 Agent 实例时以最后创建的为准（通常即当前工作 Agent）。
+
+_CURRENT_SESSION_ID: str | None = None
+
+
+def _register_current_session(sid: str) -> None:
+    """内部：注册当前活动会话 ID（SessionManager 初始化时调用）。"""
+    global _CURRENT_SESSION_ID
+    _CURRENT_SESSION_ID = sid
+
+
+def get_current_session_id() -> str | None:
+    """获取当前进程内最近创建的会话 ID。"""
+    return _CURRENT_SESSION_ID
+
+
 # ── SessionManager ────────────────────────────────
 
 
@@ -135,14 +173,23 @@ class SessionManager:
     _session_id: str
     _meta: dict
 
-    def __init__(self, resume: str | bool | None = None):
+    def __init__(self, resume: str | bool | None = None, new_sid: str | None = None):
         """
         resume=None/False → 创建新会话（默认）
         resume=True       → 续最近会话
         resume="auto"     → 续最近会话
         resume="s_xxx"    → 续指定会话
+        new_sid           → 使用预置 sid 创建新会话（优先级最高，
+                            供 subagent 等需要"父进程预知子会话 id"的场景）
         """
         os.makedirs(SESSIONS_DIR, exist_ok=True)
+
+        # 预置 sid：直接使用，不经过 resume 逻辑
+        if new_sid:
+            self._session_id = new_sid
+            self._meta = self._load_meta_from_session()
+            _register_current_session(self._session_id)
+            return
 
         # 类型归一化：bool → str/None，统一进入后续分支
         if resume is None or resume is False:
@@ -155,11 +202,13 @@ class SessionManager:
             if latest and self._session_exists(latest):
                 self._session_id = latest
                 self._meta = self._load_meta_from_session()
+                _register_current_session(self._session_id)
                 return
 
         # 默认：分配新会话 ID（惰性文件创建，首次写入时自动生成文件）
         self._session_id = self._allocate_session()
         self._meta = self._load_meta_from_session()
+        _register_current_session(self._session_id)
 
     # ── 内部工具 ──────────────────────────────────
 
@@ -190,14 +239,20 @@ class SessionManager:
 
     # ── 会话生命周期 ──────────────────────────────
 
-    def _allocate_session(self) -> str:
+    def _allocate_session(self, sid: str | None = None) -> str:
         """分配新会话 ID（惰性文件创建）。
 
         只在内存中分配 ID 和 meta，不写入磁盘。
         首次通过 save_message() / save_context() / clear_session_file()
         写入数据时，文件会被自动创建。
         避免每次 Agent 实例化都产生空会话文件。
+
+        Args:
+            sid: 可指定 sid（如 subagent 预生成），None 时自动生成
         """
+        if sid:
+            self._meta = _default_meta(sid)
+            return sid
         sid = _generate_sid()
         self._meta = _default_meta(sid)
         return sid
@@ -234,9 +289,13 @@ class SessionManager:
         self._meta = self._load_meta_from_session()
         return True
 
-    def create_session(self) -> str:
-        """创建新会话并切换过去（惰性文件创建）。"""
-        self._session_id = self._allocate_session()
+    def create_session(self, sid: str | None = None) -> str:
+        """创建新会话并切换过去（惰性文件创建）。
+
+        Args:
+            sid: 可指定 sid（如 subagent 预生成），None 时自动生成
+        """
+        self._session_id = self._allocate_session(sid)
         self._meta = self._load_meta_from_session()
         return self._session_id
 
@@ -362,6 +421,7 @@ class SessionManager:
 
         所有会话切换/退出路径都应调用此方法，确保摘要生成逻辑一致。
         摘要策略：取最后一条用户消息的前 50 字符，换行转空格。
+        subagent 会话（meta.source == "subagent"）自动加 "[subagent] " 前缀。
 
         Args:
             messages: to_serializable() 输出的非 system 消息列表
@@ -386,16 +446,29 @@ class SessionManager:
 
         # 3. 写回 meta
         target_sid = session_id or self._session_id
+        meta = _read_meta_from_file(_session_path(target_sid)) or {}
+        if meta.get("source") == "subagent" and summary and not summary.startswith("[subagent] "):
+            summary = f"[subagent] {summary}"
         self.update_meta(target_sid, summary=summary)
         return summary
 
     def update_meta(self, sid: str | None = None, **kwargs):
-        """更新指定会话的内嵌 meta 字段。"""
+        """更新指定会话的内嵌 meta 字段。
+
+        与模块级 update_session_meta 对齐：会话文件不存在时自动创建
+        （惰性文件场景，如 subagent 预生成 sid 后立即标记 source），
+        并同步内存 _meta，避免后续 save_context 覆盖。
+        """
         sid = sid or self._session_id
         path = _session_path(sid)
         meta = _read_meta_from_file(path)
         if meta is None:
-            return
+            meta = _default_meta(sid)
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(meta, ensure_ascii=False) + "\n")
+            except Exception:
+                return
         meta.update(kwargs)
         meta["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         _write_meta_to_file(path, meta)

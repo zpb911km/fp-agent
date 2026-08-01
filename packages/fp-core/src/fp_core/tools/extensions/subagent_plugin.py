@@ -20,6 +20,64 @@ import sys
 import time
 from typing import Any
 
+# ── 模块级辅助：subagent 会话收尾 ──────────────────
+# 子进程可能被 SIGKILL/崩溃（无法执行 shutdown），父进程需兜底补写
+# meta（source=subagent + summary），保证会话列表可识别、有摘要。
+
+
+def _derive_summary_from_file(sid: str) -> str:
+    """从会话文件读取最后一条 user 消息，生成摘要（与 save_and_summarize 策略一致）。"""
+    from fp_core.core.session import _session_path
+
+    path = _session_path(sid)
+    if not os.path.exists(path):
+        return ""
+    last_user = ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except Exception:
+                    continue
+                if msg.get("__meta__") or msg.get("role") != "user":
+                    continue
+                content = msg.get("content", "")
+                if content:
+                    last_user = content
+    except Exception:
+        pass
+    return last_user.strip().replace("\n", " ")[:50]
+
+
+def _finalize_subagent_session(sid: str, parent_sid: str, fallback_summary: str = "") -> None:
+    """子 agent 会话收尾：确保 meta 有 source=subagent + summary。
+
+    - 子进程正常退出：main.py 已写入 source，此处补 parent_sid
+    - 子进程超时/崩溃：save_and_summarize 未执行，此处兜底补摘要
+      （摘要取自子会话文件最后一条 user 消息；文件为空时用任务文本兜底）
+    """
+    from fp_core.core.session import update_session_meta
+
+    try:
+        summary = _derive_summary_from_file(sid)
+        if not summary and fallback_summary:
+            summary = fallback_summary.strip().replace("\n", " ")[:50]
+        if summary and not summary.startswith("[subagent] "):
+            summary = f"[subagent] {summary}"
+        update_session_meta(
+            sid,
+            source="subagent",
+            parent_sid=parent_sid,
+            summary=summary,
+        )
+    except Exception:
+        pass
+
+
 # ── 插件定义（OpenAI function calling schema） ──────────────────────
 
 PLUGIN_DEFINITION = {
@@ -169,9 +227,19 @@ async def execute(params: dict[str, Any]) -> str:
     # ═══════════════════════════════════════════════════════════
     start_time = time.time()
 
+    # 预生成子会话 ID：父进程预知 sid，子进程用它创建会话，
+    # 之后无论子进程如何退出（含 SIGKILL），父进程都能兜底补写 meta。
+    from fp_core.core.session import _generate_sid, get_current_session_id
+
+    sub_sid = _generate_sid()
+    parent_sid = get_current_session_id() or ""
+
     env = os.environ.copy()
     env["FP_IS_SUBAGENT"] = "1"
     env["FP_SUBAGENT_QUIET"] = "1"
+    env["FP_SUBAGENT_SID"] = sub_sid
+    if parent_sid:
+        env["FP_SUBAGENT_PARENT_SID"] = parent_sid
     if not verbose:
         env["FP_SUBAGENT_SILENT"] = "1"
 
@@ -191,9 +259,15 @@ async def execute(params: dict[str, Any]) -> str:
                 timeout=timeout,
             )
         except TimeoutError:
-            proc.kill()
-            await proc.wait()
+            # 优雅终止：先 SIGTERM，给子进程机会走 shutdown 写摘要；3 秒后仍不退再 SIGKILL
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3)
+            except (TimeoutError, Exception):
+                proc.kill()
+                await proc.wait()
             duration = time.time() - start_time
+            _finalize_subagent_session(sub_sid, parent_sid, fallback_summary=task)
             return json.dumps(
                 {
                     "status": "error",
@@ -207,10 +281,13 @@ async def execute(params: dict[str, Any]) -> str:
         except (KeyboardInterrupt, asyncio.CancelledError):
             proc.kill()
             await proc.wait()
+            _finalize_subagent_session(sub_sid, parent_sid, fallback_summary=task)
             raise
 
     except Exception as e:
         duration = time.time() - start_time
+        # 启动失败：子会话可能根本未创建，仍尝试标记（无害）
+        _finalize_subagent_session(sub_sid, parent_sid, fallback_summary=task)
         return json.dumps(
             {
                 "status": "error",
@@ -279,6 +356,12 @@ async def execute(params: dict[str, Any]) -> str:
             })
         except Exception as e:
             output += f"\n\n⚠️ 记忆保存失败 ({store_result}): {e}"
+
+    # ═══════════════════════════════════════════════════════════
+    # 收尾：确保 subagent 会话 meta 完整（source + parent_sid）
+    # 子进程正常退出时 main.py 已写 source/summary，此处只补 parent_sid
+    # ═══════════════════════════════════════════════════════════
+    _finalize_subagent_session(sub_sid, parent_sid, fallback_summary=task)
 
     # ═══════════════════════════════════════════════════════════
     # 返回结果：成功时返回纯文本，主 agent 直接看到子 agent 的回复

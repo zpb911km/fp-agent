@@ -103,6 +103,35 @@ async def execute(state, arg: str) -> tuple[bool, str]:
         lines = [
             "## 📂 会话列表",
             "使用 `/resume <sid>` 切换，`/resume latest` 切换到最新",
+            "`[subagent]` = 子代理任务会话，`/resume --main` 只看主会话",
+        ]
+        for i, (sid, meta) in enumerate(sorted_items, 1):
+            summary = meta.get("summary", "") or "(无摘要)"
+            msg_count = meta.get("message_count", 0)
+            marker = " ⬅" if sid == current_sid else ""
+            tag = "🔹 " if meta.get("source") == "subagent" else ""
+            lines.append(f"- **[{i}]** {tag}{_escape_md(summary)} ({msg_count}条, `{sid}`){marker}")
+
+        return (True, "\n".join(lines))
+
+    # ── /resume --main：只看主会话（过滤 subagent） ────────────
+    if arg in ("--main", "main"):
+        sessions = state.session.list_sessions()
+        if not sessions:
+            return (True, "暂无历史会话")
+
+        current_sid = state.session_id
+        sorted_items = sorted(
+            ((sid, meta) for sid, meta in sessions.items() if meta.get("source") != "subagent"),
+            key=lambda x: x[1].get("updated", ""),
+            reverse=True,
+        )
+        if not sorted_items:
+            return (True, "没有主会话（当前全部为 subagent 子任务会话）")
+
+        lines = [
+            "## 📂 主会话列表（已过滤 subagent）",
+            "使用 `/resume <sid>` 切换，`/resume latest` 切换到最新",
         ]
         for i, (sid, meta) in enumerate(sorted_items, 1):
             summary = meta.get("summary", "") or "(无摘要)"
