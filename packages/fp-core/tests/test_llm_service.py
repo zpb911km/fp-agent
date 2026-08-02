@@ -7,10 +7,24 @@
 - summarize
 """
 
+from typing import Any
+
 import pytest
 
 from fp_core.core.llm_client import CompletionResponse, StreamChunk
 from fp_core.core.llm_service import LLMConfig, LLMResult, LLMService
+
+
+# 动态构造的假 LLM client。返回 Any：这些对象只是 mock 容器，
+# 类型检查器无法推断其属性，标注 Any 避免对每个测试里的
+# client.chat.completions.create = ... 误报。
+def _make_fake_client() -> Any:
+    client: Any = type("Client", (), {})()
+    chat: Any = type("Chat", (), {})()
+    completions: Any = type("Completions", (), {})()
+    client.chat = chat
+    chat.completions = completions
+    return client
 
 
 class TestLLMConfig:
@@ -46,10 +60,9 @@ class TestChat:
     async def test_chat_basic(self):
         class FakeCompletions:
             def __init__(self):
-                self.create = None
+                self.create: Any = None
 
-        client = type("Client", (), {})()
-        client.chat = type("Chat", (), {})()
+        client = _make_fake_client()
         client.chat.completions = FakeCompletions()
 
         async def fake_create(**kwargs):
@@ -70,9 +83,7 @@ class TestChat:
 
     @pytest.mark.asyncio
     async def test_chat_with_tools_and_usage(self):
-        client = type("Client", (), {})()
-        client.chat = type("Chat", (), {})()
-        client.chat.completions = type("Completions", (), {})()
+        client = _make_fake_client()
 
         async def fake_create(**kwargs):
             assert "tools" in kwargs
@@ -85,13 +96,12 @@ class TestChat:
             [{"role": "user", "content": "hi"}],
             tools=[{"type": "function"}],
         )
+        assert result.usage is not None
         assert result.usage["total_tokens"] == 3
 
     @pytest.mark.asyncio
     async def test_chat_translates_tool_calls(self):
-        client = type("Client", (), {})()
-        client.chat = type("Chat", (), {})()
-        client.chat.completions = type("Completions", (), {})()
+        client = _make_fake_client()
 
         async def fake_create(**kwargs):
             return self._fake_response(
@@ -117,9 +127,7 @@ class TestChat:
 
     @pytest.mark.asyncio
     async def test_chat_overrides_config(self):
-        client = type("Client", (), {})()
-        client.chat = type("Chat", (), {})()
-        client.chat.completions = type("Completions", (), {})()
+        client = _make_fake_client()
 
         captured = {}
 
@@ -144,9 +152,7 @@ class TestChat:
 
     @pytest.mark.asyncio
     async def test_summarize(self):
-        client = type("Client", (), {})()
-        client.chat = type("Chat", (), {})()
-        client.chat.completions = type("Completions", (), {})()
+        client = _make_fake_client()
 
         captured = {}
 
@@ -180,8 +186,7 @@ class TestChatStream:
                 yield StreamChunk({"choices": [{"delta": {}}], "usage": {"total_tokens": 5}})
                 yield StreamChunk({"choices": [{"delta": {}}]})
 
-        client = type("Client", (), {})()
-        client.chat = type("Chat", (), {})()
+        client = _make_fake_client()
         client.chat.completions = FakeCompletions()
 
         service = self._make_service(client)
@@ -198,6 +203,7 @@ class TestChatStream:
         # usage 事件：恰好一次，不重复
         usage_events = [e for e in events if e.type == "usage"]
         assert len(usage_events) == 1
+        assert usage_events[0].data is not None
         assert usage_events[0].data["total_tokens"] == 5
 
     @pytest.mark.asyncio
@@ -207,8 +213,7 @@ class TestChatStream:
                 yield StreamChunk({"choices": [{"delta": {"reasoning_content": "思考中"}}]})
                 yield StreamChunk({"choices": [{"delta": {"content": "回答"}}]})
 
-        client = type("Client", (), {})()
-        client.chat = type("Chat", (), {})()
+        client = _make_fake_client()
         client.chat.completions = FakeCompletions()
 
         service = self._make_service(client)
@@ -251,8 +256,7 @@ class TestChatStream:
                     ]
                 })
 
-        client = type("Client", (), {})()
-        client.chat = type("Chat", (), {})()
+        client = _make_fake_client()
         client.chat.completions = FakeCompletions()
 
         service = self._make_service(client)
@@ -260,6 +264,7 @@ class TestChatStream:
 
         done = events[-1]
         assert done.type == "done"
+        assert done.data is not None
         tc = done.data["tool_calls"][0]
         assert tc["id"] == "c1"
         assert tc["function"]["name"] == "bash"
@@ -268,7 +273,7 @@ class TestChatStream:
     @pytest.mark.asyncio
     async def test_stream_fallback_when_chat_overridden(self):
         """chat 被覆写时降级为非流式，yield 单个 done"""
-        client = type("Client", (), {})()
+        client = _make_fake_client()
         service = self._make_service(client)
 
         async def fake_chat(messages, tools=None, **overrides):
@@ -279,4 +284,5 @@ class TestChatStream:
 
         assert len(events) == 1
         assert events[0].type == "done"
+        assert events[0].data is not None
         assert events[0].data["content"] == "降级结果"

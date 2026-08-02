@@ -91,8 +91,10 @@ class TestParamValidation:
                 patch("fp_core.tools.extensions.subagent_plugin._finalize_subagent_session"),
             ):
                 await subagent.execute({"task": "t", "cwd": str(tmp_path), "timeout": 1})
+                assert mock_wait.await_args is not None
                 first_timeout = mock_wait.await_args.kwargs.get("timeout")
                 await subagent.execute({"task": "t", "cwd": str(tmp_path), "timeout": 5000})
+                assert mock_wait.await_args is not None
                 second_timeout = mock_wait.await_args.kwargs.get("timeout")
 
         assert first_timeout == 10
@@ -285,6 +287,7 @@ class TestExecutePaths:
 
         assert "结果内容" in result
         mock_save.assert_awaited_once()
+        assert mock_save.await_args is not None
         args = mock_save.await_args.args[0]
         assert args["name"] == "draft_x"
         assert args["content"] == "结果内容"

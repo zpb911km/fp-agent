@@ -8,6 +8,7 @@
 """
 
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -102,6 +103,7 @@ class TestModelClasses:
         assert r.id == "cmpl-1"
         assert r.model == "gpt"
         assert len(r.choices) == 1
+        assert r.usage is not None
         assert r.usage["total_tokens"] == 2
 
     def test_stream_chunk_content(self):
@@ -158,7 +160,8 @@ class TestClient:
 
 
 class TestCompletionsCreate:
-    def _make_client(self):
+    def _make_client(self) -> Any:
+        """_session 被替换为 mock；返回 Any 避免类型检查器按 httpx.AsyncClient 误报"""
         client = Client(api_key="k", base_url="https://api.example.com/v1")
         client._session = MagicMock()
         return client
@@ -181,6 +184,7 @@ class TestCompletionsCreate:
         assert result.choices[0].message.content == "hi"
         # 请求 URL 与 body
         client._session.post.assert_awaited_once()
+        assert client._session.post.await_args is not None
         args, kwargs = client._session.post.await_args
         assert args[0] == "https://api.example.com/v1/chat/completions"
         assert kwargs["json"]["model"] == "gpt"
@@ -203,6 +207,7 @@ class TestCompletionsCreate:
             tools=[{"type": "function"}],
             extra_body={"enable_thinking": False},
         )
+        assert client._session.post.await_args is not None
         _, kwargs = client._session.post.await_args
         body = kwargs["json"]
         assert body["temperature"] == 0.5
@@ -283,7 +288,8 @@ class _FakeStreamResp:
 
 
 class TestCompletionsCreateStream:
-    def _make_client(self):
+    def _make_client(self) -> Any:
+        """_session 被替换为 mock；返回 Any 避免类型检查器按 httpx.AsyncClient 误报"""
         client = Client(api_key="k", base_url="https://api.example.com/v1")
         client._session = MagicMock()
         return client
