@@ -100,6 +100,9 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
     ("packages/fp-webui/src/*.py", ["docs/guide/WebUI手册.md"], []),
     # ACP 协议
     ("packages/fp-acp/src/*.py", ["docs/acp/README.md"], []),
+    # 测试（含 conftest）— 变更需确认测试文档
+    # 结构变更（新增测试文件）也提醒测试文档：覆盖范围表通常要同步更新
+    ("packages/fp-core/tests/*.py", ["docs/dev/测试.md"], ["docs/dev/测试.md"]),
     # 开发/脚本工具
     ("scripts/*.py", ["docs/CONTRIBUTING.md"], []),
     # 工程配置

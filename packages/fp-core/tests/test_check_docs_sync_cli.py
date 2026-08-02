@@ -229,3 +229,23 @@ def test_pre_commit_hook_wired():
     cfg = (REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
     assert "docs-sync" in cfg
     assert "scripts/check_docs_sync.py" in cfg
+    # 钩子的 files 正则必须覆盖测试目录（否则测试变更不会触发门禁）
+    assert "packages/fp-core/tests/" in cfg
+
+
+def test_test_file_change_reminds_test_doc(tmp_path):
+    """测试文件变更 → 提醒 docs/dev/测试.md（测试也纳入文档同步门禁）"""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    p = root / "packages/fp-core/tests/test_xyz.py"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("def test_xyz(): pass\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(root), "add", "packages/fp-core/tests/test_xyz.py"],
+        capture_output=True,
+        check=True,
+    )
+
+    r = _run_script(root)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "测试.md" in r.stdout

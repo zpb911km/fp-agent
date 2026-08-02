@@ -122,7 +122,7 @@ pip install fp-webui
 fp --mode webui
 ```
 
-浏览器访问 `http://localhost:7860`。
+浏览器访问 `http://localhost:8765`。
 
 ### ACP 远程调用（IDE 集成）
 
@@ -201,6 +201,14 @@ pip install -e packages/fp
 ruff check .
 ruff format .
 ```
+
+### 测试
+
+```bash
+python -m pytest packages/fp-core/tests -q
+```
+
+> **会话隔离保证**：`tests/conftest.py` 通过 autouse fixture 将 `SESSIONS_DIR` 全局指向临时目录——**任何测试都不会写入真实会话目录**（`~/.local/share/fp/sessions/`）。新增测试默认继承该隔离，无需额外配置。
 
 ---
 

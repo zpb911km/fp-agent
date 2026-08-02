@@ -194,6 +194,18 @@ Closes #42
 
 ## 测试
 
+### 全量测试（pytest）
+
+```bash
+python -m pytest packages/fp-core/tests -q
+```
+
+当前 **14 个测试文件 / 274 个用例**（273 通过 + 1 跳过，跳过项为需
+`FP_BENCHMARK=1` 才运行的性能基准）。测试体系详见 [dev/测试.md](dev/测试.md)。
+
+> **会话隔离**：`tests/conftest.py` 通过 autouse fixture 把 `SESSIONS_DIR`
+> 指向临时目录，测试不会写入真实会话目录。
+
 ### 语法检查
 
 ```bash
@@ -240,6 +252,8 @@ echo "你是谁" | fp                   # 测试系统提示词
   结构变更（新增/删除/重命名文件）额外要求 README / guide 参考 / self 扩展
   等清单类文档确认。所以「改一行注释」不会误报 README，只有「新增/删除
   命令、工具、钩子」这类结构性变化才提醒清单文档。
+- **测试文件同样纳入门禁**：`packages/fp-core/tests/*.py` 变更会要求
+  [dev/测试.md](dev/测试.md) 确认（尤其新增测试文件时，文件清单表需同步）。
 - **显式放行**：确认本次改动确实不影响文档时，用
   `FP_DOCS_SYNC_ALLOW=1 git commit`（仅输出提醒，不阻断）。
 - **手动主动触发**：`python scripts/check_docs_sync.py --since HEAD~N`

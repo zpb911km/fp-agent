@@ -32,4 +32,4 @@ repos:
         language: system
         require_serial: true
         pass_filenames: false
-        files: ^(packages/fp-core/src/|packages/fp/src/|packages/fp-terminal/|packages/fp-webui/|packages/fp-acp/|docs/|README\.md|scripts/)
+        files: ^(packages/fp-core/src/|packages/fp-core/tests/|packages/fp/src/|packages/fp-terminal/|packages/fp-webui/|packages/fp-acp/|docs/|README\.md|scripts/)
