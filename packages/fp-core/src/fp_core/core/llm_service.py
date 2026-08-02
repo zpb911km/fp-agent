@@ -169,7 +169,6 @@ class LLMService:
         content_chunks: list[str] = []
         reasoning_chunks: list[str] = []
         tool_call_acc: dict[int, dict] = {}  # index → {id, type, function: {name, arguments}}
-        final_usage: dict | None = None
 
         async for chunk in self._client.chat.completions.create_stream(**kwargs):
             # ── 文本 token ──
@@ -202,8 +201,7 @@ class LLMService:
 
             # ── usage（可能在任意 chunk 中出现，通常在最后一个或倒数第二个） ──
             if chunk.usage:
-                final_usage = chunk.usage
-                yield StreamEvent(type="usage", data=final_usage)
+                yield StreamEvent(type="usage", data=chunk.usage)
 
         # ── 构造完整 assistant_msg ──
         content = "".join(content_chunks)
@@ -221,10 +219,6 @@ class LLMService:
                 for idx in sorted(tool_call_acc.keys())
                 for acc in [tool_call_acc[idx]]
             ]
-
-        # ── 发送 usage 事件（可能为 None） ──
-        if final_usage:
-            yield StreamEvent(type="usage", data=final_usage)
 
         yield StreamEvent(type="done", data=msg)
 
