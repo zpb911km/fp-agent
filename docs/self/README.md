@@ -14,7 +14,7 @@
 
 | 能 | 不能 |
 |----|------|
-| ✅ 调用工具：`bash` / `read_file` / `write_file` / `edit_file` / `python` / `memory_save` / `memory_read` / `subagent` 等 | ❌ 主动触发斜杠命令（`/reload`、`/option list`、`/tools`……这些是**用户在终端输入**的界面） |
+| ✅ 调用工具：`bash` / `read_file` / `write_file` / `edit_file` / `python` / `memory_save` / `memory_read` / `subagent` 等 | ❌ 主动触发斜杠命令（`/reload`、`/option list`、`/sc`……这些是**用户在终端输入**的界面） |
 | ✅ 用 `bash` 跑任意命令、读写用户数据目录 | ❌ 修改已安装的 `fp_core` 包源码（如非必要） |
 | ✅ 帮用户**编写**新扩展文件放到用户目录 | ❌ 让新扩展立即生效（需要用户执行 `/reload` 或重启） |
 | ✅ 读离线文档（`fp docs --list`） | ❌ 访问源码仓库（分发后不在你手里） |
@@ -78,7 +78,7 @@ python -c "from fp_core.platform_utils import get_data_dir; print(get_data_dir()
 新写的扩展，你怎么确认它是对的？
 
 - ❌ ~~执行 `/reload`~~ —— 你做不到
-- ❌ ~~执行 `/option list`、`/tools`~~ —— 你做不到
+- ❌ ~~执行 `/option list`、`/sc`~~ —— 你做不到
 - ✅ **用 `bash` + `python` 模拟加载器逻辑**，验证文件能被正确导入、接口完整
 
 通用验证模板（工具/命令/插件都适用，把路径换成你的文件）：
