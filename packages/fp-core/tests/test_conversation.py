@@ -252,7 +252,7 @@ class TestEdgeCases:
 
         cs.add_user_message("用户")
         assert cs[1]["role"] == "user"
-        assert cs[1]["content"] == "另一个 system"
+        assert cs[1]["content"] == "用户"
 
     def test_empty_messages_for_llm(self):
         cs = ConversationState()

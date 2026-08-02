@@ -77,17 +77,17 @@ class TestSessionManager:
         assert os.path.exists(path) is True
 
     def test_save_and_load_context(self, sessions_dir):
-        """写入消息后能正确加载回来"""
+        """写入消息后能正确加载回来（load_context 不含 system prompt）"""
         sm = SessionManager(resume=False)
         sm.save_message("user", "第一条消息")
         sm.save_message("assistant", "回复")
 
         context = sm.load_context("你是一个助手")
-        assert len(context) == 3  # system + user + assistant
-        assert context[1]["role"] == "user"
-        assert context[1]["content"] == "第一条消息"
-        assert context[2]["role"] == "assistant"
-        assert context[2]["content"] == "回复"
+        assert len(context) == 2  # user + assistant（无 system）
+        assert context[0]["role"] == "user"
+        assert context[0]["content"] == "第一条消息"
+        assert context[1]["role"] == "assistant"
+        assert context[1]["content"] == "回复"
 
     def test_save_context_rewrites_file(self, sessions_dir):
         """save_context() 重写整个文件而非追加"""
@@ -101,8 +101,8 @@ class TestSessionManager:
         ])
 
         context = sm.load_context("system prompt")
-        assert len(context) == 3  # system + user + assistant
-        assert context[1]["content"] == "新消息"
+        assert len(context) == 2  # user + assistant（无 system）
+        assert context[0]["content"] == "新消息"
 
     def test_list_sessions(self, sessions_dir):
         """list_sessions() 列出所有会话"""
@@ -173,7 +173,7 @@ class TestSessionManager:
 
         sm.clear_session_file()
         context = sm.load_context("")
-        assert len(context) == 1  # 只有 system
+        assert len(context) == 0  # 消息已清空（无 system prompt）
 
     def test_resume_latest(self, sessions_dir):
         """resume_latest() 续最近会话"""
@@ -215,12 +215,10 @@ class TestSessionManager:
         assert sessions == {}
 
     def test_load_context_from_empty_file(self, sessions_dir):
-        """空文件（无会话）的 load_context 只返回 system prompt"""
+        """空文件（无会话）的 load_context 返回空列表"""
         sm = SessionManager(resume=False)
         context = sm.load_context("测试 system prompt")
-        assert len(context) == 1
-        assert context[0]["role"] == "system"
-        assert context[0]["content"] == "测试 system prompt"
+        assert len(context) == 0
 
     def test_update_meta(self, sessions_dir):
         """update_meta() 修改后可从文件重新读取"""

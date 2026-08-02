@@ -97,3 +97,9 @@ packages/*/*.egg-info/
 
 # 发布时注入的离线文档（构建产物，勿提交）
 packages/fp/src/fp/docs
+
+# 覆盖率
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
