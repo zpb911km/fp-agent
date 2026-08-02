@@ -21,3 +21,15 @@ repos:
         language: system
         types: [python]
         require_serial: true
+
+      # 文档同步门禁：改了代码而相关文档没同步 → 提醒并阻断提交。
+      # 逻辑在 scripts/check_docs_sync.py（基于 git 变更流判定，非文本比对）。
+      # 手动主动触发: python scripts/check_docs_sync.py --since HEAD~N
+      # 显式放行:      FP_DOCS_SYNC_ALLOW=1 git commit
+      - id: docs-sync
+        name: docs sync check
+        entry: python scripts/check_docs_sync.py
+        language: system
+        require_serial: true
+        pass_filenames: false
+        files: ^(packages/fp-core/src/|packages/fp/src/|packages/fp-terminal/|packages/fp-webui/|packages/fp-acp/|docs/|README\.md|scripts/)
