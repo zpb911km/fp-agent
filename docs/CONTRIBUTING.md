@@ -240,9 +240,14 @@ echo "你是谁" | fp                   # 测试系统提示词
   `FP_DOCS_SYNC_ALLOW=1 git commit`（仅输出提醒，不阻断）。
 - **手动主动触发**：`python scripts/check_docs_sync.py --since HEAD~N`
   检查最近 N 次提交的代码变更与文档是否同步。
+- **规则审计**：`python scripts/check_docs_sync.py --audit`
+  列出所有未被任何文档规则覆盖的代码文件（新增代码目录/文件时先跑一次，
+  确认它们被登记到 `DOC_RULES`，否则门禁对它们不设防）。
 
 代码变更文件与受影响文档的对应规则集中在 `scripts/check_docs_sync.py`
 的 `DOC_RULES`（命令/工具/钩子/核心/界面层/脚本各自关联到对应文档）。
+变更一个未被规则覆盖的文件时，脚本会**输出提醒但不阻断**（这是规则盲区，
+不是滞后；盲区由 `--audit` 统一暴露）。
 
 **不要**养成用 `git commit --no-verify` 绕过门禁的习惯——漂移一旦入库，
 无人会再注意到它（这正是本机制要消灭的问题）。

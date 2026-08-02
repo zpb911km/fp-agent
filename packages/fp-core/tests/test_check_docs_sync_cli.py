@@ -127,8 +127,8 @@ def test_allow_env_overrides_block(tmp_path):
     assert "命令参考" in r.stdout  # 提醒仍然输出
 
 
-def test_unmapped_change_passes(tmp_path):
-    """未登记的代码路径变更（如 README 之外的新顶层文件）→ 不受影响，通过"""
+def test_unmapped_change_warns_but_passes(tmp_path):
+    """未被规则覆盖的代码路径变更 → 输出提醒（不静默），但不阻断（exit 0）"""
     root = tmp_path / "repo"
     _init_repo(root)
     p = root / "top_level_script.py"
@@ -137,6 +137,37 @@ def test_unmapped_change_passes(tmp_path):
 
     r = _run_script(root)
     assert r.returncode == 0, r.stdout + r.stderr
+    assert "未被任何文档规则覆盖" in r.stdout  # 提醒不静默
+
+
+def test_audit_lists_unmapped(tmp_path):
+    """--audit：列出未被规则覆盖的文件（跳过 build/ 等产物），exit 1"""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    # 不被覆盖的文件
+    (root / "top_level_script.py").write_text("print(1)\n", encoding="utf-8")
+    # 构建产物（应被 audit 忽略）
+    (root / "packages" / "fp-terminal" / "build" / "lib" / "fp_cli").mkdir(parents=True)
+    (root / "packages" / "fp-terminal" / "build" / "lib" / "fp_cli" / "x.py").write_text("print(1)\n", encoding="utf-8")
+    # 测试文件（应被 audit 忽略）
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_x.py").write_text("def test(): pass\n", encoding="utf-8")
+
+    r = _run_script(root, "--audit")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "top_level_script.py" in r.stdout
+    assert "build" not in r.stdout  # 产物不报
+    assert "test_x.py" not in r.stdout  # 测试不报
+
+
+def test_audit_passes_when_all_mapped(tmp_path):
+    """--audit：所有代码文件都被规则覆盖 → exit 0"""
+    root = tmp_path / "repo"
+    _init_repo(root)
+
+    r = _run_script(root, "--audit")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "无盲区" in r.stdout
 
 
 def test_since_mode(tmp_path):

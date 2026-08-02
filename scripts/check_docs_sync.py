@@ -14,14 +14,16 @@
 用法:
     python scripts/check_docs_sync.py                  # pre-commit：检查暂存区
     python scripts/check_docs_sync.py --since HEAD~3   # 主动触发：最近 3 次提交
+    python scripts/check_docs_sync.py --audit          # 审计：列出未被任何规则覆盖的代码文件
     python scripts/check_docs_sync.py --repo PATH      # 指定仓库根（测试用）
 
 环境变量:
     FP_DOCS_SYNC_ALLOW=1  显式放行：跳过阻断（exit 0），仅输出提醒
 
 退出码:
-    0  无代码变更 / 关联文档已同步 / 显式放行
+    0  无代码变更 / 关联文档已同步 / 显式放行 / 审计无盲区
     1  存在「代码变了但关联文档没变」的提醒（提交场景将阻断）
+       （--audit 模式下 = 存在未被规则覆盖的代码文件）
 """
 
 import argparse
@@ -58,28 +60,49 @@ DOC_RULES: list[tuple[str, list[str]]] = [
         ["docs/dev/架构设计.md", "docs/dev/引擎.md", "docs/dev/项目概览.md"],
     ),
     # 其余 fp_core（会话/配置/记忆/上下文节省…）
+    # 注意: fnmatch 的 **/*.py 不匹配「当前目录下的直接文件」，需补 *.py 层
+    (
+        "packages/fp-core/src/fp_core/*.py",
+        ["docs/dev/*.md"],
+    ),
     (
         "packages/fp-core/src/fp_core/**/*.py",
         ["docs/dev/*.md"],
     ),
     # FP 入口（CLI 分发）
     (
+        "packages/fp/src/fp/*.py",
+        ["docs/guide/CLI入门.md", "docs/guide/快速开始.md", "docs/dev/项目概览.md"],
+    ),
+    (
         "packages/fp/src/fp/**/*.py",
         ["docs/guide/CLI入门.md", "docs/guide/快速开始.md", "docs/dev/项目概览.md"],
     ),
-    # 终端界面
+    # 终端界面（只覆盖 src/，build/ 是构建产物）
     (
-        "packages/fp-terminal/**/*.py",
+        "packages/fp-terminal/src/*.py",
+        ["docs/guide/CLI入门.md", "docs/dev/显示层.md"],
+    ),
+    (
+        "packages/fp-terminal/src/**/*.py",
         ["docs/guide/CLI入门.md", "docs/dev/显示层.md"],
     ),
     # WebUI
     (
-        "packages/fp-webui/**/*.py",
+        "packages/fp-webui/src/*.py",
+        ["docs/guide/WebUI手册.md"],
+    ),
+    (
+        "packages/fp-webui/src/**/*.py",
         ["docs/guide/WebUI手册.md"],
     ),
     # ACP 协议
     (
-        "packages/fp-acp/**/*.py",
+        "packages/fp-acp/src/*.py",
+        ["docs/acp/README.md"],
+    ),
+    (
+        "packages/fp-acp/src/**/*.py",
         ["docs/acp/README.md"],
     ),
     # 开发/脚本工具
@@ -117,6 +140,50 @@ def _is_doc(path: str) -> bool:
     return any(fnmatch.fnmatch(path, p) for p in _DOC_PATTERNS)
 
 
+def _is_mapped_code_file(path: str) -> bool:
+    """该代码文件是否被任何 DOC_RULES 覆盖（覆盖 = 变更时会关联文档）"""
+    return any(fnmatch.fnmatch(path, glob) for glob, _ in DOC_RULES)
+
+
+# 审计时排除的目录（构建产物 / 缓存 / 依赖 / 测试）
+_AUDIT_IGNORED_DIRS = {
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".coverage",
+    "dist",
+    "build",
+    ".venv",
+    "venv",
+    "node_modules",
+    ".eggs",
+    "*.egg-info",
+}
+
+
+def _audit_unmapped_code_files(repo: Path) -> list[str]:
+    """全仓库扫描：未被任何 DOC_RULES 覆盖的代码文件（相对路径）。"""
+    unmapped: list[str] = []
+    for p in repo.rglob("*.py"):
+        parts = p.parts
+        # 跳过缓存/构建/依赖目录
+        if any(part in _AUDIT_IGNORED_DIRS or part.endswith(".egg-info") for part in parts):
+            continue
+        rel = p.relative_to(repo).as_posix()
+        # 跳过测试文件
+        if (
+            any(part == "tests" for part in parts)
+            or fnmatch.fnmatch(rel, "test_*.py")
+            or fnmatch.fnmatch(rel, "*_test.py")
+        ):
+            continue
+        if not _is_mapped_code_file(rel):
+            unmapped.append(rel)
+    return sorted(unmapped)
+
+
 def _affected_docs(path: str) -> list[str]:
     """某个代码变更文件 → 受影响文档列表。"""
     hits: list[str] = []
@@ -137,6 +204,16 @@ def check(repo: Path, since: str | None) -> int:
             print("✅ 无代码变更，文档同步检查通过")
         return 0
 
+    # 未被任何规则覆盖的变更文件 → 提醒（不阻断，这是规则盲区不是滞后）
+    unmapped = [f for f in code_changes if not _is_mapped_code_file(f)]
+    if unmapped:
+        print("⚠️  本次变更的代码文件未被任何文档规则覆盖（门禁对它们不设防）：")
+        for f in unmapped:
+            print(f"    - {f}")
+        print("   建议：在 scripts/check_docs_sync.py 的 DOC_RULES 中为这些路径登记关联文档，")
+        print("         或确认它们确实无需文档跟进。")
+        print()
+
     # 所有代码变更 → 受影响文档全集
     needed: list[str] = []
     for f in code_changes:
@@ -145,7 +222,10 @@ def check(repo: Path, since: str | None) -> int:
                 needed.append(d)
 
     if not needed:
-        print("✅ 代码变更不影响任何登记文档（或未登记的代码路径），通过")
+        if unmapped:
+            print("（本次变更仅涉及未被规则覆盖的文件，无关联文档可检查）")
+        else:
+            print("✅ 代码变更不影响任何登记文档，通过")
         return 0
 
     # needed 里的条目可能是 glob 模式（如 docs/dev/*.md），用它匹配实际变更的文档文件
@@ -177,7 +257,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=str(REPO_ROOT), help="仓库根目录")
     parser.add_argument("--since", default=None, help="主动触发：检查 REF..工作区 的变更（如 HEAD~3）")
+    parser.add_argument("--audit", action="store_true", help="审计模式：列出未被任何规则覆盖的代码文件")
     args = parser.parse_args()
+
+    if args.audit:
+        unmapped = _audit_unmapped_code_files(Path(args.repo))
+        if unmapped:
+            print("⚠️  以下代码文件未被任何文档规则覆盖：")
+            for f in unmapped:
+                print(f"    - {f}")
+            print()
+            print("建议：在 scripts/check_docs_sync.py 的 DOC_RULES 中登记它们，")
+            print("      否则这些文件的变更不会触发任何文档提醒。")
+            return 1
+        print("✅ 所有代码文件均被文档规则覆盖，无盲区")
+        return 0
+
     return check(Path(args.repo), since=args.since)
 
 
