@@ -1,7 +1,8 @@
 """scripts/check_docs_sync.py CLI — 「代码变更→文档跟进」机制的保护测试
 
 防止「防漂移机制」自身腐烂：脚本必须能正确判定
-「代码变了、关联文档没变」→ 提醒/阻断 的六种核心场景。
+「代码变了、关联文档没变」→ 提醒/阻断 的核心场景，
+以及「内容修改不误报清单文档、结构变更才提醒清单文档」的精细化行为。
 
 每个场景都在独立的临时 git 仓库中验证（真实 diff，不 mock）。
 """
@@ -16,27 +17,27 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "check_docs_sync.py"
 
-# 脚本内置规则中，命令文件 → 命令参考文档
+# 脚本内置规则中，命令文件内容修改 → 命令系统文档；结构变更额外 → 命令参考/README
 COMMAND_FILE = "packages/fp-core/src/fp_core/commands/echo.py"
-COMMAND_DOC = "docs/guide/命令参考.md"
 
 
 def _load_script_module():
     """从源码加载脚本模块（无副作用），用于读取 DOC_RULES"""
     spec = importlib.util.spec_from_file_location("check_docs_sync", SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法加载脚本模块: {SCRIPT}")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
 def _affected_docs_for(path: str) -> list[str]:
-    """复现脚本的规则：给定代码文件 → 受影响文档列表"""
+    """复现脚本规则：给定代码文件，内容修改（M）时受影响的文档（docs_any，first-match）"""
     mod = _load_script_module()
-    hits = []
-    for glob, docs in mod.DOC_RULES:
+    for glob, docs_any, _docs_structural in mod.DOC_RULES:
         if fnmatch.fnmatch(path, glob):
-            hits.extend(docs)
-    return hits
+            return list(docs_any)
+    return []
 
 
 def _init_repo(root: Path) -> None:
@@ -44,7 +45,7 @@ def _init_repo(root: Path) -> None:
     (root / COMMAND_FILE).parent.mkdir(parents=True)
     (root / COMMAND_FILE).write_text("'''echo command'''\n", encoding="utf-8")
     (root / "docs" / "guide").mkdir(parents=True)
-    (root / COMMAND_DOC).write_text("# 命令参考\n", encoding="utf-8")
+    (root / "docs" / "guide" / "命令参考.md").write_text("# 命令参考\n", encoding="utf-8")
     (root / "README.md").write_text("# FP\n", encoding="utf-8")
 
     env = {
@@ -99,7 +100,7 @@ def test_code_change_doc_not_updated_blocks(tmp_path):
 
     r = _run_script(root)
     assert r.returncode == 1, r.stdout + r.stderr
-    assert "命令参考" in r.stdout
+    assert "命令系统" in r.stdout
 
 
 def test_code_change_doc_updated_passes(tmp_path):
@@ -124,7 +125,38 @@ def test_allow_env_overrides_block(tmp_path):
 
     r = _run_script(root, allow=True)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "命令参考" in r.stdout  # 提醒仍然输出
+    assert "命令系统" in r.stdout  # 提醒仍然输出
+
+
+def test_modify_does_not_remind_manifest(tmp_path):
+    """内容修改（M）→ 只提醒 dev 行为文档，不误报 README/命令参考（精细化核心）"""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _modify(root / COMMAND_FILE, "'''echo command v2'''\n", root)
+
+    r = _run_script(root)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "命令系统" in r.stdout
+    assert "命令参考" not in r.stdout
+    assert "README.md" not in r.stdout
+
+
+def test_structural_change_reminds_manifest(tmp_path):
+    """新增命令文件（A，结构变更）→ 额外提醒清单类文档（命令参考/README）"""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    p = root / "packages/fp-core/src/fp_core/commands/uniq.py"
+    p.write_text("'''uniq command'''\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(root), "add", "packages/fp-core/src/fp_core/commands/uniq.py"],
+        capture_output=True,
+        check=True,
+    )
+
+    r = _run_script(root)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "命令参考" in r.stdout
+    assert "README.md" in r.stdout
 
 
 def test_unmapped_change_warns_but_passes(tmp_path):
@@ -189,7 +221,7 @@ def test_since_mode(tmp_path):
 
     r = _run_script(root, "--since", "HEAD~1")
     assert r.returncode == 1, r.stdout + r.stderr
-    assert "命令参考" in r.stdout
+    assert "命令系统" in r.stdout
 
 
 def test_pre_commit_hook_wired():
