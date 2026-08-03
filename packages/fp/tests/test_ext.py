@@ -203,6 +203,87 @@ class TestReviewGate:
         assert any(r["action"] == "update" for r in recs)
         assert any(r["action"] == "review" and "自动续审" in r["note"] for r in recs)
 
+    def test_fetch_multi_asset_repo(self, tmp_path):
+        """两级抽象：fetch 单位=仓库，一次拉取识别全部资产，逐个登记 pending_review。"""
+        repo = tmp_path / "bundle"
+        repo.mkdir()
+        (repo / "foo_plugin.py").write_text(
+            '__fp__ = {"name": "foo", "version": "0.1.0", "type": "tools"}\n\ndef f():\n    return 1\n',
+            encoding="utf-8",
+        )
+        (repo / "bar.py").write_text(
+            '__fp__ = {"name": "bar", "version": "0.1.0", "type": "commands"}\n\ndef b():\n    pass\n',
+            encoding="utf-8",
+        )
+        assert _run("fetch", str(repo)) == 0
+        reg = load_registry()["assets"]
+        assert "tools/foo" in reg
+        assert "commands/bar" in reg
+        assert reg["tools/foo"]["status"] == "pending_review"
+        assert reg["commands/bar"]["status"] == "pending_review"
+        # 同仓库共享同一 staging
+        assert reg["tools/foo"]["staging"] == reg["commands/bar"]["staging"]
+
+    def test_install_extracts_asset_body(self, tmp_path):
+        """install 单位=资产：只复制资产本体到 fetched/<type>/<name>/，不带仓库无关文件。"""
+        repo = tmp_path / "bundle"
+        repo.mkdir()
+        (repo / "foo_plugin.py").write_text(
+            '__fp__ = {"name": "foo", "version": "0.1.0", "type": "tools"}\n\ndef add(a, b):\n    return a + b\n',
+            encoding="utf-8",
+        )
+        (repo / "notes.md").write_text("not an asset\n", encoding="utf-8")
+        assert _run("fetch", str(repo)) == 0
+        assert _run("review", "foo", "--approve", "--note", "OK") == 0
+        assert _run("install", "foo") == 0
+        dest = os.path.join(source_dir("fetched", "tools"), "foo")
+        assert os.path.isfile(os.path.join(dest, "foo_plugin.py"))
+        # 仓库内无关文件不得进入 fetched
+        assert not os.path.exists(os.path.join(dest, "notes.md"))
+
+    def test_install_repo_layout_body_no_git_leak(self, tmp_path):
+        """git 仓库布局（tools/extensions/...）：install 提取本体且 .git 不泄漏。"""
+        repo = tmp_path / "fp-ext"
+        os.makedirs(os.path.join(str(repo), "tools", "extensions"), exist_ok=True)
+        os.makedirs(os.path.join(str(repo), ".git"), exist_ok=True)
+        (repo / ".git" / "HEAD").write_text("ref: refs/heads/master\n", encoding="utf-8")
+        (repo / "tools" / "extensions" / "codegraph_plugin.py").write_text(
+            '__fp__ = {"name": "codegraph", "version": "1.0.0", "type": "tools"}\n\ndef query():\n    pass\n',
+            encoding="utf-8",
+        )
+        assert _run("fetch", str(repo)) == 0
+        reg = load_registry()["assets"]
+        assert "tools/codegraph" in reg
+        assert reg["tools/codegraph"]["relpath"].endswith(os.path.join("tools", "extensions", "codegraph_plugin.py"))
+        assert _run("review", "codegraph", "--approve", "--note", "OK") == 0
+        assert _run("install", "codegraph") == 0
+        dest = os.path.join(source_dir("fetched", "tools"), "codegraph")
+        assert os.path.isfile(os.path.join(dest, "codegraph_plugin.py"))
+        # .git / 隐藏项不得进入 fetched
+        assert not os.path.exists(os.path.join(dest, ".git"))
+
+    def test_remove_fetched_asset(self, tmp_path):
+        """fetched 目录型资产可正常 remove（布局修复后的回归防护）。"""
+        src = self._make_local_pkg(tmp_path)
+        _run("fetch", src)
+        _run("review", "hello", "--approve", "--note", "OK")
+        _run("install", "hello")
+        dest = os.path.join(source_dir("fetched", "tools"), "hello")
+        assert os.path.isdir(dest)
+        assert _run("remove", "hello") == 0
+        assert not os.path.exists(dest)
+        assert "tools/hello" not in load_registry()["assets"]
+
+    def test_update_remote_asset_removed(self, tmp_path):
+        """update：远程仓库已移除该资产 → 拒绝。"""
+        src = self._make_local_pkg(tmp_path)
+        _run("fetch", src)
+        _run("review", "hello", "--approve", "--note", "OK")
+        _run("install", "hello")
+        # 模拟远程移除：本地源目录删掉该资产文件
+        os.unlink(os.path.join(src, "hello_plugin.py"))
+        assert _run("update", "hello") == 1
+
 
 class TestCli:
     def test_new_and_list(self):

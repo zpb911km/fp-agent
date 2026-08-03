@@ -335,34 +335,59 @@ def _check_public_orphans(assets: list[dict], index: dict) -> list[str]:
 # ═══════════════════════════════════════════════════════════════
 
 
-def _resolve_asset_identity(staging: str) -> tuple[str, str]:
-    """从暂存区解析 (type, name)。优先 manifest，否则目录猜测。"""
-    for root, _dirs, files in os.walk(staging):
-        for fname in files:
+def _scan_repo_assets(staging: str) -> list[dict]:
+    """扫描暂存区（仓库/目录/单文件）中的**全部**资产。
+
+    返回 [{type, name, relpath, manifest}]，relpath 相对 staging：
+      - 单文件资产（tools/extensions/foo_plugin.py、commands/bar.py、memory/memo.md）→ relpath=文件
+      - 目录型资产（plugins/baz/__init__.py、tools/foo/foo_plugin.py 且父目录名=name）→ relpath=目录
+    跳过 .git / 隐藏项 / __pycache__ / .disabled。manifest 缺失的文件不视为资产。
+    """
+    assets: list[dict] = []
+    seen: set[str] = set()
+    for root, dirs, files in os.walk(staging):
+        # 跳过 .git / 隐藏目录 / __pycache__
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d != "__pycache__"]
+        for fname in sorted(files):
+            if fname.startswith(".") or fname.endswith(".disabled"):
+                continue
             fpath = os.path.join(root, fname)
+            rel = os.path.relpath(fpath, staging)
             if fname.endswith(".py"):
                 m = parse_fp_manifest(fpath)
-                if m and m.get("type") in ASSET_TYPES and m.get("name"):
-                    return m["type"], m["name"]
+                if not m or m.get("type") not in ASSET_TYPES or not m.get("name"):
+                    continue
+                atype, name = m["type"], m["name"]
+                key = f"{atype}/{name}"
+                if key in seen:
+                    continue
+                # 目录型判定：主文件父目录名 == 资产名（如 plugins/baz/、tools/foo/）
+                parent = os.path.dirname(fpath)
+                relpath = os.path.relpath(parent, staging) if os.path.basename(parent) == name else rel
+                assets.append({"type": atype, "name": name, "relpath": relpath, "manifest": m})
+                seen.add(key)
             elif fname.endswith(".md"):
                 m = parse_memory_manifest(fpath)
-                if m and m.get("name"):
-                    return "memory", m["name"]
-    base = os.path.basename(staging.rstrip("/"))
-    if base == "fetch_git":
-        base = "unknown"
-    has_md = any(f.endswith(".md") for _r, _d, fs in os.walk(staging) for f in fs)
-    return ("memory" if has_md else "tools"), base
+                if not m or not m.get("name"):
+                    continue
+                key = f"memory/{m['name']}"
+                if key in seen:
+                    continue
+                assets.append({"type": "memory", "name": m["name"], "relpath": rel, "manifest": m})
+                seen.add(key)
+    return assets
 
 
-def _do_fetch(src: str) -> tuple[int, str | None, dict, str | None]:
+def _do_fetch(src: str, mode: str = "fetch") -> tuple[int, str | None, dict, list[dict]]:
     """核心拉取逻辑。
 
-    返回 (rc, staging, provenance, entry_key)：
+    返回 (rc, staging, provenance, assets)：
       rc        退出码（0 成功）
       staging   暂存区路径
       provenance 来源信息（type/source/commit/sha256）
-      entry_key registry key（"type/name"），已登记 status=pending_review
+      assets    仓库内全部资产清单 [{type, name, relpath, manifest}]
+
+    mode="update"：已 active 资产重新拉取后标记 reviewed（待重新落地），不回落 pending_review。
     """
     staging: str | None = None
     provenance: dict = {}
@@ -395,31 +420,39 @@ def _do_fetch(src: str) -> tuple[int, str | None, dict, str | None]:
             "sha256": _sha256(src) if os.path.isfile(src) else "",
         }
     else:
-        return 1, None, {}, None
+        return 1, None, {}, []
 
-    # 解析资产身份 + 静态扫描 → 登记 pending_review
-    atype, aname = _resolve_asset_identity(staging)
-    key = f"{atype}/{aname}"
-    scan_report = scan_directory(staging)
-    high_count = sum(1 for file_hits in scan_report.values() for h in file_hits if getattr(h, "severity", "") == "HIGH")
-    reg_entry = {
-        "name": aname,
-        "type": atype,
-        "source": provenance.get("source", ""),
-        "commit": provenance.get("commit", ""),
-        "sha256": provenance.get("sha256", ""),
-        "fetched_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
-        "staging": staging,
-        "status": "pending_review",
-        "scan_high": high_count,
-    }
-    upsert_asset(key, reg_entry)
-    return 0, staging, provenance, key
+    # 扫描仓库内全部资产 → 逐个登记 pending_review（共享 staging/source/commit）
+    assets = _scan_repo_assets(staging)
+    now = __import__("datetime").datetime.now().isoformat(timespec="seconds")
+    for a in assets:
+        key = f"{a['type']}/{a['name']}"
+        existing = load_registry()["assets"].get(key)
+        status = "pending_review"
+        if mode == "update" and existing and existing.get("status") == "active":
+            status = "reviewed"  # update：重新拉取后待重新落地
+        reg_entry = {
+            "name": a["name"],
+            "type": a["type"],
+            "source": provenance.get("source", ""),
+            "commit": provenance.get("commit", ""),
+            "sha256": provenance.get("sha256", ""),
+            "fetched_at": now,
+            "staging": staging,
+            "relpath": a["relpath"],
+            "status": status,
+        }
+        upsert_asset(key, reg_entry)
+    return 0, staging, provenance, assets
 
 
 def cmd_fetch(args) -> int:
-    """拉取资产到暂存区 + 静态扫描 + 登记 pending_review。"""
-    rc, staging, provenance, entry_key = _do_fetch(args.source)
+    """拉取仓库/包到暂存区 + 静态扫描 + 登记全部资产 pending_review。
+
+    单位是「仓库」（可含多个资产）；安装单位是「资产」。
+    fetch 只负责拉取与登记，审查与选择在对话层由用户拍板后 review/install。
+    """
+    rc, staging, provenance, assets = _do_fetch(args.source)
     if rc != 0:
         print(f"❌ 无法识别的来源: {args.source}")
         return 1
@@ -429,76 +462,70 @@ def cmd_fetch(args) -> int:
         print(f"   commit: {provenance['commit'][:12]}")
     if provenance.get("sha256"):
         print(f"   sha256: {provenance['sha256'][:16]}…")
-    if entry_key:
-        print(f"   登记: {entry_key} [pending_review]")
-
-    # 解析清单 + 静态扫描
-    print("\n── 资产清单 ──")
-    found = 0
-    for root, _dirs, files in os.walk(staging):
-        for fname in files:
-            fpath = os.path.join(root, fname)
-            m = None
-            if fname.endswith(".py"):
-                m = parse_fp_manifest(fpath)
-            elif fname.endswith(".md"):
-                m = parse_memory_manifest(fpath)
-            if m:
-                found += 1
-                print(f"  📦 {fname}: {m.get('name', '?')} v{m.get('version', '?')} — {m.get('description', '')}")
-    if not found:
-        print("  （未发现 __fp__ 协议字段，可能是非标准资产，仍可审查后手动 install）")
+    print(f"   发现 {len(assets)} 个资产:" if assets else "   未发现带 __fp__ 协议声明的资产（仍可审查后手动 install）")
+    for a in assets:
+        m = a["manifest"] or {}
+        print(f"   · {a['type']}/{a['name']} v{m.get('version', '?')} — {m.get('description', '')}")
 
     print("\n── 静态扫描 ──")
     print(format_report(scan_directory(staging)))
 
-    if entry_key:
-        print("\n⏭  下一步（三阶段门禁）：在会话中审查暂存区源码，用户拍板后执行：")
-        print(f'   fp ext review {entry_key.split("/", 1)[1]} --approve --note "审查意见"')
-        print(f"   fp ext install {entry_key.split('/', 1)[1]}")
+    if assets:
+        print("\n⏭  下一步（选择想安装的资产，逐个走审查门禁）：")
+        for a in assets:
+            print(f'   fp ext review {a["name"]} --approve --note "审查意见"  →  fp ext install {a["name"]}')
     else:
         print("\n⏭  下一步：审查暂存区源码后，执行 fp ext install <name> 落地。")
     return 0
 
 
-def cmd_install(args) -> int:
-    """从暂存区落地到 fetched/（门禁：须先 review --approve）。"""
-    name = args.name
-    staging = _staging_path(name)
-    entry_key = None
-    if not os.path.isdir(staging):
-        # 从 registry pending 记录的 staging 找（fetch 登记的暂存区名可能 ≠ 资产名）
-        for k, v in load_registry()["assets"].items():
-            if v.get("name") == name and v.get("staging") and os.path.isdir(v["staging"]):
-                staging = v["staging"]
-                entry_key = k
-                break
-        if entry_key is None and os.path.isdir(_staging_path("fetch_git")):
-            staging = _staging_path("fetch_git")
-        if entry_key is None and not os.path.isdir(staging):
-            print(f"❌ 暂存区不存在: {staging}（请先 fp ext fetch）")
-            return 1
+def _find_asset_in_staging(staging: str, atype: str, name: str) -> str | None:
+    """在暂存区中按类型/名称定位资产本体（fallback：registry 无 relpath 时）。"""
+    for root, _dirs, files in os.walk(staging):
+        if ".git" in root.split(os.sep):
+            continue
+        for fname in sorted(files):
+            if fname.startswith(".") or fname.endswith(".disabled"):
+                continue
+            fpath = os.path.join(root, fname)
+            if not (fname.endswith(".py") or fname.endswith(".md")):
+                continue
+            if atype == "tools" and fname.endswith("_plugin.py"):
+                if parse_tool_name(fpath) == name:
+                    return fpath
+            else:
+                m = parse_fp_manifest(fpath) if fname.endswith(".py") else parse_memory_manifest(fpath)
+                if m and m.get("name") == name:
+                    return fpath
+    return None
 
-    # 确定资产类型（优先 registry 记录，其次 manifest，默认 tools）
-    atype = "tools"
-    manifest: dict | None = None
-    if entry_key:
-        atype = entry_key.split("/", 1)[0]
-    else:
-        for root, _dirs, files in os.walk(staging):
-            for fname in files:
-                if fname.endswith(".py"):
-                    m = parse_fp_manifest(os.path.join(root, fname))
-                    if m and m.get("type") in ASSET_TYPES:
-                        atype = m["type"]
-                        manifest = m
-                        break
-        if manifest is None and any(f.endswith(".md") for _r, _d, fs in os.walk(staging) for f in fs):
-            # 目录猜测：有 .md → memory；有 execute+name → commands；否则 tools
-            atype = "memory"
+
+def cmd_install(args) -> int:
+    """从暂存区提取**资产本体**落地到 fetched/<type>/<name>/（门禁：须先 review --approve）。
+
+    与 fetch（单位=仓库）不同，install 的单位=资产：只复制该资产的文件/目录，
+    不带 .git、不带仓库嵌套结构。fetched 布局统一为目录型 <name>/。
+    """
+    name = args.name
+    found = _find_reg_entry_by_name(name)
+    entry_key = found[0] if found else None
+    reg_entry = found[1] if found else None
+
+    # 确定 staging 与 relpath（registry 记录优先；fallback 按暂存区名）
+    staging = reg_entry.get("staging") if reg_entry else None
+    relpath = reg_entry.get("relpath") if reg_entry else None
+    atype = (reg_entry.get("type") or entry_key.split("/", 1)[0]) if entry_key else "tools"
+    if not staging or not os.path.isdir(staging):
+        staging = None
+        for cand in (_staging_path(name), _staging_path("fetch_git")):
+            if os.path.isdir(cand):
+                staging = cand
+                break
+    if not staging or not os.path.isdir(staging):
+        print("❌ 暂存区不存在（请先 fp ext fetch）")
+        return 1
 
     # ── 三阶段门禁：审查状态校验 ──
-    reg_entry = load_registry()["assets"].get(entry_key) if entry_key else None
     if reg_entry:
         status = reg_entry.get("status")
         if status == "pending_review":
@@ -511,25 +538,36 @@ def cmd_install(args) -> int:
             print(f'   如需重新审查：fp ext review {name} --approve --note "复核通过"')
             return 1
 
-    dest = source_dir("fetched", atype)
-    os.makedirs(dest, exist_ok=True)
-    dest_name = name if not name.startswith("fetch_git") else os.path.basename(staging)
-    target = os.path.join(dest, dest_name)
-
-    # 同名冲突
-    if os.path.exists(target) and not args.force:
-        print(f"⚠️  已存在: {target}")
-        print("   使用 --force 覆盖（同 source 重新安装），或先 fp ext remove。")
+    # 定位资产本体（registry relpath 优先，fallback walk 查找）
+    src_body: str | None = None
+    if relpath:
+        cand = os.path.join(staging, relpath)
+        if os.path.exists(cand):
+            src_body = cand
+    if src_body is None:
+        src_body = _find_asset_in_staging(staging, atype, name)
+    if src_body is None:
+        print(f"❌ 在暂存区未找到资产本体: {name}（{staging}）")
         return 1
 
-    # 复制（不移动——staging 保留到审查结束）
-    if os.path.isdir(staging) and any(
-        os.path.isfile(os.path.join(staging, f)) or os.path.isdir(os.path.join(staging, f)) for f in os.listdir(staging)
-    ):
-        shutil.rmtree(target, ignore_errors=True)
-        shutil.copytree(staging, target) if os.path.isdir(staging) else None
+    # 落地到 fetched/<type>/<name>/（统一目录型；本体文件或整个目录）
+    dest = os.path.join(source_dir("fetched", atype), name)
+    if os.path.exists(dest) and not args.force:
+        print(f"⚠️  已存在: {dest}")
+        print("   使用 --force 覆盖（同 source 重新安装），或先 fp ext remove。")
+        return 1
+    shutil.rmtree(dest, ignore_errors=True)
+    os.makedirs(dest, exist_ok=True)
+    if os.path.isdir(src_body):
+        for item in os.listdir(src_body):
+            s = os.path.join(src_body, item)
+            d = os.path.join(dest, item)
+            if os.path.isdir(s):
+                shutil.copytree(s, d, dirs_exist_ok=True)
+            else:
+                shutil.copy2(s, d)
     else:
-        shutil.copy2(staging, target)
+        shutil.copy2(src_body, os.path.join(dest, os.path.basename(src_body)))
 
     # 注册表（保留审查字段；无 registry 记录则构造新条目）
     now = __import__("datetime").datetime.now().isoformat(timespec="seconds")
@@ -541,7 +579,7 @@ def cmd_install(args) -> int:
     else:
         source_origin = args.source or ""
         reg_entry = {
-            "name": dest_name,
+            "name": name,
             "type": atype,
             "source": source_origin,
             "commit": "",
@@ -549,10 +587,10 @@ def cmd_install(args) -> int:
             "installed_at": now,
             "status": "active",
         }
-        upsert_asset(f"{atype}/{dest_name}", reg_entry)
-    append_audit("install", f"{atype}/{dest_name}", origin=source_origin)
-    print(f"✅ 已安装: {_asset_display('fetched', atype, dest_name)}")
-    print(f"   注册表: {atype}/{dest_name} [active]")
+        upsert_asset(f"{atype}/{name}", reg_entry)
+    append_audit("install", f"{atype}/{name}", origin=source_origin)
+    print(f"✅ 已安装: {_asset_display('fetched', atype, name)}")
+    print(f"   注册表: {atype}/{name} [active]")
     print("🔁 提示: 加载器在会话启动时扫描资产，新会话或 /reload 后生效")
     return 0
 
@@ -696,7 +734,13 @@ def cmd_info(args) -> int:
 
 
 def _asset_paths(d: str, name: str, atype: str) -> list[str]:
-    """定位资产的实际文件/目录路径（支持文件名与 manifest name）。"""
+    """定位资产的实际路径：目录型返回资产目录，单文件返回文件。
+
+    promote/demote/remove 移动时按此取路径，保证目录型资产整体迁移（不只主文件）。
+    """
+    pdir = os.path.join(d, name)
+    if os.path.isdir(pdir) and _find_main_file(pdir, atype):
+        return [pdir]
     p = _asset_filepath(d, name, atype)
     return [p] if p else []
 
@@ -744,20 +788,22 @@ def cmd_remove(args) -> int:
 def cmd_update(args) -> int:
     """重新拉取并覆盖已安装的 fetched 资产（走审查门禁：高危阻断，无高危自动续审）。"""
     name = args.name
-    reg = None
-    for atype in ASSET_TYPES:
-        r = load_registry()["assets"].get(f"{atype}/{name}")
-        if r:
-            reg = r
-            break
+    found = _find_reg_entry_by_name(name)
+    reg = found[1] if found else None
     if reg is None or not reg.get("source"):
         print(f"❌ 未找到可更新的 fetched 资产: {name}（需要 registry 中记录 source）")
         return 1
+    key = found[0]
 
     print(f"↻  重新拉取: {reg['source']}")
-    rc, staging, _provenance, key = _do_fetch(reg["source"])
+    rc, staging, _provenance, assets = _do_fetch(reg["source"], mode="update")
     if rc != 0:
         print(f"❌ 拉取失败: {reg['source']}")
+        return 1
+
+    # 新版本仍含该资产？（仓库可能已移除）
+    if not any(a["name"] == name for a in assets):
+        print(f"❌ 远程仓库中已不存在该资产: {name}")
         return 1
 
     # 门禁：新版本高危 → 阻断人工审查
@@ -774,12 +820,12 @@ def cmd_update(args) -> int:
     _mark_reviewed(key, note)
     print(f"✅ 自动续审通过: {key}（{note}）")
 
-    # 落地覆盖
+    # 落地覆盖（--force：已安装资产允许覆盖）
     args.force = True
     args.name = name
     rc = cmd_install(args)
     if rc == 0:
-        append_audit("update", f"{reg['type']}/{name}", origin=reg["source"])
+        append_audit("update", key, origin=reg["source"])
     return rc
 
 
