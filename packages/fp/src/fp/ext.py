@@ -689,6 +689,11 @@ def cmd_remove(args) -> int:
         shutil.move(p, os.path.join(trash, os.path.basename(p)))
     remove_asset(f"{atype}/{name}")
     append_audit("remove", f"{atype}/{name}")
+    # 与 new/promote/demote 一致：private/public 资产自动提交 git（fetched 非仓库跳过）
+    if source in ("private", "public"):
+        root = source_root(source)
+        ensure_repo(root)
+        commit_all(root, f"remove {atype}: {name}")
     print(f"🗑  已移入回收站: {_asset_display(source, atype, name)}")
     return 0
 

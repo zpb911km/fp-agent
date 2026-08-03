@@ -432,6 +432,11 @@ class TestCli:
         # 进入回收站
         trash = os.path.join(str(os.path.dirname(source_root("private"))), ".trash")
         assert os.path.isdir(trash)
+        # 自动提交 git（与 new/promote/demote 一致）
+        from fp.ext_git import run_git
+
+        log = run_git(source_root("private"), "log", "--oneline", "-3", check=False)
+        assert "remove tools: hello" in log.stdout
 
     def test_check_clean(self, capsys):
         _run("new", "tools", "hello")
