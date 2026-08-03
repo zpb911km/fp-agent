@@ -13,12 +13,17 @@
       - 内容修改（M）         → 只要求「行为描述类」文档（docs/dev/…）确认
       - 结构变更（增/删/改名）→ 额外要求「清单类」文档（README/guide 参考/self 扩展）确认
 
+    反向关联（DOC_LINKS，文档 → 代码文件）：
+      - 文档变更时：若其关联代码本次未同步变更 → 输出提醒（不阻断，文档允许先行）
+      - --audit：校验文档登记的关联代码文件仍存在于仓库（代码重构/改名后
+        文档里「源码真相」引用断裂时能被发现）
+
     这样新增/改名/重组都不怕：不需要预知任何名称，跟着 diff 走即可。
 
 用法:
     python scripts/check_docs_sync.py                  # pre-commit：检查暂存区
     python scripts/check_docs_sync.py --since HEAD~3   # 主动触发：最近 3 次提交
-    python scripts/check_docs_sync.py --audit          # 审计：列出未被任何规则覆盖的代码文件
+    python scripts/check_docs_sync.py --audit          # 审计：列出未覆盖代码文件 + 文档关联断裂
     python scripts/check_docs_sync.py --repo PATH      # 指定仓库根（测试用）
 
 环境变量:
@@ -27,7 +32,7 @@
 退出码:
     0  无代码变更 / 关联文档已同步 / 显式放行 / 审计无盲区
     1  存在「代码变了但关联文档没变」的提醒（提交场景将阻断）
-       （--audit 模式下 = 存在未被规则覆盖的代码文件）
+       （--audit 模式下 = 存在未被规则覆盖的代码文件，或文档关联代码文件已不存在）
 """
 
 import argparse
@@ -111,6 +116,33 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
     ("scripts/*.py", ["docs/CONTRIBUTING.md"], []),
     # 工程配置
     (".pre-commit-config.yaml", ["docs/CONTRIBUTING.md"], []),
+]
+
+# ── 反向关联：文档 → 关联代码文件（相对仓库根） ────────────────────────
+# 每条规则: (doc_glob, [code_glob, ...])  均为 fnmatch glob
+#   doc_glob    文档路径（fnmatch 的 `*` 跨 `/`，可用 docs/* 覆盖整树）
+#   code_glob   该文档「源码真相」所指向的代码文件
+# 用途：
+#   1) --audit：校验关联代码文件仍存在于仓库（代码重构/改名后链接断裂能被发现）
+#   2) 文档变更时：若关联代码本次未同步变更 → 提醒（不阻断，文档允许先行）
+# 登记原则：只登记「文档内容明确指向实现」的文档（self 操作指南、dev 行为文档），
+#           不要为纯清单/索引类文档（README）登记，避免噪音。
+DOC_LINKS: list[tuple[str, list[str]]] = [
+    # fp ext 扩展分发系统：self 操作指南 ↔ ext*.py 实现模块
+    (
+        "docs/self/扩展分发.md",
+        [
+            "packages/fp/src/fp/ext.py",
+            "packages/fp/src/fp/ext_assets.py",
+            "packages/fp/src/fp/ext_store.py",
+            "packages/fp/src/fp/ext_scanner.py",
+            "packages/fp/src/fp/ext_manifest.py",
+            "packages/fp/src/fp/ext_migrate.py",
+            "packages/fp/src/fp/ext_git.py",
+        ],
+    ),
+    # dev 设计文档 ↔ ext 模块（用 glob 覆盖全部 ext* 模块，新模块自动纳入）
+    ("docs/dev/资产分发系统.md", ["packages/fp/src/fp/ext*.py"]),
 ]
 
 # 文档文件本身（变更它们不算「代码变更」）
@@ -201,6 +233,27 @@ def _audit_unmapped_code_files(repo: Path) -> list[str]:
     return sorted(unmapped)
 
 
+def _linked_code_globs(doc: str) -> list[str]:
+    """给定文档路径 → 关联代码 glob 列表（DOC_LINKS，first-match-wins）。"""
+    for doc_glob, code_globs in DOC_LINKS:
+        if fnmatch.fnmatch(doc, doc_glob):
+            return list(code_globs)
+    return []
+
+
+def _audit_broken_doc_links(repo: Path) -> list[str]:
+    """扫描 DOC_LINKS：关联代码文件在仓库中不存在 → 链接断裂清单。
+
+    返回格式: "doc_glob -> code_glob"（代码被重构/改名后文档里的「源码真相」失联）。
+    """
+    broken: list[str] = []
+    for doc_glob, code_globs in DOC_LINKS:
+        for cg in code_globs:
+            if not list(repo.glob(cg)):
+                broken.append(f"{doc_glob} -> {cg}")
+    return sorted(broken)
+
+
 def _affected_docs(path: str, structural: bool) -> list[str]:
     """某个代码变更文件 → 受影响文档列表。
 
@@ -220,6 +273,19 @@ def check(repo: Path, since: str | None) -> int:
 
     code_changes = [(s, f) for s, f in changed if f and not _is_doc(f)]
     doc_changes = set(f for s, f in changed if f and _is_doc(f))
+
+    # 反向提醒：文档变更 + 关联代码未同步变更（不阻断，文档允许先行编写/补充说明）
+    reverse_hits: list[tuple[str, str]] = []
+    for doc in sorted(doc_changes):
+        for cg in _linked_code_globs(doc):
+            if not any(fnmatch.fnmatch(c, cg) for _, c in code_changes):
+                reverse_hits.append((doc, cg))
+
+    if reverse_hits:
+        print("📄 文档变更，但以下关联代码本次未同步变更（请确认描述与实现一致，不阻断）：")
+        for doc, cg in reverse_hits:
+            print(f"    - {doc} → {cg}")
+        print()
 
     if not code_changes:
         if not since:
@@ -283,16 +349,31 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.audit:
-        unmapped = _audit_unmapped_code_files(Path(args.repo))
+        repo = Path(args.repo)
+        unmapped = _audit_unmapped_code_files(repo)
+        broken = _audit_broken_doc_links(repo)
+        problems = 0
         if unmapped:
+            problems += 1
             print("⚠️  以下代码文件未被任何文档规则覆盖：")
             for f in unmapped:
                 print(f"    - {f}")
             print()
             print("建议：在 scripts/check_docs_sync.py 的 DOC_RULES 中登记它们，")
             print("      否则这些文件的变更不会触发任何文档提醒。")
+            print()
+        if broken:
+            problems += 1
+            print("⚠️  以下文档登记的关联代码文件在仓库中不存在（「源码真相」链接可能已因重构/改名断裂）：")
+            for b in broken:
+                print(f"    - {b}")
+            print()
+            print("建议：更新 scripts/check_docs_sync.py 的 DOC_LINKS，")
+            print("      将文档指向当前实际存在的代码文件。")
+            print()
+        if problems:
             return 1
-        print("✅ 所有代码文件均被文档规则覆盖，无盲区")
+        print("✅ 所有代码文件均被文档规则覆盖，且文档关联代码文件均存在，无盲区")
         return 0
 
     return check(Path(args.repo), since=args.since)

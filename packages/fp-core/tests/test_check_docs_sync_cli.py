@@ -48,6 +48,9 @@ def _init_repo(root: Path) -> None:
     (root / "docs" / "guide" / "命令参考.md").write_text("# 命令参考\n", encoding="utf-8")
     (root / "README.md").write_text("# FP\n", encoding="utf-8")
 
+    # 按 DOC_LINKS 登记创建占位代码文件（保证 --audit 不误报链接断裂、反向提醒可测）
+    _create_doc_link_code_files(root)
+
     env = {
         **os.environ,
         "GIT_AUTHOR_NAME": "t",
@@ -61,6 +64,18 @@ def _init_repo(root: Path) -> None:
         ["git", "-C", str(root), "commit", "-q", "-m", "init"],
     ]:
         subprocess.run(c, capture_output=True, text=True, env=env, check=True)
+
+
+def _create_doc_link_code_files(root: Path) -> None:
+    """按 DOC_LINKS 登记的 code_glob 创建占位文件（glob 具体化为首文件，如 ext*.py → ext.py）"""
+    mod = _load_script_module()
+    for _doc_glob, code_globs in mod.DOC_LINKS:
+        for cg in code_globs:
+            concrete = cg.replace("*", "")
+            p = root / concrete
+            p.parent.mkdir(parents=True, exist_ok=True)
+            if not p.exists():
+                p.write_text("# placeholder\n", encoding="utf-8")
 
 
 def _run_script(root: Path, *extra: str, allow: bool = False) -> subprocess.CompletedProcess:
@@ -249,3 +264,54 @@ def test_test_file_change_reminds_test_doc(tmp_path):
     r = _run_script(root)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "测试.md" in r.stdout
+
+
+def test_doc_change_reminds_linked_code(tmp_path):
+    """文档变更 + 关联代码未同步变 → 反向提醒（不阻断，exit 0）"""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    mod = _load_script_module()
+    doc = mod.DOC_LINKS[0][0]  # docs/self/扩展分发.md
+    p = root / doc
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _modify(p, "# 更新\n", root)
+
+    r = _run_script(root)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "关联代码" in r.stdout
+    assert "→" in r.stdout
+
+
+def test_doc_change_with_linked_code_no_reminder(tmp_path):
+    """文档 + 关联代码同改 → 该关联不再反向提醒（其他未变关联仍提醒；正向门禁照常 exit 1）"""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    mod = _load_script_module()
+    doc = mod.DOC_LINKS[0][0]
+    linked = mod.DOC_LINKS[0][1][0].replace("*", "")  # 第一个关联代码文件（无 glob）
+    p = root / doc
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _modify(p, "# 更新\n", root)
+    _modify(root / linked, "x = 1\n", root)
+
+    r = _run_script(root)
+    assert f"{doc} → {linked}" not in r.stdout  # 该关联文件已变，不再提醒
+    assert "关联代码" in r.stdout  # 其他关联文件未变，仍提醒
+    assert "资产分发系统" in r.stdout  # 正向门禁：ext.py 变更 → 资产分发系统.md 未同步
+    assert r.returncode == 1
+
+
+def test_audit_detects_broken_doc_links(tmp_path):
+    """--audit：删除 DOC_LINKS 登记的代码文件 → 报链接断裂 exit 1"""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    mod = _load_script_module()
+    linked = mod.DOC_LINKS[0][1][0].replace("*", "")
+    p = root / linked
+    if p.exists():
+        p.unlink()
+
+    r = _run_script(root, "--audit")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "不存在" in r.stdout
+    assert linked in r.stdout

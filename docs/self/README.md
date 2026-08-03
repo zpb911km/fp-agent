@@ -67,6 +67,7 @@ python -c "from fp_core.platform_utils import get_data_dir; print(get_data_dir()
 ```
 优先级：**private > public > fetched**（同名后加载覆盖 + 警告）。自写扩展放 `private/`。
 CLI：`fp ext new|list|info|promote|demote|check|migrate...`（详见 `docs/dev/资产分发系统.md`）。
+> 📘 **怎么用 `fp ext`**（命令速查 + 三大工作流 + 踩坑地图）：见 [扩展分发.md](扩展分发.md)。
 > ⚠️ **安装审查约定**：`fp ext fetch` 只是拉取+静态扫描，**落地前必须在会话中读暂存区源码做语义审查**（`read_file`），确认无风险后由用户拍板、你操作 `fp ext install`。
 
 ---
