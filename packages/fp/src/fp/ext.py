@@ -835,6 +835,7 @@ def cmd_new(args) -> int:
         f'    "name": "{safe_name}",\n'
         f'    "version": "0.1.0",\n'
         f'    "description": "",\n'
+        f'    "license": "GPL-3.0",\n'
         f'    "type": "{atype}",\n'
         f"}}\n"
     )
@@ -981,6 +982,7 @@ def cmd_init(args) -> int:
             f'    "name": "{name}",\n'
             f'    "version": "0.1.0",\n'
             f'    "description": "",\n'
+            f'    "license": "GPL-3.0",\n'
             f'    "type": "{atype}",\n'
             f"}}\n"
         )
@@ -1034,7 +1036,7 @@ def cmd_promote(args) -> int:
         print("   {")
         print('     "schema": 1,')
         print('     "author": "<你的名字>",')
-        print('     "license": "MIT",')
+        print('     "license": "GPL-3.0",')
         print('     "assets": {}')
         print("   }")
         return 1
@@ -1155,7 +1157,7 @@ def cmd_share(args) -> int:
         print("   {")
         print('     "schema": 1,')
         print('     "author": "<你的名字>",')
-        print('     "license": "MIT",')
+        print('     "license": "GPL-3.0",')
         print('     "assets": {}')
         print("   }")
         return 1
