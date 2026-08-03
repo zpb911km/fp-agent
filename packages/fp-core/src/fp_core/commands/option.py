@@ -30,6 +30,34 @@ DATA_DIR = get_data_dir()
 CORE_TOOLS = {"bash", "read_file", "write_file", "edit_file"}
 PLUGIN_SKIP = {"base.py", "setup.py"}
 
+# 三来源（资产分发系统）：fetched(外来/只读) → public(公开) → private(私有)
+# 加载优先级：private > public > fetched；操作（enable/disable/diff）优先命中高优先级版本
+_SOURCE_LABELS = {
+    "builtin": "内置",
+    "user": "用户",
+    "fetched": "外来 (fetched)",
+    "public": "公开 (public)",
+    "private": "私有 (private)",
+}
+
+
+# 常量（供 disabled 文件名解析）
+# 注意：".py.disabled" 长度为 12，勿用 11（曾导致名称多带一个点号）
+_DISABLED_SUFFIX = ".py.disabled"
+_DISABLED_SUFFIX_LEN = len(_DISABLED_SUFFIX)
+
+
+def _user_dirs(kind: str, reverse: bool = False) -> list[str]:
+    """三来源用户目录（fetched → public → private），仅返回已存在的目录。
+
+    reverse=True 时返回 private → public → fetched（高优先级优先，用于操作与展示去重）。
+    """
+    from fp_core.config import user_dirs
+
+    dirs = [d for d in user_dirs(kind) if os.path.isdir(d)]
+    return list(reversed(dirs)) if reverse else dirs
+
+
 name = "option"
 aliases = ["opt", "op", "ext", "extension", "extensions"]
 description = "统一管理三种拓展机制（commands / plugins / tools）"
@@ -109,8 +137,10 @@ class OptionManager:
                 )
             )
 
-        # 用户目录中禁用的命令
-        self._scan_disabled_cmds(os.path.join(DATA_DIR, "commands"), results, mod_map)
+        # 用户目录中禁用的命令（三来源，优先级高→低，去重）
+        seen = set()
+        for d in _user_dirs("commands", reverse=True):
+            self._scan_disabled_cmds(d, results, mod_map, seen)
         return results
 
     def _has_cmd_override(self, name: str) -> bool:
@@ -118,19 +148,20 @@ class OptionManager:
         builtin_path = os.path.join(FP_CORE_DIR, "commands", f"{name}.py")
         if not os.path.isfile(builtin_path):
             return False
-        user_path = os.path.join(DATA_DIR, "commands", f"{name}.py")
-        if os.path.isfile(user_path):
-            return True
-        return os.path.isfile(user_path + ".disabled")
+        for d in _user_dirs("commands"):
+            user_path = os.path.join(d, f"{name}.py")
+            if os.path.isfile(user_path) or os.path.isfile(user_path + ".disabled"):
+                return True
+        return False
 
-    def _scan_disabled_cmds(self, directory: str, results: list, mod_map: dict):
+    def _scan_disabled_cmds(self, directory: str, results: list, mod_map: dict, seen: set):
         if not os.path.isdir(directory):
             return
         for fn in os.listdir(directory):
             if not fn.endswith(".py.disabled"):
                 continue
-            base = fn[:-11]  # strip .py.disabled = 11 chars
-            if base == "__init__":
+            base = fn[:-_DISABLED_SUFFIX_LEN]  # strip .py.disabled（12 字符）
+            if base == "__init__" or base in seen:
                 continue
             # 检查是否已在注册表中
             found = False
@@ -140,6 +171,7 @@ class OptionManager:
                     found = True
                     break
             if not found:
+                seen.add(base)
                 results.append(
                     Entry(
                         name=base,
@@ -186,21 +218,16 @@ class OptionManager:
                 )
             )
 
-        # 用户目录中禁用的插件（文件型）
-        self._scan_disabled_files(
-            os.path.join(DATA_DIR, "plugins"),
-            results,
-            seen,
-            lambda f: not f.startswith("_") and f not in PLUGIN_SKIP,
-            self._read_plugin_name_from_file,
-        )
-
-        # 用户目录中禁用的目录型插件（name.disabled/）
-        self._scan_disabled_dirs(
-            os.path.join(DATA_DIR, "plugins"),
-            results,
-            seen,
-        )
+        # 用户目录中禁用的插件（文件型 + 目录型，三来源，优先级高→低，共享 seen 去重）
+        for d in _user_dirs("plugins", reverse=True):
+            self._scan_disabled_files(
+                d,
+                results,
+                seen,
+                lambda f: not f.startswith("_") and f not in PLUGIN_SKIP,
+                self._read_plugin_name_from_file,
+            )
+            self._scan_disabled_dirs(d, results, seen)
 
         # 内置目录中子目录（包插件），检查是否未加载（同名用户版禁用导致内置版也被屏蔽）
         bdir = os.path.join(FP_CORE_DIR, "plugins")
@@ -256,7 +283,7 @@ class OptionManager:
         for fn in os.listdir(directory):
             if not fn.endswith(".py.disabled"):
                 continue
-            base = fn[:-11]
+            base = fn[:-_DISABLED_SUFFIX_LEN]
             if not filter_fn(f"{base}.py"):
                 continue
             fp = os.path.join(directory, fn)
@@ -367,14 +394,13 @@ class OptionManager:
                 if os.path.isfile(os.path.join(bdir, bname)):
                     user_override = True
             elif source == "builtin":
-                # 当前是内置版，检查用户目录是否有同名
-                for udir in (os.path.join(DATA_DIR, "tools", "plugins"), os.path.join(DATA_DIR, "tools", "extensions")):
-                    if os.path.isdir(udir):
-                        for fn in os.listdir(udir):
-                            clean = fn.replace(".disabled", "")
-                            if clean.endswith("_plugin.py") and clean == f"{plugin_src}.py":
-                                user_override = True
-                                break
+                # 当前是内置版，检查用户目录是否有同名（三来源）
+                for udir in _user_dirs("tools"):
+                    for fn in os.listdir(udir):
+                        clean = fn.replace(".disabled", "")
+                        if clean.endswith("_plugin.py") and clean == f"{plugin_src}.py":
+                            user_override = True
+                            break
 
             results.append(
                 Entry(
@@ -389,21 +415,17 @@ class OptionManager:
                 )
             )
 
-        # 用户/内置目录中禁用的工具
-        for d in (
-            os.path.join(DATA_DIR, "tools", "plugins"),
-            os.path.join(DATA_DIR, "tools", "extensions"),
-            os.path.join(FP_CORE_DIR, "tools", "extensions"),
-        ):
+        # 用户/内置目录中禁用的工具（三来源，优先级高→低 + 内置兜底）
+        for d in _user_dirs("tools", reverse=True):
             self._scan_disabled_tools(d, results, seen)
+        self._scan_disabled_tools(os.path.join(FP_CORE_DIR, "tools", "extensions"), results, seen)
 
         return results
 
     def _find_tool_file(self, plugin_src: str) -> str:
-        """找工具插件源文件（用户目录优先）"""
+        """找工具插件源文件（用户三来源优先，private 优先）"""
         candidates = [
-            os.path.join(DATA_DIR, "tools", "plugins", f"{plugin_src}.py"),
-            os.path.join(DATA_DIR, "tools", "extensions", f"{plugin_src}.py"),
+            *(os.path.join(d, f"{plugin_src}.py") for d in _user_dirs("tools", reverse=True)),
             os.path.join(FP_CORE_DIR, "tools", "extensions", f"{plugin_src}.py"),
         ]
         for p in candidates:
@@ -480,7 +502,20 @@ class OptionManager:
     def _classify_source(self, filepath: str) -> str:
         if not filepath:
             return "builtin"
-        return "builtin" if FP_CORE_DIR in os.path.normpath(filepath) else "user"
+        norm = os.path.normpath(filepath)
+        if FP_CORE_DIR in norm:
+            return "builtin"
+        # 三来源（fetched/public/private），不在其中的归 user
+        data = os.path.normpath(DATA_DIR)
+        for s in ("fetched", "public", "private"):
+            if norm.startswith(os.path.join(data, s)):
+                return s
+        return "user"
+
+    def _is_fetched(self, path: str) -> bool:
+        """外来资产（fetched/）只读，不可 enable/disable"""
+        norm = os.path.normpath(path)
+        return norm.startswith(os.path.normpath(os.path.join(DATA_DIR, "fetched")))
 
     def _get_plugin_hooks(self, plugin_name: str) -> list[dict]:
         lifecycle = getattr(self.state, "lifecycle", None)
@@ -516,22 +551,20 @@ class OptionManager:
     # ── 启用/禁用 ─────────────────────────────────────────
 
     def _find_disabled(self, name: str) -> str | None:
-        """查找 name 对应的 .py.disabled 文件"""
+        """查找 name 对应的 .py.disabled 文件（三来源，private 优先）"""
         # 工具目录
-        for d in (os.path.join(DATA_DIR, "tools", "plugins"), os.path.join(DATA_DIR, "tools", "extensions")):
-            if os.path.isdir(d):
-                for fn in os.listdir(d):
-                    if fn.endswith("_plugin.py.disabled"):
-                        tname = self._read_tool_name(os.path.join(d, fn))
-                        if tname == name:
-                            return os.path.join(d, fn)
+        for d in _user_dirs("tools", reverse=True):
+            for fn in os.listdir(d):
+                if fn.endswith("_plugin.py.disabled"):
+                    tname = self._read_tool_name(os.path.join(d, fn))
+                    if tname == name:
+                        return os.path.join(d, fn)
         # 插件目录
-        pd = os.path.join(DATA_DIR, "plugins")
-        if os.path.isdir(pd):
+        for pd in _user_dirs("plugins", reverse=True):
             # 文件型插件：name.py.disabled
             for fn in os.listdir(pd):
                 if fn.endswith(".py.disabled") and not fn.startswith("_") and fn not in PLUGIN_SKIP:
-                    pname = self._read_plugin_name_from_file(os.path.join(pd, fn), fn[:-11])
+                    pname = self._read_plugin_name_from_file(os.path.join(pd, fn), fn[:-_DISABLED_SUFFIX_LEN])
                     if pname == name:
                         return os.path.join(pd, fn)
             # 目录型插件：name.disabled/
@@ -541,24 +574,21 @@ class OptionManager:
                 if os.path.isfile(init_path):
                     return disabled_dir
         # 命令目录
-        cd = os.path.join(DATA_DIR, "commands")
-        if os.path.isdir(cd):
+        for cd in _user_dirs("commands", reverse=True):
             for fn in os.listdir(cd):
                 if fn == f"{name}.py.disabled":
                     return os.path.join(cd, fn)
         return None
 
     def _find_enabled(self, name: str) -> str | None:
-        """查找 name 对应的 .py 文件（仅用户目录）"""
-        for d in (os.path.join(DATA_DIR, "tools", "plugins"), os.path.join(DATA_DIR, "tools", "extensions")):
-            if os.path.isdir(d):
-                for fn in os.listdir(d):
-                    if fn.endswith("_plugin.py"):
-                        tname = self._read_tool_name(os.path.join(d, fn))
-                        if tname == name:
-                            return os.path.join(d, fn)
-        pd = os.path.join(DATA_DIR, "plugins")
-        if os.path.isdir(pd):
+        """查找 name 对应的 .py 文件（仅用户三来源，private 优先）"""
+        for d in _user_dirs("tools", reverse=True):
+            for fn in os.listdir(d):
+                if fn.endswith("_plugin.py"):
+                    tname = self._read_tool_name(os.path.join(d, fn))
+                    if tname == name:
+                        return os.path.join(d, fn)
+        for pd in _user_dirs("plugins", reverse=True):
             # 文件型插件
             for fn in os.listdir(pd):
                 if fn.endswith(".py") and not fn.startswith("_") and fn not in PLUGIN_SKIP:
@@ -578,8 +608,8 @@ class OptionManager:
                 pname = self._read_plugin_name_from_file(pfile, fn)
                 if pname == name:
                     return entry_path
-        cd = os.path.join(DATA_DIR, "commands")
-        if os.path.isdir(cd):
+        # 命令目录
+        for cd in _user_dirs("commands", reverse=True):
             for fn in os.listdir(cd):
                 if fn == f"{name}.py":
                     return os.path.join(cd, fn)
@@ -589,6 +619,8 @@ class OptionManager:
         disabled_path = self._find_disabled(name)
         if disabled_path is None:
             return (False, f"⚠️ 未找到已禁用的 '{name}'")
+        if self._is_fetched(disabled_path):
+            return (False, f"❌ 外来资产 (fetched) 只读，无法启用 '{name}'")
         is_dir = os.path.isdir(disabled_path)
         enabled_path = disabled_path[:-9]  # strip .disabled
         try:
@@ -611,6 +643,8 @@ class OptionManager:
             return (False, f"⚠️ 未找到已启用的 '{name}'")
         if FP_CORE_DIR in os.path.normpath(enabled_path):
             return (False, "❌ 无法禁用内置拓展。如需覆盖，请在用户目录创建同名文件后再禁用")
+        if self._is_fetched(enabled_path):
+            return (False, f"❌ 外来资产 (fetched) 只读，无法禁用 '{name}'")
         is_dir = os.path.isdir(enabled_path)
         disabled_path = enabled_path + ".disabled"
         if os.path.exists(disabled_path):
@@ -632,7 +666,7 @@ class OptionManager:
         user_path = None
 
         # 命令
-        for d in (os.path.join(FP_CORE_DIR, "commands"), os.path.join(DATA_DIR, "commands")):
+        for d in (os.path.join(FP_CORE_DIR, "commands"), *_user_dirs("commands", reverse=True)):
             if os.path.isdir(d):
                 for fn in os.listdir(d):
                     clean = fn.replace(".disabled", "")
@@ -645,7 +679,7 @@ class OptionManager:
                                 user_path = fp
 
         # 插件
-        for d in (os.path.join(FP_CORE_DIR, "plugins"), os.path.join(DATA_DIR, "plugins")):
+        for d in (os.path.join(FP_CORE_DIR, "plugins"), *_user_dirs("plugins", reverse=True)):
             if not os.path.isdir(d):
                 continue
             for fn in os.listdir(d):
@@ -668,11 +702,7 @@ class OptionManager:
                                 user_path = fp
 
         # 工具
-        for d in (
-            os.path.join(FP_CORE_DIR, "tools", "extensions"),
-            os.path.join(DATA_DIR, "tools", "plugins"),
-            os.path.join(DATA_DIR, "tools", "extensions"),
-        ):
+        for d in (os.path.join(FP_CORE_DIR, "tools", "extensions"), *_user_dirs("tools", reverse=True)):
             if not os.path.isdir(d):
                 continue
             for fn in os.listdir(d):
@@ -844,7 +874,7 @@ def _fmt_info(item: Entry) -> str:
         else:
             lines.append(f"- **来源**: 用户覆盖 ⚡ (`{item.source_path}`)")
     else:
-        src_label = "内置" if item.source == "builtin" else "用户"
+        src_label = _SOURCE_LABELS.get(item.source, item.source)
         lines.append(f"- **来源**: {src_label} (`{item.source_path}`)")
 
     c = item.contract
