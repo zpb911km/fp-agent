@@ -952,6 +952,24 @@ def cmd_share(args) -> int:
     if source == "fetched":
         print("❌ fetched 资产禁止再分发（来源非原创，防套娃）")
         return 1
+    if source != "public":
+        print(f"❌ 资产 {name} 位于 {source}（尚未公开）。先 promote 到 public 再 share：")
+        print(f"   fp ext promote {name}")
+        print("   生命周期：private ─promote→ public ─share→ 外部仓库（分发）")
+        return 1
+
+    # 分享仓库必须已有仓库清单 fp.ext.json（声明来源与许可），缺失则拒绝
+    index_path = os.path.join(repo, SHARE_INDEX)
+    if not os.path.isfile(index_path):
+        print(f"❌ 分享仓库缺少仓库清单 {SHARE_INDEX}，拒绝发布。")
+        print("   请先在分享仓库根目录创建（仓库级元数据，声明来源与许可）：")
+        print("   {")
+        print('     "schema": 1,')
+        print('     "author": "<你的名字>",')
+        print('     "license": "MIT",')
+        print('     "assets": {}')
+        print("   }")
+        return 1
 
     src_dir = source_dir(source, atype)
     paths = _asset_paths(src_dir, name, atype)
@@ -967,7 +985,6 @@ def cmd_share(args) -> int:
             shutil.copy2(p, dest)
 
     # 更新索引 fp.ext.json
-    index_path = os.path.join(repo, SHARE_INDEX)
     index = {}
     if os.path.isfile(index_path):
         try:

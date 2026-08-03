@@ -250,6 +250,37 @@ class TestCli:
         # private 中不存在同名 → _find_asset 找到 fetched → promote 拒绝
         assert _run("promote", "external_cmd") == 1
 
+    def test_share_requires_public(self, tmp_path):
+        """share 前置：资产必须已在 public（先 promote）。"""
+        repo = tmp_path / "share-repo"
+        repo.mkdir()
+        (repo / "fp.ext.json").write_text('{"schema": 1, "assets": {}}', encoding="utf-8")
+        _run("new", "commands", "greet")
+        # private 资产 → 拒绝
+        assert _run("share", "greet", "--repo", str(repo)) == 1
+        # promote 后 → 放行
+        assert _run("promote", "greet") == 0
+        assert _run("share", "greet", "--repo", str(repo)) == 0
+
+    def test_share_requires_index(self, tmp_path):
+        """share 前置：分享仓库必须已有 fp.ext.json，缺则拒绝（不自动创建）。"""
+        repo = tmp_path / "share-repo"
+        repo.mkdir()
+        _run("new", "commands", "greet")
+        assert _run("promote", "greet") == 0
+        # 无 fp.ext.json → 拒绝
+        assert _run("share", "greet", "--repo", str(repo)) == 1
+        # 手动创建清单 → 放行，并登记资产
+        (repo / "fp.ext.json").write_text(
+            '{"schema": 1, "author": "tester", "license": "MIT", "assets": {}}', encoding="utf-8"
+        )
+        assert _run("share", "greet", "--repo", str(repo)) == 0
+        assert (repo / "commands" / "greet.py").exists()
+        import json
+
+        idx = json.loads((repo / "fp.ext.json").read_text(encoding="utf-8"))
+        assert "commands/greet" in idx["assets"]
+
     def test_remove_goes_to_trash(self):
         _run("new", "tools", "hello")
         assert _run("remove", "hello") == 0
