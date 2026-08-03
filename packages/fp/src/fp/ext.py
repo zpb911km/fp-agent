@@ -790,6 +790,20 @@ def cmd_remove(args) -> int:
             print(f"🗑  已移入回收站: {_asset_display('fetched', atype, name)}")
             return 0
 
+    # registry 无记录但 fetched 存在同名资产（孤儿，如 registry 被清但文件残留）
+    # → 优先删 fetched 本体，不误伤 public/private 同名（_find_asset 优先级会误删 public）
+    for t in ASSET_TYPES:
+        if _asset_paths(source_dir("fetched", t), name, t):
+            d = source_dir("fetched", t)
+            paths = _asset_paths(d, name, t)
+            trash = os.path.join(trash_dir(), f"fetched_{t}_{name}")
+            os.makedirs(trash, exist_ok=True)
+            for p in paths:
+                shutil.move(p, os.path.join(trash, os.path.basename(p)))
+            append_audit("remove", f"{t}/{name}", note="fetched 孤儿资产（无 registry）")
+            print(f"🗑  已移入回收站（fetched 孤儿）: {_asset_display('fetched', t, name)}")
+            return 0
+
     # 无 registry 或非 fetched → private/public 资产删除
     found = _find_asset(name)
     if not found:
