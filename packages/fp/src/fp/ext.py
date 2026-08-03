@@ -38,6 +38,7 @@ from fp.ext_git import GitError, commit_all, ensure_repo, has_remote, run_git
 from fp.ext_manifest import (
     parse_fp_manifest,
     parse_memory_manifest,
+    parse_tool_name,
     validate_manifest,
 )
 from fp.ext_migrate import migrate_once
@@ -93,19 +94,38 @@ def _ensure_staging(name: str) -> str:
     return path
 
 
+def _asset_filepath(d: str, name: str, atype: str) -> str | None:
+    """在资产目录 d 中定位资产路径（支持文件名与 manifest name 匹配）。"""
+    candidates = [name, f"{name}.py", f"{name}.md"]
+    if atype == "tools":
+        candidates.append(f"{name}_plugin.py")
+    for c in candidates:
+        p = os.path.join(d, c)
+        if os.path.exists(p):
+            return p
+    # manifest name 兜底：文件名 ≠ 语义名（如 codegraph_query_plugin.py → name=codegraph）
+    if os.path.isdir(d):
+        for e in sorted(os.listdir(d)):
+            if e.startswith(".") or e == "__pycache__" or e.endswith(".disabled"):
+                continue
+            p = os.path.join(d, e)
+            if os.path.isfile(p) and (p.endswith(".py") or p.endswith(".md")):
+                if atype == "tools" and p.endswith(".py"):
+                    if parse_tool_name(p) == name:
+                        return p
+                else:
+                    m = parse_fp_manifest(p) if p.endswith(".py") else parse_memory_manifest(p)
+                    if m and m.get("name") == name:
+                        return p
+    return None
+
+
 def _find_asset(name: str) -> tuple[str, str] | None:
     """在三来源中查找资产，返回 (来源, 类型)。优先级 private > public > fetched。"""
     for source in reversed(SOURCES):  # private 优先
         for atype in ASSET_TYPES:
-            d = source_dir(source, atype)
-            candidates = [name, f"{name}.py", f"{name}.md"]
-            if atype == "tools":
-                candidates.append(f"{name}_plugin.py")
-            for c in candidates:
-                if os.path.isfile(os.path.join(d, c)):
-                    return source, atype
-                if os.path.isdir(os.path.join(d, name)):
-                    return source, atype
+            if _asset_filepath(source_dir(source, atype), name, atype):
+                return source, atype
     return None
 
 
@@ -410,13 +430,16 @@ def cmd_list(args) -> int:
             if not os.path.isdir(d):
                 continue
             for e in sorted(os.listdir(d)):
-                if e.startswith(".") or e.endswith(".disabled"):
+                if e.startswith(".") or e == "__pycache__" or e.endswith(".disabled"):
                     continue
                 # 解析资产名（manifest name 优先，否则文件名）
                 display = e
                 fpath = os.path.join(d, e)
                 if os.path.isfile(fpath):
-                    if fpath.endswith(".py"):
+                    if fpath.endswith(".py") and atype == "tools":
+                        tname = parse_tool_name(fpath)
+                        m = {"name": tname} if tname else None
+                    elif fpath.endswith(".py"):
                         m = parse_fp_manifest(fpath)
                     elif fpath.endswith(".md"):
                         m = parse_memory_manifest(fpath)
@@ -444,16 +467,7 @@ def cmd_info(args) -> int:
         return 1
     source, atype = found
     d = source_dir(source, atype)
-    fpath = None
-    candidates = [name, f"{name}.py", f"{name}.md"]
-    if atype == "tools":
-        candidates.append(f"{name}_plugin.py")
-    for c in candidates:
-        if os.path.isfile(os.path.join(d, c)):
-            fpath = os.path.join(d, c)
-            break
-    if fpath is None and os.path.isdir(os.path.join(d, name)):
-        fpath = os.path.join(d, name)
+    fpath = _asset_filepath(d, name, atype)
 
     print(f"📦 {_asset_display(source, atype, name)}")
     if fpath:
@@ -484,19 +498,9 @@ def cmd_info(args) -> int:
 
 
 def _asset_paths(d: str, name: str, atype: str) -> list[str]:
-    """定位资产的实际文件/目录路径（含 tools 命名约定 _plugin.py）。"""
-    paths = []
-    candidates = [name, f"{name}.py", f"{name}.md"]
-    if atype == "tools":
-        candidates.append(f"{name}_plugin.py")
-    for c in candidates:
-        p = os.path.join(d, c)
-        if os.path.exists(p):
-            paths.append(p)
-    pkg = os.path.join(d, name)
-    if os.path.isdir(pkg):
-        paths.append(pkg)
-    return paths
+    """定位资产的实际文件/目录路径（支持文件名与 manifest name）。"""
+    p = _asset_filepath(d, name, atype)
+    return [p] if p else []
 
 
 def cmd_remove(args) -> int:
@@ -590,7 +594,7 @@ def cmd_check(args) -> int:
             if not os.path.isdir(d):
                 continue
             for fname in sorted(os.listdir(d)):
-                if fname.startswith(".") or fname.endswith(".disabled"):
+                if fname.startswith(".") or fname == "__pycache__" or fname.endswith(".disabled"):
                     continue
                 fpath = os.path.join(d, fname)
                 if os.path.isfile(fpath) and (

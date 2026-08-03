@@ -55,6 +55,54 @@ def parse_fp_manifest(filepath: str) -> dict | None:
     return None
 
 
+# ── 工具语义名：兼容存量 PLUGIN_DEFINITION schema ────────────────
+
+_TOOL_DEF_VARS = ("PLUGIN_DEFINITION", "PLUGIN_DEFS", "TOOLS", "FUNCTIONS")
+
+
+def parse_tool_name(filepath: str) -> str | None:
+    """解析工具语义名：__fp__.name 优先，否则兼容存量 PLUGIN_DEFINITION。
+
+    存量工具（未迁移 __fp__）以 PLUGIN_DEFINITION = {"function": {"name": ...}}
+    或 PLUGIN_DEFS = [...] 声明语义名。同样 AST 字面量解析，不执行代码。
+    返回 None 表示无法解析（无 __fp__ 也无工具定义）。
+    """
+    m = parse_fp_manifest(filepath)
+    if m and isinstance(m.get("name"), str) and m["name"].strip():
+        return m["name"]
+    if not filepath.endswith(".py"):
+        return None
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            src = f.read()
+    except OSError:
+        return None
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        target = node.targets[0]
+        if not (isinstance(target, ast.Name) and target.id in _TOOL_DEF_VARS):
+            continue
+        try:
+            val = ast.literal_eval(node.value)
+        except (ValueError, SyntaxError):
+            continue
+        defs = val if isinstance(val, list) else [val]
+        for d in defs:
+            if not isinstance(d, dict):
+                continue
+            func = d.get("function", d)
+            if isinstance(func, dict):
+                n = func.get("name")
+                if isinstance(n, str) and n.strip():
+                    return n
+    return None
+
+
 # ── 记忆：front-matter 解析 ─────────────────────────────────────
 
 
