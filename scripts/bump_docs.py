@@ -114,9 +114,9 @@ def update_changelog(version: str, release_date: str) -> bool:
         if table_has_version:
             print(f"⚠️  CHANGELOG.md: 发布历史表格中版本 [{version}] 已存在，跳过")
         else:
-            # 在表格顶部插入新行
+            # 在表头与分隔行之后插入新行（新版本行位于表格数据区顶部）
             new_row = f"| {version} | {release_date} | 待补充 |\n"
-            lines.insert(table_start, new_row)
+            lines.insert(table_start + 2, new_row)
             content = "\n".join(lines)
             path.write_text(content, encoding="utf-8")
             print("✅ CHANGELOG.md: 已更新发布历史表格")

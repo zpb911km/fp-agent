@@ -2,12 +2,37 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/) 和 [Keep a Changelog](https://keepachangelog.com/) 规范。
 
-> **📌 版本号修正说明**
->
-> 此前版本号存在虚高（2.0.0/1.1.0/1.0.0 与实际功能成熟度不匹配）。
-> 现已统一修正为 `0.1.0`，与 `pyproject.toml` 保持一致。
-> 以下版本号保留原始记录以供追溯，实际发布包版本均为 `0.1.0`。
 
+## [0.1.12] — 2026-08-04
+
+### Added
+
+- **`fp ext` 扩展分发系统（阶段一）**: 新增 `new`/`init`/`promote`/`demote`/`share`/`remove`/`fetch`/`install`/`info`/`list` 全命令体系，资产全生命周期管理；单仓库模型——promote 复制快照、share 全权管理 public 仓库（#42f9ad2, #a2eea4e）
+- **promote/demote 移动模型 v3**: 分享=移动，全局单一版本（#b6d41f2）
+- **三来源资产扫描**: option 命令支持 fetched/public/private 三种来源，自动去重（#af85c2c）
+- **subagent 会话摘要与来源标记**: 子任务会话自动生成摘要并标记来源，支持 `/resume --main`（#d586b7f）
+- **自举手册 `docs/self`**: 新增 agent 自举索引，提示词升级为"通用问题解决者 / 眼光长远 / 合作者姿态"（#bdf02dd）
+- **文档同步门禁工具链**: 代码变更→文档跟进提醒（pre-commit 钩子 + skill 触发）+ 盲区审计 `--audit`（#86abc06, #bb1c965）
+- **防漂移测试**: 文档一致性校验测试纳入 CI 门禁（#a37ab86, #3c2e00e）
+- **fp ext 操作指南**: 新增完整使用文档（#adbe1db）
+
+### Changed
+
+- **fetch/install 两级抽象**: fetch 拉仓库扫描全部资产，install 提取资产本体（#693454f）
+- **终端输入历史脱离资产库**: 历史记录迁移至 `terminal/`，废弃 MEMORY_DIR（#7a2837b）
+- **默认 manifest 增加 license**: new/init 生成 GPL-3.0（copyleft 传染协议）声明（#9f88f55）
+- **DOC_RULES 精细化**: 变更类型分层 + 模块精准映射 + 消除冗余（#12aacb5）
+- **测试覆盖提升**: 修复过时断言，薄弱模块覆盖 41%→59%；pyright 60 错误清零（#2acd527, #5655d6f）
+- **文档一致性修正**: 会话管理 / 命令参考 / 资产分发文档同步至最新代码行为（#67e4c25, #12f984c）
+
+### Fixed
+
+- **remove 精准删除 fetched 资产**: 按 registry 删除本体 + 识别孤儿资产，不误伤同名 public/private（#3b45d47, #e2fd0fc）
+- **share 前置校验与幂等**: 资产须在 public + 分享仓库须有 fp.ext.json 清单 schema（#27834ef, #b469456）
+- **资产查找支持 manifest 语义名**: 修复 list 不过滤 `__pycache__`（#ba3d7f3）
+- **流式 usage 事件只发送一次**（#c5d88d0）
+- **bash 工具防孤儿进程泄漏**（#0e49dbc）
+- **ruff format 排除 markdown**: 统一本地与 CI 检查范围（#36c0e6b）
 
 ## [0.1.11] — 2026-07-31
 
@@ -302,10 +327,10 @@
 
 ## 发布历史
 
-| 0.1.11 | 2026-07-31 | rebrand→FP + fp docs 离线文档 + edit_file v3 + WebUI 重构与安全修复 + 终端显示升级 |
-
 | 版本 | 日期 | 摘要 |
 |------|------|------|
+| 0.1.12 | 2026-08-04 | fp ext 扩展分发系统 + 文档同步门禁 + 测试覆盖提升 + 多项修复 |
+| 0.1.11 | 2026-07-31 | rebrand→FP + fp docs 离线文档 + edit_file v3 + WebUI 重构与安全修复 + 终端显示升级 |
 | 0.1.10 | 2026-07-27 | 端到端流式输出 + fp --update + edit_file v2 + 终端权责重划 |
 | 0.1.9 | 2026-07-14 | Token 用量追踪 + 角色系统 + 热重载引擎 + 工具并行 |
 | 0.1.8 | 2026-06-26 | 记忆系统重构 + shortcircuit 提示词重写 + 命令输出统一 |
@@ -319,5 +344,3 @@
 | 1.1.0 | 2026-06-01 | Subagent 派遣系统 |
 | 1.0.0 | 2026-05-28 | 自实现 LLM 客户端 + 显示模块 |
 | 0.1.0 | 2026-05-27 | 初始版本 |
-
-> 注：以上版本号为迭代记录标识，实际发布包版本统一为 `0.1.0`（详见顶部说明）。
