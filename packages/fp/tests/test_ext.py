@@ -274,6 +274,33 @@ class TestReviewGate:
         assert not os.path.exists(dest)
         assert "tools/hello" not in load_registry()["assets"]
 
+    def test_remove_fetched_not_touch_public(self, tmp_path):
+        """fetched 与 public 同名时，remove 只删 fetched，不误伤 public（_find_asset 优先级陷阱回归防护）。"""
+        # 先 promote 一个到 public
+        pub_root = source_root("public")
+        os.makedirs(pub_root, exist_ok=True)
+        with open(os.path.join(pub_root, "fp.ext.json"), "w", encoding="utf-8") as f:
+            f.write('{"schema": 1, "author": "t", "license": "MIT", "assets": {}}')
+        _run("new", "commands", "same")
+        assert _run("promote", "same") == 0
+        assert os.path.exists(os.path.join(source_dir("public", "commands"), "same.py"))
+        # 再从本地包 fetch+install 一个同名 fetched 资产
+        src = tmp_path / "same_pkg"
+        src.mkdir()
+        (src / "same.py").write_text(
+            '__fp__ = {"name": "same", "version": "0.1.0", "type": "commands"}\n\ndef x():\n    pass\n',
+            encoding="utf-8",
+        )
+        _run("fetch", str(src))
+        _run("review", "same", "--approve", "--note", "OK")
+        _run("install", "same")
+        assert os.path.isdir(os.path.join(source_dir("fetched", "commands"), "same"))
+        # remove → 只删 fetched，public 保留
+        assert _run("remove", "same") == 0
+        assert not os.path.exists(os.path.join(source_dir("fetched", "commands"), "same"))
+        assert os.path.exists(os.path.join(source_dir("public", "commands"), "same.py"))
+        assert "commands/same" not in load_registry()["assets"]
+
     def test_update_remote_asset_removed(self, tmp_path):
         """update：远程仓库已移除该资产 → 拒绝。"""
         src = self._make_local_pkg(tmp_path)

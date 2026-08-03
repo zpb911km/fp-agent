@@ -746,22 +746,51 @@ def _asset_paths(d: str, name: str, atype: str) -> list[str]:
 
 
 def cmd_remove(args) -> int:
-    """删除资产（进 .trash 可恢复）。未安装的待审查资产直接清理 staging。"""
-    name = args.name
+    """删除资产（进 .trash 可恢复）。
 
-    # 未安装的 pending/rejected 资产 → 清理 staging + registry
+    优先级语义：
+      - fetched 已安装（registry active/installed_at）：删 fetched 本体 + registry，
+        **不碰** public/private 同名资产（_find_asset 优先级会误伤 public）
+      - 未安装待审查：仅清 registry（共享 staging 保留，供同仓库其他资产继续审查）
+      - private/public 资产：删文件/目录 + registry + 自动 commit
+    """
+    name = args.name
     found = _find_reg_entry_by_name(name)
     if found:
         key, entry = found
-        if entry.get("status") in ("pending_review", "rejected") and not entry.get("installed_at"):
+        status = entry.get("status")
+        installed_at = entry.get("installed_at")
+        if status in ("pending_review", "rejected") and not installed_at:
+            # 未安装待审查：仅移除 registry（staging 可能被同仓库其他资产共享，无引用才删）
             staging = entry.get("staging")
             if staging and os.path.isdir(staging):
-                shutil.rmtree(staging, ignore_errors=True)
+                others = [v for k2, v in load_registry()["assets"].items() if k2 != key and v.get("staging") == staging]
+                if not others:
+                    shutil.rmtree(staging, ignore_errors=True)
             remove_asset(key)
             append_audit("remove", key, note="清理未安装的待审查资产")
             print(f"🗑  已清理待审查资产: {key}")
             return 0
+        if installed_at:
+            # fetched 已安装：删本体 + registry（同名 public/private 不受影响）
+            atype = entry.get("type") or key.split("/", 1)[0]
+            d = source_dir("fetched", atype)
+            paths = _asset_paths(d, name, atype)
+            if not paths:
+                remove_asset(key)
+                append_audit("remove", key, note="fetched 本体缺失，仅清理 registry")
+                print(f"🗑  已清理 registry（fetched 本体缺失）: {key}")
+                return 0
+            trash = os.path.join(trash_dir(), f"fetched_{atype}_{name}")
+            os.makedirs(trash, exist_ok=True)
+            for p in paths:
+                shutil.move(p, os.path.join(trash, os.path.basename(p)))
+            remove_asset(key)
+            append_audit("remove", key)
+            print(f"🗑  已移入回收站: {_asset_display('fetched', atype, name)}")
+            return 0
 
+    # 无 registry 或非 fetched → private/public 资产删除
     found = _find_asset(name)
     if not found:
         print(f"❌ 未找到资产: {name}")
