@@ -24,3 +24,7 @@ known-first-party = ["fp_core", "fp_cli", "fp_webui", "fp_acp", "fp"]
 
 [tool.ruff.format]
 preview = true
+# markdown 里的代码块是教学示例（对齐注释/多行字典是有意排版），
+# 不参与自动格式化；本地 pre-commit 的 ruff-format 也只作用于 .py。
+# 若未来希望 md 代码块也统一格式，删除此 exclude 即可。
+exclude = ["*.md"]
