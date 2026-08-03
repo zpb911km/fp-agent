@@ -72,7 +72,9 @@ async def execute(params: dict[str, Any]) -> str:
         )
 
     # ── 确定物理目录 ──
-    memory_dir = config.MEMORY_DIR if root == "~" else os.path.join(os.getcwd(), config.MEMORY_DIR_LOCAL)
+    # 全局（root="~"）保存到三来源最高优先级 private/memory；
+    # 本地（root="."）保存到项目内 .fp/memory
+    memory_dir = config.user_dirs("memory")[-1] if root == "~" else os.path.join(os.getcwd(), config.MEMORY_DIR_LOCAL)
 
     # ── 安全文件名 ──
     safe_name = name.replace(" ", "_").replace("/", "_")

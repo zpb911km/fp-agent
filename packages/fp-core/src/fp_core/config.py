@@ -172,6 +172,34 @@ PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 # ── 记忆系统禁用分类（不可作为 category 使用） ─────────────────────
 FORBIDDEN_CATEGORIES = {"core", "misc", "other", "uncategorized"}
 
+# ═══════════════════════════════════════════════════════════════
+# 三来源目录（ext 资产分发系统）
+# ═══════════════════════════════════════════════════════════════
+# 来源优先级（低→高）：fetched → public → private。
+# user_dirs() 返回顺序即加载顺序：后加载覆盖先加载（private 胜出），
+# 加载器遇同名冲突时需打警告。
+EXT_SOURCES = ("fetched", "public", "private")
+EXT_LAYOUTS = {
+    "tools": ("tools", "extensions"),
+    "commands": ("commands",),
+    "plugins": ("plugins",),
+    "memory": ("memory",),
+}
+
+
+def user_dirs(kind: str) -> list[str]:
+    """返回某资产类型的三来源目录（优先级低→高，加载顺序 fetched→public→private）。
+
+    Args:
+        kind: "tools" | "commands" | "plugins" | "memory"
+
+    Returns:
+        [fetched_dir, public_dir, private_dir]（均基于 {DATA} 根）
+    """
+    if kind not in EXT_LAYOUTS:
+        raise ValueError(f"未知资产类型: {kind}（可选 {list(EXT_LAYOUTS)}）")
+    return [os.path.join(_FP_DATA_DIR, s, *EXT_LAYOUTS[kind]) for s in EXT_SOURCES]
+
 
 # ═══════════════════════════════════════════════════════════════
 # 配置检查

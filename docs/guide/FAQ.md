@@ -171,7 +171,7 @@ pip install --upgrade prompt_toolkit
 | 数据 | 路径 | 说明 |
 |------|------|------|
 | 会话记录 | `~/.local/share/fp/sessions/` | 所有历史对话 |
-| 长期记忆 | `~/.local/share/fp/memory/` | 跨会话持久化记忆 |
+| 长期记忆 | `~/.local/share/fp/private/memory/`（另 public/fetched 来源） | 跨会话持久化记忆 |
 | 任务状态 | `~/.local/share/fp/tasks.json` | 任务管理系统状态 |
 
 **一键备份**

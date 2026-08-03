@@ -94,6 +94,8 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
     ),
     ("packages/fp/src/fp/docs.py", ["docs/dev/项目概览.md"], ["docs/guide/CLI入门.md", "docs/self/README.md"]),
     ("packages/fp/src/fp/version_checker.py", ["docs/dev/项目概览.md"], []),
+    # fp ext 扩展分发系统（新增模块）
+    ("packages/fp/src/fp/ext*.py", ["docs/dev/资产分发系统.md", "docs/dev/项目概览.md"], ["docs/self/扩展工具.md"]),
     # 终端界面（src/ 一条即覆盖子目录；build/ 不匹配 src 前缀）
     ("packages/fp-terminal/src/*.py", ["docs/dev/显示层.md"], ["docs/guide/CLI入门.md"]),
     # WebUI

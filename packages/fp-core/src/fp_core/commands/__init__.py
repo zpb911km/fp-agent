@@ -19,7 +19,6 @@ import os
 from types import ModuleType
 
 from fp_core.logger import get_logger
-from fp_core.platform_utils import get_data_dir
 
 # 缓存：命令名 → 模块对象
 _commands: dict[str, ModuleType] = {}
@@ -39,16 +38,19 @@ class CommandModule:
 
 
 def _discover_commands():
-    """扫描并注册所有命令模块（内置 → 用户，同名覆盖）"""
+    """扫描并注册所有命令模块（内置 → 三来源，同名覆盖 + 警告）"""
     global _commands
     _commands = {}
 
     builtin_dir = os.path.dirname(os.path.abspath(__file__))
     _scan_dir(builtin_dir, "fp_core.commands")
 
-    # 用户命令目录（跨平台：Linux ~/.local/share/fp/commands, Windows %LOCALAPPDATA%/fp/commands）
-    user_dir = os.path.join(get_data_dir(), "commands")
-    _scan_dir(user_dir)  # 直接 import 路径，通过 sys.path 解析
+    # 三来源用户命令目录（fetched → public → private，后加载覆盖先加载 + 警告）
+    # 优先级：private > public > fetched（_scan_dir 内已有重复覆盖警告）
+    from fp_core.config import user_dirs
+
+    for user_dir in user_dirs("commands"):
+        _scan_dir(user_dir)  # 直接 import 路径，通过 sys.path 解析
 
 
 def _scan_dir(directory: str, package_prefix: str | None = None):

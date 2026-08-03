@@ -33,7 +33,6 @@ from fp_core.core.state import State
 from fp_core.core.token_tracker import TokenTracker
 from fp_core.core.tool_executor import ToolExecutor
 from fp_core.logger import get_logger
-from fp_core.platform_utils import get_data_dir
 from fp_core.plugins.base.plugin import PluginRegistry
 
 # ── 上下文 local IO 通道（防并发竞态） ─────────────────
@@ -205,10 +204,13 @@ class Agent:
             plugin_dir=os.path.normpath(_builtin_plugin_dir),
         )
 
-        # 用户插件目录（跨平台，同名覆盖）
-        _user_plugin_dir = os.path.join(get_data_dir(), "plugins")
-        if os.path.isdir(_user_plugin_dir):
-            self.plugins.scan(_user_plugin_dir)
+        # 三来源用户插件目录（fetched → public → private，后扫描覆盖先扫描 + 警告）
+        # 优先级：private > public > fetched（PluginRegistry.scan 内同名覆盖会打警告）
+        from fp_core.config import user_dirs
+
+        for _user_plugin_dir in user_dirs("plugins"):
+            if os.path.isdir(_user_plugin_dir):
+                self.plugins.scan(_user_plugin_dir)
 
         # ── 核心状态访问接口（命令/插件的「大通道」，公开） ──
         self.state = State(

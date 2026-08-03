@@ -50,10 +50,22 @@ def main():
     else:
         is_docs = False
 
+    # ── 子命令：fp ext — 扩展资产分发（纯 CLI 管道，不触发更新检查） ──
+    if rest[:1] == ["ext"]:
+        rest = rest[1:]
+        from fp.ext import ext_main
+
+        sys.exit(ext_main(rest))
+
     if args.docs or is_docs:
         from fp.docs import open_docs
 
         sys.exit(open_docs(*rest))
+
+    # ── 存量迁移（幂等）：core 只认三目录，老结构自动并入 private/ ──
+    from fp.ext_migrate import ensure as ext_migrate_ensure
+
+    ext_migrate_ensure()
 
     from fp.version_checker import check_updates_background
 

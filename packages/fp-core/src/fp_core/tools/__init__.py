@@ -19,7 +19,6 @@ from collections.abc import Callable
 from typing import Any
 
 from fp_core.logger import get_logger
-from fp_core.platform_utils import get_data_dir
 
 
 class ToolRegistry:
@@ -40,17 +39,16 @@ class ToolRegistry:
         self._core_executor = execute_core_tool
 
     def _load_plugins(self):
-        """自动扫描并加载插件（内置 → 用户，同名覆盖）"""
+        """自动扫描并加载插件（内置 → 三来源，同名覆盖 + 警告）"""
         builtin_dir = os.path.join(os.path.dirname(__file__), "extensions")
         self._load_from_dir(builtin_dir, "fp_core.tools.extensions")
 
-        # 用户工具目录（跨平台：Linux ~/.local/share/fp/tools/extensions, Windows %LOCALAPPDATA%/fp/tools/extensions）
-        # 向后兼容：同时扫描旧目录 ~/.local/share/fp/tools/plugins/
-        user_dir = os.path.join(get_data_dir(), "tools", "extensions")
-        self._load_from_dir(user_dir)
-        legacy_dir = os.path.join(get_data_dir(), "tools", "plugins")
-        if legacy_dir != user_dir and os.path.isdir(legacy_dir):
-            self._load_from_dir(legacy_dir)
+        # 三来源用户工具目录（fetched → public → private，后加载覆盖先加载 + 警告）
+        # 优先级：private > public > fetched（_load_from_dir 内同名覆盖打警告）
+        from fp_core.config import user_dirs
+
+        for user_dir in user_dirs("tools"):
+            self._load_from_dir(user_dir)
 
     def _load_from_dir(self, directory: str, package_prefix: str | None = None):
         """从指定目录加载插件工具"""
@@ -62,6 +60,10 @@ class ToolRegistry:
                 continue
 
             plugin_name = fname[:-3]
+
+            # 同名覆盖警告（三来源后加载覆盖先加载；内置被用户覆盖也在此提醒）
+            if any(k == plugin_name or k.startswith(f"{plugin_name}/") for k in self._plugins):
+                get_logger().warning(f"[tools] ⚠️ 同名工具插件覆盖: {plugin_name}")
 
             try:
                 if package_prefix:

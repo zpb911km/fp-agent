@@ -83,7 +83,7 @@ def _parse_frontmatter(content: str) -> dict:
     return result
 
 
-def _list_memories(memory_dir: str) -> list[dict]:
+def _list_memories(memory_dir: str, root_label: str = ".") -> list[dict]:
     """列出目录下所有记忆的元信息"""
     if not os.path.isdir(memory_dir):
         return []
@@ -111,10 +111,24 @@ def _list_memories(memory_dir: str) -> list[dict]:
             "description": description,
             "path": fpath,
             "content": content,
-            "root": "~" if memory_dir == config.MEMORY_DIR else ".",
+            "root": root_label,
         })
 
     return memories
+
+
+def _list_global_memories() -> list[dict]:
+    """合并三来源全局记忆（fetched → public → private，同名 private 胜出）。
+
+    全局来源的 root 统一标为 "~"；项目内本地记忆保持 "."。
+    """
+    from fp_core.config import user_dirs
+
+    merged: dict[str, dict] = {}
+    for d in user_dirs("memory"):
+        for m in _list_memories(d, root_label="~"):
+            merged[m["name"]] = m  # 后加载（更高优先级）覆盖
+    return list(merged.values())
 
 
 def _parse_memory_body(content: str) -> str:
@@ -198,8 +212,8 @@ async def execute(params: dict[str, Any]) -> str:
     # 确认目录存在
     os.makedirs(config.MEMORY_DIR, exist_ok=True)
 
-    # 读取两棵树的记忆
-    global_memories = await loop.run_in_executor(None, _list_memories, config.MEMORY_DIR)
+    # 读取两棵树的记忆（全局 = 三来源合并，本地 = 项目内 .fp/memory）
+    global_memories = await loop.run_in_executor(None, _list_global_memories)
 
     local_dir = os.path.join(os.getcwd(), config.MEMORY_DIR_LOCAL)
     local_memories = await loop.run_in_executor(None, _list_memories, local_dir)

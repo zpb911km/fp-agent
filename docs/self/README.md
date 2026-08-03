@@ -49,13 +49,25 @@
 | 工具 | `fp_core/tools/__init__.py` → `ToolRegistry._load_from_dir()` | 内置 `fp_core/tools/extensions/`（memory_read、subagent、python…） | [扩展工具.md](扩展工具.md) |
 | 命令 | `fp_core/commands/__init__.py` → `_discover_commands()` | 内置 `fp_core/commands/`（reload.py、session.py、history.py…） | [扩展命令.md](扩展命令.md) |
 | 插件 | `fp_core/plugins/base/plugin.py` → `PluginRegistry.scan()` | 内置 `fp_core/plugins/`（shortcircuit/、task_system/ 目录插件） | [扩展插件.md](扩展插件.md) |
-| 记忆 | 工具 `memory_save` / `memory_read`（`fp_core/tools/extensions/memory_*_plugin.py`） | 已安装用户目录 `{DATA}/memory/`（本机现成 .md） | [技能与记忆.md](技能与记忆.md) |
+| 记忆 | 工具 `memory_save` / `memory_read`（`fp_core/tools/extensions/memory_*_plugin.py`） | 三来源 `{DATA}/{fetched,public,private}/memory/` + 项目内 `.fp/memory/` | [技能与记忆.md](技能与记忆.md) |
 
 **用户数据目录（`{DATA}`）定位：**
 ```bash
 python -c "from fp_core.platform_utils import get_data_dir; print(get_data_dir())"
 # Linux: ~/.local/share/fp/   Windows: %LOCALAPPDATA%/fp/   macOS: ~/Library/Application Support/fp/
 ```
+
+**三来源目录（扩展资产分发，阶段一已落地）：**
+```
+{DATA}/
+├── fetched/   外来资产（只读，来自 fp ext fetch）
+├── public/    本地公开资产（git 管理，可 promote 分享）
+└── private/   本地私有资产（git 管理，禁 remote）
+    每个来源内部再按类型分：tools/extensions/  commands/  plugins/  memory/
+```
+优先级：**private > public > fetched**（同名后加载覆盖 + 警告）。自写扩展放 `private/`。
+CLI：`fp ext new|list|info|promote|demote|check|migrate...`（详见 `docs/dev/资产分发系统.md`）。
+> ⚠️ **安装审查约定**：`fp ext fetch` 只是拉取+静态扫描，**落地前必须在会话中读暂存区源码做语义审查**（`read_file`），确认无风险后由用户拍板、你操作 `fp ext install`。
 
 ---
 
@@ -86,7 +98,7 @@ python -c "from fp_core.platform_utils import get_data_dir; print(get_data_dir()
 ```bash
 python3 - <<'PY'
 import importlib.util
-p = "{DATA}/tools/extensions/你的工具_plugin.py"  # ← {DATA}=get_data_dir() 输出
+p = "{DATA}/private/tools/extensions/你的工具_plugin.py"  # ← {DATA}=get_data_dir() 输出（默认自用目录）
 spec = importlib.util.spec_from_file_location("test", p)
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)

@@ -7,7 +7,6 @@
 """
 
 import os
-from unittest.mock import patch
 
 import pytest
 
@@ -18,16 +17,20 @@ from fp_core import config
 
 @pytest.fixture
 def memory_env(tmp_path, monkeypatch):
-    """隔离记忆目录"""
-    global_dir = tmp_path / "global_memory"
-    local_dir = tmp_path / "local_memory"
-    monkeypatch.setattr(config, "MEMORY_DIR", str(global_dir))
+    """隔离记忆目录（三来源模型：private/public/fetched + 项目内）"""
+    data_dir = tmp_path / "fpdata"
+    monkeypatch.setattr(config, "_FP_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(config, "MEMORY_DIR", str(data_dir / "memory"))  # 兼容保留（旧引用）
     monkeypatch.setattr(config, "MEMORY_DIR_LOCAL", os.path.join(".fp", "memory"))
+    # 隔离 cwd：避免读到真实项目的 .fp/memory（默认空，_set_local 可切换）
+    monkeypatch.chdir(tmp_path)
 
     def _set_local(cwd: str):
         monkeypatch.chdir(cwd)
 
-    return {"global": str(global_dir), "local": str(local_dir), "set_local": _set_local}
+    # 全局记忆读写最高优先级来源 = private/memory（user_dirs("memory")[-1]）
+    private_mem = os.path.join(str(data_dir), "private", "memory")
+    return {"global": private_mem, "local": str(data_dir / "local_memory"), "set_local": _set_local}
 
 
 @pytest.fixture
@@ -291,10 +294,10 @@ class TestMemoryReadExecute:
         assert "b — 无关的" not in result
 
     @pytest.mark.asyncio
-    async def test_read_by_query_multiple_keywords_and(self):
-        """多关键词 AND 匹配"""
-        with patch.object(config, "MEMORY_DIR", "/tmp/nonexistent_fp_test"):
-            result = await mem_read.execute({"query": "foo bar"})
+    async def test_read_by_query_multiple_keywords_and(self, tmp_path, monkeypatch):
+        """多关键词 AND 匹配（隔离三来源环境确保空库）"""
+        monkeypatch.setattr(config, "_FP_DATA_DIR", str(tmp_path))
+        result = await mem_read.execute({"query": "foo bar"})
         assert "无匹配" in result
 
     @pytest.mark.asyncio

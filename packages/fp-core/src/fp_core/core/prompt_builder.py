@@ -70,10 +70,10 @@ class PromptBuilder:
         return result
 
     def _build_memory_index(self) -> str:
-        """扫描两棵记忆目录树，返回分类分组的索引（用于 system prompt）"""
+        """扫描记忆目录树（三来源全局 + 项目内本地），返回分类分组的索引（用于 system prompt）"""
         from fp_core import config
+        from fp_core.config import user_dirs
 
-        global_dir = config.MEMORY_DIR
         local_dir = os.path.join(os.getcwd(), config.MEMORY_DIR_LOCAL)
 
         def _scan_dir(memory_dir: str) -> list[dict]:
@@ -96,7 +96,12 @@ class PromptBuilder:
                     results.append({"name": mem_name, "type": mem_type or "uncategorized"})
             return results
 
-        global_memories = _scan_dir(global_dir)
+        # 三来源全局记忆（fetched → public → private，同名 private 胜出）
+        global_by_name: dict[str, dict] = {}
+        for d in user_dirs("memory"):
+            for m in _scan_dir(d):
+                global_by_name[m["name"]] = m  # 后加载（更高优先级）覆盖
+        global_memories = list(global_by_name.values())
         local_memories = _scan_dir(local_dir)
 
         total = len(global_memories) + len(local_memories)

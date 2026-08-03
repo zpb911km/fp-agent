@@ -239,10 +239,10 @@ class PluginRegistry:
                 continue
 
             if instance.name in self._plugins:
-                # 已有同名插件 → 卸载旧的，用用户版本替换
+                # 已有同名插件 → 卸载旧的，用用户版本替换（警告：重名覆盖）
                 old = self._plugins[instance.name]
                 self.unregister(old.name)
-                get_logger().info(f"[PluginRegistry] 覆盖插件: {instance.name}")
+                get_logger().warning(f"[PluginRegistry] ⚠️ 同名插件覆盖: {instance.name}")
 
             self._register_instance(instance)
             found = True
