@@ -231,19 +231,23 @@ class TestCli:
         assert _run("info", "nonexistent") == 1
 
     def test_promote_demote_roundtrip(self):
-        """单仓库模型：promote 复制快照到 public/（private 原件保留）；demote 收回 public/。"""
+        """分享=移动：promote 移入 public（private 不留）；demote 移回 private（public 不留）。"""
+        pub_root = source_root("public")
+        os.makedirs(pub_root, exist_ok=True)
+        with open(os.path.join(pub_root, "fp.ext.json"), "w", encoding="utf-8") as f:
+            f.write('{"schema": 1, "author": "t", "license": "MIT", "assets": {}}')
         _run("new", "commands", "greet")
-        # promote：复制，private 原件保留，public 出现快照
+        # promote：移动，private 消失，public 出现
         assert _run("promote", "greet") == 0
-        assert os.path.exists(source_dir("private", "commands") + "/greet.py")
+        assert not os.path.exists(source_dir("private", "commands") + "/greet.py")
         assert os.path.exists(source_dir("public", "commands") + "/greet.py")
-        # demote：public 收回（进 .trash），private 原件仍保留
+        # demote：移回 private，public 消失
         assert _run("demote", "greet") == 0
         assert os.path.exists(source_dir("private", "commands") + "/greet.py")
         assert not os.path.exists(source_dir("public", "commands") + "/greet.py")
 
     def test_promote_registers_in_index(self, tmp_path):
-        """promote 把资产登记进 public 库清单（fp.ext.json 存在时）。"""
+        """promote 前置要求清单存在，并移动资产 + 登记进 public 库清单。"""
         pub_root = source_root("public")
         os.makedirs(pub_root, exist_ok=True)
         with open(os.path.join(pub_root, "fp.ext.json"), "w", encoding="utf-8") as f:
@@ -255,11 +259,24 @@ class TestCli:
         with open(os.path.join(pub_root, "fp.ext.json"), encoding="utf-8") as f:
             idx = json.loads(f.read())
         assert "commands/greet" in idx["assets"]
-        # 幂等：再次 promote 不重复登记
+        # 移动模型：promote 后 private 已无资产 → 再次 promote 拒绝（无副本可再移）
+        assert _run("promote", "greet") == 1
+        assert not os.path.exists(source_dir("private", "commands") + "/greet.py")
+
+    def test_promote_requires_index(self):
+        """移动模型：promote 前置要求 public 库清单存在（缺失则拒绝，不留悬空资产）。"""
+        pub_root = source_root("public")
+        os.makedirs(pub_root, exist_ok=True)
+        _run("new", "commands", "greet")
+        # 无 fp.ext.json → promote 拒绝（资产保持 private）
+        assert _run("promote", "greet") == 1
+        assert os.path.exists(source_dir("private", "commands") + "/greet.py")
+        # 建清单 → promote 成功（移动 + 登记）
+        with open(os.path.join(pub_root, "fp.ext.json"), "w", encoding="utf-8") as f:
+            f.write('{"schema": 1, "author": "t", "license": "MIT", "assets": {}}')
         assert _run("promote", "greet") == 0
-        with open(os.path.join(pub_root, "fp.ext.json"), encoding="utf-8") as f:
-            idx2 = json.loads(f.read())
-        assert list(idx2["assets"]) == ["commands/greet"]
+        assert not os.path.exists(source_dir("private", "commands") + "/greet.py")
+        assert os.path.exists(source_dir("public", "commands") + "/greet.py")
 
     def test_promote_fetched_rejected(self):
         """fetched 资产不能 promote（防再分发）。"""
@@ -286,14 +303,13 @@ class TestCli:
         return pub_root
 
     def test_share_requires_index(self, tmp_path):
-        """share 前置：public 仓库根目录必须已有 fp.ext.json，缺则拒绝（不自动创建）。"""
+        """share 前置：public 仓库根目录必须已有 fp.ext.json。promote 前置同样要求清单存在。"""
         pub_root = source_root("public")
         os.makedirs(pub_root, exist_ok=True)
         _run("new", "commands", "greet")
-        assert _run("promote", "greet") == 0
-        # 无 fp.ext.json → 拒绝（promote 不自动创建清单，资产也未登记）
-        assert _run("share") == 1
-        # 手动创建清单 → 补 promote（登记进清单）→ 放行
+        # 无 fp.ext.json → promote 拒绝（移动模型不留悬空资产）
+        assert _run("promote", "greet") == 1
+        # 建清单 → promote（移动+登记）→ share 放行
         with open(os.path.join(pub_root, "fp.ext.json"), "w", encoding="utf-8") as f:
             f.write('{"schema": 1, "author": "tester", "license": "MIT", "assets": {}}')
         assert _run("promote", "greet") == 0
@@ -379,6 +395,26 @@ class TestCli:
         with open(idx_path, "w", encoding="utf-8") as f:
             f.write(json.dumps(idx, indent=2))
         assert _run("share") == 1
+
+    def test_share_code_scan_force_passes(self, tmp_path):
+        """--force：跳过静态扫描拦截（清单/自描述/孤儿校验仍执行）。"""
+        self._setup_public_with_asset(tmp_path)
+        pub_cmd = source_dir("public", "commands")
+        with open(os.path.join(pub_cmd, "evil.py"), "w", encoding="utf-8") as f:
+            f.write('__fp__ = {"name": "evil", "version": "0.1.0", "description": "", "type": "commands"}\n')
+            f.write('import os\nos.system("rm -rf /")\n')
+        pub_root = source_root("public")
+        import json
+
+        idx_path = os.path.join(pub_root, "fp.ext.json")
+        with open(idx_path, encoding="utf-8") as f:
+            idx = json.loads(f.read())
+        idx["assets"]["commands/evil"] = {"source": "evil", "updated_at": "x"}
+        with open(idx_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(idx, indent=2))
+        # 无 --force 拒绝，有 --force 放行
+        assert _run("share") == 1
+        assert _run("share", "--force") == 0
 
     def test_share_idempotent(self, tmp_path, capsys):
         """share 幂等：内容无变化再次 share → 通过（commit 静默跳过），无重复提交。"""

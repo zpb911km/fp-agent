@@ -76,25 +76,6 @@ def _sha256(path: str) -> str:
     return h.hexdigest()
 
 
-def _same_content(a: str, b: str) -> bool:
-    """文件/目录内容是否一致（递归 sha256 比较）。"""
-    if os.path.isfile(a) and os.path.isfile(b):
-        return _sha256(a) == _sha256(b)
-    if os.path.isdir(a) and os.path.isdir(b):
-        for root, _dirs, files in os.walk(a):
-            rel = os.path.relpath(root, a)
-            bdir = b if rel == "." else os.path.join(b, rel)
-            if not os.path.isdir(bdir):
-                return False
-            for fn in files:
-                if not os.path.isfile(os.path.join(bdir, fn)):
-                    return False
-                if _sha256(os.path.join(root, fn)) != _sha256(os.path.join(bdir, fn)):
-                    return False
-        return True
-    return False
-
-
 def _is_git_url(src: str) -> bool:
     return src.startswith(("http://", "https://", "git@", "ssh://")) or src.endswith(".git")
 
@@ -529,6 +510,7 @@ def cmd_install(args) -> int:
     append_audit("install", f"{atype}/{dest_name}", origin=source_origin)
     print(f"✅ 已安装: {_asset_display('fetched', atype, dest_name)}")
     print(f"   注册表: {atype}/{dest_name} [active]")
+    print("🔁 提示: 加载器在会话启动时扫描资产，新会话或 /reload 后生效")
     return 0
 
 
@@ -1024,10 +1006,11 @@ def cmd_init(args) -> int:
 
 
 def cmd_promote(args) -> int:
-    """私有 → 公开（复制快照到 public/ + 隐私扫描 + 登记清单 + 单仓 commit）。
+    """私有 → 公开（移动资产到 public/ + 隐私扫描 + 登记清单 + 双仓 commit）。
 
-    单仓库模型：private 是工作区/事实源，public 是发布快照（整个仓库即分享仓库）。
-    promote = 把资产快照同步进 public/，private 原件保留。
+    分享=移动：private 与 public 各保持单一版本，杜绝多重副本失同步。
+    promote 把资产从 private/ 移入 public/（private 不再保留），
+    public 即分享仓库，整个仓库可 share/push。
     """
     name = args.name
     found = _find_asset(name)
@@ -1037,6 +1020,19 @@ def cmd_promote(args) -> int:
     source, atype = found
     src_dir = source_dir("private", atype)
     dest_dir = source_dir("public", atype)
+
+    # 前置：public 库清单必须存在（移动模型下 promote 即"移动+登记"原子操作；
+    # 清单缺失则资产移走后无登记成孤儿，且无法再 promote 补救——资产已不在 private）
+    if _load_public_index() is None:
+        print(f"❌ public 仓库缺少库级清单 {SHARE_INDEX}（位于 {source_root('public')}/）。")
+        print("   移动前请先创建（声明来源与许可）：")
+        print("   {")
+        print('     "schema": 1,')
+        print('     "author": "<你的名字>",')
+        print('     "license": "MIT",')
+        print('     "assets": {}')
+        print("   }")
+        return 1
     os.makedirs(dest_dir, exist_ok=True)
 
     # 定位资产路径
@@ -1060,51 +1056,38 @@ def cmd_promote(args) -> int:
             return 1
         print("⚠️  --force：忽略隐私风险继续")
 
-    # 复制快照到 public/（幂等：内容一致跳过；目标已存在则覆盖更新）
-    changed = False
+    # 移动资产到 public/（分享=移动；目标已存在则先移除旧版再移入，保证单版本）
     for p in paths:
         dest = os.path.join(dest_dir, os.path.basename(p))
-        if os.path.exists(dest) and _same_content(p, dest):
-            continue
-        if os.path.isdir(p):
-            shutil.copytree(p, dest, dirs_exist_ok=True)
-        else:
-            shutil.copy2(p, dest)
-        changed = True
+        if os.path.exists(dest):
+            if os.path.isdir(dest):
+                shutil.rmtree(dest, ignore_errors=True)
+            else:
+                os.unlink(dest)
+        shutil.move(p, dest)
 
-    # 登记进 public 库清单（清单不存在则提示初始化，不自动创建）
-    registered = _register_asset_in_index(atype, name)
-    if not registered and _load_public_index() is None:
-        print(f"⚠️  public 仓库尚无库级清单 {SHARE_INDEX}（位于 {source_root('public')}/）。")
-        print("   分享前请补充（声明来源与许可）：")
-        print("   {")
-        print('     "schema": 1,')
-        print('     "author": "<你的名字>",')
-        print('     "license": "MIT",')
-        print('     "assets": {}')
-        print("   }")
+    # 登记进 public 库清单（清单已在前置校验存在；登记必然发生，不留悬空资产）
+    _register_asset_in_index(atype, name)
 
-    # git：public 仓库提交（单仓库模型下 public 即分享仓库）
+    # git：private 移出 + public 移入，双仓各自提交
+    ensure_repo(source_root("private"))
+    commit_all(source_root("private"), f"promote {atype}/{name}: moved to public")
     ensure_repo(source_root("public"))
     commit_all(source_root("public"), f"promote {atype}/{name}")
 
     append_audit("promote", f"{atype}/{name}")
-    if changed:
-        print(f"✅ 已公开（快照同步）: {_asset_display('public', atype, name)}")
-    else:
-        print(f"✅ 已公开（内容无变化）: {_asset_display('public', atype, name)}")
-    print(f"   private 原件保留: {_asset_display('private', atype, name)}")
+    print(f"✅ 已公开（移动）: {_asset_display('public', atype, name)}")
+    print(f"   private 已移出（单一版本，无副本）: {_asset_display('private', atype, name)}")
     print("   下一步：fp ext share 校验并发布 public 仓库")
     return 0
 
 
 def cmd_demote(args) -> int:
-    """公开 → 私有（从 public/ 收回发布，private 原件保留）。
+    """公开 → 私有（把资产从 public/ 移回 private/）。
 
-    单仓库模型：promote 是复制，demote 只移除 public/ 发布快照（进 .trash 可恢复），
-    并同步移除库清单登记；private 工作区不受影响。
-    注意：promote 后同名资产在 private 与 public 同时存在，这里**只查 public**，
-    不能走 _find_asset（默认优先 private）。
+    分享=移动：demote 是 promote 的逆操作——从 public 移回 private，
+    同步移除库清单登记，双仓各自 commit。不产生副本，不留 .trash。
+    注意：这里**只查 public**，不能走 _find_asset（默认优先 private）。
     """
     name = args.name
     atype = None
@@ -1116,34 +1099,35 @@ def cmd_demote(args) -> int:
         print(f"❌ 资产不在 public/ 中: {name}（demote 仅对公开资产开放）")
         return 1
     src_dir = source_dir("public", atype)
+    dest_dir = source_dir("private", atype)
+    os.makedirs(dest_dir, exist_ok=True)
 
     paths = _asset_paths(src_dir, name, atype)
     if not paths:
         print(f"❌ 未找到 {name} 的实际文件")
         return 1
 
-    # 移出 public → .trash（可恢复；git 历史仍在）
-    trash = os.path.join(trash_dir(), f"public_{atype}_{name}")
-    os.makedirs(trash, exist_ok=True)
+    # 移回 private（目标已存在同名 → 拒绝，防止覆盖用户当前工作区文件）
     for p in paths:
-        dest = os.path.join(trash, os.path.basename(p))
+        dest = os.path.join(dest_dir, os.path.basename(p))
         if os.path.exists(dest):
-            if os.path.isdir(dest):
-                shutil.rmtree(dest, ignore_errors=True)
-            else:
-                os.unlink(dest)
+            print(f"❌ private/ 已存在同名资产 {dest}，demote 会覆盖工作区文件。")
+            print("   请先处理 private 中的同名资产（移动/删除）后重试。")
+            return 1
         shutil.move(p, dest)
 
     # 同步移除库清单登记
     _unregister_asset_in_index(atype, name)
 
-    # git：public 仓库提交（单仓库模型下 public 即分享仓库）
+    # git：public 移出 + private 移入，双仓各自提交
     ensure_repo(source_root("public"))
     commit_all(source_root("public"), f"demote {atype}/{name}")
+    ensure_repo(source_root("private"))
+    commit_all(source_root("private"), f"demote {atype}/{name}: moved to private")
 
     append_audit("demote", f"{atype}/{name}")
-    print(f"✅ 已收回发布: {_asset_display('public', atype, name)}（已移入 .trash）")
-    print(f"   private 原件保留: {_asset_display('private', atype, name)}")
+    print(f"✅ 已收回（移动回 private）: {_asset_display('private', atype, name)}")
+    print(f"   public 已移出（单一版本，无副本）: {_asset_display('public', atype, name)}")
     return 0
 
 
@@ -1199,16 +1183,19 @@ def cmd_share(args) -> int:
         return 1
 
     # 4. 代码检查：public 全资产静态扫描（install 规则 + promote 隐私规则）
-    scan_hits: dict[str, list] = {}
-    for a in assets:
-        if os.path.isfile(a["path"]) and a["path"].endswith(".py"):
-            hs = scan_file(a["path"], scene="promote")
-            if hs:
-                scan_hits[os.path.basename(a["path"])] = hs
-    if scan_hits:
-        print("❌ public 仓库存在静态扫描风险，拒绝发布：")
-        print(format_report(scan_hits))
-        return 1
+    if getattr(args, "force", False):
+        print("⚠️  --force：跳过静态扫描（清单/自描述/孤儿校验仍执行）")
+    else:
+        scan_hits: dict[str, list] = {}
+        for a in assets:
+            if os.path.isfile(a["path"]) and a["path"].endswith(".py"):
+                hs = scan_file(a["path"], scene="promote")
+                if hs:
+                    scan_hits[os.path.basename(a["path"])] = hs
+        if scan_hits:
+            print("❌ public 仓库存在静态扫描风险，拒绝发布（确认无泄露可 --force 强制）：")
+            print(format_report(scan_hits))
+            return 1
 
     # 5. 提交 + 可选推送
     ensure_repo(public_root)
@@ -1295,18 +1282,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("dir", help="资产目录")
     p.set_defaults(func=cmd_init)
 
-    p = sub.add_parser("promote", help="私有 → 公开")
+    p = sub.add_parser("promote", help="私有 → 公开（移动资产到 public/，private 不留副本）")
     p.add_argument("name")
     p.add_argument("--force", action="store_true", help="忽略隐私扫描风险")
     p.add_argument("--push", action="store_true", help="推送 public 仓库")
     p.set_defaults(func=cmd_promote)
 
-    p = sub.add_parser("demote", help="公开 → 私有")
+    p = sub.add_parser("demote", help="公开 → 私有（移回 private/，public 不留副本）")
     p.add_argument("name")
     p.set_defaults(func=cmd_demote)
 
     p = sub.add_parser("share", help="校验并发布 public 仓库（库清单/__fp__/孤儿/代码检查 + commit + 可选 push）")
     p.add_argument("--push", action="store_true", help="推送到 public 仓库 remote")
+    p.add_argument("--force", action="store_true", help="跳过静态扫描拦截（仍执行清单/自描述/孤儿校验）")
     p.set_defaults(func=cmd_share)
 
     p = sub.add_parser("migrate", help="手动执行存量迁移")
