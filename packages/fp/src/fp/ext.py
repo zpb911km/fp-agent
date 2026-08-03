@@ -23,6 +23,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 
@@ -73,6 +74,25 @@ def _sha256(path: str) -> str:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _same_content(a: str, b: str) -> bool:
+    """文件/目录内容是否一致（递归 sha256 比较）。"""
+    if os.path.isfile(a) and os.path.isfile(b):
+        return _sha256(a) == _sha256(b)
+    if os.path.isdir(a) and os.path.isdir(b):
+        for root, _dirs, files in os.walk(a):
+            rel = os.path.relpath(root, a)
+            bdir = b if rel == "." else os.path.join(b, rel)
+            if not os.path.isdir(bdir):
+                return False
+            for fn in files:
+                if not os.path.isfile(os.path.join(bdir, fn)):
+                    return False
+                if _sha256(os.path.join(root, fn)) != _sha256(os.path.join(bdir, fn)):
+                    return False
+        return True
+    return False
 
 
 def _is_git_url(src: str) -> bool:
@@ -808,8 +828,11 @@ def cmd_init(args) -> int:
 
     # 无 manifest → 追加（工具/命令：文件头；插件：__init__.py 头部；记忆：frontmatter）
     name = os.path.basename(target.rstrip("/")) or os.path.basename(os.path.dirname(target))
-    if atype == "tools":
-        name = name.replace("_plugin", "")
+    if atype in ("tools", "commands", "memory") and main_file:
+        base = os.path.basename(main_file)
+        name = base[: -len(".py")] if base.endswith(".py") else base[: -len(".md")] if base.endswith(".md") else base
+        if atype == "tools":
+            name = name.replace("_plugin", "")
     if main_file.endswith(".py"):
         with open(main_file, encoding="utf-8") as f:
             content = f.read()
@@ -821,10 +844,16 @@ def cmd_init(args) -> int:
             f'    "type": "{atype}",\n'
             f"}}\n"
         )
-        # 插入到 docstring 之后
-        if content.startswith('"""'):
-            lines = content.split("\n", 2)
-            content = lines[0] + "\n" + lines[1] + "\n\n" + block + "\n" + (lines[2] if len(lines) > 2 else "")
+        # 插入到模块 docstring 闭合之后（正确识别多行 docstring）
+        mdoc = re.match(r'^(\s*("""|\'\'\'))', content)
+        if mdoc:
+            quote = mdoc.group(2)
+            end = content.find(quote, mdoc.end())
+            if end != -1:
+                insert_at = end + len(quote)
+                content = content[:insert_at] + "\n\n" + block + "\n" + content[insert_at:]
+            else:
+                content = block + "\n" + content
         else:
             content = block + "\n" + content
         with open(main_file, "w", encoding="utf-8") as f:
@@ -970,21 +999,43 @@ def cmd_share(args) -> int:
         print('     "assets": {}')
         print("   }")
         return 1
+    # 清单必须声明协议版本（schema），缺失视为无效清单
+    try:
+        with open(index_path, encoding="utf-8") as f:
+            index_head = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        index_head = None
+    if not isinstance(index_head, dict) or index_head.get("schema") != 1:
+        print(f"❌ 分享仓库清单 {SHARE_INDEX} 无效（缺少 schema=1 协议版本声明）。")
+        print("   请按仓库级元数据格式补齐：schema / author / license / assets")
+        return 1
 
+    # 分享资产必须自描述（含 __fp__ manifest），否则拒绝（发布物须可被标准协议消费）
     src_dir = source_dir(source, atype)
     paths = _asset_paths(src_dir, name, atype)
+    main_file = next((p for p in paths if p.endswith((".py", ".md"))), None)
+    if main_file:
+        m = parse_fp_manifest(main_file) if main_file.endswith(".py") else parse_memory_manifest(main_file)
+        if not m:
+            print(f"❌ 资产 {name} 缺少 __fp__ manifest，分享物必须自描述。")
+            print(f"   请先为资产补充 manifest：fp ext init {os.path.dirname(main_file)}")
+            return 1
 
-    # 复制快照到分享仓库对应类型目录
+    # 复制快照到分享仓库对应类型目录（幂等：内容一致则跳过）
     dest_dir = os.path.join(repo, atype)
     os.makedirs(dest_dir, exist_ok=True)
+    changed = False
     for p in paths:
         dest = os.path.join(dest_dir, os.path.basename(p))
+        if os.path.exists(dest) and _same_content(p, dest):
+            continue  # 内容一致，跳过
         if os.path.isdir(p):
             shutil.copytree(p, dest, dirs_exist_ok=True)
         else:
             shutil.copy2(p, dest)
+        changed = True
 
-    # 更新索引 fp.ext.json
+    # 更新索引 fp.ext.json（保留 schema/author/license，只登记资产）
     index = {}
     if os.path.isfile(index_path):
         try:
@@ -992,8 +1043,12 @@ def cmd_share(args) -> int:
                 index = json.load(f)
         except (json.JSONDecodeError, OSError):
             index = {}
+    asset_key = f"{atype}/{name}"
+    if not changed and asset_key in index.get("assets", {}):
+        print(f"✅ 已是最新（内容无变化），跳过发布: {asset_key}")
+        return 0
     index.setdefault("assets", {})
-    index["assets"][f"{atype}/{name}"] = {
+    index["assets"][asset_key] = {
         "source": os.path.basename(name),
         "updated_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
     }

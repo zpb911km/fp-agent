@@ -281,6 +281,53 @@ class TestCli:
         idx = json.loads((repo / "fp.ext.json").read_text(encoding="utf-8"))
         assert "commands/greet" in idx["assets"]
 
+    def test_share_requires_manifest(self, tmp_path):
+        """share 前置：资产必须自描述（有 __fp__），缺失拒绝；补上后放行。"""
+        repo = tmp_path / "share-repo"
+        repo.mkdir()
+        (repo / "fp.ext.json").write_text(
+            '{"schema": 1, "author": "t", "license": "MIT", "assets": {}}', encoding="utf-8"
+        )
+        # 手写一个无 __fp__ 的命令（文件名 = 语义名）
+        cdir = source_dir("private", "commands")
+        os.makedirs(cdir, exist_ok=True)
+        bare = os.path.join(cdir, "bare.py")
+        with open(bare, "w", encoding="utf-8") as f:
+            f.write('PLUGIN_DEFINITION = {"type": "function", "function": {"name": "bare"}}\n')
+        assert _run("promote", "bare") == 0
+        # 无 __fp__ → share 拒绝
+        assert _run("share", "bare", "--repo", str(repo)) == 1
+        # 补上 __fp__（模拟 init 结果）→ 放行
+        with open(os.path.join(source_dir("public", "commands"), "bare.py"), "w", encoding="utf-8") as f:
+            f.write('__fp__ = {"name": "bare", "version": "0.1.0", "description": "", "type": "commands"}\n')
+        assert _run("share", "bare", "--repo", str(repo)) == 0
+
+    def test_share_idempotent(self, tmp_path, capsys):
+        """share 幂等：内容无变化再次 share → 跳过并提示已是最新。"""
+        repo = tmp_path / "share-repo"
+        repo.mkdir()
+        (repo / "fp.ext.json").write_text(
+            '{"schema": 1, "author": "t", "license": "MIT", "assets": {}}', encoding="utf-8"
+        )
+        _run("new", "commands", "greet")
+        assert _run("promote", "greet") == 0
+        # 第一次 share
+        assert _run("share", "greet", "--repo", str(repo)) == 0
+        # 第二次 share（内容无变化）→ 跳过
+        assert _run("share", "greet", "--repo", str(repo)) == 0
+        out = capsys.readouterr().out
+        assert "已是最新" in out
+
+    def test_share_schema_required(self, tmp_path):
+        """share 前置：fp.ext.json 必须含 schema 字段（协议版本）。"""
+        repo = tmp_path / "share-repo"
+        repo.mkdir()
+        # 无 schema 字段的清单
+        (repo / "fp.ext.json").write_text('{"author": "t", "assets": {}}', encoding="utf-8")
+        _run("new", "commands", "greet")
+        assert _run("promote", "greet") == 0
+        assert _run("share", "greet", "--repo", str(repo)) == 1
+
     def test_remove_goes_to_trash(self):
         _run("new", "tools", "hello")
         assert _run("remove", "hello") == 0
