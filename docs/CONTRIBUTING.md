@@ -252,8 +252,8 @@ echo "你是谁" | fp                   # 测试系统提示词
   结构变更（新增/删除/重命名文件）额外要求 README / guide 参考 / self 扩展
   等清单类文档确认。所以「改一行注释」不会误报 README，只有「新增/删除
   命令、工具、钩子」这类结构性变化才提醒清单文档。
-- **测试文件同样纳入门禁**：`packages/fp-core/tests/*.py` 变更会要求
-  [dev/测试.md](dev/测试.md) 确认（尤其新增测试文件时，文件清单表需同步）。
+- **测试文件同样纳入门禁**：`packages/fp-core/tests/*.py` 与 `packages/fp/tests/*.py`
+  变更会要求 [dev/测试.md](dev/测试.md) 确认（尤其新增测试文件时，文件清单表需同步）。
 - **显式放行**：确认本次改动确实不影响文档时，用
   `FP_DOCS_SYNC_ALLOW=1 git commit`（仅输出提醒，不阻断）。
 - **手动主动触发**：`python scripts/check_docs_sync.py --since HEAD~N`

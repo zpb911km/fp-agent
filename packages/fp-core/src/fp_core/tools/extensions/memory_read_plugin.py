@@ -209,9 +209,6 @@ async def execute(params: dict[str, Any]) -> str:
 
     loop = asyncio.get_running_loop()
 
-    # 确认目录存在
-    os.makedirs(config.MEMORY_DIR, exist_ok=True)
-
     # 读取两棵树的记忆（全局 = 三来源合并，本地 = 项目内 .fp/memory）
     global_memories = await loop.run_in_executor(None, _list_global_memories)
 

@@ -105,6 +105,8 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
     # 测试（含 conftest）— 变更需确认测试文档
     # 结构变更（新增测试文件）也提醒测试文档：覆盖范围表通常要同步更新
     ("packages/fp-core/tests/*.py", ["docs/dev/测试.md"], ["docs/dev/测试.md"]),
+    # fp 包测试（fp ext 分发系统等）
+    ("packages/fp/tests/*.py", ["docs/dev/测试.md"], ["docs/dev/测试.md"]),
     # 开发/脚本工具
     ("scripts/*.py", ["docs/CONTRIBUTING.md"], []),
     # 工程配置

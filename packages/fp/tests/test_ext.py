@@ -127,6 +127,22 @@ class TestReviewGate:
         assert reg["tools/hello"]["status"] == "pending_review"
         assert reg["tools/hello"]["source"]  # 来源已记录
 
+    def test_staging_isolated_in_tmp(self, tmp_path):
+        """回归防护：staging 必须落在隔离目录内，杜绝真实用户目录残留。
+
+        历史 bug：STAGING_DIR 曾是模块级常量，import 时绑定真实目录，
+        导致 fetch 测试把 staging 写到 ~/.local/share/fp/.staging/ 而 registry 写到 tmp。
+        """
+        src = self._make_local_pkg(tmp_path)
+        assert _run("fetch", src) == 0
+        # 真实用户目录不得出现新 staging
+        real_staging = os.path.join(os.path.expanduser("~"), ".local", "share", "fp", ".staging", "hello")
+        assert not os.path.exists(real_staging)
+        # 隔离目录内必须有 staging（staging 名 = fetch 源目录名，不一定是资产名）
+        isolated_staging_root = os.path.join(str(tmp_path), "fp", ".staging")
+        assert os.path.isdir(isolated_staging_root)
+        assert any(os.path.isdir(os.path.join(isolated_staging_root, n)) for n in os.listdir(isolated_staging_root))
+
     def test_install_blocked_without_review(self, tmp_path):
         src = self._make_local_pkg(tmp_path)
         _run("fetch", src)

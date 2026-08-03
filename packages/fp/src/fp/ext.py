@@ -51,8 +51,11 @@ from fp.ext_store import (
     upsert_asset,
 )
 
-# 暂存区（fetch 后的审查场所）
-STAGING_DIR = os.path.join(os.path.dirname(registry_path()), ".staging")
+
+# 暂存区（fetch 后的审查场所）——动态获取，避免模块级绑定导致路径固化（测试/换环境时残留）
+def _staging_dir() -> str:
+    return os.path.join(os.path.dirname(registry_path()), ".staging")
+
 
 # 分享仓库索引文件名（share 更新用）
 SHARE_INDEX = "fp.ext.json"
@@ -80,7 +83,7 @@ def _is_single_file_url(src: str) -> bool:
 
 
 def _staging_path(name: str) -> str:
-    return os.path.join(STAGING_DIR, name)
+    return os.path.join(_staging_dir(), name)
 
 
 def _ensure_staging(name: str) -> str:

@@ -164,9 +164,11 @@ BASH_PATH: str = _value("BASH_PATH", "")
 _FP_DATA_DIR = get_data_dir()
 
 SESSIONS_DIR = os.path.join(_FP_DATA_DIR, "sessions")
-MEMORY_DIR = os.path.join(_FP_DATA_DIR, "memory")
+MEMORY_DIR = os.path.join(_FP_DATA_DIR, "memory")  # 遗留：资产记忆已迁移至三来源，仅保留向后兼容
 MEMORY_DIR_LOCAL = os.path.join(".fp", "memory")
 TASKS_FILE = os.path.join(_FP_DATA_DIR, "tasks.json")
+# 终端输入历史（运行时状态，不属于资产，独立于三来源目录）
+INPUT_HISTORY_FILE = os.path.join(_FP_DATA_DIR, "terminal", "_input_history")
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 
 # ── 记忆系统禁用分类（不可作为 category 使用） ─────────────────────

@@ -139,7 +139,7 @@ class InputHandler:
             from prompt_toolkit import PromptSession
             from prompt_toolkit.history import FileHistory
 
-            history_file = os.path.join(config.MEMORY_DIR, "_input_history")
+            history_file = config.INPUT_HISTORY_FILE
             os.makedirs(os.path.dirname(history_file), exist_ok=True)
 
             # 构建补全器（延迟加载，确保 tools/commands 已就绪）
