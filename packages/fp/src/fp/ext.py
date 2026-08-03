@@ -95,16 +95,53 @@ def _ensure_staging(name: str) -> str:
     return path
 
 
+def _find_main_file(d: str, atype: str) -> str | None:
+    """在资产目录 d 中定位该类型的主文件（目录型资产）。
+
+    规则与 cmd_init 一致：tools 取 *_plugin.py，commands 取非 _ 开头的 .py，
+    plugins 取 __init__.py，memory 取 .md。
+    """
+    if not os.path.isdir(d):
+        return None
+    if atype == "tools":
+        for f in os.listdir(d):
+            if f.endswith("_plugin.py"):
+                return os.path.join(d, f)
+    elif atype == "commands":
+        for f in os.listdir(d):
+            if f.endswith(".py") and not f.startswith("_"):
+                return os.path.join(d, f)
+    elif atype == "plugins":
+        init = os.path.join(d, "__init__.py")
+        if os.path.isfile(init):
+            return init
+    else:  # memory
+        for f in os.listdir(d):
+            if f.endswith(".md"):
+                return os.path.join(d, f)
+    return None
+
+
 def _asset_filepath(d: str, name: str, atype: str) -> str | None:
-    """在资产目录 d 中定位资产路径（支持文件名与 manifest name 匹配）。"""
+    """在资产目录 d 中定位资产路径（支持单文件与目录型资产）。
+
+    优先级：单文件匹配 → <name>/ 目录型 → manifest name 兜底。
+    """
+    # 1. 单文件匹配
     candidates = [name, f"{name}.py", f"{name}.md"]
     if atype == "tools":
         candidates.append(f"{name}_plugin.py")
     for c in candidates:
         p = os.path.join(d, c)
-        if os.path.exists(p):
+        if os.path.isfile(p):
             return p
-    # manifest name 兜底：文件名 ≠ 语义名（如 codegraph_query_plugin.py → name=codegraph）
+    # 2. 目录型：<name>/ 下找主文件
+    pdir = os.path.join(d, name)
+    if os.path.isdir(pdir):
+        main = _find_main_file(pdir, atype)
+        if main:
+            return main
+    # 3. manifest name 兜底：文件名/目录名 ≠ 语义名（如 codegraph_query_plugin.py → name=codegraph）
     if os.path.isdir(d):
         for e in sorted(os.listdir(d)):
             if e.startswith(".") or e == "__pycache__" or e.endswith(".disabled"):
@@ -118,6 +155,12 @@ def _asset_filepath(d: str, name: str, atype: str) -> str | None:
                     m = parse_fp_manifest(p) if p.endswith(".py") else parse_memory_manifest(p)
                     if m and m.get("name") == name:
                         return p
+            elif os.path.isdir(p) and p != pdir:
+                main = _find_main_file(p, atype)
+                if main:
+                    m = parse_fp_manifest(main) if main.endswith(".py") else parse_memory_manifest(main)
+                    if m and m.get("name") == name:
+                        return main
     return None
 
 
@@ -236,9 +279,9 @@ def _scan_public_assets() -> list[dict]:
                     manifest = parse_memory_manifest(fpath)
                     name = (manifest or {}).get("name")
             elif os.path.isdir(fpath):
-                init = os.path.join(fpath, "__init__.py")
-                if os.path.isfile(init):
-                    manifest = parse_fp_manifest(init)
+                main = _find_main_file(fpath, atype)
+                if main:
+                    manifest = parse_fp_manifest(main) if main.endswith(".py") else parse_memory_manifest(main)
                     name = (manifest or {}).get("name")
             assets.append({"atype": atype, "name": name, "path": fpath, "manifest": manifest})
     return assets
@@ -929,28 +972,8 @@ def cmd_init(args) -> int:
         print("❌ 无法推断资产类型（需位于三来源的某类型目录下）")
         return 1
 
-    # 找主文件
-    main_file = None
-    if atype == "tools":
-        for f in os.listdir(target):
-            if f.endswith("_plugin.py"):
-                main_file = os.path.join(target, f)
-                break
-    elif atype == "commands":
-        for f in os.listdir(target):
-            if f.endswith(".py") and not f.startswith("_"):
-                main_file = os.path.join(target, f)
-                break
-    elif atype == "plugins":
-        init = os.path.join(target, "__init__.py")
-        if os.path.isfile(init):
-            main_file = init
-    else:
-        for f in os.listdir(target):
-            if f.endswith(".md"):
-                main_file = os.path.join(target, f)
-                break
-
+    # 找主文件（目录型资产规则，与 _asset_filepath/_scan_public_assets 一致）
+    main_file = _find_main_file(target, atype)
     if main_file is None:
         print(f"❌ 未找到 {atype} 主文件（{target}）")
         return 1

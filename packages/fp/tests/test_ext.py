@@ -468,3 +468,78 @@ class TestCli:
 
     def test_detect_legacy_empty(self):
         assert detect_legacy() == []
+
+    # ── 目录型资产支持（对齐 cmd_init 的目录型世界观）──
+
+    @staticmethod
+    def _write_dir_tool(name: str, with_manifest: bool) -> str:
+        """构造目录型 tools 资产：<tools>/<name>/<name>_plugin.py，返回目录路径。"""
+        d = os.path.join(source_dir("private", "tools"), name)
+        os.makedirs(d, exist_ok=True)
+        lines = [f'"""{name} 工具插件"""\n\n']
+        if with_manifest:
+            lines.append(
+                f'__fp__ = {{"name": "{name}", "version": "0.1.0", "description": "",'
+                f' "license": "GPL-3.0", "type": "tools"}}\n\n'
+            )
+        lines.append(
+            'PLUGIN_DEFINITION = {"type": "function", "function": {'
+            f'"name": "{name}", "description": "",'
+            ' "parameters": {"type": "object", "properties": {}}}}\n\n\n'
+        )
+        lines.append('async def execute(params: dict) -> str:\n    return ""\n')
+        with open(os.path.join(d, f"{name}_plugin.py"), "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        return d
+
+    def test_asset_filepath_directory(self):
+        """_asset_filepath 能定位目录型资产（<name>/ 内主文件）。"""
+        from fp.ext import _asset_filepath
+
+        self._write_dir_tool("dir_probe", with_manifest=False)
+        p = _asset_filepath(source_dir("private", "tools"), "dir_probe", "tools")
+        assert p and p.endswith(os.path.join("dir_probe", "dir_probe_plugin.py"))
+
+    def test_asset_filepath_directory_name_mismatch(self):
+        """目录名 ≠ 语义名时，靠 manifest name 兜底定位。"""
+        from fp.ext import _asset_filepath
+
+        self._write_dir_tool("dir_actual", with_manifest=True)  # manifest name=dir_actual
+        # 目录名改掉，仅 manifest name 指向 dir_actual
+        src = os.path.join(source_dir("private", "tools"), "dir_actual")
+        dst = os.path.join(source_dir("private", "tools"), "dir_renamed")
+        os.rename(src, dst)
+        p = _asset_filepath(source_dir("private", "tools"), "dir_actual", "tools")
+        assert p and p.endswith(os.path.join("dir_renamed", "dir_actual_plugin.py"))
+
+    def test_info_directory_asset(self, capsys):
+        """目录型 tools 资产：info 能读到 manifest（修复'无 manifest'误报）。"""
+        self._write_dir_tool("dir_probe", with_manifest=False)
+        d = os.path.join(source_dir("private", "tools"), "dir_probe")
+        # init 补 manifest（目录型舞台）
+        assert _run("init", d) == 0
+        assert _run("info", "dir_probe") == 0
+        out = capsys.readouterr().out
+        assert "dir_probe" in out
+        assert "name" in out
+        assert "无 manifest" not in out
+
+    def test_scan_public_directory_asset(self):
+        """_scan_public_assets 识别目录型 tools 资产（share 前置可解析）。"""
+        from fp.ext import _scan_public_assets
+
+        # 构造目录型资产到 public
+        d = os.path.join(source_dir("public", "tools"), "dir_pub")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "dir_pub_plugin.py"), "w", encoding="utf-8") as f:
+            f.write(
+                '"""dir_pub 工具插件"""\n\n'
+                '__fp__ = {"name": "dir_pub", "version": "0.1.0", "description": "",'
+                ' "license": "GPL-3.0", "type": "tools"}\n\n'
+                'PLUGIN_DEFINITION = {"type": "function", "function": '
+                '{"name": "dir_pub", "description": "", "parameters": {"type": "object", "properties": {}}}}\n\n\n'
+                'async def execute(params: dict) -> str:\n    return ""\n'
+            )
+        assets = _scan_public_assets()
+        names = {a["name"] for a in assets}
+        assert "dir_pub" in names
