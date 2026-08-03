@@ -231,15 +231,35 @@ class TestCli:
         assert _run("info", "nonexistent") == 1
 
     def test_promote_demote_roundtrip(self):
+        """单仓库模型：promote 复制快照到 public/（private 原件保留）；demote 收回 public/。"""
         _run("new", "commands", "greet")
-        # promote
+        # promote：复制，private 原件保留，public 出现快照
         assert _run("promote", "greet") == 0
-        assert not os.path.exists(source_dir("private", "commands") + "/greet.py")
+        assert os.path.exists(source_dir("private", "commands") + "/greet.py")
         assert os.path.exists(source_dir("public", "commands") + "/greet.py")
-        # demote
+        # demote：public 收回（进 .trash），private 原件仍保留
         assert _run("demote", "greet") == 0
         assert os.path.exists(source_dir("private", "commands") + "/greet.py")
         assert not os.path.exists(source_dir("public", "commands") + "/greet.py")
+
+    def test_promote_registers_in_index(self, tmp_path):
+        """promote 把资产登记进 public 库清单（fp.ext.json 存在时）。"""
+        pub_root = source_root("public")
+        os.makedirs(pub_root, exist_ok=True)
+        with open(os.path.join(pub_root, "fp.ext.json"), "w", encoding="utf-8") as f:
+            f.write('{"schema": 1, "author": "t", "license": "MIT", "assets": {}}')
+        _run("new", "commands", "greet")
+        assert _run("promote", "greet") == 0
+        import json
+
+        with open(os.path.join(pub_root, "fp.ext.json"), encoding="utf-8") as f:
+            idx = json.loads(f.read())
+        assert "commands/greet" in idx["assets"]
+        # 幂等：再次 promote 不重复登记
+        assert _run("promote", "greet") == 0
+        with open(os.path.join(pub_root, "fp.ext.json"), encoding="utf-8") as f:
+            idx2 = json.loads(f.read())
+        assert list(idx2["assets"]) == ["commands/greet"]
 
     def test_promote_fetched_rejected(self):
         """fetched 资产不能 promote（防再分发）。"""
@@ -250,83 +270,123 @@ class TestCli:
         # private 中不存在同名 → _find_asset 找到 fetched → promote 拒绝
         assert _run("promote", "external_cmd") == 1
 
-    def test_share_requires_public(self, tmp_path):
-        """share 前置：资产必须已在 public（先 promote）。"""
-        repo = tmp_path / "share-repo"
-        repo.mkdir()
-        (repo / "fp.ext.json").write_text('{"schema": 1, "assets": {}}', encoding="utf-8")
-        _run("new", "commands", "greet")
-        # private 资产 → 拒绝
-        assert _run("share", "greet", "--repo", str(repo)) == 1
-        # promote 后 → 放行
-        assert _run("promote", "greet") == 0
-        assert _run("share", "greet", "--repo", str(repo)) == 0
+    def _setup_public_with_asset(self, tmp_path, asset_name="greet", manifest=True):
+        """构造：public 仓库 + 库清单 + 一个已 promote 的资产。"""
+        pub_root = source_root("public")
+        os.makedirs(pub_root, exist_ok=True)
+        with open(os.path.join(pub_root, "fp.ext.json"), "w", encoding="utf-8") as f:
+            f.write('{"schema": 1, "author": "tester", "license": "MIT", "assets": {}}')
+        _run("new", "commands", asset_name)
+        assert _run("promote", asset_name) == 0
+        if not manifest:
+            # 模拟 promote 后仍缺 __fp__（手工放置）
+            pub_asset = os.path.join(source_dir("public", "commands"), f"{asset_name}.py")
+            with open(pub_asset, "w", encoding="utf-8") as f:
+                f.write('PLUGIN_DEFINITION = {"type": "function", "function": {"name": "bare"}}\n')
+        return pub_root
 
     def test_share_requires_index(self, tmp_path):
-        """share 前置：分享仓库必须已有 fp.ext.json，缺则拒绝（不自动创建）。"""
-        repo = tmp_path / "share-repo"
-        repo.mkdir()
+        """share 前置：public 仓库根目录必须已有 fp.ext.json，缺则拒绝（不自动创建）。"""
+        pub_root = source_root("public")
+        os.makedirs(pub_root, exist_ok=True)
         _run("new", "commands", "greet")
         assert _run("promote", "greet") == 0
-        # 无 fp.ext.json → 拒绝
-        assert _run("share", "greet", "--repo", str(repo)) == 1
-        # 手动创建清单 → 放行，并登记资产
-        (repo / "fp.ext.json").write_text(
-            '{"schema": 1, "author": "tester", "license": "MIT", "assets": {}}', encoding="utf-8"
-        )
-        assert _run("share", "greet", "--repo", str(repo)) == 0
-        assert (repo / "commands" / "greet.py").exists()
-        import json
-
-        idx = json.loads((repo / "fp.ext.json").read_text(encoding="utf-8"))
-        assert "commands/greet" in idx["assets"]
+        # 无 fp.ext.json → 拒绝（promote 不自动创建清单，资产也未登记）
+        assert _run("share") == 1
+        # 手动创建清单 → 补 promote（登记进清单）→ 放行
+        with open(os.path.join(pub_root, "fp.ext.json"), "w", encoding="utf-8") as f:
+            f.write('{"schema": 1, "author": "tester", "license": "MIT", "assets": {}}')
+        assert _run("promote", "greet") == 0
+        assert _run("share") == 0
 
     def test_share_requires_manifest(self, tmp_path):
-        """share 前置：资产必须自描述（有 __fp__），缺失拒绝；补上后放行。"""
-        repo = tmp_path / "share-repo"
-        repo.mkdir()
-        (repo / "fp.ext.json").write_text(
-            '{"schema": 1, "author": "t", "license": "MIT", "assets": {}}', encoding="utf-8"
-        )
-        # 手写一个无 __fp__ 的命令（文件名 = 语义名）
-        cdir = source_dir("private", "commands")
-        os.makedirs(cdir, exist_ok=True)
-        bare = os.path.join(cdir, "bare.py")
-        with open(bare, "w", encoding="utf-8") as f:
-            f.write('PLUGIN_DEFINITION = {"type": "function", "function": {"name": "bare"}}\n')
-        assert _run("promote", "bare") == 0
+        """share 前置：public 内所有资产必须自描述（有 __fp__），缺失拒绝；补上后放行。"""
+        self._setup_public_with_asset(tmp_path, asset_name="bare", manifest=False)
         # 无 __fp__ → share 拒绝
-        assert _run("share", "bare", "--repo", str(repo)) == 1
+        assert _run("share") == 1
         # 补上 __fp__（模拟 init 结果）→ 放行
         with open(os.path.join(source_dir("public", "commands"), "bare.py"), "w", encoding="utf-8") as f:
             f.write('__fp__ = {"name": "bare", "version": "0.1.0", "description": "", "type": "commands"}\n')
-        assert _run("share", "bare", "--repo", str(repo)) == 0
-
-    def test_share_idempotent(self, tmp_path, capsys):
-        """share 幂等：内容无变化再次 share → 跳过并提示已是最新。"""
-        repo = tmp_path / "share-repo"
-        repo.mkdir()
-        (repo / "fp.ext.json").write_text(
-            '{"schema": 1, "author": "t", "license": "MIT", "assets": {}}', encoding="utf-8"
-        )
-        _run("new", "commands", "greet")
-        assert _run("promote", "greet") == 0
-        # 第一次 share
-        assert _run("share", "greet", "--repo", str(repo)) == 0
-        # 第二次 share（内容无变化）→ 跳过
-        assert _run("share", "greet", "--repo", str(repo)) == 0
-        out = capsys.readouterr().out
-        assert "已是最新" in out
+        assert _run("share") == 0
 
     def test_share_schema_required(self, tmp_path):
-        """share 前置：fp.ext.json 必须含 schema 字段（协议版本）。"""
-        repo = tmp_path / "share-repo"
-        repo.mkdir()
-        # 无 schema 字段的清单
-        (repo / "fp.ext.json").write_text('{"author": "t", "assets": {}}', encoding="utf-8")
+        """share 前置：fp.ext.json 必须含 schema=1（协议版本）。"""
+        pub_root = source_root("public")
+        os.makedirs(pub_root, exist_ok=True)
+        with open(os.path.join(pub_root, "fp.ext.json"), "w", encoding="utf-8") as f:
+            f.write('{"author": "t", "assets": {}}')
         _run("new", "commands", "greet")
         assert _run("promote", "greet") == 0
-        assert _run("share", "greet", "--repo", str(repo)) == 1
+        assert _run("share") == 1
+
+    def test_share_requires_author_license(self, tmp_path):
+        """share 前置：fp.ext.json 缺 author 或 license → 拒绝。"""
+        pub_root = source_root("public")
+        os.makedirs(pub_root, exist_ok=True)
+        with open(os.path.join(pub_root, "fp.ext.json"), "w", encoding="utf-8") as f:
+            f.write('{"schema": 1, "assets": {}}')
+        _run("new", "commands", "greet")
+        assert _run("promote", "greet") == 0
+        assert _run("share") == 1
+
+    def test_share_orphan_root_file(self, tmp_path):
+        """孤儿检查：public 根目录杂散文件 → 拒绝。"""
+        self._setup_public_with_asset(tmp_path)
+        pub_root = source_root("public")
+        with open(os.path.join(pub_root, "stray.txt"), "w", encoding="utf-8") as f:
+            f.write("junk")
+        assert _run("share") == 1
+
+    def test_share_orphan_dangling_index(self, tmp_path):
+        """孤儿检查：清单登记但磁盘缺失（悬空）→ 拒绝。"""
+        self._setup_public_with_asset(tmp_path)
+        pub_root = source_root("public")
+        idx_path = os.path.join(pub_root, "fp.ext.json")
+        import json
+
+        with open(idx_path, encoding="utf-8") as f:
+            idx = json.loads(f.read())
+        idx["assets"]["commands/ghost"] = {"source": "ghost", "updated_at": "x"}
+        with open(idx_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(idx, indent=2))
+        assert _run("share") == 1
+
+    def test_share_orphan_unregistered(self, tmp_path):
+        """孤儿检查：磁盘资产未在清单登记 → 拒绝。"""
+        self._setup_public_with_asset(tmp_path, asset_name="registered")
+        # 手工往 public 放一个未登记资产
+        pub_cmd = source_dir("public", "commands")
+        with open(os.path.join(pub_cmd, "loose.py"), "w", encoding="utf-8") as f:
+            f.write('__fp__ = {"name": "loose", "version": "0.1.0", "description": "", "type": "commands"}\n')
+        assert _run("share") == 1
+
+    def test_share_code_scan_rejects(self, tmp_path):
+        """代码检查：public 资产含高风险代码 → 拒绝。"""
+        self._setup_public_with_asset(tmp_path)
+        # 往 public 放一个高风险资产（未登记也会先被孤儿拦截，这里走已登记路径覆盖）
+        pub_cmd = source_dir("public", "commands")
+        with open(os.path.join(pub_cmd, "evil.py"), "w", encoding="utf-8") as f:
+            f.write('__fp__ = {"name": "evil", "version": "0.1.0", "description": "", "type": "commands"}\n')
+            f.write('import os\nos.system("rm -rf /")\n')
+        # 先补登记避免孤儿拦截
+        pub_root = source_root("public")
+        import json
+
+        idx_path = os.path.join(pub_root, "fp.ext.json")
+        with open(idx_path, encoding="utf-8") as f:
+            idx = json.loads(f.read())
+        idx["assets"]["commands/evil"] = {"source": "evil", "updated_at": "x"}
+        with open(idx_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(idx, indent=2))
+        assert _run("share") == 1
+
+    def test_share_idempotent(self, tmp_path, capsys):
+        """share 幂等：内容无变化再次 share → 通过（commit 静默跳过），无重复提交。"""
+        self._setup_public_with_asset(tmp_path)
+        assert _run("share") == 0
+        assert _run("share") == 0
+        out = capsys.readouterr().out
+        assert "已通过校验并发布" in out
 
     def test_remove_goes_to_trash(self):
         _run("new", "tools", "hello")

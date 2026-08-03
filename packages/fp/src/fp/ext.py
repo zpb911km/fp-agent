@@ -13,9 +13,9 @@
   check              存量体检：unmanaged 资产 + 静态扫描 + 审计核对
   new <type> <name>  生成新资产脚手架（到 private/）
   init <dir>         为已有资产补充/校验 __fp__ manifest
-  promote <name>     私有 → 公开（移动 + 隐私扫描 + git + 可选 push）
-  demote <name>      公开 → 私有（收回）
-  share <name>       发布通道：复制快照到分享仓库并 push
+  promote <name>     私有 → 公开（复制快照到 public/ + 隐私扫描 + 登记清单 + git）
+  demote <name>      公开 → 私有（从 public/ 收回发布，private 原件保留）
+  share [--push]     发布 public/ 仓库：校验库清单 + __fp__ + 孤儿文件 + 代码检查 + commit + push
   migrate            手动执行存量迁移（老结构 → private/）
 """
 
@@ -59,7 +59,7 @@ def _staging_dir() -> str:
     return os.path.join(os.path.dirname(registry_path()), ".staging")
 
 
-# 分享仓库索引文件名（share 更新用）
+# public 仓库的库级清单文件名（share 校验/维护用，位于 {DATA}/public/ 根目录）
 SHARE_INDEX = "fp.ext.json"
 
 
@@ -151,6 +151,159 @@ def _find_asset(name: str) -> tuple[str, str] | None:
 
 def _asset_display(source: str, atype: str, name: str) -> str:
     return f"{source}/{atype}/{name}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# public 仓库（单仓库模型）辅助
+# ═══════════════════════════════════════════════════════════════
+
+
+def _public_index_path() -> str:
+    """public 仓库的库级清单路径（{DATA}/public/fp.ext.json）。"""
+    return os.path.join(source_root("public"), SHARE_INDEX)
+
+
+def _load_public_index() -> dict | None:
+    """读取 public 库级清单；不存在或 JSON 损坏返回 None。"""
+    path = _public_index_path()
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _save_public_index(index: dict) -> None:
+    """写 public 库级清单（原子写）。"""
+    path = _public_index_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(index, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _register_asset_in_index(atype: str, name: str, commit: bool = True) -> bool:
+    """把资产登记进 public 库清单（幂等）。清单不存在时跳过（不自动创建）。
+
+    返回是否实际改动。promote/demote 后调用，保持"清单即发布物目录"一致。
+    """
+    index = _load_public_index()
+    if index is None:
+        return False
+    key = f"{atype}/{name}"
+    assets = index.setdefault("assets", {})
+    if key in assets:
+        return False
+    assets[key] = {
+        "source": name,
+        "updated_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+    }
+    _save_public_index(index)
+    if commit:
+        ensure_repo(source_root("public"))
+        commit_all(source_root("public"), f"index: register {key}")
+    return True
+
+
+def _unregister_asset_in_index(atype: str, name: str, commit: bool = True) -> bool:
+    """从 public 库清单移除资产登记（幂等）。清单不存在时跳过。"""
+    index = _load_public_index()
+    if index is None:
+        return False
+    key = f"{atype}/{name}"
+    if key not in index.get("assets", {}):
+        return False
+    del index["assets"][key]
+    _save_public_index(index)
+    if commit:
+        ensure_repo(source_root("public"))
+        commit_all(source_root("public"), f"index: unregister {key}")
+    return True
+
+
+def _scan_public_assets() -> list[dict]:
+    """枚举 public/ 下所有资产。
+
+    返回 [{atype, name, path, manifest}]：
+      name 为 None → 无法解析（缺 __fp__ 也无工具定义，孤儿候选）；
+      manifest 为 None → 缺 __fp__（文件级协议缺失，share 拒绝）。
+    """
+    assets: list[dict] = []
+    for atype in ASSET_TYPES:
+        d = source_dir("public", atype)
+        if not os.path.isdir(d):
+            continue
+        for e in sorted(os.listdir(d)):
+            if e.startswith(".") or e == "__pycache__" or e.endswith(".disabled"):
+                continue
+            fpath = os.path.join(d, e)
+            manifest: dict | None = None
+            name: str | None = None
+            if os.path.isfile(fpath):
+                if fpath.endswith(".py"):
+                    if atype == "tools":
+                        manifest = parse_fp_manifest(fpath)
+                        name = parse_tool_name(fpath)
+                    else:
+                        manifest = parse_fp_manifest(fpath)
+                        name = (manifest or {}).get("name")
+                elif fpath.endswith(".md"):
+                    manifest = parse_memory_manifest(fpath)
+                    name = (manifest or {}).get("name")
+            elif os.path.isdir(fpath):
+                init = os.path.join(fpath, "__init__.py")
+                if os.path.isfile(init):
+                    manifest = parse_fp_manifest(init)
+                    name = (manifest or {}).get("name")
+            assets.append({"atype": atype, "name": name, "path": fpath, "manifest": manifest})
+    return assets
+
+
+def _check_public_orphans(assets: list[dict], index: dict) -> list[str]:
+    """孤儿文件检查，返回问题列表（空 = 干净）。
+
+    覆盖三类：
+      ① 根目录杂散项（非 fp.ext.json、非类型目录）
+      ② 清单登记但磁盘缺失（悬空）
+      ③ 磁盘资产未登记 / 无法解析的杂散文件
+    """
+    issues: list[str] = []
+    public_root = source_root("public")
+
+    # ① 根目录杂散项
+    for e in sorted(os.listdir(public_root)):
+        if e.startswith(".") or e == SHARE_INDEX:
+            continue
+        p = os.path.join(public_root, e)
+        if os.path.isdir(p) and e in ASSET_TYPES:
+            continue
+        issues.append(f"public/ 根目录杂散项: {e}")
+
+    # ② 清单登记但磁盘缺失（悬空）
+    declared = index.get("assets", {})
+    for key in declared:
+        if "/" not in key:
+            issues.append(f"清单登记格式错误: {key}")
+            continue
+        atype, name = key.split("/", 1)
+        if atype not in ASSET_TYPES:
+            issues.append(f"清单登记未知类型: {key}")
+            continue
+        if not _asset_filepath(source_dir("public", atype), name, atype):
+            issues.append(f"清单登记但文件缺失: {key}")
+
+    # ③ 磁盘资产未登记 / 杂散文件
+    disk_keys = {f"{a['atype']}/{a['name']}" for a in assets if a["name"]}
+    for key in sorted(disk_keys - set(declared)):
+        issues.append(f"资产未在 {SHARE_INDEX} 登记: {key}")
+    for a in assets:
+        if not a["name"]:
+            issues.append(f"无法识别资产（缺 __fp__ / 工具定义）: {a['atype']}/{os.path.basename(a['path'])}")
+    return issues
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -871,7 +1024,11 @@ def cmd_init(args) -> int:
 
 
 def cmd_promote(args) -> int:
-    """私有 → 公开（移动 + 隐私扫描 + git + 可选 push）。"""
+    """私有 → 公开（复制快照到 public/ + 隐私扫描 + 登记清单 + 单仓 commit）。
+
+    单仓库模型：private 是工作区/事实源，public 是发布快照（整个仓库即分享仓库）。
+    promote = 把资产快照同步进 public/，private 原件保留。
+    """
     name = args.name
     found = _find_asset(name)
     if not found or found[0] != "private":
@@ -903,95 +1060,109 @@ def cmd_promote(args) -> int:
             return 1
         print("⚠️  --force：忽略隐私风险继续")
 
-    # 移动
+    # 复制快照到 public/（幂等：内容一致跳过；目标已存在则覆盖更新）
+    changed = False
     for p in paths:
         dest = os.path.join(dest_dir, os.path.basename(p))
-        if os.path.exists(dest):
-            print(f"❌ 目标已存在: {dest}（先 fp ext remove 或手动处理）")
-            return 1
-        shutil.move(p, dest)
+        if os.path.exists(dest) and _same_content(p, dest):
+            continue
+        if os.path.isdir(p):
+            shutil.copytree(p, dest, dirs_exist_ok=True)
+        else:
+            shutil.copy2(p, dest)
+        changed = True
 
-    # git
-    for src_root, msg in (
-        (source_root("private"), f"promote {name} → public"),
-        (source_root("public"), f"promote {name} ← private"),
-    ):
-        ensure_repo(src_root)
-        commit_all(src_root, msg)
-    if args.push and not has_remote(source_root("public")):
-        print("⚠️  public 仓库无 remote，跳过 push（--repo 指定分享仓库见 fp ext share）")
-    elif args.push:
-        run_git(source_root("public"), "push")
-        print("🚀 已 push public 仓库")
+    # 登记进 public 库清单（清单不存在则提示初始化，不自动创建）
+    registered = _register_asset_in_index(atype, name)
+    if not registered and _load_public_index() is None:
+        print(f"⚠️  public 仓库尚无库级清单 {SHARE_INDEX}（位于 {source_root('public')}/）。")
+        print("   分享前请补充（声明来源与许可）：")
+        print("   {")
+        print('     "schema": 1,')
+        print('     "author": "<你的名字>",')
+        print('     "license": "MIT",')
+        print('     "assets": {}')
+        print("   }")
+
+    # git：public 仓库提交（单仓库模型下 public 即分享仓库）
+    ensure_repo(source_root("public"))
+    commit_all(source_root("public"), f"promote {atype}/{name}")
 
     append_audit("promote", f"{atype}/{name}")
-    print(f"✅ 已公开: {_asset_display('public', atype, name)}")
+    if changed:
+        print(f"✅ 已公开（快照同步）: {_asset_display('public', atype, name)}")
+    else:
+        print(f"✅ 已公开（内容无变化）: {_asset_display('public', atype, name)}")
+    print(f"   private 原件保留: {_asset_display('private', atype, name)}")
+    print("   下一步：fp ext share 校验并发布 public 仓库")
     return 0
 
 
 def cmd_demote(args) -> int:
-    """公开 → 私有（收回，无隐私扫描）。"""
+    """公开 → 私有（从 public/ 收回发布，private 原件保留）。
+
+    单仓库模型：promote 是复制，demote 只移除 public/ 发布快照（进 .trash 可恢复），
+    并同步移除库清单登记；private 工作区不受影响。
+    注意：promote 后同名资产在 private 与 public 同时存在，这里**只查 public**，
+    不能走 _find_asset（默认优先 private）。
+    """
     name = args.name
-    found = _find_asset(name)
-    if not found or found[0] != "public":
+    atype = None
+    for t in ASSET_TYPES:
+        if _asset_filepath(source_dir("public", t), name, t):
+            atype = t
+            break
+    if atype is None:
         print(f"❌ 资产不在 public/ 中: {name}（demote 仅对公开资产开放）")
         return 1
-    source, atype = found
     src_dir = source_dir("public", atype)
-    dest_dir = source_dir("private", atype)
-    os.makedirs(dest_dir, exist_ok=True)
 
     paths = _asset_paths(src_dir, name, atype)
+    if not paths:
+        print(f"❌ 未找到 {name} 的实际文件")
+        return 1
+
+    # 移出 public → .trash（可恢复；git 历史仍在）
+    trash = os.path.join(trash_dir(), f"public_{atype}_{name}")
+    os.makedirs(trash, exist_ok=True)
     for p in paths:
-        dest = os.path.join(dest_dir, os.path.basename(p))
+        dest = os.path.join(trash, os.path.basename(p))
         if os.path.exists(dest):
-            print(f"❌ 目标已存在: {dest}")
-            return 1
+            if os.path.isdir(dest):
+                shutil.rmtree(dest, ignore_errors=True)
+            else:
+                os.unlink(dest)
         shutil.move(p, dest)
 
-    for src_root, msg in (
-        (source_root("public"), f"demote {name} → private"),
-        (source_root("private"), f"demote {name} ← public"),
-    ):
-        ensure_repo(src_root)
-        commit_all(src_root, msg)
+    # 同步移除库清单登记
+    _unregister_asset_in_index(atype, name)
+
+    # git：public 仓库提交（单仓库模型下 public 即分享仓库）
+    ensure_repo(source_root("public"))
+    commit_all(source_root("public"), f"demote {atype}/{name}")
 
     append_audit("demote", f"{atype}/{name}")
-    print(f"✅ 已收回: {_asset_display('private', atype, name)}")
+    print(f"✅ 已收回发布: {_asset_display('public', atype, name)}（已移入 .trash）")
+    print(f"   private 原件保留: {_asset_display('private', atype, name)}")
     return 0
 
 
 def cmd_share(args) -> int:
-    """发布通道：复制快照到分享仓库并 push。"""
-    name = args.name
-    repo = args.repo
-    if not repo:
-        print("❌ 需要 --repo <dir> 指定分享仓库（用于推送的 git 仓库）")
-        return 1
-    repo = os.path.abspath(repo)
-    if not os.path.isdir(repo):
-        print(f"❌ 分享仓库不存在: {repo}")
+    """发布 public/ 仓库（单仓库模型：public 即分享仓库）。
+
+    职责：校验库清单 + 文件级 __fp__ + 孤儿文件 + 代码检查（静态扫描），
+    通过后提交并（可选）推送。public 仓库是用户全部公开资产所在的唯一仓库。
+    """
+    public_root = source_root("public")
+    if not os.path.isdir(public_root):
+        print(f"❌ public 仓库不存在: {public_root}")
         return 1
 
-    found = _find_asset(name)
-    if not found:
-        print(f"❌ 未找到资产: {name}")
-        return 1
-    source, atype = found
-    if source == "fetched":
-        print("❌ fetched 资产禁止再分发（来源非原创，防套娃）")
-        return 1
-    if source != "public":
-        print(f"❌ 资产 {name} 位于 {source}（尚未公开）。先 promote 到 public 再 share：")
-        print(f"   fp ext promote {name}")
-        print("   生命周期：private ─promote→ public ─share→ 外部仓库（分发）")
-        return 1
-
-    # 分享仓库必须已有仓库清单 fp.ext.json（声明来源与许可），缺失则拒绝
-    index_path = os.path.join(repo, SHARE_INDEX)
-    if not os.path.isfile(index_path):
-        print(f"❌ 分享仓库缺少仓库清单 {SHARE_INDEX}，拒绝发布。")
-        print("   请先在分享仓库根目录创建（仓库级元数据，声明来源与许可）：")
+    # 1. 库级清单 fp.ext.json（必须存在且含 schema=1，缺失拒绝、不自动创建）
+    index = _load_public_index()
+    if index is None:
+        print(f"❌ public 仓库缺少有效库级清单 {SHARE_INDEX}（位于 {public_root}/）。")
+        print("   请在 public 仓库根目录创建（仓库级元数据，声明来源与许可）：")
         print("   {")
         print('     "schema": 1,')
         print('     "author": "<你的名字>",')
@@ -999,69 +1170,59 @@ def cmd_share(args) -> int:
         print('     "assets": {}')
         print("   }")
         return 1
-    # 清单必须声明协议版本（schema），缺失视为无效清单
-    try:
-        with open(index_path, encoding="utf-8") as f:
-            index_head = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        index_head = None
-    if not isinstance(index_head, dict) or index_head.get("schema") != 1:
-        print(f"❌ 分享仓库清单 {SHARE_INDEX} 无效（缺少 schema=1 协议版本声明）。")
+    if index.get("schema") != 1:
+        print(f"❌ 库级清单 {SHARE_INDEX} 无效（缺少 schema=1 协议版本声明）。")
         print("   请按仓库级元数据格式补齐：schema / author / license / assets")
         return 1
+    if not index.get("author") or not index.get("license"):
+        print(f"⚠️  库级清单 {SHARE_INDEX} 缺少 author 或 license（建议补齐后发布）。")
+        return 1
 
-    # 分享资产必须自描述（含 __fp__ manifest），否则拒绝（发布物须可被标准协议消费）
-    src_dir = source_dir(source, atype)
-    paths = _asset_paths(src_dir, name, atype)
-    main_file = next((p for p in paths if p.endswith((".py", ".md"))), None)
-    if main_file:
-        m = parse_fp_manifest(main_file) if main_file.endswith(".py") else parse_memory_manifest(main_file)
-        if not m:
-            print(f"❌ 资产 {name} 缺少 __fp__ manifest，分享物必须自描述。")
-            print(f"   请先为资产补充 manifest：fp ext init {os.path.dirname(main_file)}")
-            return 1
+    # 2. 枚举 public 资产 + 文件级 __fp__ 检查（分享物必须自描述）
+    assets = _scan_public_assets()
+    issues: list[str] = []
+    for a in assets:
+        if a["manifest"] is None:
+            issues.append(f"资产缺少 __fp__ manifest（分享物必须自描述）: {a['atype']}/{os.path.basename(a['path'])}")
+    if issues:
+        print("❌ 以下资产未自描述，拒绝发布（请先 fp ext init 补充 manifest）：")
+        for i in issues:
+            print(f"   · {i}")
+        return 1
 
-    # 复制快照到分享仓库对应类型目录（幂等：内容一致则跳过）
-    dest_dir = os.path.join(repo, atype)
-    os.makedirs(dest_dir, exist_ok=True)
-    changed = False
-    for p in paths:
-        dest = os.path.join(dest_dir, os.path.basename(p))
-        if os.path.exists(dest) and _same_content(p, dest):
-            continue  # 内容一致，跳过
-        if os.path.isdir(p):
-            shutil.copytree(p, dest, dirs_exist_ok=True)
-        else:
-            shutil.copy2(p, dest)
-        changed = True
+    # 3. 孤儿文件检查（根目录杂散 / 清单悬空 / 未登记）
+    orphan_issues = _check_public_orphans(assets, index)
+    if orphan_issues:
+        print("❌ public 仓库存在孤儿文件/登记不一致，拒绝发布：")
+        for i in orphan_issues:
+            print(f"   · {i}")
+        return 1
 
-    # 更新索引 fp.ext.json（保留 schema/author/license，只登记资产）
-    index = {}
-    if os.path.isfile(index_path):
-        try:
-            with open(index_path, encoding="utf-8") as f:
-                index = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            index = {}
-    asset_key = f"{atype}/{name}"
-    if not changed and asset_key in index.get("assets", {}):
-        print(f"✅ 已是最新（内容无变化），跳过发布: {asset_key}")
-        return 0
-    index.setdefault("assets", {})
-    index["assets"][asset_key] = {
-        "source": os.path.basename(name),
-        "updated_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
-    }
-    with open(index_path, "w", encoding="utf-8") as f:
-        json.dump(index, f, indent=2, ensure_ascii=False)
+    # 4. 代码检查：public 全资产静态扫描（install 规则 + promote 隐私规则）
+    scan_hits: dict[str, list] = {}
+    for a in assets:
+        if os.path.isfile(a["path"]) and a["path"].endswith(".py"):
+            hs = scan_file(a["path"], scene="promote")
+            if hs:
+                scan_hits[os.path.basename(a["path"])] = hs
+    if scan_hits:
+        print("❌ public 仓库存在静态扫描风险，拒绝发布：")
+        print(format_report(scan_hits))
+        return 1
 
-    ensure_repo(repo)
-    commit_all(repo, f"share {atype}/{name}")
+    # 5. 提交 + 可选推送
+    ensure_repo(public_root)
+    commit_all(public_root, "share: 发布 public 仓库")
     if args.push:
-        run_git(repo, "push")
-        print("🚀 已 push 分享仓库")
-    append_audit("share", f"{atype}/{name}", origin=repo)
-    print(f"✅ 已发布到分享仓库: {repo}")
+        if not has_remote(public_root):
+            print("⚠️  public 仓库无 remote，跳过 push（先 git remote add origin <url>）")
+        else:
+            run_git(public_root, "push")
+            print("🚀 已 push public 仓库")
+
+    append_audit("share", "public", origin=public_root)
+    print(f"✅ public 仓库已通过校验并发布: {public_root}")
+    print("   他人安装：fp ext fetch <仓库 URL>")
     return 0
 
 
@@ -1144,10 +1305,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name")
     p.set_defaults(func=cmd_demote)
 
-    p = sub.add_parser("share", help="发布到分享仓库")
-    p.add_argument("name")
-    p.add_argument("--repo", required=True, help="分享仓库目录")
-    p.add_argument("--push", action="store_true", help="推送分享仓库")
+    p = sub.add_parser("share", help="校验并发布 public 仓库（库清单/__fp__/孤儿/代码检查 + commit + 可选 push）")
+    p.add_argument("--push", action="store_true", help="推送到 public 仓库 remote")
     p.set_defaults(func=cmd_share)
 
     p = sub.add_parser("migrate", help="手动执行存量迁移")

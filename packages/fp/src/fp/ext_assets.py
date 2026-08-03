@@ -2,7 +2,7 @@
 
 三来源目录（优先级低→高：fetched → public → private）：
   {DATA}/fetched/  外来资产（只读，来自 fp ext fetch）
-  {DATA}/public/   本地公开资产（git 管理，可 push 分享）
+  {DATA}/public/   分享仓库本体（git 管理，可 push；根目录含 fp.ext.json 库清单）
   {DATA}/private/  本地私有资产（git 管理，禁 remote）
 
 每种来源内部按资产类型分目录：
