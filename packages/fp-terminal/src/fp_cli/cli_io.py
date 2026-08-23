@@ -12,6 +12,8 @@ from fp_core.core.io import IOChannel
 class CLIIO(IOChannel):
     """CLI 通道 — 直接使用 input() 和 display 模块。"""
 
+    frontend = "terminal"
+
     def __init__(self):
         self._streamer = None
         self._spinner = None

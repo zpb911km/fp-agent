@@ -36,6 +36,11 @@ class IOChannel:
     不直接依赖 input() 或 display 模块。
     """
 
+    # 前端身份标识。子类覆盖：
+    #   CLIIO → "terminal" / WebSocketIO → "webui" / ACPIO → "acp"
+    # 供扩展（命令/插件/工具）判断运行环境，避免各自 hack 检测。
+    frontend: str = "unknown"
+
     # ── 文本输出 ─────────────────────────────────────
 
     def info(self, text: str):
@@ -103,6 +108,8 @@ class WebSocketIO(IOChannel):
       - WebSocketIO.ask() 发布 "ask" 事件，阻塞等待 feed_reply()
       - WebSocket 处理器收到用户消息后调用 feed_reply()
     """
+
+    frontend = "webui"
 
     def __init__(self, event_bus):
         self._event_bus = event_bus
@@ -179,6 +186,8 @@ class RestIO(IOChannel):
     若命令触发了 ask()（如 /back 无参数交互模式），
     直接返回空字符串触发"已取消"分支，不会阻塞。
     """
+
+    frontend = "rest"
 
     async def ask(self, prompt: str) -> str:
         return ""

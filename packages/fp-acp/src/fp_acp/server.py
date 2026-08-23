@@ -67,6 +67,8 @@ class ACPIO(IOChannel):
       用户需要看到渐进式反馈，而不是静默等待后突然弹出完整回复。
     """
 
+    frontend = "acp"
+
     _STREAM_THRESHOLD = 300
 
     def __init__(self, send_chunk=None):
