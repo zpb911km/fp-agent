@@ -119,7 +119,7 @@ def llm_tool(msg: str):
 # 而非从中间砍断整个字符串。
 
 _STR_MAX = 60  # 单个字符串值最大长度
-_STRUCT_MAX = 400  # 嵌套 dict/list 展开后整体最大长度
+_STRUCT_MAX = 4000  # 嵌套 dict/list 展开后整体最大长度
 _TOOL_PART_DELAY = 0.02  # 工具调用行逐段流式展开的间隔（秒）
 
 
@@ -169,12 +169,12 @@ def _tool_parts(name: str, args) -> list[str]:
     if not isinstance(args, dict):
         return [f"  🛠️  {name}({args})"]
 
-    segs = [f"  🛠️  {name}("]
+    segs = [f"  🛠️  {name}(\n"]
     for i, (k, v) in enumerate(args.items()):
         if i:
-            segs.append(", ")
+            segs.append(", \n")
         segs.append(f"{k}={_fmt_tool_value(v)}")
-    segs.append(")")
+    segs.append("\n)")
     return segs
 
 
