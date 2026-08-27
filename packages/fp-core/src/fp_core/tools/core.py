@@ -19,14 +19,48 @@ import contextlib
 import hashlib
 import locale
 import os
+import re
 import signal
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TypedDict
 
 from fp_core.platform_utils import find_bash, is_windows
+
+# ── OpenAI function calling schema 类型（精确声明，替代裸 dict） ──────────
+
+
+class OpenAIParameter(TypedDict):
+    """单个工具参数定义（ParamSpec.to_openai 的返回）"""
+
+    type: str
+    description: str
+
+
+class OpenAIParameters(TypedDict):
+    """工具参数容器（properties/required）"""
+
+    type: str
+    properties: dict[str, OpenAIParameter]
+    required: list[str]
+
+
+class OpenAIFunction(TypedDict):
+    """OpenAI function calling 的 function 定义"""
+
+    name: str
+    description: str
+    parameters: OpenAIParameters
+
+
+class OpenAISchema(TypedDict):
+    """OpenAI function calling 完整 schema（ToolSpec.to_openai_schema 的返回）"""
+
+    type: str
+    function: OpenAIFunction
+
 
 # ── 辅助函数 ─────────────────────────────────────────────────────────────
 
@@ -60,7 +94,7 @@ class ParamSpec:
     required: bool
     description: str
 
-    def to_openai(self) -> dict:
+    def to_openai(self) -> OpenAIParameter:
         return {"type": self.type, "description": self.description}
 
 
@@ -71,9 +105,9 @@ class ToolSpec:
     name: str
     description: str
     params: list[ParamSpec]
-    handler: Callable[..., Awaitable[Any]]
+    handler: Callable[..., Awaitable[str]]
 
-    def to_openai_schema(self) -> dict:
+    def to_openai_schema(self) -> OpenAISchema:
         """从声明生成 OpenAI function calling schema"""
         properties = {p.name: p.to_openai() for p in self.params}
         required = [p.name for p in self.params if p.required]
@@ -90,12 +124,16 @@ class ToolSpec:
             },
         }
 
-    async def run(self, params: dict[str, Any]) -> Any:
-        """从参数字典路由：校验必填项 → 提取参数 → 调用底层处理器"""
+    async def run(self, params: dict[str, object]) -> str:
+        """从参数字典路由：校验必填项 → 提取参数 → 调用底层处理器。
+
+        只传实际提供的参数：可选参数缺省时不强传 None，
+        由 handler 的默认值兜底（如 bash 的 timeout=300 / force=False）。
+        """
         missing = [p.name for p in self.params if p.required and p.name not in params]
         if missing:
             raise ValueError(f"工具 {self.name} 缺少必填参数: {', '.join(missing)}")
-        kwargs = {p.name: params.get(p.name) for p in self.params}
+        kwargs = {p.name: params[p.name] for p in self.params if p.name in params}
         return await self.handler(**kwargs)
 
 
@@ -119,7 +157,40 @@ async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
                 proc.kill()
 
 
-async def _execute_bash(command: str) -> str:
+# ── bash 副作用检查 ─────────────────────────────────────────────────────
+# 定位：提醒层而非安全层——防"无意识自伤/毁灭"，不防"有意执行"（force 可绕过）。
+# 来源：反思记录 8/14 的 pkill 自杀坑（同一 bash 调用里 pkill 杀掉执行命令的 shell 自身）。
+# 关键事实：pkill 默认不排除自身进程；bash 工具内 `bash -c <command>` 的 cmdline 含
+# command 全文，因此 pkill -f <任何词> 几乎必然命中执行它的 shell——故 pkill 直接 BLOCK。
+
+# BLOCK：毁灭级（数据/系统级破坏）或极高自伤风险，必须 force=true 才放行
+_BLOCK_PATTERNS: list[tuple[str, str]] = [
+    (r"rm\s+-rf\s+(/\s*$|/\s+|/\*|~+\s*$|\.\s*$)", "rm -rf 根目录/家目录/当前目录"),
+    (r"(^|[;&|]\s*)mkfs(\.\w+)?\b", "磁盘格式化 mkfs"),
+    (r"(^|[;&|]\s*)fdisk\b", "磁盘分区 fdisk"),
+    (r"(^|[;&|]\s*)parted\b", "磁盘分区 parted"),
+    (r"\bdd\b[^|;]*\bof=/dev/", "dd 直接写 /dev/ 设备"),
+    (r"(^|[;&|]\s*)(shutdown|reboot|poweroff|halt)\b", "关机/重启/停机"),
+    (r":\(\s*\)\s*\{\s*:\s*\|", "fork 炸弹"),
+    (r"chmod\s+-R\s+777\s+(/\s*$|/\s+|/\*)", "chmod -R 777 根目录"),
+    (r"chown\s+-R\b[^|;]*\s/\s*$", "chown -R 整个根目录"),
+    (r"\bpkill\b", "pkill 不排除自身进程，bash 工具内执行极易杀死执行命令的 shell（曾真实发生）"),
+]
+
+
+def _check_side_effect(command: str) -> str:
+    """检查命令是否命中 BLOCK 规则。返回拦截原因；无风险返回空字符串。
+
+    设计取舍：只保留执行前拦截（BLOCK）——同步工具协议下事后提示无意义，
+    且工具调用记录本身常驻上下文，透明可审计，故不设 WARN 层。
+    """
+    for pat, reason in _BLOCK_PATTERNS:
+        if re.search(pat, command):
+            return reason
+    return ""
+
+
+async def _execute_bash(command: str, timeout: int = 300, force: bool = False) -> str:
     """异步执行 shell 命令。
 
     方案：stdout/stderr 重定向到临时文件而非 PIPE——
@@ -129,9 +200,31 @@ async def _execute_bash(command: str) -> str:
       同时天然规避管道 64KB 死锁，大输出由文件承载。
     - 配合 start_new_session=True（独立进程组）+ killpg 击杀，SIGINT/超时
       时 shell 与子进程一并清理，不挂死、不泄漏。
+
+    Args:
+        command: 要执行的 shell 命令
+        timeout: 超时秒数（1~3600，默认 300），长任务可调大
+        force: 设为 true 跳过副作用检查（危险命令直接放行，确认风险后使用）
     """
     if not command:
         raise ValueError("bash 工具需要 command 参数")
+
+    # ── 副作用检查（force 绕过） ──
+    if not force:
+        reason = _check_side_effect(command)
+        if reason:
+            return (
+                f"⛔ 命令被安全检查拦截：{reason}\n"
+                f"命令: {command}\n"
+                f"若要强制执行，请重新调用并设置 force=true（有风险，请确认后使用）"
+            )
+
+    # ── timeout 参数化（clamp 1~3600） ──
+    try:
+        timeout = int(timeout)
+    except (TypeError, ValueError):
+        timeout = 300
+    timeout = max(1, min(timeout, 3600))
 
     cmd_prefix = ""
     start_time = time.monotonic()
@@ -166,12 +259,12 @@ async def _execute_bash(command: str) -> str:
                 )
 
             try:
-                returncode = await asyncio.wait_for(proc.wait(), timeout=300)
+                returncode = await asyncio.wait_for(proc.wait(), timeout=timeout)
             except TimeoutError:
                 await _kill_process_group(proc)
                 with contextlib.suppress(TimeoutError, asyncio.CancelledError):
                     await asyncio.wait_for(proc.wait(), timeout=2)
-                return "错误：命令执行超时（300秒）"
+                return f"错误：命令执行超时（{timeout}秒），可加大 timeout 参数重试"
             except (KeyboardInterrupt, asyncio.CancelledError):
                 await _kill_process_group(proc)
                 with contextlib.suppress(TimeoutError, asyncio.CancelledError):
@@ -253,7 +346,7 @@ async def _execute_read_file(file_path: str, offset: int | None = None, limit: i
 
             if (remainder > 0) or char_cut:
                 next_offset = (offset or 0) + lines_returned
-                hints = []
+                hints: list[str] = []
                 if remainder > 0:
                     hints.append(f"共 {total_lines} 行，已读 {lines_returned} 行，剩余 {remainder} 行")
                 if char_cut:
@@ -275,7 +368,7 @@ async def _execute_read_file(file_path: str, offset: int | None = None, limit: i
 
 async def _execute_write_file(file_path: str, content: str) -> str:
     """异步写入文件"""
-    if not file_path or content is None:
+    if not file_path:
         raise ValueError("write_file 需要 file_path 和 content 参数")
 
     try:
@@ -318,7 +411,7 @@ async def _execute_edit_file(
         old_string: 需要被替换的已有文本
         new_string: 替换后的新文本
     """
-    if not file_hash or old_string is None or new_string is None:
+    if not file_hash or not old_string or not new_string:
         raise ValueError("edit_file 需要 file_hash, old_string, new_string 参数")
 
     try:
@@ -382,8 +475,14 @@ async def _execute_edit_file(
 CORE_TOOLS: list[ToolSpec] = [
     ToolSpec(
         name="bash",
-        description="执行 shell 命令。小输出直接返回，大输出(≥3K)自动保存文件+返回预览。超时 300 秒。",
-        params=[ParamSpec("command", "string", True, "要执行的 shell 命令")],
+        description="执行 shell 命令。小输出直接返回，大输出(≥3K)自动保存文件+返回预览。"
+        "默认超时 300 秒，可用 timeout 参数调整。危险命令（rm -rf 根目录、pkill、磁盘操作、关机等）"
+        "会被安全检查拦截，确认风险后可用 force=true 强制执行。",
+        params=[
+            ParamSpec("command", "string", True, "要执行的 shell 命令"),
+            ParamSpec("timeout", "integer", False, "超时秒数（1~3600，默认 300），长任务可调大"),
+            ParamSpec("force", "boolean", False, "设为 true 跳过副作用检查（危险命令放行，确认风险后使用）"),
+        ],
         handler=_execute_bash,
     ),
     ToolSpec(
@@ -440,12 +539,12 @@ CORE_TOOLS: list[ToolSpec] = [
 _TOOL_INDEX: dict[str, ToolSpec] = {t.name: t for t in CORE_TOOLS}
 
 
-def get_core_definitions() -> list:
+def get_core_definitions() -> list[OpenAISchema]:
     """返回核心工具的 OpenAI schema 定义（由 ToolSpec 单一数据源生成）"""
     return [t.to_openai_schema() for t in CORE_TOOLS]
 
 
-async def execute_core_tool(tool_name: str, params: dict[str, Any]) -> Any:
+async def execute_core_tool(tool_name: str, params: dict[str, object]) -> str:
     """
     执行核心工具（异步）
 

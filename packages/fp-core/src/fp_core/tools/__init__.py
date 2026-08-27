@@ -15,19 +15,31 @@ Tools 包 — 插件化工具系统（全异步版本）
 import importlib
 import importlib.util
 import os
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import TypedDict, cast
 
 from fp_core.logger import get_logger
+from fp_core.tools.core import OpenAISchema
+
+# 工具执行器签名：所有工具 handler 都是 async def(params: dict) -> str
+ToolExecutor = Callable[..., Awaitable[str]]
+
+
+class PluginEntry(TypedDict):
+    """已注册的插件工具条目"""
+
+    definition: OpenAISchema
+    executor: ToolExecutor
+    source: str
 
 
 class ToolRegistry:
     """工具注册表，管理所有核心工具和插件"""
 
     def __init__(self):
-        self._core_defs: list[dict] = []
-        self._core_executor: Callable | None = None
-        self._plugins: dict[str, dict] = {}  # {name: {definition, executor}}
+        self._core_defs: list[OpenAISchema] = []
+        self._core_executor: Callable[[str, dict[str, object]], Awaitable[str]] | None = None
+        self._plugins: dict[str, PluginEntry] = {}  # {name: {definition, executor, source}}
         self._load_core()
         self._load_plugins()
 
@@ -77,9 +89,12 @@ class ToolRegistry:
 
                 # ── 多工具模式：PLUGIN_DEFINITIONS + TOOL_MAP ──
                 if hasattr(module, "PLUGIN_DEFINITIONS") and hasattr(module, "TOOL_MAP"):
-                    for defn in module.PLUGIN_DEFINITIONS:
+                    definitions = cast(list[OpenAISchema], module.PLUGIN_DEFINITIONS)
+                    tool_map = cast(dict[str, ToolExecutor], module.TOOL_MAP)
+                    module_execute = cast(ToolExecutor, module.execute)
+                    for defn in definitions:
                         tool_name = defn["function"]["name"]
-                        executor = module.TOOL_MAP.get(tool_name, module.execute)
+                        executor = tool_map.get(tool_name, module_execute)
                         self._plugins[f"{plugin_name}/{tool_name}"] = {
                             "definition": defn,
                             "executor": executor,
@@ -89,8 +104,8 @@ class ToolRegistry:
                 # ── 单工具模式：PLUGIN_DEFINITION + execute ──
                 elif hasattr(module, "PLUGIN_DEFINITION") and hasattr(module, "execute"):
                     self._plugins[plugin_name] = {
-                        "definition": module.PLUGIN_DEFINITION,
-                        "executor": module.execute,
+                        "definition": cast(OpenAISchema, module.PLUGIN_DEFINITION),
+                        "executor": cast(ToolExecutor, module.execute),
                         "source": plugin_name,
                     }
                 else:
@@ -98,7 +113,7 @@ class ToolRegistry:
             except Exception as e:
                 get_logger().warning(f"[tools] ⚠️ 加载插件 {plugin_name} 失败: {e}")
 
-    def register_tool(self, name: str, definition: dict, executor: Callable):
+    def register_tool(self, name: str, definition: OpenAISchema, executor: ToolExecutor):
         """动态注册一个工具（供生命周期插件使用）
 
         Args:
@@ -112,14 +127,14 @@ class ToolRegistry:
             "source": "lifecycle_plugin",
         }
 
-    def get_all_definitions(self) -> list[dict]:
+    def get_all_definitions(self) -> list[OpenAISchema]:
         """获取所有工具的 OpenAI function calling schema 列表"""
         definitions = list(self._core_defs)
         for plugin_data in self._plugins.values():
             definitions.append(plugin_data["definition"])
         return definitions
 
-    async def execute(self, tool_name: str, params: dict[str, Any]) -> Any:
+    async def execute(self, tool_name: str, params: dict[str, object]) -> str:
         """
         执行指定工具（异步）
 
@@ -159,6 +174,6 @@ def create_registry() -> ToolRegistry:
     return ToolRegistry()
 
 
-async def execute_tool(tool_name: str, params: dict[str, Any]) -> Any:
+async def execute_tool(tool_name: str, params: dict[str, object]) -> str:
     """执行指定工具（异步）"""
     return await registry.execute(tool_name, params)
