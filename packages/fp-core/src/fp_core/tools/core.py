@@ -299,12 +299,27 @@ async def _execute_bash(command: str, timeout: int = 300, force: bool = False) -
             _fd, _path = tempfile.mkstemp(prefix="fp_bash_", suffix=".log")
             with os.fdopen(_fd, "w", encoding="utf-8") as _f:
                 _f.write(output)
-            preview = output[:200]
-            return (
+
+            # 结构化预览：头部 + 尾部 + stderr 摘要，让 LLM 一次拿到关键信息
+            # （报错通常在尾部或 stderr，旧实现只给头部 200 字符，常漏掉真正要看的）
+            total_chars = len(output)
+            total_lines = output.count("\n") + 1
+            head = output[:200]
+            tail = output[-200:] if total_chars > 400 else ""
+
+            summary = (
                 f"✅ 命令执行成功（exit=0，{duration:.1f}s）\n"
-                f"输出较长（{len(output)} 字符），已保存至 {_path}\n\n"
-                f"前 200 字符预览：\n────────────────────────\n{preview}\n"
-                f"────────────────────────\n\n需要完整内容 → read_file({_path!r})"
+                f"输出较长（{total_chars} 字符 / {total_lines} 行），已保存至 {_path}"
+            )
+            if stderr_text.strip():
+                summary += f"\n⚠️ stderr 存在（{len(stderr_text)} 字符），开头：\n{stderr_text[:200]}"
+            return (
+                f"{summary}\n\n"
+                f"── 头部 200 字符 ────────────────────────\n{head}\n"
+                f"────────────────────────────────────────\n"
+                f"── 尾部 200 字符 ────────────────────────\n{tail}\n"
+                f"────────────────────────────────────────\n\n"
+                f"需要完整内容 → read_file({_path!r})"
             )
         except Exception as e:
             return f"错误：{e}"

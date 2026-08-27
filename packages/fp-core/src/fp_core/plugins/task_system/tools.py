@@ -5,6 +5,7 @@
 
 from typing import Any
 
+from .models import TaskStatus
 from .store import TaskStore
 
 # ── OpenAI Function Calling Schema ─────────────────────────────
@@ -66,7 +67,9 @@ DEF_CLEAR = {
     "type": "function",
     "function": {
         "name": "task_clear",
-        "description": "清除所有已完成的任务。会删除已完成（completed）状态的记录，并更新任务 ID 序列。",
+        "description": (
+            "清除全部已完成（completed）状态的任务。注意：此操作不可撤销，且无法指定单个任务（会清掉所有已完成任务）。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {},
@@ -112,7 +115,7 @@ async def handle_update(params: dict[str, Any]) -> str:
     store = TaskStore()
     task = store.update(task_id, status)
     if task is None:
-        return f"错误：未找到任务 #{task_id}"
+        return f"错误：未找到任务 #{task_id}（任务可能已被清除，可用 task_list 查看当前任务）"
     return f"✅ 任务 #{task.id} 状态已更新为 [{status}]"
 
 
@@ -135,8 +138,11 @@ async def handle_list(params: dict[str, Any]) -> str:
 async def handle_clear(params: dict[str, Any]) -> str:
     """清除已完成任务"""
     store = TaskStore()
+    before = store.list_all()
+    cleared_tasks = [t for t in before if t.status == TaskStatus.COMPLETED]
     cleared = store.clear_completed()
     if cleared == 0:
         return "没有已完成的任务需要清除"
     remaining = len(store.list_all())
-    return f"✅ 已清除 {cleared} 个已完成任务，剩余 {remaining} 个待办任务"
+    detail = "、".join(f"#{t.id} {t.subject}" for t in cleared_tasks)
+    return f"✅ 已清除 {cleared} 个已完成任务（{detail}），剩余 {remaining} 个待办任务"

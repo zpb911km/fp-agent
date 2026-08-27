@@ -285,7 +285,8 @@ class TestBash:
         result = await _execute_bash("seq 1 5000")
         assert "输出较长" in result
         assert "已保存至" in result
-        assert "前 200 字符预览" in result
+        assert "头部 200 字符" in result
+        assert "尾部 200 字符" in result
 
     @pytest.mark.asyncio
     async def test_stderr_appended(self):

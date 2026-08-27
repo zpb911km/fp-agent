@@ -4,8 +4,11 @@ JSON 文件存储，位于 .fp/tasks.json（项目本地）。
 线程安全（所有同步操作均在 executor 中运行）。
 """
 
+import contextlib
 import json
 import os
+
+from fp_core.logger import get_logger
 
 from .models import Task, TaskStatus
 
@@ -23,18 +26,36 @@ class TaskStore:
         return self._file_path
 
     def load(self) -> tuple[list[Task], int]:
-        """加载任务列表和下一个 ID"""
+        """加载任务列表和下一个 ID。
+
+        容错策略：文件不存在 → 正常空；JSON 损坏 → 告警 + 备份原文件后返回空
+        （不静默清空，避免任务"凭空消失"）；单条坏数据 → 跳过并告警，保留其余好条目。
+        """
         if not os.path.exists(self._file_path):
             return [], 1
 
         try:
             with open(self._file_path, encoding="utf-8") as f:
                 data = json.load(f)
-            tasks = [Task.from_dict(t) for t in data.get("tasks", [])]
-            next_id = data.get("next_id", 1)
-            return tasks, next_id
-        except Exception:
+        except (json.JSONDecodeError, OSError) as e:
+            get_logger().error(f"[task] ⚠️ tasks.json 解析失败（{e}），已备份为 {self._file_path}.bak")
+            with contextlib.suppress(OSError):
+                os.replace(self._file_path, self._file_path + ".bak")
             return [], 1
+
+        if not isinstance(data, dict):
+            get_logger().warning("[task] ⚠️ tasks.json 顶层结构异常（非对象），按空任务处理")
+            return [], 1
+
+        tasks: list[Task] = []
+        for idx, item in enumerate(data.get("tasks", [])):
+            try:
+                tasks.append(Task.from_dict(item))
+            except Exception as e:
+                get_logger().warning(f"[task] ⚠️ 跳过坏任务条目 #{idx}: {e}")
+
+        next_id = data.get("next_id", 1)
+        return tasks, next_id
 
     def save(self, tasks: list[Task], next_id: int):
         """保存任务列表"""
