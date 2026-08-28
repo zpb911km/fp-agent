@@ -16,11 +16,13 @@ class GitError(RuntimeError):
     pass
 
 
-def run_git(cwd: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+def run_git(cwd: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     """在指定目录执行 git 命令。失败抛 GitError。"""
     cmd = ["git", *args]
     try:
-        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=60)
+        proc: subprocess.CompletedProcess[str] = subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=60
+        )
     except (OSError, subprocess.TimeoutExpired) as e:
         raise GitError(f"git 执行失败: {e}") from e
     if check and proc.returncode != 0:

@@ -21,6 +21,7 @@ ext-audit.jsonl（两段式追加，每行一条）：
 import json
 import os
 from datetime import datetime
+from typing import Any, cast
 
 from fp.ext_assets import audit_path, registry_path
 
@@ -30,7 +31,7 @@ REGISTRY_VERSION = 1
 # ── registry ────────────────────────────────────────────────────
 
 
-def load_registry() -> dict:
+def load_registry() -> dict[str, Any]:
     """加载注册表，不存在或损坏时返回空结构（幂等）。"""
     path = registry_path()
     if not os.path.isfile(path):
@@ -38,14 +39,16 @@ def load_registry() -> dict:
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, dict) and isinstance(data.get("assets"), dict):
-            return data
+        if isinstance(data, dict):
+            data_dict = cast(dict[str, Any], data)
+            if isinstance(data_dict.get("assets"), dict):
+                return data_dict
     except (json.JSONDecodeError, OSError):
         pass
     return {"version": REGISTRY_VERSION, "assets": {}}
 
 
-def save_registry(registry: dict) -> None:
+def save_registry(registry: dict[str, Any]) -> None:
     """原子写注册表（先写临时文件再 rename）。"""
     path = registry_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -55,12 +58,12 @@ def save_registry(registry: dict) -> None:
     os.replace(tmp, path)
 
 
-def registry_asset(key: str) -> dict | None:
+def registry_asset(key: str) -> dict[str, Any] | None:
     """按 "<type>/<name>" 查注册表条目。"""
     return load_registry()["assets"].get(key)
 
 
-def upsert_asset(key: str, data: dict) -> None:
+def upsert_asset(key: str, data: dict[str, Any]) -> None:
     """新增或更新一条注册表记录。"""
     reg = load_registry()
     reg["assets"][key] = data
@@ -95,12 +98,12 @@ def append_audit(action: str, asset: str, origin: str = "", note: str = "") -> N
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def load_audit(limit: int | None = None) -> list[dict]:
+def load_audit(limit: int | None = None) -> list[dict[str, Any]]:
     """读取审计日志（按时间正序，limit 限制条数）。"""
     path = audit_path()
     if not os.path.isfile(path):
         return []
-    records: list[dict] = []
+    records: list[dict[str, Any]] = []
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()

@@ -27,7 +27,7 @@ PACKAGES = [
 # ── 工具函数 ───────────────────────────────────────
 
 
-def _parse_version(ver: str) -> tuple:
+def _parse_version(ver: str) -> tuple[int, ...]:
     """将 '0.1.5' 转为 (0, 1, 5) 以便逐段比较"""
     try:
         return tuple(int(x) for x in ver.split("."))
@@ -63,7 +63,7 @@ def _fetch_latest_version(pkg_name: str) -> str | None:
         return None
 
 
-def _print_notice(outdated: list):
+def _print_notice(outdated: list[tuple[str, str, str]]):
     """打印黄色更新提示框（到 stderr，不污染 stdout）"""
     lines = [
         f"{YELLOW}╔══════════════════════════════════════════╗",
@@ -83,7 +83,7 @@ def _print_notice(outdated: list):
 
 def _do_check():
     """执行一次版本检查"""
-    outdated = []
+    outdated: list[tuple[str, str, str]] = []
 
     for pypi_name, display_name in PACKAGES:
         installed = _get_installed_version(pypi_name)
@@ -113,7 +113,7 @@ def do_update():
 
     print("正在检查更新...")
 
-    outdated = []
+    outdated: list[tuple[str, str, str]] = []
     for pypi_name, display_name in PACKAGES:
         installed = _get_installed_version(pypi_name)
         if installed is None:

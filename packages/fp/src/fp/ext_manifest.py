@@ -19,13 +19,14 @@
 """
 
 import ast
+from typing import Any, cast
 
 FP_SCHEMA_VERSION = 1
 
 # ── Python 资产：__fp__ 协议 ─────────────────────────────────────
 
 
-def parse_fp_manifest(filepath: str) -> dict | None:
+def parse_fp_manifest(filepath: str) -> dict[str, Any] | None:
     """解析 Python 文件头部的 __fp__ 协议字段（AST 字面量，不执行代码）。
 
     返回 dict（不保证字段完整，调用方用 validate_manifest 校验）；
@@ -51,7 +52,7 @@ def parse_fp_manifest(filepath: str) -> dict | None:
                 except (ValueError, SyntaxError):
                     return None
                 if isinstance(val, dict):
-                    return val
+                    return cast(dict[str, Any], val)
     return None
 
 
@@ -91,13 +92,13 @@ def parse_tool_name(filepath: str) -> str | None:
             val = ast.literal_eval(node.value)
         except (ValueError, SyntaxError):
             continue
-        defs = val if isinstance(val, list) else [val]
+        defs = cast(list[Any], val) if isinstance(val, list) else [val]
         for d in defs:
             if not isinstance(d, dict):
                 continue
-            func = d.get("function", d)
+            func = cast(dict[str, Any], d).get("function", d)
             if isinstance(func, dict):
-                n = func.get("name")
+                n = cast(dict[str, Any], func).get("name")
                 if isinstance(n, str) and n.strip():
                     return n
     return None
@@ -106,7 +107,7 @@ def parse_tool_name(filepath: str) -> str | None:
 # ── 记忆：front-matter 解析 ─────────────────────────────────────
 
 
-def parse_frontmatter(content: str) -> dict:
+def parse_frontmatter(content: str) -> dict[str, str]:
     """解析记忆文件的 YAML frontmatter（第一对 --- 之间）。
 
     行扫描实现（memory_save 生成的格式固定为 name/description/type/created
@@ -131,7 +132,7 @@ def parse_frontmatter(content: str) -> dict:
     return result
 
 
-def parse_memory_manifest(filepath: str) -> dict | None:
+def parse_memory_manifest(filepath: str) -> dict[str, str] | None:
     """解析记忆文件的 manifest（front-matter）。无法解析返回 None。"""
     try:
         with open(filepath, encoding="utf-8") as f:
@@ -147,7 +148,7 @@ def parse_memory_manifest(filepath: str) -> dict | None:
 # ── 校验与规范化 ─────────────────────────────────────────────────
 
 
-def validate_manifest(manifest: dict, asset_type: str | None = None) -> list[str]:
+def validate_manifest(manifest: dict[str, Any] | None, asset_type: str | None = None) -> list[str]:
     """校验 manifest，返回问题列表（空列表 = 合法）。
 
     Args:
