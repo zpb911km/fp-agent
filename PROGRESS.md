@@ -62,3 +62,11 @@ fp-core（根基）→ fp-terminal / fp-webui / fp-acp → fp（聚合）
 - 12 错全清，全局 1056→1044
 - 技巧：private 访问用 getattr/cast、ctypes 用 cast(Any)、空 dict 补注解
 - 验收：pytest 286 passed ✓
+
+## 批11（fp-webui main.py 179→0）
+- 子agent 修复：EventBus 泛型、WebUIPlugin 回调、REST/WS 端点、JSON 解析 cast 收敛、_UVICORN_LOG_CONFIG
+- 179 错全清，全局 1049→870
+- 坑：ruff 自动 fix 会把 getattr/setattr 私有访问简化回直接访问 → reportPrivateUsage 复活
+  → 方案：直接访问 + `# type: ignore[reportPrivateUsage]`（项目已有此风格）
+- 级联反向暴露 5 错（option.py/plugin.py 私有访问）→ 同方案清零，870→865
+- 验收：pytest 338 passed ✓
