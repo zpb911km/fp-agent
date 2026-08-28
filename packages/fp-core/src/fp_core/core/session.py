@@ -41,7 +41,7 @@ def _extract_sid(filename: str) -> str:
 # ── 会话文件（嵌入 meta） ─────────────────────────
 
 
-def _default_meta(sid: str) -> dict:
+def _default_meta(sid: str) -> dict[str, Any]:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return {
         "__meta__": True,
@@ -73,7 +73,7 @@ def _session_path(sid: str) -> str:
     return os.path.join(SESSIONS_DIR, f"{sid}.jsonl")
 
 
-def _read_meta_from_file(path: str) -> dict | None:
+def _read_meta_from_file(path: str) -> dict[str, Any] | None:
     """读取会话文件第一行中的 meta 信息。"""
     if not os.path.exists(path):
         return None
@@ -89,7 +89,7 @@ def _read_meta_from_file(path: str) -> dict | None:
     return None
 
 
-def _write_meta_to_file(path: str, meta: dict) -> bool:
+def _write_meta_to_file(path: str, meta: dict[str, Any]) -> bool:
     """重写会话文件的第一行（meta header）。"""
     if not os.path.exists(path):
         return False
@@ -108,8 +108,8 @@ def _write_meta_to_file(path: str, meta: dict) -> bool:
 def _find_latest_session() -> str | None:
     """扫描 sessions 目录，返回 updated 最新的会话 sid。
     若无任何会话，返回 None。"""
-    latest_sid = None
-    latest_time = ""
+    latest_sid: str | None = None
+    latest_time: str = ""
 
     try:
         for fname in os.listdir(SESSIONS_DIR):
@@ -126,7 +126,7 @@ def _find_latest_session() -> str | None:
     return latest_sid
 
 
-def update_session_meta(sid: str, **kwargs) -> bool:
+def update_session_meta(sid: str, **kwargs: Any) -> bool:
     """模块级函数：更新指定会话的 meta 字段（不依赖 SessionManager 实例）。
 
     与 SessionManager.update_meta 不同，本函数在会话文件不存在时
@@ -150,18 +150,18 @@ def update_session_meta(sid: str, **kwargs) -> bool:
 # 供同进程内的其他模块（如 subagent 插件）读取当前活动会话 ID。
 # 多 Agent 实例时以最后创建的为准（通常即当前工作 Agent）。
 
-_CURRENT_SESSION_ID: str | None = None
+_current_session_id: str | None = None
 
 
 def _register_current_session(sid: str) -> None:
     """内部：注册当前活动会话 ID（SessionManager 初始化时调用）。"""
-    global _CURRENT_SESSION_ID
-    _CURRENT_SESSION_ID = sid
+    global _current_session_id
+    _current_session_id = sid
 
 
 def get_current_session_id() -> str | None:
     """获取当前进程内最近创建的会话 ID。"""
-    return _CURRENT_SESSION_ID
+    return _current_session_id
 
 
 # ── SessionManager ────────────────────────────────
@@ -171,7 +171,7 @@ class SessionManager:
     """会话管理器 — 只负责持久化，不再持有 _context"""
 
     _session_id: str
-    _meta: dict
+    _meta: dict[str, Any]
 
     def __init__(self, resume: str | bool | None = None, new_sid: str | None = None):
         """
@@ -221,7 +221,7 @@ class SessionManager:
         sid = sid or self._session_id
         return _session_path(sid)
 
-    def _load_meta_from_session(self, sid: str | None = None) -> dict:
+    def _load_meta_from_session(self, sid: str | None = None) -> dict[str, Any]:
         """从会话文件读取 meta。"""
         sid = sid or self._session_id
         path = self._session_path(sid)
@@ -230,7 +230,7 @@ class SessionManager:
             meta = _default_meta(sid)
         return meta
 
-    def _write_meta(self, meta: dict | None = None):
+    def _write_meta(self, meta: dict[str, Any] | None = None) -> None:
         """将 meta 写回文件第一行。"""
         if meta is None:
             meta = self._meta
@@ -267,7 +267,7 @@ class SessionManager:
 
     def list_sessions(self) -> dict[str, dict[str, Any]]:
         """列出所有会话及其 meta。扫描 sessions 目录。"""
-        sessions = {}
+        sessions: dict[str, dict[str, Any]] = {}
         try:
             for fname in os.listdir(SESSIONS_DIR):
                 if not _is_session_file(fname):
@@ -275,7 +275,7 @@ class SessionManager:
                 path = os.path.join(SESSIONS_DIR, fname)
                 meta = _read_meta_from_file(path)
                 if meta:
-                    sid = meta.get("id", _extract_sid(fname))
+                    sid: str = meta.get("id", _extract_sid(fname))
                     sessions[sid] = meta
         except Exception:
             pass
@@ -312,7 +312,7 @@ class SessionManager:
         except Exception:
             return False
 
-    def clear_session_file(self):
+    def clear_session_file(self) -> None:
         """清空当前会话文件（重置为默认 meta，删除历史消息）。"""
         self._meta = _default_meta(self._session_id)
         path = self._session_path()
@@ -333,7 +333,7 @@ class SessionManager:
 
     # ── 惰性文件创建 ──────────────────────────────
 
-    def _ensure_file(self):
+    def _ensure_file(self) -> None:
         """确保会话文件存在（惰性文件创建的核心）。
 
         如果文件不存在，用当前 meta 创建文件并写入首行。
@@ -346,13 +346,13 @@ class SessionManager:
 
     # ── 消息存储（正序，最新在文件末尾） ──────────
 
-    def save_message(self, role: str, content: str, **kwargs):
+    def save_message(self, role: str, content: str, **kwargs: Any) -> None:
         """追加一条消息到文件末尾，并更新文件内嵌的 meta。
 
         首次调用时自动创建会话文件（惰性文件创建）。
         """
         self._ensure_file()
-        msg = {"role": role, "content": content}
+        msg: dict[str, Any] = {"role": role, "content": content}
         for k, v in kwargs.items():
             if v:
                 msg[k] = v
@@ -365,7 +365,7 @@ class SessionManager:
         self._meta["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._write_meta(self._meta)
 
-    def save_context(self, context: list[dict[str, Any]]):
+    def save_context(self, context: list[dict[str, Any]]) -> None:
         """将完整上下文写入文件。context 应为 to_serializable() 的输出（无 system prompt）。"""
         # 防御性过滤：防止误传入 system 消息
         context = [m for m in context if m.get("role") != "system"]
@@ -412,11 +412,11 @@ class SessionManager:
         return context
 
     @property
-    def meta(self) -> dict:
+    def meta(self) -> dict[str, Any]:
         """获取当前会话的 meta 信息（只读视图）"""
         return dict(self._meta)
 
-    def save_and_summarize(self, messages: list[dict], session_id: str | None = None) -> str:
+    def save_and_summarize(self, messages: list[dict[str, Any]], session_id: str | None = None) -> str:
         """保存会话上下文并生成摘要（统一入口）。
 
         所有会话切换/退出路径都应调用此方法，确保摘要生成逻辑一致。
@@ -434,25 +434,25 @@ class SessionManager:
         self.save_context(messages)
 
         # 2. 从最后一条用户消息生成摘要
-        summary = ""
+        summary: str = ""
         last_user = next(
             (m for m in reversed(messages) if m.get("role") == "user"),
             None,
         )
         if last_user:
-            content = last_user.get("content", "")
+            content: str = last_user.get("content", "")
             if content:
                 summary = content.strip().replace("\n", " ")[:50]
 
         # 3. 写回 meta
         target_sid = session_id or self._session_id
-        meta = _read_meta_from_file(_session_path(target_sid)) or {}
+        meta: dict[str, Any] = _read_meta_from_file(_session_path(target_sid)) or {}
         if meta.get("source") == "subagent" and summary and not summary.startswith("[subagent] "):
             summary = f"[subagent] {summary}"
         self.update_meta(target_sid, summary=summary)
         return summary
 
-    def update_meta(self, sid: str | None = None, **kwargs):
+    def update_meta(self, sid: str | None = None, **kwargs: Any) -> None:
         """更新指定会话的内嵌 meta 字段。
 
         与模块级 update_session_meta 对齐：会话文件不存在时自动创建

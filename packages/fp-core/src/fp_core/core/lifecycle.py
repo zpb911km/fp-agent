@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from functools import wraps
-from typing import Any
+from typing import Any, TypeVar, cast
 
 from fp_core.logger import get_logger
 
@@ -72,7 +72,7 @@ class MessageFilterEvent:
 
     original_content: str  # 原始用户输入
     filtered_content: str = ""  # 修改后的内容（插件可改）
-    messages: list[dict] = field(default_factory=list)  # 当前对话上下文
+    messages: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])  # 当前对话上下文
     blocked: bool = False  # 守卫：是否阻止消息进入
     block_reason: str = ""  # 阻止原因
 
@@ -81,9 +81,9 @@ class MessageFilterEvent:
 class BeforeLLMCallEvent:
     """ON_BEFORE_LLM_CALL 的事件上下文（transform）"""
 
-    messages: list[dict]  # 传给 LLM 的消息（插件可修改）
-    tools: list[dict]  # 工具定义列表
-    modified_messages: list[dict] | None = None  # 插件修改后的消息
+    messages: list[dict[str, Any]]  # 传给 LLM 的消息（插件可修改）
+    tools: list[dict[str, Any]]  # 工具定义列表
+    modified_messages: list[dict[str, Any]] | None = None  # 插件修改后的消息
     cancelled: bool = False  # 守卫：是否取消此次调用
     cancel_reason: str = ""  # 取消原因
 
@@ -92,11 +92,11 @@ class BeforeLLMCallEvent:
 class AfterLLMCallEvent:
     """ON_AFTER_LLM_CALL 的事件上下文（transform）"""
 
-    response: dict  # LLM 返回的 assistant message
+    response: dict[str, Any]  # LLM 返回的 assistant message
     has_tool_calls: bool = False  # 是否有工具调用
-    tool_names: list[str] = field(default_factory=list)
+    tool_names: list[str] = field(default_factory=list[str])
     content: str = ""  # 回复文本
-    modified_response: dict | None = None  # 插件修改后的 response
+    modified_response: dict[str, Any] | None = None  # 插件修改后的 response
     block_tool_execution: bool = False  # 守卫：阻止工具执行
 
 
@@ -179,12 +179,16 @@ class HookContext:
     """钩子执行上下文（通用）"""
 
     hook: LifecycleHook
-    data: dict[str, Any] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    data: dict[str, Any] = field(default_factory=dict[str, Any])
+    metadata: dict[str, Any] = field(default_factory=dict[str, Any])
     stop_propagation: bool = False
     error: Exception | None = None
     # 标注此钩子点是 observe 还是 transform
     hook_type: str = "observe"  # "observe" | "transform"
+
+
+# 钩子注册条目：(优先级, 名称, 回调函数, 钩子类型)
+HookEntry = tuple[int, str, Callable[..., Any], str]
 
 
 class LifecycleManager:
@@ -194,14 +198,14 @@ class LifecycleManager:
     """
 
     def __init__(self, enable_log: bool = False):
-        self._hooks: dict[str, list[tuple]] = {}  # hook_name -> [(priority, name, func, hook_type)]
+        self._hooks: dict[str, list[HookEntry]] = {}  # hook_name -> [(priority, name, func, hook_type)]
         self._enable_log = enable_log
         self._stats: dict[str, int] = {}
 
     def register(
         self,
         hook: LifecycleHook,
-        func: Callable,
+        func: Callable[..., Any],
         priority: int = 100,
         name: str | None = None,
         hook_type: str | None = None,  # "observe" | "transform"，None=自动推断
@@ -211,7 +215,7 @@ class LifecycleManager:
         if hook_name not in self._hooks:
             self._hooks[hook_name] = []
 
-        name = name or getattr(func, "__name__", str(id(func)))
+        name = cast(str, name or getattr(func, "__name__", str(id(func))))
 
         # 自动推断钩子类型
         if hook_type is None:
@@ -252,7 +256,7 @@ class LifecycleManager:
                     return True
         return False
 
-    async def emit(self, hook: LifecycleHook, context: HookContext | None = None, **kwargs) -> HookContext:
+    async def emit(self, hook: LifecycleHook, context: HookContext | None = None, **kwargs: Any) -> HookContext:
         """
         触发钩子。
 
@@ -287,7 +291,7 @@ class LifecycleManager:
 
             try:
                 start = time.time()
-                if asyncio.iscoroutinefunction(func):
+                if asyncio.iscoroutinefunction(func):  # pyright: ignore[reportDeprecated]
                     result = await func(context, **context.data)
                 else:
                     result = func(context, **context.data)
@@ -334,23 +338,26 @@ class LifecycleManager:
         return self._stats.copy()
 
 
-def hook(hook_type: LifecycleHook, priority: int = 100):
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def hook(hook_type: LifecycleHook, priority: int = 100) -> Callable[[F], F]:
     """装饰器：注册生命周期钩子（保留旧接口）"""
 
-    def decorator(func):
-        func._lifecycle_hook = hook_type
-        func._lifecycle_priority = priority
+    def decorator(func: F) -> F:
+        func._lifecycle_hook = hook_type  # pyright: ignore[reportFunctionMemberAccess]
+        func._lifecycle_priority = priority  # pyright: ignore[reportFunctionMemberAccess]
 
         @wraps(func)
-        async def async_wrapper(context, **kwargs):
+        async def async_wrapper(context: HookContext, **kwargs: Any) -> Any:
             return await func(context, **kwargs)
 
         @wraps(func)
-        def sync_wrapper(context, **kwargs):
+        def sync_wrapper(context: HookContext, **kwargs: Any) -> Any:
             return func(context, **kwargs)
 
-        if asyncio.iscoroutinefunction(func):
-            return async_wrapper
-        return sync_wrapper
+        if asyncio.iscoroutinefunction(func):  # pyright: ignore[reportDeprecated]
+            return cast(F, async_wrapper)
+        return cast(F, sync_wrapper)
 
     return decorator

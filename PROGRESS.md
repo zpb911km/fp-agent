@@ -20,15 +20,23 @@ fp-core（根基）→ fp-terminal / fp-webui / fp-acp → fp（聚合）
 | 批 | 文件 | 单文件错 | 修后 | 全局(基线2840→) | pytest | commit | 备注 |
 |---|---|---|---|---|---|---|---|
 | 试点1 | fp-core/core/conversation.py | 166 | 0 | 2620 (-220) | 286p/1s ✓ | 5568af7 | 根因=dict泛型缺失级联；级联收益+54 |
+| 试点2 | fp-core/commands/option.py | 186 | 5(环境) | 2439 (-181) | 286p/1s ✓ | 3f85c04 | 剩4×MissingTypeStubs+1×PrivateUsage |
+| 环境 | 5 包 py.typed | — | — | 2327 (-112) | — | a8bff3c | 用户批准；stub 错全消 |
+| 批1 | core/llm_client+llm_service+io | 93+106+31 | 全0 | 2088 (-239) | 286p/1s ✓ | 78c1416 | 级联收益+9；service 对兄弟包 Any 兜底 |
+| 批2 | core/session+prompt_builder+lifecycle | 82+35+80 | 全0 | 1851 (-237) | 338p/1s ✓ | 待提交 | 级联收益+40；lifecycle 用 ignore 抑制 iscoroutinefunction 弃用 |
 
 ## 待办
 
-- [x] 试点1：conversation.py（子 agent 修复 → 主验证 → 提交）✅
-- [ ] 试点2：option.py
-- [ ] 试点数据汇报 → 用户决定铺开方式
-- [ ] 环境类问题清单（py.typed、第三方无类型）→ 用户拍板
+- [x] 试点1：conversation.py ✅
+- [x] 试点2：option.py ✅
+- [x] 环境：py.typed ✅
+- [x] 批2：core/session.py + core/prompt_builder.py + core/lifecycle.py ✅
+- [ ] 批3：core/agent.py（依赖批1批2）
+- [ ] 后续按依赖顺序铺开（fp-core commands/plugins/tools → terminal → acp/webui → fp）
+- [ ] 环境类问题清单（_commands 私有访问、第三方无类型）→ 用户拍板
 
 ## 遇到的坑
 
 - docs sync 钩子拦截类型标注 commit → 用 FP_DOCS_SYNC_ALLOW=1 放行（类型标注不改变行为，文档无需更新）
 - pyrightconfig.json 无效键 "strict": true（标准是 typeCheckingMode）→ 已修正
+- fp-terminal 实际导入包名是 fp_cli（egg-info 名字 fp_terminal 是历史遗留）→ py.typed 放 fp_cli/

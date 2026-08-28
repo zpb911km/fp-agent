@@ -8,6 +8,7 @@ PromptBuilder — 系统提示词构建器
 """
 
 import os
+from typing import cast
 
 
 class PromptBuilder:
@@ -18,7 +19,7 @@ class PromptBuilder:
 
     def build_system_prompt(self) -> str:
         """构建完整的系统提示词"""
-        parts = []
+        parts: list[str] = []
 
         # 基础 Agent 提示词
         from fp_core.prompts.agent import load_agent_prompt
@@ -35,7 +36,7 @@ class PromptBuilder:
         return "\n\n".join(parts)
 
     @staticmethod
-    def _parse_frontmatter(content: str) -> dict:
+    def _parse_frontmatter(content: str) -> dict[str, str]:
         """解析 YAML frontmatter（第一对 --- 之间）。
 
         优先用 yaml.safe_load（正确解析多行/引号/特殊字符），
@@ -55,11 +56,11 @@ class PromptBuilder:
         try:
             fm = yaml.safe_load(fm_text)
             if isinstance(fm, dict):
-                return fm
+                return cast(dict[str, str], fm)
         except Exception:
             pass
         # 降级：行扫描
-        result = {}
+        result: dict[str, str] = {}
         for line in fm_text.split("\n"):
             if line.startswith("name:"):
                 result["name"] = line.split(":", 1)[1].strip()
@@ -76,10 +77,10 @@ class PromptBuilder:
 
         local_dir = os.path.join(os.getcwd(), config.MEMORY_DIR_LOCAL)
 
-        def _scan_dir(memory_dir: str) -> list[dict]:
+        def _scan_dir(memory_dir: str) -> list[dict[str, str]]:
             if not os.path.isdir(memory_dir):
                 return []
-            results = []
+            results: list[dict[str, str]] = []
             for fname in sorted(os.listdir(memory_dir)):
                 if not fname.endswith(".md"):
                     continue
@@ -97,7 +98,7 @@ class PromptBuilder:
             return results
 
         # 三来源全局记忆（fetched → public → private，同名 private 胜出）
-        global_by_name: dict[str, dict] = {}
+        global_by_name: dict[str, dict[str, str]] = {}
         for d in user_dirs("memory"):
             for m in _scan_dir(d):
                 global_by_name[m["name"]] = m  # 后加载（更高优先级）覆盖
@@ -108,7 +109,7 @@ class PromptBuilder:
         if total == 0:
             return ""
 
-        def _group(memories: list[dict]) -> dict[str, list[str]]:
+        def _group(memories: list[dict[str, str]]) -> dict[str, list[str]]:
             groups: dict[str, list[str]] = {}
             for m in memories:
                 groups.setdefault(m["type"], []).append(m["name"])
