@@ -14,9 +14,10 @@ import contextvars
 import json
 import os
 import types
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from fp_core import (
     config,  # only for shutdown_panel (CLI-specific)
@@ -69,7 +70,7 @@ class Message:
 
     role: str = "user"
     content: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict[str, Any])
 
 
 @dataclass
@@ -77,7 +78,7 @@ class Response:
     """响应对象"""
 
     content: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict[str, Any])
     error: str | None = None
 
 
@@ -163,8 +164,11 @@ class Agent:
             allowed_tools = getattr(role, "allowed_tools", None)
             if allowed_tools:
                 allowed_set = set(allowed_tools)
-                _orig_get_defs = self._tool_exec.get_definitions
-                self._tool_exec.get_definitions = lambda: [
+                _orig_get_defs: Callable[[], list[dict[str, Any]]] = cast(
+                    "Callable[[], list[dict[str, Any]]]",
+                    self._tool_exec.get_definitions,  # type: ignore[reportUnknownMemberType]
+                )
+                self._tool_exec.get_definitions = lambda: [  # type: ignore[reportUnknownMemberType]
                     d for d in _orig_get_defs() if d["function"]["name"] in allowed_set
                 ]
         else:
@@ -289,13 +293,13 @@ class Agent:
             LifecycleHook.ON_SHUTDOWN, self._builtin_shutdown, priority=999, name="builtin_shutdown"
         )
 
-    async def _on_init(self, ctx: HookContext, **kwargs) -> HookContext:
+    async def _on_init(self, ctx: HookContext, **kwargs: Any) -> HookContext:
         if self.enable_log:
             get_logger().info("[Agent] Initializing...")
         ctx.data["initialized"] = True
         return ctx
 
-    async def _builtin_shutdown(self, ctx: HookContext, **kwargs) -> HookContext:
+    async def _builtin_shutdown(self, ctx: HookContext, **kwargs: Any) -> HookContext:
         """关闭钩子 — 生成会话摘要 + 保存上下文 + 显示退出面板"""
         # 热重载时不显示关闭面板
         if getattr(self.state, "silent_shutdown", False):
@@ -365,7 +369,9 @@ class Agent:
 
     # ============ LLM 调用（含 IO 展示） ============
 
-    async def _invoke_llm(self, context: list[dict], silent: bool = False) -> tuple[dict[str, Any], dict | None]:
+    async def _invoke_llm(
+        self, context: list[dict[str, Any]], silent: bool = False
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """发起流式聊天请求（逐 token 展示）
 
         实际 LLM 调用委托给 LLMService.chat_stream()。
@@ -387,10 +393,13 @@ class Agent:
             await io.thinking_start(streaming=_can_stream)
 
         _llm_exc: BaseException | None = None
-        usage: dict | None = None
-        assistant_msg: dict | None = None
+        usage: dict[str, Any] | None = None
+        assistant_msg: dict[str, Any] | None = None
         try:
-            async for event in self._llm.chat_stream(context, tools=self._tool_exec.get_definitions()):
+            async for event in self._llm.chat_stream(
+                context,
+                tools=cast("list[dict[str, Any]] | None", self._tool_exec.get_definitions()),  # type: ignore[reportUnknownMemberType]
+            ):
                 if event.type == "content":
                     if not silent:
                         io.stream_write(event.text)
@@ -442,14 +451,14 @@ class Agent:
         if not silent:
             io.tool_call(name, args)
 
-        result = await self._tool_exec.execute(tc)
+        result = await cast("Callable[[dict[str, Any]], Awaitable[str]]", self._tool_exec.execute)(tc)  # type: ignore[reportUnknownMemberType]
 
         if not silent:
             io.tool_result(result)
 
         return result
 
-    async def _execute_one_tool(self, tc: dict, silent: bool = False) -> tuple[str, str]:
+    async def _execute_one_tool(self, tc: dict[str, Any], silent: bool = False) -> tuple[str, str]:
         """并行工具执行单元 — 封装单个工具的完整生命周期
 
         包含：
@@ -628,7 +637,7 @@ class Agent:
             ctx = await self.lifecycle.emit(
                 LifecycleHook.ON_BEFORE_LLM_CALL,
                 messages=self._conv.messages,
-                tools=self._tool_exec.get_definitions(),
+                tools=cast("list[dict[str, Any]]", self._tool_exec.get_definitions()),  # type: ignore[reportUnknownMemberType]
             )
             if ctx.data.get("cancelled"):
                 return Response(content=ctx.data.get("cancel_reason", "已取消"))
