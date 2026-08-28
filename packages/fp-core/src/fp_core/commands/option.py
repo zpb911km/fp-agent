@@ -15,7 +15,9 @@
 
 import ast
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any, TypedDict, cast
 
 import fp_core
 from fp_core.platform_utils import get_data_dir
@@ -68,6 +70,17 @@ description = "统一管理三种拓展机制（commands / plugins / tools）"
 # ═══════════════════════════════════════════════════════════════
 
 
+class EntryContract(TypedDict, total=False):
+    """Entry.contract 载荷（键随拓展 type 变化，command/plugin/tool 各取所需）"""
+
+    aliases: list[str]
+    version: str
+    hooks: list[dict[str, Any]]
+    class_name: str
+    schema: dict[str, Any]
+    core: bool
+
+
 @dataclass
 class Entry:
     """统一拓展条目"""
@@ -79,7 +92,7 @@ class Entry:
     source: str  # "builtin" | "user"
     source_path: str
     user_override: bool = False
-    contract: dict = field(default_factory=dict)
+    contract: EntryContract = field(default_factory=EntryContract)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -90,7 +103,8 @@ class Entry:
 class OptionManager:
     """封装三个扫描逻辑的差异，对外提供统一接口"""
 
-    def __init__(self, state):
+    def __init__(self, state: Any):
+        # state 为动态对象（插件/工具/生命周期注册表内部结构），用 Any 兜底
         self.state = state
 
     # ── 全量扫描 ──────────────────────────────────────────
@@ -104,7 +118,7 @@ class OptionManager:
         from fp_core.commands import _commands as cmd_reg
 
         # mod id 去重（别名指向同一模块）
-        mod_map: dict[int, dict] = {}
+        mod_map: dict[int, dict[str, Any]] = {}
         for name, mod in cmd_reg.items():
             mid = id(mod)
             if mid not in mod_map:
@@ -115,7 +129,7 @@ class OptionManager:
             else:
                 entry["aliases"].append(name)
 
-        results = []
+        results: list[Entry] = []
         for _mid, info in mod_map.items():
             mod = info["mod"]
             cname = info["names"][0] if info["names"] else info["aliases"][0]
@@ -138,7 +152,7 @@ class OptionManager:
             )
 
         # 用户目录中禁用的命令（三来源，优先级高→低，去重）
-        seen = set()
+        seen: set[str] = set()
         for d in _user_dirs("commands", reverse=True):
             self._scan_disabled_cmds(d, results, mod_map, seen)
         return results
@@ -154,7 +168,9 @@ class OptionManager:
                 return True
         return False
 
-    def _scan_disabled_cmds(self, directory: str, results: list, mod_map: dict, seen: set):
+    def _scan_disabled_cmds(
+        self, directory: str, results: list[Entry], mod_map: dict[int, dict[str, Any]], seen: set[str]
+    ) -> None:
         if not os.path.isdir(directory):
             return
         for fn in os.listdir(directory):
@@ -186,8 +202,8 @@ class OptionManager:
     # ── 插件扫描 ──────────────────────────────────────────
 
     def scan_plugins(self) -> list[Entry]:
-        results = []
-        seen = set()
+        results: list[Entry] = []
+        seen: set[str] = set()
 
         for pname in self.state.plugins.list_plugins():
             plugin = self.state.plugins.get(pname)
@@ -197,7 +213,7 @@ class OptionManager:
             try:
                 import inspect
 
-                src_path = inspect.getfile(type(plugin))
+                src_path = inspect.getfile(cast(Any, type(plugin)))
             except Exception:
                 src_path = ""
             source = self._classify_source(src_path)
@@ -277,7 +293,14 @@ class OptionManager:
                     pass
         return ""
 
-    def _scan_disabled_files(self, directory: str, results: list, seen: set, filter_fn, name_reader):
+    def _scan_disabled_files(
+        self,
+        directory: str,
+        results: list[Entry],
+        seen: set[str],
+        filter_fn: Callable[[str], bool],
+        name_reader: Callable[[str, str], str],
+    ) -> None:
         if not os.path.isdir(directory):
             return
         for fn in os.listdir(directory):
@@ -303,7 +326,7 @@ class OptionManager:
                 )
             )
 
-    def _scan_disabled_dirs(self, directory: str, results: list, seen: set):
+    def _scan_disabled_dirs(self, directory: str, results: list[Entry], seen: set[str]) -> None:
         """扫描目录型插件的禁用态（name.disabled/）"""
         if not os.path.isdir(directory):
             return
@@ -353,8 +376,8 @@ class OptionManager:
     # ── 工具扫描 ──────────────────────────────────────────
 
     def scan_tools(self) -> list[Entry]:
-        results = []
-        seen = set()
+        results: list[Entry] = []
+        seen: set[str] = set()
         reg = self.state.tool_exec.registry
 
         # 核心工具
@@ -433,7 +456,7 @@ class OptionManager:
                 return p
         return ""
 
-    def _scan_disabled_tools(self, directory: str, results: list, seen: set):
+    def _scan_disabled_tools(self, directory: str, results: list[Entry], seen: set[str]) -> None:
         if not os.path.isdir(directory):
             return
         for fn in os.listdir(directory):
@@ -517,11 +540,11 @@ class OptionManager:
         norm = os.path.normpath(path)
         return norm.startswith(os.path.normpath(os.path.join(DATA_DIR, "fetched")))
 
-    def _get_plugin_hooks(self, plugin_name: str) -> list[dict]:
+    def _get_plugin_hooks(self, plugin_name: str) -> list[dict[str, Any]]:
         lifecycle = getattr(self.state, "lifecycle", None)
         if lifecycle is None:
             return []
-        hooks = []
+        hooks: list[dict[str, Any]] = []
         for hook_key, entries in lifecycle._hooks.items():
             for prio, reg_name, _func, htype in entries:
                 if reg_name.startswith(plugin_name):
@@ -661,7 +684,7 @@ class OptionManager:
 
     # ── 差异对比 ─────────────────────────────────────────
 
-    def diff(self, name: str) -> dict | None:
+    def diff(self, name: str) -> dict[str, Any] | None:
         builtin_path = None
         user_path = None
 
@@ -745,7 +768,7 @@ class OptionManager:
         except Exception:
             return 0
 
-    def _read_tool_schema(self, fp: str) -> dict | None:
+    def _read_tool_schema(self, fp: str) -> dict[str, Any] | None:
         try:
             with open(fp, encoding="utf-8") as f:
                 tree = ast.parse(f.read())
@@ -917,7 +940,7 @@ def _fmt_info(item: Entry) -> str:
     return "\n".join(lines)
 
 
-def _fmt_diff(diff_info: dict) -> str:
+def _fmt_diff(diff_info: dict[str, Any]) -> str:
     if "note" in diff_info:
         return f"ℹ️ {diff_info['note']}"
 
@@ -945,7 +968,7 @@ def _fmt_diff(diff_info: dict) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 
-def execute(state, arg: str) -> tuple[bool, str]:
+def execute(state: Any, arg: str) -> tuple[bool, str]:
     mgr = OptionManager(state)
     arg = arg.strip()
 
@@ -1060,9 +1083,9 @@ def _handle_action(mgr: OptionManager, action: str, target: str) -> tuple[bool, 
         # 尝试直接传递给 mgr（可能对应禁用的命令等）
         if action in ("enable", "disable"):
             if action == "enable":
-                ok, msg = mgr.enable(target)
+                _ok, msg = mgr.enable(target)
             else:
-                ok, msg = mgr.disable(target)
+                _ok, msg = mgr.disable(target)
             return (True, msg)
         return (True, f"⚠️ 未找到拓展 '{target}'（使用 `/option list` 查看可用名称/编号）")
 
@@ -1072,11 +1095,11 @@ def _handle_action(mgr: OptionManager, action: str, target: str) -> tuple[bool, 
     name = entry.name
 
     if action == "enable":
-        ok, msg = mgr.enable(name)
+        _ok, msg = mgr.enable(name)
         return (True, msg)
 
     if action == "disable":
-        ok, msg = mgr.disable(name)
+        _ok, msg = mgr.disable(name)
         return (True, msg)
 
     if action == "diff":

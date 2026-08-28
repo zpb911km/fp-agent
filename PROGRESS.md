@@ -19,15 +19,16 @@ fp-core（根基）→ fp-terminal / fp-webui / fp-acp → fp（聚合）
 
 | 批 | 文件 | 单文件错 | 修后 | 全局(基线2840→) | pytest | commit | 备注 |
 |---|---|---|---|---|---|---|---|
-| 试点1 | fp-core/core/conversation.py | 166 | ? | ? | ? | ? | 流水线首测 |
+| 试点1 | fp-core/core/conversation.py | 166 | 0 | 2620 (-220) | 286p/1s ✓ | 5568af7 | 根因=dict泛型缺失级联；级联收益+54 |
 
 ## 待办
 
-- [ ] 试点1：conversation.py（子 agent 修复 → 主验证 → 提交）
+- [x] 试点1：conversation.py（子 agent 修复 → 主验证 → 提交）✅
 - [ ] 试点2：option.py
 - [ ] 试点数据汇报 → 用户决定铺开方式
 - [ ] 环境类问题清单（py.typed、第三方无类型）→ 用户拍板
 
 ## 遇到的坑
 
-（待填）
+- docs sync 钩子拦截类型标注 commit → 用 FP_DOCS_SYNC_ALLOW=1 放行（类型标注不改变行为，文档无需更新）
+- pyrightconfig.json 无效键 "strict": true（标准是 typeCheckingMode）→ 已修正
