@@ -30,6 +30,7 @@ fp-core（根基）→ fp-terminal / fp-webui / fp-acp → fp（聚合）
 | 批6 | tools 扩展层 memory_read+subagent | 89+8 | 全0 | 1553 (-89) | 338p/1s ✓ | f5ef79f | memory_read 根因=_parse_frontmatter 无参 dict 级联 |
 | 批7 | commands 层 shortcircuit+resume | 126+104 | 全0 | 1319 (-234) | 338p/1s ✓ | 004a3fa | 级联收益大（含 commands 内部）；resume 靠 state: State 注解一次消除级联 |
 | 批8 | commands 层全部小文件（13个） | 154 | 全0 | 1166 (-153) | 338p/1s ✓ | 1690146 | compact/back/fork/new/history/reload/clear/token/session/exit_bang/help/exit_cmd/__init__ |
+| 批9 | fp-terminal 全部（display+main+style+cli_io） | 56+36+19+7 | 全0 | 1048 (-118) | 338p/1s ✓ | e0221b1 | display 用 cast 恢复 isinstance 收窄泛型；main 补 prompt_toolkit 参数类型；site-packages 旧版 fp_cli 需重装同步 |
 
 ## 待办
 
@@ -43,8 +44,8 @@ fp-core（根基）→ fp-terminal / fp-webui / fp-acp → fp（聚合）
 - [x] 批6：tools 扩展层 memory_read/subagent ✅
 - [x] 批7：commands 大文件 shortcircuit/resume ✅
 - [x] 批8：commands 小文件（13个）✅
+- [x] 批9：fp-terminal 全部 ✅
 - [ ] **fp-core 全部清零**（剩 option.py 1 个环境类 _commands 私有访问，待用户拍板）
-- [ ] 批9：fp-terminal（display/main/style/cli_io）
 - [ ] 批10：fp-webui（main.py 179）
 - [ ] 批11：fp-acp（server.py 425 最大单文件）
 - [ ] 批12：fp 聚合包（ext.py 349 第二大 + ext_manifest/ext_store/ext_git/version_checker）
