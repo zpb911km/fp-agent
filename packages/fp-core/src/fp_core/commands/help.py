@@ -1,11 +1,13 @@
 """help 命令 — 显示帮助信息"""
 
+from fp_core.core.state import State
+
 name = "help"
 aliases = ["?"]
 description = "显示此帮助"
 
 
-def execute(state, arg: str) -> tuple[bool, str]:
+def execute(state: State, arg: str) -> tuple[bool, str]:
     from fp_core.commands import get_all_commands
 
     cmds = get_all_commands()

@@ -19,12 +19,14 @@
 
 import time
 
+from fp_core.core.state import State
+
 name = "reload"
 aliases = ["rl", "hotreload"]
 description = "热重载 Agent（重新加载核心模块，保留会话上下文）"
 
 
-async def execute(state, arg: str) -> tuple[bool, str]:
+async def execute(state: State, arg: str) -> tuple[bool, str]:
     """执行热重载"""
     from fp_core.core.reloader import AgentReloader
 
@@ -56,7 +58,7 @@ async def execute(state, arg: str) -> tuple[bool, str]:
     elapsed = time.time() - t0
 
     # ── 暂存新 Agent，供外层循环消费 ──
-    state._reload_result = (new_agent, info)
+    state._reload_result = (new_agent, info)  # pyright: ignore[reportPrivateUsage]  # noqa: E501 设计内跨类协议（State 注释明确该字段专供 reload 命令使用）
 
     session_status = "✅ 已恢复" if info.get("session_restored") else "⚠️ 新建会话"
     lines = [

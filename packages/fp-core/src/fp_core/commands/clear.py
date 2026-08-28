@@ -4,12 +4,14 @@
 不再经过 Agent.clear_session() 中转。
 """
 
+from fp_core.core.state import State
+
 name = "clear"
 aliases: list[str] = []
 description = "清空当前会话"
 
 
-def execute(state, arg: str) -> tuple[bool, str]:
+def execute(state: State, arg: str) -> tuple[bool, str]:
     state.rebuild_system_prompt()
     state.conversation.reset(state.conversation.system_prompt)
     state.session.clear_session_file()

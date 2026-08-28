@@ -5,7 +5,9 @@ core 层只提供 llm.summarize() 基础设施，压缩策略完全由本命令�
 """
 
 from dataclasses import dataclass
+from typing import Any
 
+from fp_core.core.state import State
 from fp_core.logger import get_logger
 
 name = "compact"
@@ -20,7 +22,7 @@ class _CompactConfig:
     keep_meaningful: int = 4  # 保留的有意义（user/assistant）消息数
 
 
-def _find_split(history: list[dict], keep: int) -> int | None:
+def _find_split(history: list[dict[str, Any]], keep: int) -> int | None:
     """从尾部向前扫描，找到第 keep 条 user/assistant 消息的位置"""
     meaningful_found = 0
     for i in range(len(history) - 1, -1, -1):
@@ -31,9 +33,9 @@ def _find_split(history: list[dict], keep: int) -> int | None:
     return None
 
 
-def _format_for_summary(messages: list[dict]) -> str:
+def _format_for_summary(messages: list[dict[str, Any]]) -> str:
     """将待压缩消息格式化为 LLM 摘要输入文本（策略点：模板/截断/语言标签）"""
-    parts = []
+    parts: list[str] = []
     for m in messages:
         role = m["role"]
         if role == "user":
@@ -47,7 +49,7 @@ def _format_for_summary(messages: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-async def execute(state, arg: str) -> tuple[bool, str]:
+async def execute(state: State, arg: str) -> tuple[bool, str]:
     conv = state.conversation
     config = _CompactConfig()
 

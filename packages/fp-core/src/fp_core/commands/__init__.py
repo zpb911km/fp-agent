@@ -12,11 +12,12 @@ commands/__init__.py — 命令注册表与自动发现
     全部核心状态访问（conversation / session / llm / lifecycle 等）。
 """
 
-import asyncio
 import importlib
 import importlib.util
+import inspect
 import os
 from types import ModuleType
+from typing import Any
 
 from fp_core.logger import get_logger
 
@@ -127,7 +128,8 @@ async def execute(state: object, cmd_name: str, arg: str) -> tuple[bool, str]:
         return (False, "")
 
     # 执行命令（自动适配同步/异步）
-    if asyncio.iscoroutinefunction(mod.execute):
+    result: Any
+    if inspect.iscoroutinefunction(mod.execute):
         result = await mod.execute(state, arg)
     else:
         result = mod.execute(state, arg)

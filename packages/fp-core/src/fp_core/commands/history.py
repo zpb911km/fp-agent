@@ -3,6 +3,8 @@
 直接读 state.conversation，不再经过 Agent.history() 中转。
 """
 
+from fp_core.core.state import State
+
 name = "history"
 aliases: list[str] = []
 description = "查看当前对话历史"
@@ -16,7 +18,7 @@ def _safe_preview(text: str, max_len: int = 80) -> str:
     return f"`{text}`"
 
 
-def execute(state, arg: str) -> tuple[bool, str]:
+def execute(state: State, arg: str) -> tuple[bool, str]:
     history = state.conversation.get_history_for_display()
 
     if not history:

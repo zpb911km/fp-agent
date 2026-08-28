@@ -4,12 +4,14 @@
 不再经过 Agent.fork() 中转。
 """
 
+from fp_core.core.state import State
+
 name = "fork"
 aliases: list[str] = []
 description = "基于当前上下文新建会话"
 
 
-def execute(state, arg: str) -> tuple[bool, str]:
+def execute(state: State, arg: str) -> tuple[bool, str]:
     old_messages = state.conversation.get_non_system_messages()
 
     if not old_messages:

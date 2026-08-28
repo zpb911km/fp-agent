@@ -15,12 +15,14 @@
 结果：旧会话被保存归档，当前会话切换为全新的空白会话。
 """
 
+from fp_core.core.state import State
+
 name = "new"
 aliases = ["fresh"]
 description = "新建一个空白会话（保存当前会话后创建全新会话）"
 
 
-def execute(state, arg: str) -> tuple[bool, str]:
+def execute(state: State, arg: str) -> tuple[bool, str]:
     # ── fork 阶段：保存旧会话 ──────────────────────────────────
     old_sid = state.session_id
 

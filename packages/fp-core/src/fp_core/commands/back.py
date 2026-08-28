@@ -7,6 +7,8 @@
 全部逻辑通过公共 API 自组装，不依赖 core 层的业务策略。
 """
 
+from fp_core.core.state import State
+
 name = "back"
 aliases: list[str] = []
 description = "回退到对话的某个历史时刻。用法: /back list 查看列表, /back <N> 直接回退"
@@ -20,7 +22,7 @@ def _safe_preview(text: str, max_len: int = 80) -> str:
     return f"`{text}`"
 
 
-async def execute(state, arg: str) -> tuple[bool, str]:
+async def execute(state: State, arg: str) -> tuple[bool, str]:
     parts = arg.strip().split()
 
     if not parts:
