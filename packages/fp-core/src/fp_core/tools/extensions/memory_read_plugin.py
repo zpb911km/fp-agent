@@ -15,7 +15,7 @@ Memory Read 插件 v2 — 读取/搜索长期记忆（异步版本）
 import asyncio
 import os
 import re
-from typing import Any
+from typing import Any, cast
 
 from fp_core import config
 
@@ -48,7 +48,7 @@ PLUGIN_DEFINITION = {
 }
 
 
-def _parse_frontmatter(content: str) -> dict:
+def _parse_frontmatter(content: str) -> dict[str, Any]:
     """解析 YAML frontmatter（第一对 --- 之间）。
 
     优先用 yaml.safe_load（正确解析多行/引号/特殊字符），
@@ -68,11 +68,11 @@ def _parse_frontmatter(content: str) -> dict:
     try:
         fm = yaml.safe_load(fm_text)
         if isinstance(fm, dict):
-            return fm
+            return cast(dict[str, Any], fm)
     except Exception:
         pass
     # 降级：行扫描
-    result = {}
+    result: dict[str, Any] = {}
     for line in fm_text.split("\n"):
         if line.startswith("name:"):
             result["name"] = line.split(":", 1)[1].strip()
@@ -83,12 +83,12 @@ def _parse_frontmatter(content: str) -> dict:
     return result
 
 
-def _list_memories(memory_dir: str, root_label: str = ".") -> list[dict]:
+def _list_memories(memory_dir: str, root_label: str = ".") -> list[dict[str, str]]:
     """列出目录下所有记忆的元信息"""
     if not os.path.isdir(memory_dir):
         return []
 
-    memories = []
+    memories: list[dict[str, str]] = []
     for fname in sorted(os.listdir(memory_dir)):
         if not fname.endswith(".md"):
             continue
@@ -102,8 +102,8 @@ def _list_memories(memory_dir: str, root_label: str = ".") -> list[dict]:
             continue
 
         fm = _parse_frontmatter(content)
-        mem_type = fm.get("type", "unknown")
-        description = fm.get("description", "")
+        mem_type: str = fm.get("type", "unknown")
+        description: str = fm.get("description", "")
 
         memories.append({
             "name": name,
@@ -117,14 +117,14 @@ def _list_memories(memory_dir: str, root_label: str = ".") -> list[dict]:
     return memories
 
 
-def _list_global_memories() -> list[dict]:
+def _list_global_memories() -> list[dict[str, str]]:
     """合并三来源全局记忆（fetched → public → private，同名 private 胜出）。
 
     全局来源的 root 统一标为 "~"；项目内本地记忆保持 "."。
     """
     from fp_core.config import user_dirs
 
-    merged: dict[str, dict] = {}
+    merged: dict[str, dict[str, str]] = {}
     for d in user_dirs("memory"):
         for m in _list_memories(d, root_label="~"):
             merged[m["name"]] = m  # 后加载（更高优先级）覆盖
@@ -143,16 +143,16 @@ def _parse_memory_body(content: str) -> str:
     return "\n".join(lines[body_start:]).strip()
 
 
-def _categorize(memories: list[dict], root_label: str) -> dict[str, list[dict]]:
+def _categorize(memories: list[dict[str, str]], root_label: str) -> dict[str, list[dict[str, str]]]:
     """按 type（分类）分组记忆"""
-    groups: dict[str, list[dict]] = {}
+    groups: dict[str, list[dict[str, str]]] = {}
     for m in memories:
         t = m["type"] or "uncategorized"
         groups.setdefault(t, []).append(m)
     return groups
 
 
-def _build_tree_index(global_memories: list[dict], local_memories: list[dict]) -> str:
+def _build_tree_index(global_memories: list[dict[str, str]], local_memories: list[dict[str, str]]) -> str:
     """构建顶层树状索引"""
     lines = ["## 我的长期记忆索引", ""]
 
@@ -185,7 +185,7 @@ def _build_tree_index(global_memories: list[dict], local_memories: list[dict]) -
     return "\n".join(lines)
 
 
-def _build_category_browse(category: str, memories: list[dict], root_label: str) -> str:
+def _build_category_browse(category: str, memories: list[dict[str, str]], root_label: str) -> str:
     """浏览某个分类下的所有记忆"""
     lines = [f"📂 {root_label}/{category}/（共 {len(memories)} 条）", ""]
     for m in memories:
@@ -203,9 +203,9 @@ async def execute(params: dict[str, Any]) -> str:
     Returns:
         格式化结果
     """
-    name = params.get("name", "").strip()
-    path = params.get("path", "").strip()
-    query = params.get("query", "").strip()
+    name: str = params.get("name", "").strip()
+    path: str = params.get("path", "").strip()
+    query: str = params.get("query", "").strip()
 
     loop = asyncio.get_running_loop()
 
@@ -272,7 +272,7 @@ async def execute(params: dict[str, Any]) -> str:
         keywords = [kw.lower() for kw in query.split()]
         all_memories = global_memories + local_memories
 
-        def matches(m: dict) -> bool:
+        def matches(m: dict[str, str]) -> bool:
             search_space = (
                 m["name"].lower()
                 + " "

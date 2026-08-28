@@ -18,7 +18,7 @@ import json
 import os
 import sys
 import time
-from typing import Any
+from typing import Any, cast
 
 # ── 模块级辅助：subagent 会话收尾 ──────────────────
 # 子进程可能被 SIGKILL/崩溃（无法执行 shutdown），父进程需兜底补写
@@ -27,7 +27,7 @@ from typing import Any
 
 def _derive_summary_from_file(sid: str) -> str:
     """从会话文件读取最后一条 user 消息，生成摘要（与 save_and_summarize 策略一致）。"""
-    from fp_core.core.session import _session_path
+    from fp_core.core.session import _session_path  # pyright: ignore[reportPrivateUsage]
 
     path = _session_path(sid)
     if not os.path.exists(path):
@@ -154,12 +154,13 @@ async def execute(params: dict[str, Any]) -> str:
     context = params.get("context", "")
     store_result = params.get("store_result", "")
     timeout = params.get("timeout", 300)
-    constraints = params.get("constraints", {})
+    constraints_raw: Any = params.get("constraints", {})
 
     # 解析约束
-    verbose = constraints.get("verbose", False) if isinstance(constraints, dict) else False
-    output_format = constraints.get("output_format", "text") if isinstance(constraints, dict) else "text"
-    max_length = constraints.get("max_length", 0) if isinstance(constraints, dict) else 0
+    constraints: dict[str, Any] = cast(dict[str, Any], constraints_raw if isinstance(constraints_raw, dict) else {})
+    verbose: bool = constraints.get("verbose", False)
+    output_format: str = constraints.get("output_format", "text")
+    max_length: Any = constraints.get("max_length", 0)
 
     # 校验 timeout 合法性
     if not isinstance(timeout, (int, float)) or timeout < 10:
@@ -229,9 +230,10 @@ async def execute(params: dict[str, Any]) -> str:
 
     # 预生成子会话 ID：父进程预知 sid，子进程用它创建会话，
     # 之后无论子进程如何退出（含 SIGKILL），父进程都能兜底补写 meta。
-    from fp_core.core.session import _generate_sid, get_current_session_id
+    from fp_core.core.session import _generate_sid, get_current_session_id  # pyright: ignore[reportPrivateUsage]
 
     sub_sid = _generate_sid()
+    parent_sid = get_current_session_id() or ""
     parent_sid = get_current_session_id() or ""
 
     env = os.environ.copy()
