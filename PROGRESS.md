@@ -80,3 +80,9 @@ fp-core（根基）→ fp-terminal / fp-webui / fp-acp → fp（聚合）
 - 坑：pyright isinstance 收窄+条件表达式组合有怪癖，显式注解无效 → 用 cast 绕过
 - 坑：pre-commit daemon 缓存环境变量 → FP_DOCS_SYNC_ALLOW 不生效，需 `pre-commit clean` 后重试
 - 验收：pytest 338 passed ✓（子agent 环境 FP_IS_SUBAGENT=1 会导致 subagent 测试假失败，用 env -u 跑）
+
+## 批13（fp-acp server.py 425→0，最大单文件）
+- 子agent 修复：_handle_*/_send_* 系列签名补参返回类型、dict 泛型、私有访问 type: ignore
+- 425 错全清，全局 705→280（server.py 是最后大块，清完直接 -425）
+- 验收：pyright 280 errors / pytest 338 passed ✓
+- 剩余：ext.py 271 + cli_io.py 8 + main.py 1

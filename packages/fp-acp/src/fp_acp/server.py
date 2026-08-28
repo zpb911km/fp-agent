@@ -23,6 +23,8 @@ ACP Server — Agent Client Protocol 实现 (v1 兼容)
   - 通知使用 ACP v1 的 update 结构
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import json
@@ -30,10 +32,15 @@ import os
 import re
 import sys
 import traceback
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, cast
 
 from fp_core.core.io import IOChannel
 from fp_core.core.lifecycle import LifecycleHook
+
+if TYPE_CHECKING:
+    from fp_core.core.agent import Agent
+    from fp_core.core.lifecycle import HookContext
 
 # ═══════════════════════════════════════════════════════════
 # ACP v1 常量
@@ -71,7 +78,7 @@ class ACPIO(IOChannel):
 
     _STREAM_THRESHOLD = 300
 
-    def __init__(self, send_chunk=None):
+    def __init__(self, send_chunk: Callable[[str], None] | None = None):
         """
         Args:
             send_chunk: 可选的回调函数，接收 (text: str)，
@@ -79,7 +86,7 @@ class ACPIO(IOChannel):
                         同步调用，直接写入 stdout。
         """
         self._buffer: list[str] = []
-        self._send_chunk = send_chunk
+        self._send_chunk: Callable[[str], None] | None = send_chunk
         self._char_count = 0
 
     def _accumulate(self, text: str):
@@ -150,7 +157,7 @@ class ACPServer:
                           Follow Agent: 文件操作时通知 IDE 打开对应文件
     """
 
-    def __init__(self, agent_instance=None):
+    def __init__(self, agent_instance: Agent | None = None):
         """
         Args:
             agent_instance: 可选，注入已存在的 Agent 实例。
@@ -163,7 +170,7 @@ class ACPServer:
 
         # ── 创建 Agent（print/display 重定向到 stderr） ──
         if agent_instance is not None:
-            self._agent = agent_instance
+            self._agent: Agent = agent_instance
         else:
             from fp_core.core.agent import Agent
 
@@ -177,12 +184,12 @@ class ACPServer:
         self._active_tool_call_ids: dict[str, str] = {}
 
         # ── 工具参数缓存（call → result 阶段共享） ──
-        self._last_edit_args: dict | None = None  # edit_file 参数，用于构建 diff
+        self._last_edit_args: dict[str, Any] | None = None  # edit_file 参数，用于构建 diff
         self._last_read_path: str | None = None  # read_file 路径，用于 result 的 resource URI
         self._last_write_path: str | None = None  # write_file 路径，用于 result 展示内容
 
         # ── 当前 prompt 处理 task（用于取消） ──
-        self._current_task: asyncio.Task | None = None
+        self._current_task: asyncio.Task[Any] | None = None
 
         # ── 并发 prompt 防护 ──
         self._processing_prompt = False
@@ -233,7 +240,7 @@ class ACPServer:
             priority=1000,
         )
 
-    def _extract_file_path(self, tool_name: str, args: dict) -> str | None:
+    def _extract_file_path(self, tool_name: str, args: dict[str, Any]) -> str | None:
         """
         从工具调用参数中提取文件路径。
 
@@ -244,7 +251,7 @@ class ACPServer:
 
         参数 args 应为已解析为 dict 的参数字典，由调用方保证。
         """
-        if not isinstance(args, dict):
+        if not isinstance(args, dict):  # type: ignore[reportUnnecessaryIsInstance]
             return None
 
         # 直接有 file_path 参数的
@@ -277,7 +284,13 @@ class ACPServer:
         else:
             return "other"
 
-    async def _on_tool_call(self, context, tool_name="", tool_args="", **kwargs):
+    async def _on_tool_call(
+        self,
+        context: HookContext,
+        tool_name: str = "",
+        tool_args: str = "",
+        **kwargs: Any,
+    ) -> None:
         """工具调用前 — 发送 tool_call 通知
 
         ACP v1 规范使用 rawInput 传递原始工具参数。
@@ -288,9 +301,9 @@ class ACPServer:
             return
 
         # ── 解析参数 ──
-        args_dict = {}
+        args_dict: dict[str, Any] = {}
         with contextlib.suppress(json.JSONDecodeError, TypeError):
-            args_dict = json.loads(tool_args) if isinstance(tool_args, str) else {}
+            args_dict = json.loads(tool_args) if isinstance(tool_args, str) else {}  # type: ignore[reportUnnecessaryIsInstance]
 
         # ── 缓存 edit_file 参数供 _on_tool_result 构建 diff ──
         if tool_name == "edit_file":
@@ -309,7 +322,7 @@ class ACPServer:
         file_path = self._extract_file_path(tool_name, args_dict)
         title = self._build_tool_title(tool_name, args_dict, kind)
 
-        notification: dict = {
+        notification: dict[str, Any] = {
             "sessionId": self._session_id,
             "update": {
                 "sessionUpdate": "tool_call",
@@ -347,7 +360,7 @@ class ACPServer:
         "other": "🔧",
     }
 
-    def _build_tool_title(self, tool_name: str, args: dict, kind: str) -> str:
+    def _build_tool_title(self, tool_name: str, args: dict[str, Any], kind: str) -> str:
         """构建一目了然的工具标题，含 emoji 和关键参数"""
         emoji = self._TOOL_EMOJI.get(kind, "🔧")
 
@@ -388,7 +401,7 @@ class ACPServer:
             return f"{emoji} ELF: {os.path.basename(fp)}"
         return f"{emoji} {tool_name}"
 
-    def _build_human_description(self, tool_name: str, args: dict) -> str:
+    def _build_human_description(self, tool_name: str, args: dict[str, Any]) -> str:
         """构建人类可读的工具调用描述（放在 content 中替代 JSON 展示）"""
         if tool_name == "bash":
             return args.get("command", "")
@@ -445,10 +458,16 @@ class ACPServer:
             with contextlib.suppress(json.JSONDecodeError, KeyError, TypeError):
                 parsed = json.loads(result_str)
                 if isinstance(parsed, dict) and "result" in parsed:
-                    result_str = parsed["result"]
+                    result_str = cast(str, parsed["result"])
         return result_str
 
-    async def _on_tool_result(self, context, tool_name="", result="", **kwargs):
+    async def _on_tool_result(
+        self,
+        context: HookContext,
+        tool_name: str = "",
+        result: Any = "",
+        **kwargs: Any,
+    ) -> None:
         """工具完成后 — 发送 tool_call_update
 
         ACP v1 规范使用 rawOutput 传递原始工具结果。
@@ -464,7 +483,7 @@ class ACPServer:
         # ── 清理结果：subagent 抽取 result 字段 ──
         display_str = self._extract_display_result(tool_name, result_str)
 
-        notification: dict = {
+        notification: dict[str, Any] = {
             "sessionId": self._session_id,
             "update": {
                 "sessionUpdate": "tool_call_update",
@@ -476,7 +495,7 @@ class ACPServer:
         }
 
         # ── content：富内容块 ──
-        content_blocks: list[dict] = []
+        content_blocks: list[dict[str, Any]] = []
 
         # 所有工具的结果用 resource/text/plain 展示（保留换行和缩进）
         # text 类型会吞掉换行变为单行，resource 才能正确保留格式
@@ -586,7 +605,7 @@ class ACPServer:
     # 公共接口
     # ═══════════════════════════════════════════════════════
 
-    async def start(self):
+    async def start(self) -> None:
         """启动 ACP 服务器，从 stdin 读取 JSON-RPC 消息"""
         await self._agent.ensure_initialized()
         self._session_id = self._agent.session.session_id
@@ -614,14 +633,14 @@ class ACPServer:
     # 消息循环
     # ═══════════════════════════════════════════════════════
 
-    async def _read_loop(self, reader: asyncio.StreamReader):
+    async def _read_loop(self, reader: asyncio.StreamReader) -> None:
         """从 stdin 逐行读取 JSON-RPC 消息（全异步派发）
 
         关键设计：所有请求/通知都通过 create_task 异步派发，不阻塞 stdin 读取循环。
         这样 session/cancel 通知可以在 prompt 处理期间被读取和派发，
         实现对正在运行的 agent 真正中断。
         """
-        active_tasks: set[asyncio.Task] = set()
+        active_tasks: set[asyncio.Task[Any]] = set()
 
         while True:
             line = await reader.readline()
@@ -636,7 +655,7 @@ class ACPServer:
                 continue
 
             try:
-                request: dict = json.loads(text)
+                request: dict[str, Any] = json.loads(text)
             except json.JSONDecodeError as e:
                 self._log(f"⚠️  JSON 解析失败: {e}")
                 continue
@@ -646,7 +665,7 @@ class ACPServer:
             active_tasks.add(task)
             task.add_done_callback(active_tasks.discard)
 
-    async def _dispatch(self, request: dict):
+    async def _dispatch(self, request: dict[str, Any]) -> None:
         """分发 JSON-RPC 请求到对应的处理器"""
         method = request.get("method", "")
         req_id = request.get("id")
@@ -682,9 +701,9 @@ class ACPServer:
             traceback.print_exc(file=sys.stderr)
             self._send_error(req_id, -32603, str(e))
 
-    def _get_handler(self, method: str):
+    def _get_handler(self, method: str) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None:
         """根据方法名查找对应的处理器"""
-        handlers = {
+        handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
             "initialize": self._handle_initialize,
             "session/new": self._handle_session_new,
             "session/load": self._handle_session_load,
@@ -696,7 +715,7 @@ class ACPServer:
         }
         return handlers.get(method)
 
-    async def _handle_notification(self, method: str, params: dict):
+    async def _handle_notification(self, method: str, params: dict[str, Any]) -> None:
         """处理通知（无 id 的请求）"""
         if method == "session/cancel":
             self._log("⏹️  收到取消通知，正在中断 agent...")
@@ -717,7 +736,7 @@ class ACPServer:
     # ACP v1 方法处理器
     # ═══════════════════════════════════════════════════════
 
-    async def _handle_initialize(self, params: dict) -> dict:
+    async def _handle_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
         """
         ACP v1 协议握手。
 
@@ -751,7 +770,7 @@ class ACPServer:
             "authMethods": [],
         }
 
-    async def _handle_session_new(self, params: dict) -> dict:
+    async def _handle_session_new(self, params: dict[str, Any]) -> dict[str, Any]:
         """
         ACP v1 创建新会话。
 
@@ -776,7 +795,7 @@ class ACPServer:
         # 以确保 IDE 先拿到 sessionId 再处理命令列表。
         return {"sessionId": new_sid}
 
-    async def _handle_session_load(self, params: dict) -> dict:
+    async def _handle_session_load(self, params: dict[str, Any]) -> dict[str, Any]:
         """
         ACP v1 恢复已有会话。
 
@@ -813,7 +832,7 @@ class ACPServer:
             self._session_id = new_sid
             return {"sessionId": new_sid}
 
-    async def _handle_session_list(self, params: dict) -> dict:
+    async def _handle_session_list(self, params: dict[str, Any]) -> dict[str, Any]:
         """
         ACP v1 列出所有历史会话。
 
@@ -822,7 +841,7 @@ class ACPServer:
         all_sessions = self._agent.session.list_sessions()
         current_sid = self._agent.session.session_id
 
-        sessions_list = []
+        sessions_list: list[dict[str, Any]] = []
         for sid, meta in sorted(
             all_sessions.items(),
             key=lambda x: x[1].get("updated", x[1].get("created", "")),
@@ -844,7 +863,7 @@ class ACPServer:
 
         return {"sessions": sessions_list}
 
-    async def _handle_session_prompt(self, params: dict) -> dict:
+    async def _handle_session_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
         """
         ACP v1 核心交互：发送用户消息并返回 AI 回复。
 
@@ -890,8 +909,8 @@ class ACPServer:
             except asyncio.CancelledError:
                 self._log("⏹️  Agent 处理已被用户取消")
                 # 清理中断标记，确保下次 prompt 正常工作
-                self._agent._interrupted = False
-                self._agent._processing = False
+                self._agent._interrupted = False  # type: ignore[reportPrivateUsage]
+                self._agent._processing = False  # type: ignore[reportPrivateUsage]
                 # 取消后仍然 flush 缓冲区，确保用户看到已生成的内容
                 buf = acp_io.flush_text()
                 if buf.strip():
@@ -901,7 +920,7 @@ class ACPServer:
                 reload_data = getattr(self._agent.state, "_reload_result", None)
                 if reload_data is not None:
                     new_agent, info = reload_data
-                    self._agent.state._reload_result = None
+                    self._agent.state._reload_result = None  # type: ignore[reportPrivateUsage]
                     self._agent = new_agent
                     self._session_id = self._agent.session.session_id
                     self._reset_tool_state()
@@ -929,7 +948,7 @@ class ACPServer:
             reload_data = getattr(self._agent.state, "_reload_result", None)
             if reload_data is not None:
                 new_agent, info = reload_data
-                self._agent.state._reload_result = None  # 防止重复消费
+                self._agent.state._reload_result = None  # type: ignore[reportPrivateUsage]  # 防止重复消费
                 self._agent = new_agent
                 self._session_id = self._agent.session.session_id
                 # 新 Agent 有全新的 lifecycle 实例，需重新注册 Follow Agent 钩子
@@ -941,16 +960,16 @@ class ACPServer:
         finally:
             self._processing_prompt = False
 
-    async def _handle_session_set_mode(self, params: dict) -> dict:
+    async def _handle_session_set_mode(self, params: dict[str, Any]) -> dict[str, Any]:
         """切换 Agent 模式（预留）"""
         mode = params.get("mode", "normal")
         return {"mode": mode}
 
-    async def _handle_session_ping(self, params: dict) -> dict:
+    async def _handle_session_ping(self, params: dict[str, Any]) -> dict[str, Any]:
         """ACP v1 心跳保持"""
         return {"pong": True}
 
-    async def _handle_session_commands(self, params: dict) -> dict:
+    async def _handle_session_commands(self, params: dict[str, Any]) -> dict[str, Any]:
         """
         返回可用斜杠命令列表（作为 session/commands 请求的 fallback）。
 
@@ -976,7 +995,7 @@ class ACPServer:
     # 辅助方法
     # ═══════════════════════════════════════════════════════
 
-    def _extract_prompt(self, params: dict) -> str | None:
+    def _extract_prompt(self, params: dict[str, Any]) -> str | None:
         """
         从 ACP v1 请求中提取用户消息文本。
 
@@ -996,20 +1015,20 @@ class ACPServer:
           ]
         """
         # ── 方式1: ACP v1 标准 prompt ──
-        prompt_list = params.get("prompt")
-        if prompt_list is not None and isinstance(prompt_list, list) and len(prompt_list) > 0:
+        prompt_list = cast("list[dict[str, Any]] | None", params.get("prompt"))
+        if prompt_list is not None and isinstance(prompt_list, list) and len(prompt_list) > 0:  # type: ignore[reportUnnecessaryIsInstance]
             return self._prompt_blocks_to_text(prompt_list)
 
         # ── 方式2: OpenAI 兼容 messages ──
-        messages = params.get("messages")
-        if messages is not None and isinstance(messages, list) and len(messages) > 0:
+        messages = cast("list[dict[str, Any]] | None", params.get("messages"))
+        if messages is not None and isinstance(messages, list) and len(messages) > 0:  # type: ignore[reportUnnecessaryIsInstance]
             last_msg = messages[-1]
             if last_msg.get("role") in ("user", "assistant"):
                 return self._build_messages_text(messages)
 
         return None
 
-    def _prompt_blocks_to_text(self, blocks: list[dict]) -> str:
+    def _prompt_blocks_to_text(self, blocks: list[dict[str, Any]]) -> str:
         """
         将 ACP v1 的 content blocks 转换为文本。
 
@@ -1021,7 +1040,7 @@ class ACPServer:
           - 所有 text blocks 按顺序拼接
           - resource blocks 转换为 [文件: uri]\n内容 格式
         """
-        parts = []
+        parts: list[str] = []
         for block in blocks:
             block_type = block.get("type", "")
 
@@ -1043,7 +1062,7 @@ class ACPServer:
 
         return "\n".join(parts)
 
-    def _build_messages_text(self, messages: list[dict]) -> str:
+    def _build_messages_text(self, messages: list[dict[str, Any]]) -> str:
         """
         从 OpenAI 格式的 messages 中提取最后一条 user 消息。
 
@@ -1093,7 +1112,7 @@ class ACPServer:
         except Exception as e:
             self._log(f"注册斜杠命令失败: {e}")
 
-    def _send_plan_notification(self, session_id=None):
+    def _send_plan_notification(self, session_id: str | None = None) -> None:
         """发送 ACP v1 plan 更新通知"""
         sid = session_id or self._session_id
         self._send_notification(
@@ -1113,7 +1132,7 @@ class ACPServer:
             },
         )
 
-    def _send_message_notification(self, text: str, session_id=None):
+    def _send_message_notification(self, text: str, session_id: str | None = None) -> None:
         """通过 agent_message_chunk 通知发送回复内容"""
         import uuid
 
@@ -1133,7 +1152,7 @@ class ACPServer:
             },
         )
 
-    async def _shutdown_agent(self):
+    async def _shutdown_agent(self) -> None:
         """安全关闭 Agent"""
         try:
             self._agent.state.nuclear_exit = True
@@ -1146,7 +1165,7 @@ class ACPServer:
     # JSON-RPC 通信（写真正的 stdout）
     # ═══════════════════════════════════════════════════════
 
-    def _send_result(self, req_id: Any, result: dict | None):
+    def _send_result(self, req_id: Any, result: dict[str, Any] | None) -> None:
         """发送 JSON-RPC 成功响应"""
         msg = json.dumps(
             {"jsonrpc": "2.0", "id": req_id, "result": result},
@@ -1155,7 +1174,7 @@ class ACPServer:
         self._stdout.write(msg + "\n")
         self._stdout.flush()
 
-    def _send_error(self, req_id: Any, code: int, message: str):
+    def _send_error(self, req_id: Any, code: int, message: str) -> None:
         """发送 JSON-RPC 错误响应"""
         msg = json.dumps(
             {
@@ -1168,7 +1187,7 @@ class ACPServer:
         self._stdout.write(msg + "\n")
         self._stdout.flush()
 
-    def _send_notification(self, method: str, params: dict):
+    def _send_notification(self, method: str, params: dict[str, Any]) -> None:
         """发送 JSON-RPC 通知（无 id）"""
         msg = json.dumps(
             {"jsonrpc": "2.0", "method": method, "params": params},
@@ -1178,7 +1197,7 @@ class ACPServer:
         self._stdout.flush()
 
     @staticmethod
-    def _log(msg: str):
+    def _log(msg: str) -> None:
         """日志输出到 stderr"""
         print(f"[ACP] {msg}", file=sys.stderr, flush=True)
 
@@ -1188,7 +1207,7 @@ class ACPServer:
 # ═══════════════════════════════════════════════════════════
 
 
-def main():
+def main() -> None:
     """启动 ACP Server 的入口函数"""
     server = ACPServer()
     try:
