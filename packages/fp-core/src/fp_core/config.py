@@ -6,7 +6,7 @@ Agent v2 配置管理
 import json
 import os
 import sys
-from typing import Any
+from typing import Any, cast
 
 from fp_core.logger import get_logger
 from fp_core.platform_utils import get_config_dir, get_data_dir
@@ -15,20 +15,20 @@ from fp_core.platform_utils import get_config_dir, get_data_dir
 USER_CONFIG_PATH = os.path.join(get_config_dir(), "config.json")
 
 
-def _load_json_config() -> dict:
+def _load_json_config() -> dict[str, Any]:
     """加载用户配置，不存在则返回空 dict（回退到 Python 硬编码默认值）"""
     if os.path.isfile(USER_CONFIG_PATH):
         try:
             with open(USER_CONFIG_PATH, encoding="utf-8") as f:
                 cfg = json.load(f)
             if isinstance(cfg, dict):
-                return cfg
+                return cast(dict[str, Any], cfg)
         except (json.JSONDecodeError, OSError):
             pass
     return {}
 
 
-_json_cfg = _load_json_config()
+_json_cfg: dict[str, Any] = _load_json_config()
 
 # ═══════════════════════════════════════════════════════════════
 # 配置 Schema 验证
@@ -237,7 +237,7 @@ def check_llm_config() -> bool:
     return ok
 
 
-def get_default_config() -> dict:
+def get_default_config() -> dict[str, Any]:
     """获取默认配置（用于生成 config.json）"""
     return {
         "LLM_API_KEY": "your-api-key-here",

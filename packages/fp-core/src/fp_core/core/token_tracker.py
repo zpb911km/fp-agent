@@ -26,7 +26,7 @@ TokenTracker — token 消耗跟踪器
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 
 @dataclass
@@ -144,19 +144,19 @@ class TokenTracker:
         if usage is None:
             return
 
-        prompt = usage.get("prompt_tokens", 0) or 0
-        completion = usage.get("completion_tokens", 0) or 0
-        total = usage.get("total_tokens", 0) or 0
+        prompt: int = usage.get("prompt_tokens", 0) or 0
+        completion: int = usage.get("completion_tokens", 0) or 0
+        total: int = usage.get("total_tokens", 0) or 0
 
         if total == 0:
             return  # 无效数据，跳过
 
         # ── 提取缓存相关字段 ──
-        cache_hit = 0
-        cache_miss = 0
+        cache_hit: int = 0
+        cache_miss: int = 0
 
         # 方式1: prompt_tokens_details.cached_tokens（DeepSeek 嵌套结构）
-        prompt_details = usage.get("prompt_tokens_details")
+        prompt_details = cast(dict[str, Any] | None, usage.get("prompt_tokens_details"))
         if isinstance(prompt_details, dict):
             cache_hit = prompt_details.get("cached_tokens", 0) or 0
 
@@ -170,8 +170,8 @@ class TokenTracker:
             cache_miss = max(0, prompt - cache_hit)
 
         # ── 提取推理相关字段 ──
-        reasoning = 0
-        completion_details = usage.get("completion_tokens_details")
+        reasoning: int = 0
+        completion_details = cast(dict[str, Any] | None, usage.get("completion_tokens_details"))
         if isinstance(completion_details, dict):
             reasoning = completion_details.get("reasoning_tokens", 0) or 0
         if not reasoning:

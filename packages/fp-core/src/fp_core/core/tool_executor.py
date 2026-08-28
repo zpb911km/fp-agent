@@ -9,14 +9,20 @@ ToolExecutor — 工具执行层
 - 只做"工具调用→结果"的纯执行
 """
 
+from __future__ import annotations
+
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from fp_core.tools import ToolRegistry
+    from fp_core.tools.core import OpenAISchema
 
 
 class ToolExecutor:
     """工具执行器"""
 
-    def __init__(self, registry: Any | None = None):
+    def __init__(self, registry: ToolRegistry | None = None):
         """
         Args:
             registry: ToolRegistry 实例。None 时创建独立实例（不再共享全局单例）
@@ -29,15 +35,15 @@ class ToolExecutor:
             self._registry = create_registry()
 
     @property
-    def registry(self):
+    def registry(self) -> ToolRegistry:
         """工具注册表（供插件注册工具时使用）"""
         return self._registry
 
-    def get_definitions(self) -> list[dict]:
+    def get_definitions(self) -> list[OpenAISchema]:
         """获取所有工具的 OpenAI function calling schema"""
         return self._registry.get_all_definitions()
 
-    async def execute(self, tool_call: dict) -> str:
+    async def execute(self, tool_call: dict[str, Any]) -> str:
         """
         执行工具调用。
 
@@ -57,7 +63,7 @@ class ToolExecutor:
             TypeError: 工具参数类型错误
             Exception: 工具执行时的其他异常
         """
-        name = tool_call["function"]["name"]
-        args = json.loads(tool_call["function"]["arguments"])
-        result = await self._registry.execute(name, args)
+        name: str = tool_call["function"]["name"]
+        args: dict[str, Any] = json.loads(tool_call["function"]["arguments"])
+        result = cast("str | None", await self._registry.execute(name, args))
         return str(result) if result is not None else "执行成功（无返回）"

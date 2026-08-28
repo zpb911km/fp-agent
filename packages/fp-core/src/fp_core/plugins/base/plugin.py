@@ -8,9 +8,11 @@ import importlib.util
 import inspect
 import os
 import sys
+import types
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 from fp_core.logger import get_logger
@@ -22,7 +24,7 @@ class PluginConfig:
 
     enabled: bool = True
     priority: int = 100
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict[str, Any])
 
 
 class Plugin(ABC):
@@ -89,17 +91,29 @@ class _TrackingLifecycle(LifecycleManager):
     供 PluginRegistry.unregister() 清理使用。
     """
 
-    def __init__(self, lifecycle: LifecycleManager, tracker: list):
+    def __init__(self, lifecycle: LifecycleManager, tracker: list[tuple[LifecycleHook, str]]):
         super().__init__()
         self._lifecycle = lifecycle
         self._tracker = tracker
 
-    def register(self, hook, func, priority=100, name=None, hook_type=None):
+    def register(
+        self,
+        hook: LifecycleHook,
+        func: Callable[..., Any],
+        priority: int = 100,
+        name: str | None = None,
+        hook_type: str | None = None,
+    ) -> None:
         resolved_name = name or getattr(func, "__name__", str(id(func)))
         self._tracker.append((hook, resolved_name))
         return self._lifecycle.register(hook, func, priority, name, hook_type)
 
-    async def emit(self, hook: LifecycleHook, context: HookContext | None = None, **kwargs) -> HookContext:
+    async def emit(
+        self,
+        hook: LifecycleHook,
+        context: HookContext | None = None,
+        **kwargs: Any,
+    ) -> HookContext:
         return await self._lifecycle.emit(hook, context, **kwargs)
 
 
@@ -124,7 +138,7 @@ class PluginRegistry:
         self._lifecycle = lifecycle
         self._plugins: dict[str, Plugin] = {}
         self._plugin_order: list[str] = []
-        self._tracked_hooks: dict[str, list[tuple]] = {}  # plugin_name → [(hook, name), ...]
+        self._tracked_hooks: dict[str, list[tuple[LifecycleHook, str]]] = {}  # plugin_name → [(hook, name), ...]
 
         if plugin_dir is not None:
             self.scan(plugin_dir)
@@ -198,7 +212,7 @@ class PluginRegistry:
     _import_counter = 0
 
     @classmethod
-    def _import_module(cls, filepath: str):
+    def _import_module(cls, filepath: str) -> types.ModuleType | None:
         """从文件路径导入模块"""
         try:
             cls._import_counter += 1
@@ -216,7 +230,7 @@ class PluginRegistry:
 
     # ── 内部：从模块提取并注册 Plugin ─────────────
 
-    def _register_plugin_from_module(self, module, fallback_name: str) -> bool:
+    def _register_plugin_from_module(self, module: types.ModuleType, fallback_name: str) -> bool:
         """从模块中查找 Plugin 子类并注册
 
         Returns:
@@ -255,10 +269,10 @@ class PluginRegistry:
         """注册插件实例（通过 _TrackingLifecycle 追踪钩子注册）"""
         self._plugins[plugin.name] = plugin
         self._plugin_order.append(plugin.name)
-        plugin._lifecycle = self._lifecycle
+        plugin._lifecycle = self._lifecycle  # pyright: ignore[reportPrivateUsage]
 
         # 用追踪包装器替代原始 lifecycle，记录此插件注册的所有钩子
-        tracker: list[tuple] = []
+        tracker: list[tuple[LifecycleHook, str]] = []
         tracking = _TrackingLifecycle(self._lifecycle, tracker)
         plugin.on_register(tracking)
         if tracker:
@@ -300,10 +314,13 @@ class PluginRegistry:
             yield self._plugins[name]
 
 
-def plugin(name: str, priority: int = 100):
+_P = TypeVar("_P", bound=Plugin)
+
+
+def plugin(name: str, priority: int = 100) -> Callable[[type[_P]], type[_P]]:
     """插件装饰器"""
 
-    def decorator(cls):
+    def decorator(cls: type[_P]) -> type[_P]:
         cls.name = name
         # 将 priority 存入配置
         return cls
