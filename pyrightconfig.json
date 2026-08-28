@@ -1,0 +1,11 @@
+{
+  "typeCheckingMode": "strict",
+  "pythonVersion": "3.12",
+  "include": [
+    "packages/fp-core/src",
+    "packages/fp/src",
+    "packages/fp-acp/src",
+    "packages/fp-terminal/src",
+    "packages/fp-webui/src"
+  ]
+}

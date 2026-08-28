@@ -13,19 +13,21 @@ ConversationState — 上下文状态的唯一所有者
   SessionStore 只做持久化（不持有状态）
 """
 
+from typing import Any
+
 
 class ConversationState:
     """上下文状态的唯一所有者"""
 
     def __init__(self, system_prompt: str = ""):
-        self._messages: list[dict] = []
+        self._messages: list[dict[str, Any]] = []
         if system_prompt:
             self._messages.append({"role": "system", "content": system_prompt})
 
     # ── 只读属性 ─────────────────────────────────────
 
     @property
-    def messages(self) -> list[dict]:
+    def messages(self) -> list[dict[str, Any]]:
         """返回消息列表的防御性拷贝"""
         return list(self._messages)
 
@@ -38,7 +40,7 @@ class ConversationState:
     def __len__(self) -> int:
         return len(self._messages)
 
-    def __getitem__(self, idx: int) -> dict:
+    def __getitem__(self, idx: int) -> dict[str, Any]:
         return self._messages[idx]
 
     # ── 写操作 ───────────────────────────────────────
@@ -50,7 +52,7 @@ class ConversationState:
         else:
             self._messages.insert(0, {"role": "system", "content": prompt})
 
-    def set_messages(self, system_prompt: str, non_system_messages: list[dict]):
+    def set_messages(self, system_prompt: str, non_system_messages: list[dict[str, Any]]):
         """「大通道」批量替换 — 一次性替换全部消息
 
         fork/back/switch 等需要批量操作的场景使用此方法，
@@ -64,19 +66,19 @@ class ConversationState:
         cleaned = [m for m in non_system_messages if m.get("role") != "system"]
         self._messages = [{"role": "system", "content": system_prompt}] + [dict(m) for m in cleaned]
 
-    def append(self, message: dict):
+    def append(self, message: dict[str, Any]):
         """追加一条消息"""
         self._messages.append(message)
 
-    def extend(self, messages: list[dict]):
+    def extend(self, messages: list[dict[str, Any]]):
         """批量追加消息"""
         self._messages.extend(messages)
 
-    def replace_all(self, messages: list[dict]):
+    def replace_all(self, messages: list[dict[str, Any]]):
         """替换整个消息列表"""
         self._messages = list(messages)
 
-    def insert(self, index: int, message: dict):
+    def insert(self, index: int, message: dict[str, Any]):
         """在指定位置插入消息"""
         self._messages.insert(index, message)
 
@@ -91,24 +93,24 @@ class ConversationState:
 
     # ── 便捷添加方法 ─────────────────────────────────
 
-    def add_user_message(self, content: str) -> dict:
+    def add_user_message(self, content: str) -> dict[str, Any]:
         msg = {"role": "user", "content": content}
         self._messages.append(msg)
         return msg
 
-    def add_assistant_message(self, msg: dict) -> dict:
+    def add_assistant_message(self, msg: dict[str, Any]) -> dict[str, Any]:
         msg = dict(msg)
         self._messages.append(msg)
         return msg
 
-    def add_tool_message(self, tool_call_id: str, content: str) -> dict:
+    def add_tool_message(self, tool_call_id: str, content: str) -> dict[str, Any]:
         msg = {"role": "tool", "tool_call_id": tool_call_id, "content": content}
         self._messages.append(msg)
         return msg
 
     # ── 查询方法 ─────────────────────────────────────
 
-    def get_non_system_messages(self) -> list[dict]:
+    def get_non_system_messages(self) -> list[dict[str, Any]]:
         """返回所有非 system 消息"""
         return [m for m in self._messages if m["role"] != "system"]
 
@@ -118,7 +120,7 @@ class ConversationState:
     def get_system_count(self) -> int:
         return sum(1 for m in self._messages if m["role"] == "system")
 
-    def get_messages_for_llm(self) -> list[dict]:
+    def get_messages_for_llm(self) -> list[dict[str, Any]]:
         """返回传给 LLM 的消息（含 tool ordering 修复）"""
         if len(self._messages) <= 1:
             return list(self._messages)
@@ -126,7 +128,7 @@ class ConversationState:
         repaired = self._repair_ordering(self._messages[1:])
         return [system] + repaired
 
-    def get_last_assistant_message(self) -> dict | None:
+    def get_last_assistant_message(self) -> dict[str, Any] | None:
         """获取最后一条 assistant 消息"""
         for m in reversed(self._messages):
             if m["role"] == "assistant":
@@ -141,16 +143,16 @@ class ConversationState:
     # ── 工具消息顺序修复 ────────────────────────────
 
     @staticmethod
-    def _repair_ordering(messages: list[dict]) -> list[dict]:
+    def _repair_ordering(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """
         修复 tool 消息顺序 — 不丢弃信息，转为合成消息保留。
 
         当 tool_call 和 tool_result 不成对时（例如中断导致），
         将孤立的 tool 消息转为 system 消息保留信息。
         """
-        result: list[dict] = []
-        buffer: list[dict] = []
-        active_tool_ids: set = set()
+        result: list[dict[str, Any]] = []
+        buffer: list[dict[str, Any]] = []
+        active_tool_ids: set[str] = set()
 
         for m in messages:
             if m["role"] == "assistant" and m.get("tool_calls"):
@@ -198,15 +200,15 @@ class ConversationState:
             self._messages = [self._messages[0]] + repaired
         return changed
 
-    def get_history_for_display(self) -> list[dict]:
+    def get_history_for_display(self) -> list[dict[str, Any]]:
         """获取用于显示的历史消息"""
         return self.get_non_system_messages()
 
     # ── 序列化 ───────────────────────────────────────
 
-    def to_serializable(self) -> list[dict]:
+    def to_serializable(self) -> list[dict[str, Any]]:
         """返回可序列化的消息列表（用于持久化，跳过首条 system）"""
-        result = []
+        result: list[dict[str, Any]] = []
         for i, msg in enumerate(self._messages):
             if msg.get("role") == "system" and i == 0:
                 continue  # system prompt 由 SessionStore 重新加载
@@ -218,7 +220,7 @@ class ConversationState:
         return result
 
     @classmethod
-    def from_serialized(cls, system_prompt: str, serialized: list[dict]) -> "ConversationState":
+    def from_serialized(cls, system_prompt: str, serialized: list[dict[str, Any]]) -> "ConversationState":
         """从持久化数据恢复上下文"""
         state = cls(system_prompt)
         for msg in serialized:
