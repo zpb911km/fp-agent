@@ -9,6 +9,7 @@ LLMService — 纯 LLM 调用层
 """
 
 import types
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,7 +21,7 @@ class LLMConfig:
     model: str = ""
     temperature: float = 0.7
     max_tokens: int = 4096
-    extra_body: dict = field(default_factory=lambda: {"enable_thinking": False})
+    extra_body: dict[str, Any] = field(default_factory=lambda: {"enable_thinking": False})
 
 
 @dataclass
@@ -45,19 +46,20 @@ class StreamEvent:
 
     type: str = ""
     text: str = ""
-    data: dict | None = None
+    data: dict[str, Any] | None = None
 
 
 class LLMService:
     """LLM 调用服务"""
 
-    def __init__(self, client, config: LLMConfig):
+    def __init__(self, client: Any, config: LLMConfig):
         """
         Args:
             client: LLM client 实例（core.llm_client.Client）
+                    （注：llm_client.Client 内部成员类型不完整，此处以 Any 兜底）
             config: LLM 配置
         """
-        self._client = client
+        self._client: Any = client
         self._config = config
 
     @property
@@ -66,9 +68,9 @@ class LLMService:
 
     async def chat(
         self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        **overrides,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        **overrides: Any,
     ) -> LLMResult:
         """
         调用 LLM 并返回 LLMResult(message, usage)。
@@ -86,12 +88,12 @@ class LLMService:
             usage dict:
                 {"prompt_tokens": int, "completion_tokens": int, "total_tokens": int}
         """
-        model = overrides.get("model", self._config.model)
-        temperature = overrides.get("temperature", self._config.temperature)
-        max_tokens = overrides.get("max_tokens", self._config.max_tokens)
-        extra_body = overrides.get("extra_body", self._config.extra_body)
+        model: str = overrides.get("model", self._config.model)
+        temperature: float = overrides.get("temperature", self._config.temperature)
+        max_tokens: int = overrides.get("max_tokens", self._config.max_tokens)
+        extra_body: dict[str, Any] = overrides.get("extra_body", self._config.extra_body)
 
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
@@ -106,7 +108,7 @@ class LLMService:
         message = response.choices[0].message
         usage = response.usage  # 可能为 None，由调用方处理
 
-        msg: dict = {"role": "assistant", "content": message.content or ""}
+        msg: dict[str, Any] = {"role": "assistant", "content": message.content or ""}
         if message.tool_calls:
             msg["tool_calls"] = [
                 {
@@ -124,10 +126,10 @@ class LLMService:
 
     async def chat_stream(
         self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        **overrides,
-    ):
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        **overrides: Any,
+    ) -> AsyncIterator[StreamEvent]:
         """
         流式调用 LLM，逐个 yield StreamEvent。
 
@@ -149,12 +151,12 @@ class LLMService:
             result = await self.chat(messages, tools=tools, **overrides)
             yield StreamEvent(type="done", data=result.message)
             return
-        model = overrides.get("model", self._config.model)
-        temperature = overrides.get("temperature", self._config.temperature)
-        max_tokens = overrides.get("max_tokens", self._config.max_tokens)
-        extra_body = overrides.get("extra_body", self._config.extra_body)
+        model: str = overrides.get("model", self._config.model)
+        temperature: float = overrides.get("temperature", self._config.temperature)
+        max_tokens: int = overrides.get("max_tokens", self._config.max_tokens)
+        extra_body: dict[str, Any] = overrides.get("extra_body", self._config.extra_body)
 
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
@@ -168,7 +170,7 @@ class LLMService:
         # 累积完整消息（用于最终构造 assistant_msg）
         content_chunks: list[str] = []
         reasoning_chunks: list[str] = []
-        tool_call_acc: dict[int, dict] = {}  # index → {id, type, function: {name, arguments}}
+        tool_call_acc: dict[int, dict[str, Any]] = {}  # index → {id, type, function: {name, arguments}}
 
         async for chunk in self._client.chat.completions.create_stream(**kwargs):
             # ── 文本 token ──
@@ -205,7 +207,7 @@ class LLMService:
 
         # ── 构造完整 assistant_msg ──
         content = "".join(content_chunks)
-        msg: dict = {"role": "assistant", "content": content}
+        msg: dict[str, Any] = {"role": "assistant", "content": content}
         if tool_call_acc:
             msg["tool_calls"] = [
                 {

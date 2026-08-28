@@ -21,7 +21,7 @@ Usage:
 
 import contextlib
 import json
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -47,7 +47,7 @@ class APIError(Exception):
 class ToolCallFunction:
     __slots__ = ("name", "arguments")
 
-    def __init__(self, data: dict):
+    def __init__(self, data: dict[str, Any]):
         self.name: str = data.get("name", "")
         self.arguments: str = data.get("arguments", "")
 
@@ -55,7 +55,7 @@ class ToolCallFunction:
 class ToolCall:
     __slots__ = ("id", "type", "function")
 
-    def __init__(self, data: dict):
+    def __init__(self, data: dict[str, Any]):
         self.id: str = data.get("id", "")
         self.type: str = data.get("type", "function")
         self.function = ToolCallFunction(data.get("function", {}))
@@ -66,7 +66,7 @@ class Message:
 
     __slots__ = ("role", "content", "tool_calls", "reasoning_content")
 
-    def __init__(self, data: dict):
+    def __init__(self, data: dict[str, Any]):
         self.role: str = data.get("role", "assistant")
         self.content: str | None = data.get("content")
         self.reasoning_content: str | None = data.get("reasoning_content")
@@ -92,7 +92,7 @@ class Message:
 class MessageChoice:
     __slots__ = ("index", "message", "finish_reason")
 
-    def __init__(self, data: dict):
+    def __init__(self, data: dict[str, Any]):
         self.index: int = data.get("index", 0)
         self.message = Message(data.get("message", {}))
         self.finish_reason: str | None = data.get("finish_reason")
@@ -103,7 +103,7 @@ class CompletionResponse:
 
     __slots__ = ("id", "object", "created", "model", "choices", "usage")
 
-    def __init__(self, data: dict):
+    def __init__(self, data: dict[str, Any]):
         self.id: str = data.get("id", "")
         self.object: str = data.get("object", "chat.completion")
         self.created: int = data.get("created", 0)
@@ -126,17 +126,17 @@ class StreamChunk:
 
     __slots__ = ("content", "reasoning_content", "tool_calls", "finish_reason", "usage")
 
-    def __init__(self, data: dict):
-        choice = (data.get("choices") or [{}])[0]
-        delta = choice.get("delta", {})
+    def __init__(self, data: dict[str, Any]):
+        choice: dict[str, Any] = cast(dict[str, Any], (data.get("choices") or [{}])[0])
+        delta: dict[str, Any] = cast(dict[str, Any], choice.get("delta", {}))
         self.content: str | None = delta.get("content")
         self.reasoning_content: str | None = delta.get("reasoning_content")
         raw_tc = delta.get("tool_calls")
-        self.tool_calls: list[dict] | None = None
+        self.tool_calls: list[dict[str, Any]] | None = None
         if raw_tc:
             self.tool_calls = raw_tc
         self.finish_reason: str | None = choice.get("finish_reason")
-        self.usage: dict | None = data.get("usage")
+        self.usage: dict[str, Any] | None = data.get("usage")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -148,17 +148,17 @@ class Completions:
     """client.chat.completions"""
 
     def __init__(self, client: "Client"):
-        self._client = client
+        self._client: Any = client
 
     async def create(
         self,
         model: str,
-        messages: list[dict],
+        messages: list[dict[str, Any]],
         temperature: float | None = None,
         max_tokens: int | None = None,
-        tools: list[dict] | None = None,
-        extra_body: dict | None = None,
-        **kwargs,
+        tools: list[dict[str, Any]] | None = None,
+        extra_body: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> "CompletionResponse":
         """
         发起聊天补全请求（异步，非流式）。
@@ -212,12 +212,12 @@ class Completions:
     async def create_stream(
         self,
         model: str,
-        messages: list[dict],
+        messages: list[dict[str, Any]],
         temperature: float | None = None,
         max_tokens: int | None = None,
-        tools: list[dict] | None = None,
-        extra_body: dict | None = None,
-        **kwargs,
+        tools: list[dict[str, Any]] | None = None,
+        extra_body: dict[str, Any] | None = None,
+        **kwargs: Any,
     ):
         """
         发起流式聊天补全请求（SSE）。
@@ -315,7 +315,7 @@ class Client:
         self._timeout = timeout
         self.chat = Chat(self)
 
-    def _headers(self) -> dict:
+    def _headers(self) -> dict[str, Any]:
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",

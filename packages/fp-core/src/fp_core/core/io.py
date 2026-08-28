@@ -26,6 +26,7 @@ CLIIO 实现已在 fp-terminal/packages/fp_cli/cli_io.py 中。
 """
 
 import asyncio
+from typing import Any
 
 
 class IOChannel:
@@ -82,7 +83,7 @@ class IOChannel:
 
     # ── 工具调用展示 ─────────────────────────────────
 
-    def tool_call(self, name: str, args: dict):
+    def tool_call(self, name: str, args: dict[str, Any]):
         """显示工具调用"""
 
     def tool_result(self, result: str):
@@ -111,9 +112,11 @@ class WebSocketIO(IOChannel):
 
     frontend = "webui"
 
-    def __init__(self, event_bus):
-        self._event_bus = event_bus
-        self._pending_reply: asyncio.Future | None = None
+    def __init__(self, event_bus: Any):
+        # event_bus: EventBus 类型定义在 fp-webui 包（fp_webui/main.py），
+        # fp-core 不应依赖 fp-webui（分层方向错误），故用 Any 兜底。
+        self._event_bus: Any = event_bus
+        self._pending_reply: asyncio.Future[str] | None = None
         self.is_running = False  # WebSocket 处理器用来判断当前是否有任务在处理
 
     # ── 供 WebSocket 处理器调用 ─────────────────────────
@@ -131,7 +134,7 @@ class WebSocketIO(IOChannel):
 
     # ── IO 接口 ─────────────────────────────────────────
 
-    def _pub(self, type_: str, **data):
+    def _pub(self, type_: str, **data: Any) -> None:
         """向 EventBus 发布事件（fire-and-forget）"""
         asyncio.ensure_future(self._event_bus.publish({"type": type_, **data}))
 
@@ -162,7 +165,7 @@ class WebSocketIO(IOChannel):
     def stream_reset(self):
         """WebSocket 无状态管理，无需操作"""
 
-    def tool_call(self, name: str, args: dict):
+    def tool_call(self, name: str, args: dict[str, Any]):
         self._pub("tool_call", name=name, args=args)
 
     def tool_result(self, result: str):
@@ -220,7 +223,7 @@ class RestIO(IOChannel):
     def stream_reset(self):
         """静默通道，无需操作"""
 
-    def tool_call(self, name: str, args: dict):
+    def tool_call(self, name: str, args: dict[str, Any]):
         pass
 
     def tool_result(self, result: str):
