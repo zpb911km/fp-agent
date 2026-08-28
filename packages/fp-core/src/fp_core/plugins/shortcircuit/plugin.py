@@ -24,22 +24,22 @@ Refiner = Callable[[str, str, str], Awaitable[tuple[str, str]]]
 
 _scan_components = cast(
     Callable[[list[dict[str, Any]]], list[Component]],
-    _sc_impl._scan_components,
+    _sc_impl._scan_components,  # type: ignore[reportPrivateUsage]
 )
 _shortcircuit = cast(
     Callable[
         [list[dict[str, Any]], Refiner | None, list[tuple[int, int]], str],
         Awaitable[tuple[bool, str, int, list[Component] | None]],
     ],
-    _sc_impl._shortcircuit,
+    _sc_impl._shortcircuit,  # type: ignore[reportPrivateUsage]
 )
 _build_regenerate_refiner = cast(
     Callable[[State], Refiner],
-    _sc_impl._build_regenerate_refiner,
+    _sc_impl._build_regenerate_refiner,  # type: ignore[reportPrivateUsage]
 )
 _format_components_display = cast(
     Callable[[list[Component]], str],
-    _sc_impl._format_components_display,
+    _sc_impl._format_components_display,  # type: ignore[reportPrivateUsage]
 )
 
 TOOL_DEFINITION = {

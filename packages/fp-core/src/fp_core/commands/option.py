@@ -117,7 +117,7 @@ class OptionManager:
     def scan_commands(self) -> list[Entry]:
         import fp_core.commands as _cmds
 
-        cmd_reg: dict[str, Any] = cast(dict[str, Any], _cmds._commands)
+        cmd_reg: dict[str, Any] = cast(dict[str, Any], _cmds._commands)  # type: ignore[reportPrivateUsage]
 
         # mod id 去重（别名指向同一模块）
         mod_map: dict[int, dict[str, Any]] = {}
