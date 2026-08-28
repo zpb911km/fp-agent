@@ -10,6 +10,9 @@
 """
 
 import re
+from typing import Any
+
+from fp_core.core.state import State
 
 name = "resume"
 aliases: list[str] = []
@@ -26,7 +29,7 @@ def _escape_md(text: str) -> str:
     return re.sub(rf"([{re.escape(escape_chars)}])", r"\\\1", text)
 
 
-def _sorted_sessions(state, exclude_current: bool = False) -> list[tuple[str, dict]]:
+def _sorted_sessions(state: State, exclude_current: bool = False) -> list[tuple[str, dict[str, Any]]]:
     """按 updated 降序排列会话，可选排除当前会话"""
     sessions = state.session.list_sessions()
     current_sid = state.session_id
@@ -40,7 +43,7 @@ def _sorted_sessions(state, exclude_current: bool = False) -> list[tuple[str, di
     return sorted_items
 
 
-def _resolve_sid(state, raw: str, exclude_current: bool = False) -> str | None:
+def _resolve_sid(state: State, raw: str, exclude_current: bool = False) -> str | None:
     """将用户输入解析为 sid：纯数字 → list 序号映射，否则原样返回"""
     if raw.isdigit():
         i = int(raw)
@@ -51,7 +54,7 @@ def _resolve_sid(state, raw: str, exclude_current: bool = False) -> str | None:
     return raw  # 当作 sid 直接返回
 
 
-def _rebuild_context(state):
+def _rebuild_context(state: State) -> None:
     """用 system prompt 重建 context（切换会话时调用）"""
     state.rebuild_system_prompt()
     prompt = state.conversation.system_prompt
@@ -62,7 +65,7 @@ def _rebuild_context(state):
         state.conversation.set_system_prompt(prompt)
 
 
-async def execute(state, arg: str) -> tuple[bool, str]:
+async def execute(state: State, arg: str) -> tuple[bool, str]:
     arg = arg.strip()
 
     # ── /resume <无参数> = /resume list ────────────────────────

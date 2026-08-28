@@ -21,7 +21,26 @@
   * = 未完成（中断块 / 待回复）
 """
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from typing import Any, TypedDict
+
+Message = dict[str, Any]
+
+
+class Component(TypedDict):
+    """连通块记录（见 _scan_components 的文档注释）"""
+
+    idx: int
+    user_idx: int
+    terminal_idx: int
+    message_count: int
+    user_preview: str
+    assistant_preview: str
+    compressible: bool
+    complete: bool
+
+
+Refiner = Callable[[str, str, str], Awaitable[tuple[str, str]]]
 
 name = "sc"
 description = "短路(shortcircuit)已完成的连通块。用法: /sc list 查看, /sc 或 /sc N 短路最近的, /sc #N 短路指定编号的"
@@ -32,7 +51,7 @@ description = "短路(shortcircuit)已完成的连通块。用法: /sc list 查�
 # ═══════════════════════════════════════════════════════
 
 
-def _scan_components(messages: list[dict]) -> list[dict]:
+def _scan_components(messages: list[Message]) -> list[Component]:
     """
     扫描非 system 消息列表，返回从旧到新排序的连通块。
 
@@ -53,7 +72,7 @@ def _scan_components(messages: list[dict]) -> list[dict]:
     """
     user_indices = [i for i, m in enumerate(messages) if m["role"] == "user"]
 
-    components = []
+    components: list[Component] = []
     for pos, user_idx in enumerate(user_indices):
         terminal_idx = user_indices[pos + 1] - 1 if pos + 1 < len(user_indices) else len(messages) - 1
         msg_count = terminal_idx - user_idx + 1
@@ -76,11 +95,11 @@ def _scan_components(messages: list[dict]) -> list[dict]:
 
 
 async def _shortcircuit(
-    messages: list[dict],
-    refiner: Callable | None,
+    messages: list[Message],
+    refiner: Refiner | None,
     targets: list[tuple[int, int]],
     mode: str = "crop",
-) -> tuple[bool, str, int, list[dict] | None]:
+) -> tuple[bool, str, int, list[Message] | None]:
     """
     短路压缩：将指定连通块压缩为 user + assistant 消息对。
 
@@ -97,7 +116,7 @@ async def _shortcircuit(
         失败时返回 (False, 错误信息, 0, None)，原始 messages 不受影响。
     """
     targets = sorted(targets, key=lambda x: x[0])
-    new_sections: list[list[dict]] = []
+    new_sections: list[list[Message]] = []
     total_saved = 0
 
     try:
@@ -108,7 +127,7 @@ async def _shortcircuit(
             complete = terminal_msg["role"] == "assistant" and not terminal_msg.get("tool_calls")
 
             # ── 构建上下文（含中文标签，命令层策略） ──
-            context_parts = []
+            context_parts: list[str] = []
             for j in range(user_idx, terminal_idx + 1):
                 m = messages[j]
                 role_label = "用户" if m["role"] == "user" else "AI" if m["role"] == "assistant" else "工具"
@@ -158,7 +177,7 @@ async def _shortcircuit(
                 total_saved += msg_count - 2
 
         # ── 重建消息列表 ──
-        new_messages: list[dict] = []
+        new_messages: list[Message] = []
         i = 0
         section_idx = 0
         while i < len(messages):
@@ -177,7 +196,7 @@ async def _shortcircuit(
         return (False, f"短路失败: {e}", 0, None)
 
 
-def _build_regenerate_refiner(state) -> Callable:
+def _build_regenerate_refiner(state: Any) -> Refiner:
     """构建提炼回调 — 调用 LLM 精炼 assistant 回复"""
 
     async def refiner(user_text: str, assistant_text: str, context_text: str) -> tuple[str, str]:
@@ -227,7 +246,7 @@ def _build_regenerate_refiner(state) -> Callable:
 # ═══════════════════════════════════════════════════════
 
 
-def _parse_args(arg: str) -> tuple[str, object, str]:
+def _parse_args(arg: str) -> tuple[str, int | tuple[int, int] | None | str, str]:
     """解析短路命令参数
 
     Returns:
@@ -284,7 +303,7 @@ def _parse_args(arg: str) -> tuple[str, object, str]:
         return ("error", f"无效参数: '{cmd}'", mode)
 
 
-async def execute(state, arg: str) -> tuple[bool, str]:
+async def execute(state: Any, arg: str) -> tuple[bool, str]:
     action, value, mode = _parse_args(arg)
 
     if action == "error":
@@ -316,7 +335,7 @@ async def execute(state, arg: str) -> tuple[bool, str]:
         selected = native[:value]
         targets = [(c["user_idx"], c["terminal_idx"]) for c in selected]
     elif action == "index":
-        targets = []
+        targets: list[tuple[int, int]] = []
         for comp in components:
             if comp["idx"] == value:
                 targets.append((comp["user_idx"], comp["terminal_idx"]))
@@ -337,7 +356,7 @@ async def execute(state, arg: str) -> tuple[bool, str]:
         return (True, "没有可短路的连通块，或指定的连通块编号不存在")
 
     # ── 执行压缩（命令层自组装，纯函数操作消息列表） ──
-    refiner = None if mode == "crop" else _build_regenerate_refiner(state)
+    refiner: Refiner | None = None if mode == "crop" else _build_regenerate_refiner(state)
     success, msg, saved, new_messages = await _shortcircuit(messages, refiner, targets, mode)
 
     if success:
@@ -349,12 +368,12 @@ async def execute(state, arg: str) -> tuple[bool, str]:
         return (True, msg)
 
 
-def _format_components_display(components: list[dict]) -> str:
+def _format_components_display(components: list[Component]) -> str:
     """格式化连通块列表用于 /sc list 展示"""
     if not components:
         return "没有已完成的连通块"
 
-    lines = [
+    lines: list[str] = [
         f"## 📦 连通块列表（共 {len(components)} 个）",
         "`~` = 已充分压缩，`*` = 未完成",
     ]
