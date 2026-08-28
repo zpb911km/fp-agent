@@ -86,3 +86,9 @@ fp-core（根基）→ fp-terminal / fp-webui / fp-acp → fp（聚合）
 - 425 错全清，全局 705→280（server.py 是最后大块，清完直接 -425）
 - 验收：pyright 280 errors / pytest 338 passed ✓
 - 剩余：ext.py 271 + cli_io.py 8 + main.py 1
+
+## 批14（收官：ext.py 271→0 + 级联收尾 9→0，全局 280→0 🎉）
+- 子agent 修复 ext.py：4 个 TypedDict（_PublicIndex/_PublicAsset/_RepoAsset/_Provenance）、13 个 cmd_* args 补 argparse.Namespace（一次消除大批级联）、dict 泛型、cast 绕过 isinstance/索引怪癖
+- 级联反向暴露 9 错（上游类型精确后旧绕过失效）：cli_io.py 4×多余 cast 移除+私有访问 type: ignore、fp_core __all__ 补 "__version__"
+- **验收：pyright 0 errors / ruff clean / pytest 286p+1s ✓ / 全工程类型债清零**
+- 剩余：无。option.py 遗留 1 个环境类问题（_commands 私有访问）已在批10 清零，__version__ 导出问题已在本批解决
