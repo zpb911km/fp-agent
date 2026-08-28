@@ -29,7 +29,9 @@ import secrets
 import socket
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
+from typing import Any, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from fp_core.platform_utils import get_data_dir
@@ -37,7 +39,7 @@ from fp_core.platform_utils import get_data_dir
 # ── FastAPI / WebSocket ─────────────────────────────────
 try:
     import uvicorn
-    from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
     from fastapi.responses import HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
 except ImportError as e:
@@ -51,7 +53,7 @@ except ImportError as e:
 # 这里的顶层 import 仅用于类型标注。
 from fp_core.core.agent import Agent
 from fp_core.core.io import RestIO, WebSocketIO
-from fp_core.core.lifecycle import HookContext, LifecycleHook
+from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 from fp_core.logger import get_logger
 from fp_core.plugins.base.plugin import Plugin
 
@@ -72,22 +74,22 @@ class EventBus:
     """
 
     def __init__(self):
-        self._subscribers: dict[str, asyncio.Queue] = {}
+        self._subscribers: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self._next_id = 0
 
-    def subscribe(self) -> tuple[str, asyncio.Queue]:
+    def subscribe(self) -> tuple[str, asyncio.Queue[dict[str, Any]]]:
         """订阅事件流，返回 (subscriber_id, queue)"""
         sub_id = f"sub_{self._next_id}"
         self._next_id += 1
-        q: asyncio.Queue = asyncio.Queue(maxsize=1024)
+        q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1024)
         self._subscribers[sub_id] = q
         return sub_id, q
 
-    def unsubscribe(self, sub_id: str):
+    def unsubscribe(self, sub_id: str) -> None:
         """取消订阅"""
         self._subscribers.pop(sub_id, None)
 
-    async def publish(self, event: dict):
+    async def publish(self, event: dict[str, Any]) -> None:
         """向所有订阅者推送事件
 
         背压策略：队列满时丢弃最旧事件（get_nowait），而非丢弃订阅者。
@@ -112,7 +114,7 @@ class EventBus:
     def subscriber_count(self) -> int:
         return len(self._subscribers)
 
-    async def shutdown(self):
+    async def shutdown(self) -> None:
         """关闭所有订阅者"""
         dead_subs = list(self._subscribers.keys())
         for sub_id in dead_subs:
@@ -182,7 +184,7 @@ class WebUIPlugin(Plugin):
     name = "webui_bridge"
     version = "1.0.0"
 
-    def on_register(self, lifecycle):
+    def on_register(self, lifecycle: LifecycleManager) -> None:
         """注册所有需要监听的生命周期钩子"""
         lifecycle.register(
             LifecycleHook.ON_BEFORE_LLM_CALL,
@@ -229,15 +231,15 @@ class WebUIPlugin(Plugin):
             name="webui_shutdown",
         )
 
-    async def _emit(self, event_type: str, **data):
+    async def _emit(self, event_type: str, **data: Any) -> None:
         """向 EventBus 发布事件"""
         await event_bus.publish({"type": event_type, "ts": time.time(), **data})
 
-    async def _on_before_llm(self, ctx: HookContext, **kwargs):
+    async def _on_before_llm(self, ctx: HookContext, **kwargs: Any) -> None:
         """LLM 调用开始 → 前端显示"思考中"状态"""
         await self._emit("llm_start")
 
-    async def _on_after_llm(self, ctx: HookContext, **kwargs):
+    async def _on_after_llm(self, ctx: HookContext, **kwargs: Any) -> None:
         """LLM 调用完成 → 通知前端 LLM 状态
 
         注意：LLM 可能同时返回文本内容和工具调用（如"我来查一下..." + tool_calls）。
@@ -252,12 +254,12 @@ class WebUIPlugin(Plugin):
             tool_names=kwargs.get("tool_names", []),
         )
 
-    async def _on_tool_select(self, ctx: HookContext, **kwargs):
+    async def _on_tool_select(self, ctx: HookContext, **kwargs: Any) -> None:
         """工具选择 → 前端显示即将调用的工具列表"""
         tools = kwargs.get("tools", [])
         await self._emit("tool_select", tools=tools)
 
-    async def _on_tool_call(self, ctx: HookContext, **kwargs):
+    async def _on_tool_call(self, ctx: HookContext, **kwargs: Any) -> None:
         """工具调用开始 → 前端显示工具名称和参数"""
         await self._emit(
             "tool_call",
@@ -266,7 +268,7 @@ class WebUIPlugin(Plugin):
             tool_call_id=kwargs.get("tool_call_id", ""),
         )
 
-    async def _on_tool_result(self, ctx: HookContext, **kwargs):
+    async def _on_tool_result(self, ctx: HookContext, **kwargs: Any) -> None:
         """工具调用完成 → 前端显示结果摘要"""
         result = kwargs.get("result", "")
         await self._emit(
@@ -276,15 +278,15 @@ class WebUIPlugin(Plugin):
             tool_call_id=kwargs.get("tool_call_id", ""),
         )
 
-    async def _on_error(self, ctx: HookContext, **kwargs):
+    async def _on_error(self, ctx: HookContext, **kwargs: Any) -> None:
         """错误发生 → 前端显示错误信息"""
         await self._emit("error", error=str(kwargs.get("error", "")))
 
-    async def _on_shutdown(self, ctx: HookContext, **kwargs):
+    async def _on_shutdown(self, ctx: HookContext, **kwargs: Any) -> None:
         """Agent 关闭 → 前端显示关闭通知"""
         await self._emit("shutdown")
 
-    def on_unregister(self):
+    def on_unregister(self) -> None:
         """卸载插件时清理资源"""
         # WebUIPlugin 是桥接插件，随 Agent 生命周期自动管理，
         # EventBus 由 WebUI 服务器全局管理，此处无需额外清理
@@ -357,7 +359,7 @@ _AUTH_WHITELIST = {"/api/auth", "/api/health"}
 
 
 @app.middleware("http")
-async def auth_middleware(request: Request, call_next):
+async def auth_middleware(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     """拦截 /api/* 请求，验证 Bearer Token（白名单除外）"""
     path = request.url.path
     if path.startswith("/api/") and path not in _AUTH_WHITELIST:
@@ -399,7 +401,7 @@ def _get_lan_ip() -> str:
 
 
 @app.middleware("http")
-async def access_log_middleware(request: Request, call_next):
+async def access_log_middleware(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     """记录访问日志，URL 脱敏（不暴露 query 中的 token）"""
     start = time.monotonic()
     method = request.method
@@ -445,7 +447,7 @@ def _check_auth_rate_limit(client_ip: str) -> None:
 
 
 @app.post("/api/auth")
-async def auth_login(request: Request, body: dict):
+async def auth_login(request: Request, body: dict[str, Any]) -> dict[str, Any]:
     """验证 Token 并登录（每 IP 限频）"""
     client_ip = request.client.host if request.client else request.headers.get("x-forwarded-for", "unknown")
     _check_auth_rate_limit(client_ip)
@@ -456,7 +458,7 @@ async def auth_login(request: Request, body: dict):
 
 
 @app.get("/api/health")
-async def health_check():
+async def health_check() -> dict[str, Any]:
     """健康检查端点"""
     agent = await get_agent()
     return {
@@ -468,7 +470,7 @@ async def health_check():
 
 
 @app.post("/api/chat")
-async def send_message(body: dict):
+async def send_message(body: dict[str, Any]) -> dict[str, Any]:
     """
     发送消息并获取回复（非流式）
 
@@ -496,12 +498,12 @@ async def send_message(body: dict):
 
 
 @app.get("/api/sessions")
-async def list_sessions():
+async def list_sessions() -> dict[str, Any]:
     """列出所有历史会话"""
     agent = await get_agent()
     sessions = agent.session.list_sessions()
 
-    result = []
+    result: list[dict[str, Any]] = []
     for sid, info in sorted(sessions.items(), key=lambda x: x[1].get("created", ""), reverse=True):
         result.append({
             "id": sid,
@@ -532,7 +534,7 @@ async def _replace_agent(
     *,
     reload_modules: bool = False,
     restore_session: bool = True,
-) -> dict:
+) -> dict[str, Any]:
     """
     替换全局 Agent 实例的核心逻辑。
 
@@ -720,7 +722,7 @@ async def delete_session_endpoint(session_id: str):
 
 
 @app.get("/api/sessions/{session_id}/messages")
-async def get_session_messages(session_id: str):
+async def get_session_messages(session_id: str) -> dict[str, Any]:
     """
     获取指定会话的完整消息列表（直接读文件，不修改 Agent 状态）。
 
@@ -731,20 +733,20 @@ async def get_session_messages(session_id: str):
       2. compact 产生的摘要 system 消息
       3. repair_tool_ordering 转化的孤儿 tool 消息
     """
-    from fp_core.core.session import _session_path
+    import fp_core.core.session as _session_mod
 
-    path = _session_path(session_id)
+    path = _session_mod._session_path(session_id)  # type: ignore[reportPrivateUsage]
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
 
-    messages = []
+    messages: list[dict[str, Any]] = []
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                msg = json.loads(line)
+                msg: dict[str, Any] = json.loads(line)
             except json.JSONDecodeError:
                 continue
             if msg.get("__meta__"):
@@ -755,7 +757,7 @@ async def get_session_messages(session_id: str):
     # ConversationState.get_non_system_messages() 只返回 role != "system" 的消息，
     # 所以 compact 后产生的 system(摘要) 消息不计入索引。
     # 如果按文件全部消息编号，compact/resume 后前端 data-index 与后端索引会错位。
-    result = []
+    result: list[dict[str, Any]] = []
     non_system_idx = 0  # 只对非 system 消息的 1-based 索引
     for msg in messages:
         role = msg.get("role", "")
@@ -785,7 +787,7 @@ async def get_session_messages(session_id: str):
 
 
 @app.post("/api/sessions/{session_id}/search")
-async def search_session_messages(session_id: str, body: dict):
+async def search_session_messages(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
     """
     通过文本内容片段搜索消息，返回消息的真实文件行号和非 system 索引。
 
@@ -815,9 +817,9 @@ async def search_session_messages(session_id: str, body: dict):
       - line_number 可用于文件定位
       - 匹配方式：简单子串匹配（默认）或正则表达式
     """
-    from fp_core.core.session import _session_path
+    import fp_core.core.session as _session_mod
 
-    path = _session_path(session_id)
+    path = _session_mod._session_path(session_id)  # type: ignore[reportPrivateUsage]
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
 
@@ -827,11 +829,11 @@ async def search_session_messages(session_id: str, body: dict):
 
     import re
 
-    use_regex = body.get("regex", False)
+    use_regex = cast(bool, body.get("regex", False))
     limit = min(body.get("limit", 20), 100)
 
     # ── 编译匹配模式 ──
-    pattern: re.Pattern | None = None
+    pattern: re.Pattern[Any] | None = None
     query_lower: str | None = None
     if use_regex:
         try:
@@ -839,10 +841,10 @@ async def search_session_messages(session_id: str, body: dict):
         except re.error as e:
             raise HTTPException(status_code=400, detail=f"正则表达式无效: {e}") from e
     else:
-        query_lower = query.lower()
+        query_lower = cast(str, query.lower())
 
     # ── 逐行扫描文件 ──
-    results = []
+    results: list[dict[str, Any]] = []
     try:
         with open(path, encoding="utf-8") as f:
             lines = f.readlines()
@@ -855,14 +857,14 @@ async def search_session_messages(session_id: str, body: dict):
         if not line:
             continue
         try:
-            msg = json.loads(line)
+            msg: dict[str, Any] = json.loads(line)
         except json.JSONDecodeError:
             continue
         if msg.get("__meta__"):
             continue
 
         role = msg.get("role", "")
-        content = msg.get("content", "")
+        content = cast(str, msg.get("content", ""))
 
         # 计算非 system 索引（与 /back 一致）
         is_system = role == "system"
@@ -1073,8 +1075,8 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
     current_io: WebSocketIO | None = None
 
     # 后台任务跟踪（初始化后供 finally 安全清理）
-    push_task: asyncio.Task | None = None
-    process_tasks: list[asyncio.Task] = []
+    push_task: asyncio.Task[None] | None = None
+    process_tasks: list[asyncio.Task[None]] = []
 
     try:
         # 发送连接确认
@@ -1139,7 +1141,7 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
                 ws_io.is_running = True
                 current_io = ws_io
 
-                async def process_and_notify(msg: str, io: WebSocketIO, agent=agent):
+                async def process_and_notify(msg: str, io: WebSocketIO, agent: Agent = agent):
                     """处理消息并通过 EventBus 推送结果"""
                     try:
                         response = await agent.process(msg, io=io)
@@ -1150,7 +1152,7 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
                         reload_data = getattr(agent.state, "_reload_result", None)
                         if reload_data is not None:
                             new_agent, info = reload_data
-                            agent.state._reload_result = None  # 防止重复消费
+                            agent.state._reload_result = None  # type: ignore[reportPrivateUsage]  # 防止重复消费
                             global _agent
                             _agent = new_agent
                             get_logger().info(
@@ -1278,7 +1280,7 @@ class _UvicornBannerFilter(logging.Filter):
 
 
 # 定制 uvicorn 日志：保留错误/访问日志，去掉启动横幅
-_UVICORN_LOG_CONFIG: dict = {
+_UVICORN_LOG_CONFIG: dict[str, Any] = {
     "version": 1,
     "disable_existing_loggers": False,
     "filters": {"no_banner": {"()": _UvicornBannerFilter}},
