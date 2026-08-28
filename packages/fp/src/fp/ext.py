@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import sys
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from fp.ext_assets import (
     ASSET_TYPES,
@@ -53,6 +54,9 @@ from fp.ext_store import (
     upsert_asset,
 )
 
+if TYPE_CHECKING:
+    from fp.ext_scanner import Hit
+
 
 # 暂存区（fetch 后的审查场所）——动态获取，避免模块级绑定导致路径固化（测试/换环境时残留）
 def _staging_dir() -> str:
@@ -61,6 +65,43 @@ def _staging_dir() -> str:
 
 # public 仓库的库级清单文件名（share 校验/维护用，位于 {DATA}/public/ 根目录）
 SHARE_INDEX = "fp.ext.json"
+
+
+# ── 类型定义（资产分发内部数据结构） ──────────────────────────────
+class _PublicIndex(TypedDict, total=False):
+    """public 库级清单（fp.ext.json）。"""
+
+    schema: int
+    author: str
+    license: str
+    assets: dict[str, Any]
+
+
+class _PublicAsset(TypedDict):
+    """public/ 下枚举出的磁盘资产。"""
+
+    atype: str
+    name: str | None
+    path: str
+    manifest: dict[str, Any] | None
+
+
+class _RepoAsset(TypedDict):
+    """暂存区（仓库/目录/单文件）中扫描出的资产。"""
+
+    type: str
+    name: str
+    relpath: str
+    manifest: dict[str, Any] | None
+
+
+class _Provenance(TypedDict, total=False):
+    """fetch 来源信息。"""
+
+    type: str
+    source: str
+    commit: str
+    sha256: str
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -187,7 +228,7 @@ def _public_index_path() -> str:
     return os.path.join(source_root("public"), SHARE_INDEX)
 
 
-def _load_public_index() -> dict | None:
+def _load_public_index() -> _PublicIndex | None:
     """读取 public 库级清单；不存在或 JSON 损坏返回 None。"""
     path = _public_index_path()
     if not os.path.isfile(path):
@@ -197,10 +238,10 @@ def _load_public_index() -> dict | None:
             data = json.load(f)
     except (json.JSONDecodeError, OSError):
         return None
-    return data if isinstance(data, dict) else None
+    return cast(_PublicIndex, data) if isinstance(data, dict) else None
 
 
-def _save_public_index(index: dict) -> None:
+def _save_public_index(index: _PublicIndex) -> None:
     """写 public 库级清单（原子写）。"""
     path = _public_index_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -219,7 +260,7 @@ def _register_asset_in_index(atype: str, name: str, commit: bool = True) -> bool
     if index is None:
         return False
     key = f"{atype}/{name}"
-    assets = index.setdefault("assets", {})
+    assets = cast(dict[str, Any], index).setdefault("assets", {})
     if key in assets:
         return False
     assets[key] = {
@@ -241,7 +282,7 @@ def _unregister_asset_in_index(atype: str, name: str, commit: bool = True) -> bo
     key = f"{atype}/{name}"
     if key not in index.get("assets", {}):
         return False
-    del index["assets"][key]
+    del cast(dict[str, Any], index)["assets"][key]
     _save_public_index(index)
     if commit:
         ensure_repo(source_root("public"))
@@ -249,14 +290,14 @@ def _unregister_asset_in_index(atype: str, name: str, commit: bool = True) -> bo
     return True
 
 
-def _scan_public_assets() -> list[dict]:
+def _scan_public_assets() -> list[_PublicAsset]:
     """枚举 public/ 下所有资产。
 
     返回 [{atype, name, path, manifest}]：
       name 为 None → 无法解析（缺 __fp__ 也无工具定义，孤儿候选）；
       manifest 为 None → 缺 __fp__（文件级协议缺失，share 拒绝）。
     """
-    assets: list[dict] = []
+    assets: list[_PublicAsset] = []
     for atype in ASSET_TYPES:
         d = source_dir("public", atype)
         if not os.path.isdir(d):
@@ -265,7 +306,7 @@ def _scan_public_assets() -> list[dict]:
             if e.startswith(".") or e == "__pycache__" or e.endswith(".disabled"):
                 continue
             fpath = os.path.join(d, e)
-            manifest: dict | None = None
+            manifest: dict[str, Any] | None = None
             name: str | None = None
             if os.path.isfile(fpath):
                 if fpath.endswith(".py"):
@@ -274,20 +315,20 @@ def _scan_public_assets() -> list[dict]:
                         name = parse_tool_name(fpath)
                     else:
                         manifest = parse_fp_manifest(fpath)
-                        name = (manifest or {}).get("name")
+                        name = manifest.get("name") if manifest else None
                 elif fpath.endswith(".md"):
                     manifest = parse_memory_manifest(fpath)
-                    name = (manifest or {}).get("name")
+                    name = manifest.get("name") if manifest else None
             elif os.path.isdir(fpath):
                 main = _find_main_file(fpath, atype)
                 if main:
                     manifest = parse_fp_manifest(main) if main.endswith(".py") else parse_memory_manifest(main)
-                    name = (manifest or {}).get("name")
+                    name = manifest.get("name") if manifest else None
             assets.append({"atype": atype, "name": name, "path": fpath, "manifest": manifest})
     return assets
 
 
-def _check_public_orphans(assets: list[dict], index: dict) -> list[str]:
+def _check_public_orphans(assets: list[_PublicAsset], index: _PublicIndex) -> list[str]:
     """孤儿文件检查，返回问题列表（空 = 干净）。
 
     覆盖三类：
@@ -335,7 +376,7 @@ def _check_public_orphans(assets: list[dict], index: dict) -> list[str]:
 # ═══════════════════════════════════════════════════════════════
 
 
-def _scan_repo_assets(staging: str) -> list[dict]:
+def _scan_repo_assets(staging: str) -> list[_RepoAsset]:
     """扫描暂存区（仓库/目录/单文件）中的**全部**资产。
 
     返回 [{type, name, relpath, manifest}]，relpath 相对 staging：
@@ -343,7 +384,7 @@ def _scan_repo_assets(staging: str) -> list[dict]:
       - 目录型资产（plugins/baz/__init__.py、tools/foo/foo_plugin.py 且父目录名=name）→ relpath=目录
     跳过 .git / 隐藏项 / __pycache__ / .disabled。manifest 缺失的文件不视为资产。
     """
-    assets: list[dict] = []
+    assets: list[_RepoAsset] = []
     seen: set[str] = set()
     for root, dirs, files in os.walk(staging):
         # 跳过 .git / 隐藏目录 / __pycache__
@@ -378,7 +419,7 @@ def _scan_repo_assets(staging: str) -> list[dict]:
     return assets
 
 
-def _do_fetch(src: str, mode: str = "fetch") -> tuple[int, str | None, dict, list[dict]]:
+def _do_fetch(src: str, mode: str = "fetch") -> tuple[int, str | None, _Provenance, list[_RepoAsset]]:
     """核心拉取逻辑。
 
     返回 (rc, staging, provenance, assets)：
@@ -390,7 +431,7 @@ def _do_fetch(src: str, mode: str = "fetch") -> tuple[int, str | None, dict, lis
     mode="update"：已 active 资产重新拉取后标记 reviewed（待重新落地），不回落 pending_review。
     """
     staging: str | None = None
-    provenance: dict = {}
+    provenance: _Provenance = {}
 
     if _is_git_url(src):
         staging = _ensure_staging("fetch_git")
@@ -446,7 +487,7 @@ def _do_fetch(src: str, mode: str = "fetch") -> tuple[int, str | None, dict, lis
     return 0, staging, provenance, assets
 
 
-def cmd_fetch(args) -> int:
+def cmd_fetch(args: argparse.Namespace) -> int:
     """拉取仓库/包到暂存区 + 静态扫描 + 登记全部资产 pending_review。
 
     单位是「仓库」（可含多个资产）；安装单位是「资产」。
@@ -458,17 +499,19 @@ def cmd_fetch(args) -> int:
         return 1
 
     print(f"📥 已拉取到暂存区: {staging}")
-    if provenance.get("commit"):
-        print(f"   commit: {provenance['commit'][:12]}")
-    if provenance.get("sha256"):
-        print(f"   sha256: {provenance['sha256'][:16]}…")
+    commit = provenance.get("commit")
+    if commit:
+        print(f"   commit: {commit[:12]}")
+    sha256 = provenance.get("sha256")
+    if sha256:
+        print(f"   sha256: {sha256[:16]}…")
     print(f"   发现 {len(assets)} 个资产:" if assets else "   未发现带 __fp__ 协议声明的资产（仍可审查后手动 install）")
     for a in assets:
-        m = a["manifest"] or {}
+        m: dict[str, Any] = a["manifest"] or {}
         print(f"   · {a['type']}/{a['name']} v{m.get('version', '?')} — {m.get('description', '')}")
 
     print("\n── 静态扫描 ──")
-    print(format_report(scan_directory(staging)))
+    print(format_report(scan_directory(cast(str, staging))))
 
     if assets:
         print("\n⏭  下一步（选择想安装的资产，逐个走审查门禁）：")
@@ -500,7 +543,7 @@ def _find_asset_in_staging(staging: str, atype: str, name: str) -> str | None:
     return None
 
 
-def cmd_install(args) -> int:
+def cmd_install(args: argparse.Namespace) -> int:
     """从暂存区提取**资产本体**落地到 fetched/<type>/<name>/（门禁：须先 review --approve）。
 
     与 fetch（单位=仓库）不同，install 的单位=资产：只复制该资产的文件/目录，
@@ -514,7 +557,7 @@ def cmd_install(args) -> int:
     # 确定 staging 与 relpath（registry 记录优先；fallback 按暂存区名）
     staging = reg_entry.get("staging") if reg_entry else None
     relpath = reg_entry.get("relpath") if reg_entry else None
-    atype = (reg_entry.get("type") or entry_key.split("/", 1)[0]) if entry_key else "tools"
+    atype = (cast(dict[str, Any], reg_entry).get("type") or entry_key.split("/", 1)[0]) if entry_key else "tools"
     if not staging or not os.path.isdir(staging):
         staging = None
         for cand in (_staging_path(name), _staging_path("fetch_git")):
@@ -574,7 +617,7 @@ def cmd_install(args) -> int:
     if reg_entry:
         reg_entry["status"] = "active"
         reg_entry["installed_at"] = now
-        upsert_asset(entry_key, reg_entry)
+        upsert_asset(cast(str, entry_key), reg_entry)
         source_origin = reg_entry.get("source", "")
     else:
         source_origin = args.source or ""
@@ -595,7 +638,7 @@ def cmd_install(args) -> int:
     return 0
 
 
-def _find_reg_entry_by_name(name: str) -> tuple[str, dict] | None:
+def _find_reg_entry_by_name(name: str) -> tuple[str, dict[str, Any]] | None:
     """按资产名（或 key）在 registry 中查找，返回 (key, entry)。"""
     reg = load_registry()
     # 先按 key 精确匹配
@@ -618,7 +661,7 @@ def _mark_reviewed(key: str, note: str) -> None:
     append_audit("review", key, origin=entry.get("source", ""), note=note)
 
 
-def cmd_review(args) -> int:
+def cmd_review(args: argparse.Namespace) -> int:
     """记录 FP 对暂存资产的审查结论（审计第二段）。"""
     name = args.name
     found = _find_reg_entry_by_name(name)
@@ -655,7 +698,7 @@ def cmd_review(args) -> int:
     return 0
 
 
-def cmd_list(args) -> int:
+def cmd_list(args: argparse.Namespace) -> int:
     """列出三来源所有资产。"""
     print("── 资产清单（三来源） ──")
     total = 0
@@ -694,7 +737,7 @@ def cmd_list(args) -> int:
     return 0
 
 
-def cmd_info(args) -> int:
+def cmd_info(args: argparse.Namespace) -> int:
     """查看单个资产详情。"""
     name = args.name
     found = _find_asset(name)
@@ -745,7 +788,7 @@ def _asset_paths(d: str, name: str, atype: str) -> list[str]:
     return [p] if p else []
 
 
-def cmd_remove(args) -> int:
+def cmd_remove(args: argparse.Namespace) -> int:
     """删除资产（进 .trash 可恢复）。
 
     优先级语义：
@@ -828,7 +871,7 @@ def cmd_remove(args) -> int:
     return 0
 
 
-def cmd_update(args) -> int:
+def cmd_update(args: argparse.Namespace) -> int:
     """重新拉取并覆盖已安装的 fetched 资产（走审查门禁：高危阻断，无高危自动续审）。"""
     name = args.name
     found = _find_reg_entry_by_name(name)
@@ -836,7 +879,7 @@ def cmd_update(args) -> int:
     if reg is None or not reg.get("source"):
         print(f"❌ 未找到可更新的 fetched 资产: {name}（需要 registry 中记录 source）")
         return 1
-    key = found[0]
+    key = cast(tuple[str, dict[str, Any]], found)[0]
 
     print(f"↻  重新拉取: {reg['source']}")
     rc, staging, _provenance, assets = _do_fetch(reg["source"], mode="update")
@@ -850,7 +893,7 @@ def cmd_update(args) -> int:
         return 1
 
     # 门禁：新版本高危 → 阻断人工审查
-    hits = scan_directory(staging)
+    hits = scan_directory(cast(str, staging))
     high_hits = [h for file_hits in hits.values() for h in file_hits if getattr(h, "severity", "") == "HIGH"]
     if high_hits:
         print("❌ 新版本静态扫描发现高危风险，需人工审查：")
@@ -872,7 +915,7 @@ def cmd_update(args) -> int:
     return rc
 
 
-def cmd_check(args) -> int:
+def cmd_check(args: argparse.Namespace) -> int:
     """存量体检：unmanaged 资产 + 静态扫描 + 审计核对。"""
     print("── 存量体检 ──")
     reg = load_registry()
@@ -950,7 +993,7 @@ def cmd_check(args) -> int:
     return 0
 
 
-def cmd_new(args) -> int:
+def cmd_new(args: argparse.Namespace) -> int:
     """生成新资产脚手架（到 private/）。"""
     atype = args.type
     name = args.name
@@ -1040,7 +1083,7 @@ def cmd_new(args) -> int:
     return 0
 
 
-def cmd_init(args) -> int:
+def cmd_init(args: argparse.Namespace) -> int:
     """为已有资产补充/校验 __fp__ manifest。"""
     target = os.path.abspath(args.dir)
     if not os.path.isdir(target):
@@ -1124,7 +1167,7 @@ def cmd_init(args) -> int:
     return 0
 
 
-def cmd_promote(args) -> int:
+def cmd_promote(args: argparse.Namespace) -> int:
     """私有 → 公开（移动资产到 public/ + 隐私扫描 + 登记清单 + 双仓 commit）。
 
     分享=移动：private 与 public 各保持单一版本，杜绝多重副本失同步。
@@ -1136,7 +1179,7 @@ def cmd_promote(args) -> int:
     if not found or found[0] != "private":
         print(f"❌ 资产不在 private/ 中: {name}（promote 仅对私有资产开放）")
         return 1
-    source, atype = found
+    _, atype = found
     src_dir = source_dir("private", atype)
     dest_dir = source_dir("public", atype)
 
@@ -1162,7 +1205,7 @@ def cmd_promote(args) -> int:
 
     # 隐私扫描（promote 场景）
     print("── 隐私扫描 ──")
-    hits = {}
+    hits: dict[str, list[Hit]] = {}
     for p in paths:
         if os.path.isfile(p) and p.endswith(".py"):
             hs = scan_file(p, scene="promote")
@@ -1201,7 +1244,7 @@ def cmd_promote(args) -> int:
     return 0
 
 
-def cmd_demote(args) -> int:
+def cmd_demote(args: argparse.Namespace) -> int:
     """公开 → 私有（把资产从 public/ 移回 private/）。
 
     分享=移动：demote 是 promote 的逆操作——从 public 移回 private，
@@ -1250,7 +1293,7 @@ def cmd_demote(args) -> int:
     return 0
 
 
-def cmd_share(args) -> int:
+def cmd_share(args: argparse.Namespace) -> int:
     """发布 public/ 仓库（单仓库模型：public 即分享仓库）。
 
     职责：校验库清单 + 文件级 __fp__ + 孤儿文件 + 代码检查（静态扫描），
@@ -1305,7 +1348,7 @@ def cmd_share(args) -> int:
     if getattr(args, "force", False):
         print("⚠️  --force：跳过静态扫描（清单/自描述/孤儿校验仍执行）")
     else:
-        scan_hits: dict[str, list] = {}
+        scan_hits: dict[str, list[Hit]] = {}
         for a in assets:
             if os.path.isfile(a["path"]) and a["path"].endswith(".py"):
                 hs = scan_file(a["path"], scene="promote")
@@ -1332,7 +1375,7 @@ def cmd_share(args) -> int:
     return 0
 
 
-def cmd_migrate(args) -> int:
+def cmd_migrate(args: argparse.Namespace) -> int:
     """手动执行存量迁移。"""
     report = migrate_once()
     if not report:

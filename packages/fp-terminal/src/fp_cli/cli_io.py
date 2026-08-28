@@ -69,12 +69,12 @@ class CLIIO(IOChannel):
 
     def stream_think(self, token: str):
         if self._streamer is None:
-            self._streamer = LLMStreamer(silent=cast(bool, _display_mod._FP_SILENT))
+            self._streamer = LLMStreamer(silent=_display_mod._FP_SILENT)  # type: ignore[reportPrivateUsage]
         self._streamer.think(token)
 
     def stream_write(self, content: str):
         if self._streamer is None:
-            self._streamer = LLMStreamer(silent=cast(bool, _display_mod._FP_SILENT))
+            self._streamer = LLMStreamer(silent=_display_mod._FP_SILENT)  # type: ignore[reportPrivateUsage]
         self._streamer.write(content)
 
     def stream_reset(self):
@@ -89,12 +89,12 @@ class CLIIO(IOChannel):
 
     def tool_call(self, name: str, args: dict[str, Any]):
         if self._streamer is None:
-            self._streamer = LLMStreamer(silent=cast(bool, _display_mod._FP_SILENT))
+            self._streamer = LLMStreamer(silent=_display_mod._FP_SILENT)  # type: ignore[reportPrivateUsage]
         asyncio.create_task(cast(_StreamerToolProto, self._streamer).tool(name, args))
 
     def tool_result(self, result: str):
         if self._streamer is None:
-            self._streamer = LLMStreamer(silent=cast(bool, _display_mod._FP_SILENT))
+            self._streamer = LLMStreamer(silent=_display_mod._FP_SILENT)  # type: ignore[reportPrivateUsage]
         asyncio.create_task(self._streamer.tool_result_line(result))
 
     # ── 交互式输入 ───────────────────────────────────

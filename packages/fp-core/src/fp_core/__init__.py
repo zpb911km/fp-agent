@@ -29,4 +29,5 @@ __all__ = [
     "Plugin",
     "PluginConfig",
     "PluginRegistry",
+    "__version__",
 ]
