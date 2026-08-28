@@ -11,6 +11,7 @@ platform_utils.py - 跨平台工具集
 import os
 import subprocess
 import sys
+from typing import Any, cast
 
 # ═══════════════════════════════════════════════════════════════
 # 平台检测
@@ -229,7 +230,7 @@ def ansi_supported() -> bool:
             import ctypes
             from ctypes import wintypes
 
-            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            kernel32 = cast(Any, ctypes.windll.kernel32)  # type: ignore[attr-defined]
             # STD_OUTPUT_HANDLE = -11
             h = kernel32.GetStdHandle(-11)
             mode = wintypes.DWORD()

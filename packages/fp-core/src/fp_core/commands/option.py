@@ -115,7 +115,9 @@ class OptionManager:
     # ── 命令扫描 ──────────────────────────────────────────
 
     def scan_commands(self) -> list[Entry]:
-        from fp_core.commands import _commands as cmd_reg
+        import fp_core.commands as _cmds
+
+        cmd_reg: dict[str, Any] = cast(dict[str, Any], _cmds._commands)
 
         # mod id 去重（别名指向同一模块）
         mod_map: dict[int, dict[str, Any]] = {}

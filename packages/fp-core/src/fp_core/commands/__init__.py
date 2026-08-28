@@ -17,7 +17,7 @@ import importlib.util
 import inspect
 import os
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 
 from fp_core.logger import get_logger
 
@@ -140,7 +140,7 @@ async def execute(state: object, cmd_name: str, arg: str) -> tuple[bool, str]:
 
     # 新版：返回 (handled, output)
     if isinstance(result, tuple):
-        return result
+        return cast(tuple[bool, str], result)
 
     return (True, str(result))
 

@@ -56,3 +56,9 @@ fp-core（根基）→ fp-terminal / fp-webui / fp-acp → fp（聚合）
 - docs sync 钩子拦截类型标注 commit → 用 FP_DOCS_SYNC_ALLOW=1 放行（类型标注不改变行为，文档无需更新）
 - pyrightconfig.json 无效键 "strict": true（标准是 typeCheckingMode）→ 已修正
 - fp-terminal 实际导入包名是 fp_cli（egg-info 名字 fp_terminal 是历史遗留）→ py.typed 放 fp_cli/
+
+## 批10（fp-core 残留 6 小文件）
+- 子agent 修复：shortcircuit/plugin.py、platform_utils.py、task_system/tools.py、core/state.py、commands/option.py、commands/__init__.py
+- 12 错全清，全局 1056→1044
+- 技巧：private 访问用 getattr/cast、ctypes 用 cast(Any)、空 dict 补注解
+- 验收：pytest 286 passed ✓

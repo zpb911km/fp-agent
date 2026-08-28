@@ -15,7 +15,7 @@
 """
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from fp_core.core.agent import Agent
@@ -90,7 +90,7 @@ class State:
     agent: "Agent | None" = field(repr=False, default=None)
 
     # ── 热重载暂存（/reload 命令设置，外层循环消费后交换 agent 引用） ──
-    _reload_result: "tuple[Agent, dict] | None" = field(repr=False, default=None)
+    _reload_result: "tuple[Agent, dict[Any, Any]] | None" = field(repr=False, default=None)
 
     # ── 标志位 ──────────────────────────────────────────
 

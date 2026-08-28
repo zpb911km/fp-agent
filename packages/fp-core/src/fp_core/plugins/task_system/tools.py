@@ -51,7 +51,7 @@ DEF_UPDATE = {
     },
 }
 
-DEF_LIST = {
+DEF_LIST: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "task_list",
@@ -63,7 +63,7 @@ DEF_LIST = {
     },
 }
 
-DEF_CLEAR = {
+DEF_CLEAR: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "task_clear",
