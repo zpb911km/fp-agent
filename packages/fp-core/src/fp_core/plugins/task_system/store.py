@@ -7,6 +7,7 @@ JSON 文件存储，位于 .fp/tasks.json（项目本地）。
 import contextlib
 import json
 import os
+from typing import Any, cast
 
 from fp_core.logger import get_logger
 
@@ -46,6 +47,8 @@ class TaskStore:
         if not isinstance(data, dict):
             get_logger().warning("[task] ⚠️ tasks.json 顶层结构异常（非对象），按空任务处理")
             return [], 1
+
+        data = cast(dict[str, Any], data)
 
         tasks: list[Task] = []
         for idx, item in enumerate(data.get("tasks", [])):
@@ -115,7 +118,7 @@ class TaskStore:
         in_progress = [t for t in tasks if t.status == TaskStatus.IN_PROGRESS]
         pending = [t for t in tasks if t.status == TaskStatus.PENDING]
 
-        parts = []
+        parts: list[str] = []
         if in_progress:
             ids = ",".join(str(t.id) for t in in_progress)
             parts.append(f"▶#{ids}")

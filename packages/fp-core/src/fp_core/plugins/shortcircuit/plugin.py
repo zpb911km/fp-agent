@@ -7,14 +7,40 @@ ShortcircuitPlugin — 自我上下文修剪工具
 全部逻辑通过公共 API + commands/shortcircuit 的纯函数实现。
 """
 
-from fp_core.commands.shortcircuit import (
-    _build_regenerate_refiner,
-    _format_components_display,
-    _scan_components,
-    _shortcircuit,
-)
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
+
+from fp_core.commands import shortcircuit as _sc_impl
+from fp_core.core.conversation import ConversationState
 from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
+from fp_core.core.state import State
 from fp_core.plugins.base.plugin import Plugin, PluginConfig
+from fp_core.tools import ToolRegistry
+from fp_core.tools.core import OpenAISchema
+
+# ── commands/shortcircuit 纯函数：经 getattr 注入精确类型（规避私有符号导入） ──
+Component = dict[str, Any]
+Refiner = Callable[[str, str, str], Awaitable[tuple[str, str]]]
+
+_scan_components = cast(
+    Callable[[list[dict[str, Any]]], list[Component]],
+    _sc_impl._scan_components,
+)
+_shortcircuit = cast(
+    Callable[
+        [list[dict[str, Any]], Refiner | None, list[tuple[int, int]], str],
+        Awaitable[tuple[bool, str, int, list[Component] | None]],
+    ],
+    _sc_impl._shortcircuit,
+)
+_build_regenerate_refiner = cast(
+    Callable[[State], Refiner],
+    _sc_impl._build_regenerate_refiner,
+)
+_format_components_display = cast(
+    Callable[[list[Component]], str],
+    _sc_impl._format_components_display,
+)
 
 TOOL_DEFINITION = {
     "type": "function",
@@ -83,32 +109,35 @@ class ShortcircuitPlugin(Plugin):
     def on_unregister(self):
         self._registered = False
 
-    async def _on_init(self, ctx: HookContext, **kwargs) -> HookContext:
+    async def _on_init(self, ctx: HookContext, **kwargs: Any) -> HookContext:
         if self._registered:
             return ctx
 
-        tool_registry = kwargs.get("tool_registry")
-        state = kwargs.get("state")
+        tool_registry: ToolRegistry | None = kwargs.get("tool_registry")
+        state: State | None = kwargs.get("state")
         if tool_registry is None or state is None:
             return ctx
 
-        async def execute(params: dict) -> str:
-            action = params.get("action", "compress")
-            conv = state.conversation
+        registry: ToolRegistry = tool_registry
+        st: State = state
+
+        async def execute(params: dict[str, Any]) -> str:
+            action: str = params.get("action", "compress")
+            conv: ConversationState = st.conversation
 
             # ── 通过公共 API 获取非 system 消息 ──
-            messages = conv.get_non_system_messages()
+            messages: list[dict[str, Any]] = conv.get_non_system_messages()
 
             # ── list：查看连通块概览 ──
             if action == "list":
-                components = _scan_components(messages)
+                components: list[Component] = _scan_components(messages)
                 return _format_components_display(components)
 
             # ── compress：执行压缩 ──
-            mode = params.get("mode", "crop")
-            block_ids = params.get("block_ids")
-            range_param = params.get("range")
-            count = params.get("count", 1)
+            mode: str = params.get("mode", "crop")
+            block_ids: list[int] | None = params.get("block_ids")
+            range_param: list[int] | None = params.get("range")
+            count: int = params.get("count", 1)
 
             components = _scan_components(messages)
             if not components:
@@ -122,8 +151,8 @@ class ShortcircuitPlugin(Plugin):
                 selected = [c for c in components if start <= c["idx"] <= end]
                 if not selected:
                     return f"未找到编号 {start}~{end} 的连通块"
-                min_user = selected[0]["user_idx"]
-                max_terminal = selected[-1]["terminal_idx"]
+                min_user: int = selected[0]["user_idx"]
+                max_terminal: int = selected[-1]["terminal_idx"]
                 target_raw = [(min_user, max_terminal)]
 
             elif block_ids is not None:
@@ -145,19 +174,19 @@ class ShortcircuitPlugin(Plugin):
             if not target_raw:
                 return "没有可压缩的连通块"
 
-            refiner = None if mode == "crop" else _build_regenerate_refiner(state)
+            refiner: Refiner | None = None if mode == "crop" else _build_regenerate_refiner(st)
             success, msg, saved, new_messages = await _shortcircuit(messages, refiner, target_raw, mode)
 
             if success:
                 # 通过公共 API 写回
-                conv.set_messages(conv.system_prompt, new_messages)
-                state.session.save_context(conv.to_serializable())
+                conv.set_messages(conv.system_prompt, cast(list[Component], new_messages))
+                st.session.save_context(conv.to_serializable())
                 if range_param is not None:
                     return f"已合并 #{range_param[0]}~#{range_param[1]} 为一个连通块，节省 {saved} 条消息"
                 return f"已压缩 {len(target_raw)} 个连通块，节省 {saved} 条消息"
             else:
                 return f"压缩失败: {msg}"
 
-        tool_registry.register_tool("shortcircuit", TOOL_DEFINITION, execute)
+        registry.register_tool("shortcircuit", cast(OpenAISchema, TOOL_DEFINITION), execute)
         self._registered = True
         return ctx

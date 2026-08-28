@@ -5,8 +5,12 @@
 - ON_BEFORE_LLM_CALL: 每次 LLM 调用前附加 [task] 提醒
 """
 
+from typing import Any, cast
+
 from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 from fp_core.plugins.base.plugin import Plugin, PluginConfig
+from fp_core.tools import ToolRegistry
+from fp_core.tools.core import OpenAISchema
 
 from .store import TaskStore
 from .tools import ALL_DEFINITIONS, handle_clear, handle_create, handle_list, handle_update
@@ -53,7 +57,7 @@ class TaskSystemPlugin(Plugin):
 
     # ── 钩子实现 ───────────────────────────────────
 
-    async def _on_init(self, ctx: HookContext, **kwargs) -> HookContext:
+    async def _on_init(self, ctx: HookContext, **kwargs: Any) -> HookContext:
         """ON_INIT 钩子：注册工具 + 注入 system prompt 描述
 
         从 kwargs 中获取 tool_registry，注册 4 个任务工具。
@@ -61,12 +65,12 @@ class TaskSystemPlugin(Plugin):
         由 Agent 在 ON_INIT emit 后追加到 system prompt。
         """
         # 1. 注册工具
-        tool_registry = kwargs.get("tool_registry")
+        tool_registry: ToolRegistry | None = kwargs.get("tool_registry")
         if tool_registry is not None:
             for defn in ALL_DEFINITIONS:
-                tool_name = defn["function"]["name"]
+                tool_name: str = defn["function"]["name"]
                 executor = self._get_executor(tool_name)
-                tool_registry.register_tool(tool_name, defn, executor)
+                tool_registry.register_tool(tool_name, cast(OpenAISchema, defn), executor)
 
         # 2. 标记描述已注入（ON_BEFORE_LLM_CALL 不再重复注入）
         self._description_injected = True
@@ -77,7 +81,7 @@ class TaskSystemPlugin(Plugin):
 
         return ctx
 
-    async def _on_before_llm_call(self, ctx: HookContext, **kwargs) -> HookContext:
+    async def _on_before_llm_call(self, ctx: HookContext, **kwargs: Any) -> HookContext:
         """ON_BEFORE_LLM_CALL 钩子：附加 [task] 跟随提醒
 
         将 [task] 标记追加到最后一条消息的 content 末尾，格式：
@@ -90,9 +94,9 @@ class TaskSystemPlugin(Plugin):
         """
         # 首次调用时注入 system prompt 描述（如果 ON_INIT 没完成注入的 fallback）
         if not self._description_injected:
-            modified = list(kwargs.get("messages", []))
+            modified: list[dict[str, Any]] = list(kwargs.get("messages", []))
             if modified and modified[0].get("role") == "system":
-                existing = modified[0]["content"]
+                existing: str = modified[0]["content"]
                 if "【任务系统】" not in existing:
                     modified[0] = dict(modified[0])
                     modified[0]["content"] = existing + "\n\n" + TASK_SYSTEM_DESCRIPTION
@@ -107,12 +111,12 @@ class TaskSystemPlugin(Plugin):
         hint = f"[task] {summary}"
 
         # ── 将 [task] 追加到最后一条消息的 content 末尾 ──
-        modified = list(kwargs.get("messages", []))
+        modified: list[dict[str, Any]] = list(kwargs.get("messages", []))
         if not modified:
             return ctx  # 空消息列表，跳过
 
-        last = modified[-1]
-        last_content = last.get("content")
+        last: dict[str, Any] = modified[-1]
+        last_content: str | None = last.get("content")
         if not last_content:  # content 为 None 或空字符串（如纯 tool_calls 的 assistant 消息）
             return ctx  # 跳过，不附加
 
