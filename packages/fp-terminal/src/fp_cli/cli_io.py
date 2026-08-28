@@ -5,8 +5,21 @@ CLIIO — CLI 通道实现（fp-terminal 版）
 """
 
 import asyncio
+from typing import Any, Protocol, cast
 
+from fp_cli import display as _display_mod
+from fp_cli.display import LLMStreamer
 from fp_core.core.io import IOChannel
+
+
+class _StreamerToolProto(Protocol):
+    """流式输出器 tool 接口。
+
+    仅用于补全 display.LLMStreamer.tool 的签名（display.py 中 args 未注解），
+    避免 reportUnknownMemberType 级联。
+    """
+
+    async def tool(self, name: str, args: dict[str, Any]) -> None: ...
 
 
 class CLIIO(IOChannel):
@@ -55,17 +68,13 @@ class CLIIO(IOChannel):
     # ── 流式输出 ─────────────────────────────────────
 
     def stream_think(self, token: str):
-        from fp_cli.display import _FP_SILENT, LLMStreamer
-
         if self._streamer is None:
-            self._streamer = LLMStreamer(silent=_FP_SILENT)
+            self._streamer = LLMStreamer(silent=cast(bool, _display_mod._FP_SILENT))
         self._streamer.think(token)
 
     def stream_write(self, content: str):
-        from fp_cli.display import _FP_SILENT, LLMStreamer
-
         if self._streamer is None:
-            self._streamer = LLMStreamer(silent=_FP_SILENT)
+            self._streamer = LLMStreamer(silent=cast(bool, _display_mod._FP_SILENT))
         self._streamer.write(content)
 
     def stream_reset(self):
@@ -78,18 +87,14 @@ class CLIIO(IOChannel):
 
     # ── 工具调用展示 ─────────────────────────────────
 
-    def tool_call(self, name: str, args: dict):
-        from fp_cli.display import _FP_SILENT, LLMStreamer
-
+    def tool_call(self, name: str, args: dict[str, Any]):
         if self._streamer is None:
-            self._streamer = LLMStreamer(silent=_FP_SILENT)
-        asyncio.create_task(self._streamer.tool(name, args))
+            self._streamer = LLMStreamer(silent=cast(bool, _display_mod._FP_SILENT))
+        asyncio.create_task(cast(_StreamerToolProto, self._streamer).tool(name, args))
 
     def tool_result(self, result: str):
-        from fp_cli.display import _FP_SILENT, LLMStreamer
-
         if self._streamer is None:
-            self._streamer = LLMStreamer(silent=_FP_SILENT)
+            self._streamer = LLMStreamer(silent=cast(bool, _display_mod._FP_SILENT))
         asyncio.create_task(self._streamer.tool_result_line(result))
 
     # ── 交互式输入 ───────────────────────────────────

@@ -12,8 +12,10 @@ import json
 import os
 import sys
 import time
+from typing import Any, cast
 
 from fp_cli.style import apply_style, color_supported, truncate
+from fp_core.core.token_tracker import TokenUsage
 
 # ── 静默模式：子 agent 执行时抑制所有终端输出 ──────────
 _FP_SILENT = os.environ.get("FP_SUBAGENT_SILENT") == "1"
@@ -136,7 +138,7 @@ def _trunc_struct(s: str, limit: int) -> str:
     return s[:limit] + f"… <+{len(s) - limit} chars>"
 
 
-def _fmt_tool_value(v, max_str: int = _STR_MAX, max_struct: int = _STRUCT_MAX) -> str:
+def _fmt_tool_value(v: Any, max_str: int = _STR_MAX, max_struct: int = _STRUCT_MAX) -> str:
     """递归格式化工具参数值：长字符串按项目截断，保持 dict/list 结构。
 
     嵌套 dict/list 展开后整体超长时仅截断内文并标注，保留 {}/[] 结构括号与
@@ -147,15 +149,17 @@ def _fmt_tool_value(v, max_str: int = _STR_MAX, max_struct: int = _STRUCT_MAX) -
     if v is None or isinstance(v, (bool, int, float)):
         return repr(v)
     if isinstance(v, dict):
-        inner = ", ".join(f"{k}={_fmt_tool_value(x, max_str, max_struct)}" for k, x in v.items())
+        d = cast(dict[str, Any], v)
+        inner = ", ".join(f"{k}={_fmt_tool_value(x, max_str, max_struct)}" for k, x in d.items())
         return f"{{{_trunc_struct(inner, max_struct)}}}"
     if isinstance(v, (list, tuple)):
-        inner = ", ".join(_fmt_tool_value(x, max_str, max_struct) for x in v)
+        seq = cast(list[Any] | tuple[Any, ...], v)
+        inner = ", ".join(_fmt_tool_value(x, max_str, max_struct) for x in seq)
         return f"[{_trunc_struct(inner, max_struct)}]"
     return _trunc_str(str(v), max_str)
 
 
-def _tool_parts(name: str, args) -> list[str]:
+def _tool_parts(name: str, args: Any) -> list[str]:
     """将工具调用拆分为可流式展示的片段：前缀 → 各参数 → 后缀。
 
     args 可为 dict（已解析）或字符串（未解析/流式不完整 JSON）。
@@ -169,8 +173,9 @@ def _tool_parts(name: str, args) -> list[str]:
     if not isinstance(args, dict):
         return [f"  🛠️  {name}({args})"]
 
+    items = cast(dict[str, Any], args)
     segs = [f"  🛠️  {name}(\n"]
-    for i, (k, v) in enumerate(args.items()):
+    for i, (k, v) in enumerate(items.items()):
         if i:
             segs.append(", \n")
         segs.append(f"{k}={_fmt_tool_value(v)}")
@@ -178,7 +183,7 @@ def _tool_parts(name: str, args) -> list[str]:
     return segs
 
 
-def format_tool_call(name: str, args) -> str:
+def format_tool_call(name: str, args: Any) -> str:
     """将工具调用格式化为单行可读形式（供一次性打印场景使用）。"""
     return "".join(_tool_parts(name, args))
 
@@ -226,7 +231,7 @@ class LLMStreamer:
         self._live = None  # rich.live.Live 实例，首次内容时创建
 
     @staticmethod
-    def _safe_print(*args, **kwargs):
+    def _safe_print(*args: Any, **kwargs: Any):
         """安全打印，stdout 不可用时静默忽略"""
         with contextlib.suppress(AttributeError, ValueError, OSError):
             print(*args, **kwargs)
@@ -316,7 +321,7 @@ class LLMStreamer:
         from fp_core.platform_utils import get_config_dir
 
         path = os.path.join(get_config_dir(), "config.json")
-        raw = {}
+        raw: dict[str, Any] = {}
         if os.path.isfile(path):
             try:
                 with open(path, encoding="utf-8") as f:
@@ -324,7 +329,7 @@ class LLMStreamer:
             except Exception:
                 pass
 
-        parts = []
+        parts: list[str] = []
         color = raw.get("color", "default")
         if color and color != "default":
             parts.append(color)
@@ -367,7 +372,7 @@ class LLMStreamer:
             except Exception:
                 pass
 
-    async def tool(self, name: str, args) -> None:
+    async def tool(self, name: str, args: Any) -> None:
         """工具调用阶段：覆盖思考信息，逐段流式展开格式化工具行。
 
         通过类级锁串行化输出：并行工具调用时每个工具独占一行、片段不交错，
@@ -479,7 +484,13 @@ def _display_width(text: str) -> int:
 
 
 def shutdown_panel(
-    summary: str, file: str, model: str, msg_count: int, created: str, duration: str = "", token_usage=None
+    summary: str,
+    file: str,
+    model: str,
+    msg_count: int,
+    created: str,
+    duration: str = "",
+    token_usage: TokenUsage | None = None,
 ):
     """退出时的统计面板（框线装饰），自动适应内容宽度"""
     if _silent():

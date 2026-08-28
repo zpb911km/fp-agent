@@ -6,6 +6,7 @@ fp-terminal 样式模块 — ANSI 着色与截断
 
 import os
 import sys
+from typing import TypedDict, cast
 
 from fp_core.platform_utils import is_windows
 
@@ -27,6 +28,15 @@ ANSI_COLORS = {
 }
 
 
+class DisplayStyle(TypedDict):
+    """get_display_style 返回的样式结构。"""
+
+    color: str
+    bold: bool
+    dim: bool
+    italic: bool
+
+
 def color_supported() -> bool:
     """检测终端是否支持颜色"""
     if os.environ.get("FORCE_COLOR"):
@@ -40,19 +50,19 @@ def color_supported() -> bool:
     return sys.stdout.isatty()
 
 
-def get_display_style(name: str) -> dict:
+def get_display_style(name: str) -> DisplayStyle:
     """获取显示样式"""
-    raw = _json_styles().get(name, {})
-    color_name = raw.get("color", "default")
+    raw: dict[str, object] = _json_styles().get(name, {})
+    color_name = cast(str, raw.get("color", "default"))
     return {
         "color": ANSI_COLORS.get(color_name, ""),
-        "bold": raw.get("bold", False),
-        "dim": raw.get("dim", False),
-        "italic": raw.get("italic", False),
+        "bold": cast(bool, raw.get("bold", False)),
+        "dim": cast(bool, raw.get("dim", False)),
+        "italic": cast(bool, raw.get("italic", False)),
     }
 
 
-def _json_styles() -> dict:
+def _json_styles() -> dict[str, dict[str, object]]:
     """从 config.json 读取 display_styles 段"""
     import json
 

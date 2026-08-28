@@ -6,13 +6,20 @@ import asyncio
 import os
 import signal
 import sys
+from types import FrameType
+from typing import Any
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.completion import Completer as PtCompleter
+from prompt_toolkit.document import Document
+from prompt_toolkit.key_binding import KeyPressEvent
 
-from fp_cli import display
-from fp_cli.cli_io import CLIIO
 from fp_core import config
 from fp_core.logger import Logger, set_logger
+
+from . import display
+from .cli_io import CLIIO
 
 
 # ── Terminal Logger：fp-core 内部日志 → 终端输出 ──
@@ -65,7 +72,7 @@ class SlashCompleter(PtCompleter):
         self._words = sorted(words, key=lambda w: (not w.startswith("/"), w))
         self._words_meta = meta
 
-    def get_completions(self, document, complete_event):
+    def get_completions(self, document: Document, complete_event: CompleteEvent):
         """prompt_toolkit Completer 接口"""
         from prompt_toolkit.completion import Completion
 
@@ -91,7 +98,7 @@ class InputHandler:
     def __init__(self, prompt: str = "(Agent) > "):
         self._plain_prompt = prompt
         self.prompt = self._build_prompt(prompt)
-        self._session = None
+        self._session: PromptSession[str] | None = None
         self._init_session()
 
     @staticmethod
@@ -112,9 +119,11 @@ class InputHandler:
         kb = KeyBindings()
 
         @kb.add(Keys.Tab)
-        def _(event):
+        def _(event: KeyPressEvent):
             """Tab 键：确认当前选中的补全项，无选中时直接触发补全"""
-            b = event.current_buffer
+            from prompt_toolkit.buffer import Buffer
+
+            b: Buffer = event.current_buffer
 
             if b.complete_state is not None:
                 # 补全菜单已显示 → 确认当前选中项
@@ -162,7 +171,7 @@ class InputHandler:
         return input(prompt_text)
 
 
-def _raw_sigint_handler(signum, frame):
+def _raw_sigint_handler(signum: int, frame: FrameType | None):
     """跨平台 SIGINT 处理器：取消 asyncio 任务 + 通知 agent 实例"""
     # 方式 1（Unix 主线程）：直接取消所有 asyncio 任务
     try:
@@ -179,7 +188,7 @@ def _raw_sigint_handler(signum, frame):
         _current_agent.cancel()
 
 
-def _raw_sigterm_handler(signum, frame):
+def _raw_sigterm_handler(signum: int, frame: FrameType | None):
     """SIGTERM 处理器：软中断（仅设置 agent 中断标记，不 cancel asyncio 任务）。
 
     与 SIGINT 不同：subagent 超时时父进程先 terminate() 发 SIGTERM，
@@ -227,7 +236,7 @@ async def main():
     # subagent 标记：子进程自身先写 source + parent_sid（父进程会在结束时兜底）
     if os.environ.get("FP_IS_SUBAGENT") == "1":
         _parent_sid = os.environ.get("FP_SUBAGENT_PARENT_SID") or ""
-        _sub_meta: dict = {"source": "subagent"}
+        _sub_meta: dict[str, Any] = {"source": "subagent"}
         if _parent_sid:
             _sub_meta["parent_sid"] = _parent_sid
         agent.session.update_meta(**_sub_meta)
@@ -298,7 +307,7 @@ async def main():
                         reload_data = getattr(agent.state, "_reload_result", None)
                         if reload_data is not None:
                             new_agent, info = reload_data
-                            agent.state._reload_result = None  # 防止重复消费
+                            agent.state._reload_result = None  # pyright: ignore[reportPrivateUsage]  # noqa: E501 设计内跨类协议（State 注释明确该字段专供 reload 流程使用）
                             agent = new_agent
                             _current_agent = agent
                             display.info(f"🔄 Agent 已切换 (model={info['model']}, session={info['session_id']})")
