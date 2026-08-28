@@ -25,6 +25,7 @@ fp-core（根基）→ fp-terminal / fp-webui / fp-acp → fp（聚合）
 | 批1 | core/llm_client+llm_service+io | 93+106+31 | 全0 | 2088 (-239) | 286p/1s ✓ | 78c1416 | 级联收益+9；service 对兄弟包 Any 兜底 |
 | 批2 | core/session+prompt_builder+lifecycle | 82+35+80 | 全0 | 1851 (-237) | 338p/1s ✓ | b498c6a | 级联收益+40；lifecycle 用 ignore 抑制 iscoroutinefunction 弃用 |
 | 批3 | core/agent.py + plugins/__init__.py | 44 | 0 | 1800 (-51) | 338p/1s ✓ | 4c754f4 | 根因：plugins/ 缺 __init__.py 致 namespace pkg → stub 错；级联-7 |
+| 批4 | 基础层 plugin+config+tool_executor+token_tracker | 35+12+8+9 | 全0 | 1736 (-64) | 338p/1s ✓ | 89a3811 | plugin 基类修复带下游级联；tool_executor 用 TYPE_CHECKING 防循环导入 |
 
 ## 待办
 
@@ -33,6 +34,7 @@ fp-core（根基）→ fp-terminal / fp-webui / fp-acp → fp（聚合）
 - [x] 环境：py.typed ✅
 - [x] 批2：core/session.py + core/prompt_builder.py + core/lifecycle.py ✅
 - [x] 批3：core/agent.py ✅
+- [x] 批4：基础层 plugin/config/tool_executor/token_tracker ✅
 - [ ] 后续按依赖顺序铺开（fp-core commands/plugins/tools → terminal → acp/webui → fp）
 - [ ] 环境类问题清单（_commands 私有访问、第三方无类型）→ 用户拍板
 
