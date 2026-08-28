@@ -28,6 +28,7 @@ fp-core（根基）→ fp-terminal / fp-webui / fp-acp → fp（聚合）
 | 批4 | 基础层 plugin+config+tool_executor+token_tracker | 35+12+8+9 | 全0 | 1736 (-64) | 338p/1s ✓ | 89a3811 | plugin 基类修复带下游级联；tool_executor 用 TYPE_CHECKING 防循环导入 |
 | 批5 | 插件层 shortcircuit+task_system+store | 60+24+10 | 全0 | 1642 (-94) | 338p/1s ✓ | 21a0658 | shortcircuit 插件修复带级联-94；子任务报 edit_file 写竞争（已串行重做） |
 | 批6 | tools 扩展层 memory_read+subagent | 89+8 | 全0 | 1553 (-89) | 338p/1s ✓ | f5ef79f | memory_read 根因=_parse_frontmatter 无参 dict 级联 |
+| 批7 | commands 层 shortcircuit+resume | 126+104 | 全0 | 1319 (-234) | 338p/1s ✓ | 004a3fa | 级联收益大（含 commands 内部）；resume 靠 state: State 注解一次消除级联 |
 
 ## 待办
 
@@ -39,7 +40,9 @@ fp-core（根基）→ fp-terminal / fp-webui / fp-acp → fp（聚合）
 - [x] 批4：基础层 plugin/config/tool_executor/token_tracker ✅
 - [x] 批5：插件层 shortcircuit/task_system ✅
 - [x] 批6：tools 扩展层 memory_read/subagent ✅
-- [ ] 后续按依赖顺序铺开（fp-core commands → terminal → acp/webui → fp）
+- [x] 批7：commands 大文件 shortcircuit/resume ✅
+- [ ] 批8：commands 剩余小文件（compact/back/fork/new/history/reload/clear/token/session/exit_bang/help/exit_cmd/__init__/option）
+- [ ] 后续：terminal → acp/webui → fp
 - [ ] 环境类问题清单（_commands 私有访问、第三方无类型）→ 用户拍板
 
 ## 遇到的坑
