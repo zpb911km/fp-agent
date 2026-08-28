@@ -45,10 +45,12 @@ fp-core（根基）→ fp-terminal / fp-webui / fp-acp → fp（聚合）
 - [x] 批7：commands 大文件 shortcircuit/resume ✅
 - [x] 批8：commands 小文件（13个）✅
 - [x] 批9：fp-terminal 全部 ✅
+- [x] 批10：fp-webui（main.py 179→0，1049→870）✅
+- [x] 批11：fp-webui 级联反向暴露 5 错清零（870→865）✅
+- [x] 批12：fp 聚合包 4 小文件（ext_manifest/ext_store/ext_git/version_checker）✅
 - [ ] **fp-core 全部清零**（剩 option.py 1 个环境类 _commands 私有访问，待用户拍板）
-- [ ] 批10：fp-webui（main.py 179）
-- [ ] 批11：fp-acp（server.py 425 最大单文件）
-- [ ] 批12：fp 聚合包（ext.py 349 第二大 + ext_manifest/ext_store/ext_git/version_checker）
+- [ ] 批13：fp-acp（server.py 425 最大单文件）
+- [ ] 批14：fp 聚合包（ext.py 271 + cli_io 8 + main.py 1）
 - [ ] 环境类问题清单（_commands 私有访问、第三方无类型）→ 用户拍板
 
 ## 遇到的坑
@@ -70,3 +72,11 @@ fp-core（根基）→ fp-terminal / fp-webui / fp-acp → fp（聚合）
   → 方案：直接访问 + `# type: ignore[reportPrivateUsage]`（项目已有此风格）
 - 级联反向暴露 5 错（option.py/plugin.py 私有访问）→ 同方案清零，870→865
 - 验收：pytest 338 passed ✓
+
+## 批12（fp 聚合包 4 小文件 82→0）
+- 子agent 修复：ext_manifest/ext_store/ext_git/version_checker（28+23+18+13）
+- 关键：ext_git 用 `CompletedProcess[str]` 消除 proc.stdout 级联；ext_manifest 修 parse_fp_manifest 返回类型带级联
+- 级联收益：ext.py 受益精确返回类型 -78
+- 坑：pyright isinstance 收窄+条件表达式组合有怪癖，显式注解无效 → 用 cast 绕过
+- 坑：pre-commit daemon 缓存环境变量 → FP_DOCS_SYNC_ALLOW 不生效，需 `pre-commit clean` 后重试
+- 验收：pytest 338 passed ✓（子agent 环境 FP_IS_SUBAGENT=1 会导致 subagent 测试假失败，用 env -u 跑）
