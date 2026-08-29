@@ -26,6 +26,13 @@ _scan_components = cast(
     Callable[[list[dict[str, Any]]], list[Component]],
     _sc_impl._scan_components,  # type: ignore[reportPrivateUsage]
 )
+_degenerate = cast(
+    Callable[
+        [list[dict[str, Any]], list[tuple[int, int]], bool],
+        tuple[bool, str, int, list[Component] | None],
+    ],
+    _sc_impl._degenerate,  # type: ignore[reportPrivateUsage]
+)
 _shortcircuit = cast(
     Callable[
         [list[dict[str, Any]], Refiner | None, list[tuple[int, int]], str],
@@ -47,8 +54,11 @@ TOOL_DEFINITION = {
     "function": {
         "name": "shortcircuit",
         "description": (
-            "管理对话历史的连通块。用于对于已经完整完成的任务,保存其状态,消除其过程,主动节省上下文"
-            "。先用 action=list 查看概览，再用 action=compress 按需压缩。"
+            "管理对话历史的连通块。默认对当前进行中的连通块执行退化(degenerate)："
+            "删除块内的工具调用与工具返回消息，保留 AI 每一步输出的文本记录，"
+            "把工具调用链退化为纯文本消息链，保持上下文简短且语义完整。"
+            "也可对历史连通块执行合并压缩(crop/regenerate)。"
+            "先用 action=list 查看概览，再按需处理。"
         ),
         "parameters": {
             "type": "object",
@@ -56,31 +66,35 @@ TOOL_DEFINITION = {
                 "action": {
                     "type": "string",
                     "enum": ["compress", "list"],
-                    "description": "list=列出所有连通块, compress=执行压缩（默认）",
+                    "description": "list=列出所有连通块, compress=执行退化或合并（默认）",
                     "default": "compress",
                 },
                 "count": {
                     "type": "integer",
-                    "description": "从最晚的连通块开始压缩 N 个。默认 1。互斥于 block_ids/range",
+                    "description": "从最晚的连通块开始处理 N 个。默认 1。互斥于 block_ids/range",
                     "default": 1,
                 },
                 "block_ids": {
                     "type": "array",
                     "items": {"type": "integer"},
-                    "description": "指定编号压缩，如 [2,5] 表示 #2 和 #5。互斥于 count/range",
+                    "description": "指定编号处理，如 [2,5] 表示 #2 和 #5。互斥于 count/range",
                 },
                 "range": {
                     "type": "array",
                     "items": {"type": "integer"},
                     "minItems": 2,
                     "maxItems": 2,
-                    "description": "合并压缩一个范围，如 [1,4] 表示 #1~#4 合并为一条。互斥于 count/block_ids",
+                    "description": "处理一个范围，如 [1,4] 表示 #1~#4 合并为一个块。互斥于 count/block_ids",
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["crop", "regenerate"],
-                    "description": "crop=只删工具消息不动回复（默认）, regenerate=调 LLM 提炼",
-                    "default": "crop",
+                    "enum": ["degenerate", "crop", "regenerate"],
+                    "description": (
+                        "degenerate=退化（默认）：删除工具调用/返回消息，保留 AI 文本记录，"
+                        "当前进行中的块永远安全，不破坏 agent 循环; "
+                        "crop=合并删除工具消息; regenerate=合并并调 LLM 提炼"
+                    ),
+                    "default": "degenerate",
                 },
             },
         },
@@ -133,8 +147,8 @@ class ShortcircuitPlugin(Plugin):
                 components: list[Component] = _scan_components(messages)
                 return _format_components_display(components)
 
-            # ── compress：执行压缩 ──
-            mode: str = params.get("mode", "crop")
+            # ── compress：执行退化或合并 ──
+            mode: str = params.get("mode", "degenerate")
             block_ids: list[int] | None = params.get("block_ids")
             range_param: list[int] | None = params.get("range")
             count: int = params.get("count", 1)
@@ -143,7 +157,10 @@ class ShortcircuitPlugin(Plugin):
             if not components:
                 return "没有连通块需要处理"
 
-            # 确定要压缩的目标（非 system 空间索引）
+            # 确定要处理的目标（非 system 空间索引）
+            # 过滤条件随模式变化：degenerate 看工具噪音（degenerable），合并看内容量（compressible）
+            usable_key: str = "degenerable" if mode == "degenerate" else "compressible"
+
             target_raw: list[tuple[int, int]] = []
 
             if range_param is not None:
@@ -165,27 +182,35 @@ class ShortcircuitPlugin(Plugin):
                         return f"未找到编号 {bid} 的连通块"
 
             else:
-                compressible = [c for c in components if c["compressible"]]
-                if not compressible:
+                # 默认：从最晚的连通块开始取前 count 个（与命令层一致）
+                usable = [c for c in reversed(components) if c[usable_key]]
+                if not usable:
+                    if mode == "degenerate":
+                        return "没有可退化的连通块（无工具调用噪音）"
                     return "所有连通块均已达最小状态（2 条消息），无需压缩"
-                selected = compressible[:count]
-                target_raw = [(c["user_idx"], c["terminal_idx"]) for c in selected]
+                target_raw = [(c["user_idx"], c["terminal_idx"]) for c in usable[:count]]
 
             if not target_raw:
-                return "没有可压缩的连通块"
+                return "没有可处理的连通块"
 
-            refiner: Refiner | None = None if mode == "crop" else _build_regenerate_refiner(st)
-            success, msg, saved, new_messages = await _shortcircuit(messages, refiner, target_raw, mode)
+            # ── 执行（工具情境：保护调用点，保证 agent loop 不断开） ──
+            if mode == "degenerate":
+                success, msg, saved, new_messages = _degenerate(messages, target_raw, True)
+            else:
+                refiner: Refiner | None = None if mode == "crop" else _build_regenerate_refiner(st)
+                success, msg, saved, new_messages = await _shortcircuit(messages, refiner, target_raw, mode)
 
             if success:
                 # 通过公共 API 写回
                 conv.set_messages(conv.system_prompt, cast(list[Component], new_messages))
                 st.session.save_context(conv.to_serializable())
+                if mode == "degenerate":
+                    return f"已退化 {len(target_raw)} 个连通块，清理 {saved} 条工具消息"
                 if range_param is not None:
                     return f"已合并 #{range_param[0]}~#{range_param[1]} 为一个连通块，节省 {saved} 条消息"
                 return f"已压缩 {len(target_raw)} 个连通块，节省 {saved} 条消息"
             else:
-                return f"压缩失败: {msg}"
+                return f"处理失败: {msg}"
 
         registry.register_tool("shortcircuit", cast(OpenAISchema, TOOL_DEFINITION), execute)
         self._registered = True

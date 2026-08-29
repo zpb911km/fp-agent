@@ -15,8 +15,11 @@
 可选修饰（跟在最后）:
   -c                     裁剪模式（crop）：只移除 tool 中间消息，不调 LLM（默认）
   -r                     提炼模式（regenerate）：调 LLM 重新生成精简回复
+  -d                     退化模式（degenerate）：删除目标块内的工具调用/工具返回消息，
+                        把工具调用链退化为纯文本 assistant 消息链（保留 AI 文本记录）
 
 状态标记（/sc list）:
+  D = 可退化（块内存在工具调用噪音）
   ~ = 已充分压缩（无可压缩空间）
   * = 未完成（中断块 / 待回复）
 """
@@ -38,6 +41,7 @@ class Component(TypedDict):
     assistant_preview: str
     compressible: bool
     complete: bool
+    degenerable: bool
 
 
 Refiner = Callable[[str, str, str], Awaitable[tuple[str, str]]]
@@ -68,6 +72,7 @@ def _scan_components(messages: list[Message]) -> list[Component]:
         "assistant_preview": "北京25°C...",
         "compressible": True/False,  # 有实际内容可压缩（msg_count > 2）
         "complete": True/False,      # 最后一条是 assistant(无 tool_calls)
+        "degenerable": True/False,   # 块内存在工具调用噪音（tool 消息 / 带 tool_calls 的 assistant）
     }
     """
     user_indices = [i for i, m in enumerate(messages) if m["role"] == "user"]
@@ -80,6 +85,9 @@ def _scan_components(messages: list[Message]) -> list[Component]:
 
         complete = terminal_msg["role"] == "assistant" and not terminal_msg.get("tool_calls")
 
+        block = messages[user_idx : terminal_idx + 1]
+        degenerable = any(m["role"] == "tool" or (m["role"] == "assistant" and m.get("tool_calls")) for m in block)
+
         components.append({
             "idx": pos + 1,
             "user_idx": user_idx,
@@ -89,9 +97,144 @@ def _scan_components(messages: list[Message]) -> list[Component]:
             "assistant_preview": terminal_msg.get("content", "")[:120],
             "compressible": msg_count > 2,
             "complete": complete,
+            "degenerable": degenerable,
         })
 
     return components
+
+
+def _degenerate(
+    messages: list[Message],
+    targets: list[tuple[int, int]],
+    protect_callsite: bool = False,
+) -> tuple[bool, str, int, list[Message] | None]:
+    """
+    退化：将指定连通块内的工具调用链退化为纯文本 assistant 消息链。
+
+    逐消息规则（固定，不调 LLM）：
+      - user                      → 保留
+      - assistant 无 tool_calls   → 保留
+      - assistant 有 tool_calls 且有 content → 删除 tool_calls，保留 content（转正）
+      - assistant 有 tool_calls 无 content   → 整条删除（免兼容问题）
+      - tool                      → 删除
+
+    多条合并一条（protect_callsite 保护语义）：受保护调用点
+    （进行中的 assistant(tool_calls)）前若退化出连续纯文本 assistant，
+    将其 content 逆序并入调用点消息的 content，消除
+    「纯文本 assistant → assistant(tool_calls)」连续结构（部分 API 拒绝该结构）。
+
+    Args:
+        messages:         非 system 消息列表
+        targets:          要退化的连通块消息索引 [(user_idx, terminal_idx), ...]
+                          均为 messages 中的 0-based 索引
+        protect_callsite: True 时（工具情境，agent loop 正在跑）：
+                          若目标块终点是「进行中的 assistant(tool_calls)」
+                          （即本次工具调用点），则终点收缩到调用点之前，
+                          调用点及其即将追加的 tool 结果本轮不动，保证 loop 不断开；
+                          同时将调用点前退化出的连续纯文本 assistant
+                          逆序合并进调用点 content（多条合并一条）。
+                          command 情境（无进行中循环）传 False。
+
+    Returns:
+        (是否成功, 描述信息, 变更的消息数, 新的消息列表或 None)
+        失败时返回 (False, 错误信息, 0, None)，原始 messages 不受影响。
+        变更数 = 删除的 tool/空 content 消息数 + 转正的 assistant 消息数。
+    """
+    targets = sorted(targets, key=lambda x: x[0])
+    new_sections: list[list[Message]] = []
+    processed_ends: list[int] = []
+    total_changed = 0
+    protected_callsites: list[int] = []
+
+    try:
+        for user_idx, terminal_idx in targets:
+            eff_terminal = terminal_idx
+
+            # 调用点保护：终点若是进行中的 assistant(tool_calls)，收缩到调用点之前。
+            # 调用点（terminal_idx）本轮原样保留（含 tool_calls），等 agent 追加 tool 结果，
+            # 保证 loop 不断开；下次退化时它作为历史按统一规则自然处理。
+            if protect_callsite:
+                while (
+                    eff_terminal >= user_idx
+                    and messages[eff_terminal]["role"] == "assistant"
+                    and messages[eff_terminal].get("tool_calls")
+                ):
+                    eff_terminal -= 1
+                # 收缩生效（块内确有可退化内容）→ 该终点为受保护调用点，
+                # 重建时将其前的连续纯文本 assistant 逆序并入其 content（多条合并一条）。
+                if eff_terminal >= user_idx:
+                    protected_callsites.append(terminal_idx)
+
+            # 无可退化内容（如块内只有 user + 调用点）→ 原样保留该块
+            if eff_terminal < user_idx:
+                new_sections.append([])
+                processed_ends.append(user_idx - 1)
+                continue
+
+            block = messages[user_idx : eff_terminal + 1]
+            kept: list[Message] = []
+            for m in block:
+                role = m["role"]
+                if role == "tool":
+                    total_changed += 1
+                    continue
+                if role == "assistant" and m.get("tool_calls"):
+                    content = m.get("content")
+                    if content:
+                        new_m = dict(m)
+                        new_m.pop("tool_calls", None)
+                        new_m.pop("function_call", None)
+                        kept.append(new_m)
+                        total_changed += 1
+                    else:
+                        # 只有 tool_calls 没有 content → 整条删除
+                        total_changed += 1
+                        continue
+                else:
+                    kept.append(dict(m))
+
+            new_sections.append(kept)
+            processed_ends.append(eff_terminal)
+
+        # ── 重建消息列表 ──
+        new_messages: list[Message] = []
+        i = 0
+        section_idx = 0
+        while i < len(messages):
+            if section_idx < len(targets) and i == targets[section_idx][0]:
+                for msg in new_sections[section_idx]:
+                    new_messages.append(dict(msg))
+                i = processed_ends[section_idx] + 1
+                section_idx += 1
+            elif i in protected_callsites:
+                # 多条合并一条：受保护调用点前若是连续纯文本 assistant（无 tool_calls），
+                # 逆序并入调用点 content。逆序 = 从最靠近调用点的文本开始逐条取出，
+                # 取出的顺序即历史时间顺序（最早文本在前、调用点原文在最后），
+                # 消除「纯文本 assistant → assistant(tool_calls)」连续结构。
+                callsite = dict(messages[i])
+                collected: list[str] = []
+                while (
+                    new_messages and new_messages[-1]["role"] == "assistant" and not new_messages[-1].get("tool_calls")
+                ):
+                    collected.insert(0, new_messages[-1].get("content", ""))
+                    new_messages.pop()
+                if collected:
+                    merged_prefix = "\n".join(c for c in collected if c)
+                    original = callsite.get("content") or ""
+                    if merged_prefix and original:
+                        callsite["content"] = f"{merged_prefix}\n{original}"
+                    elif merged_prefix:
+                        callsite["content"] = merged_prefix
+                new_messages.append(callsite)
+                i += 1
+            else:
+                new_messages.append(dict(messages[i]))
+                i += 1
+
+        return (True, "degenerate completed", total_changed, new_messages)
+
+    except Exception as e:
+        return (False, f"退化失败: {e}", 0, None)
 
 
 async def _shortcircuit(
@@ -253,7 +396,7 @@ def _parse_args(arg: str) -> tuple[str, int | tuple[int, int] | None | str, str]
         (action, value, mode)
         action: "list" | "default" | "count" | "index" | "range" | "error"
         value:  int | tuple(int,int) | str(错误信息)
-        mode:   "regenerate" | "crop"
+        mode:   "degenerate" | "regenerate" | "crop"
     """
     parts = arg.strip().split()
     if not parts:
@@ -266,6 +409,8 @@ def _parse_args(arg: str) -> tuple[str, int | tuple[int, int] | None | str, str]
             mode = "crop"
         elif p == "-r":
             mode = "regenerate"
+        elif p == "-d":
+            mode = "degenerate"
         else:
             clean_parts.append(p)
 
@@ -325,17 +470,23 @@ async def execute(state: Any, arg: str) -> tuple[bool, str]:
         return (True, "没有已完成的连通块需要短路")
 
     # 确定要短路的非 system 空间索引
+    # 过滤条件随模式变化：degenerate 看工具噪音（degenerable），合并看内容量（compressible）
+    targets: list[tuple[int, int]] = []
+
     if action == "default":
-        native = [c for c in reversed(components) if c["compressible"]]
-        selected = native[:1]
-        targets = [(c["user_idx"], c["terminal_idx"]) for c in selected]
+        if mode == "degenerate":
+            native = [c for c in reversed(components) if c["degenerable"]]
+        else:
+            native = [c for c in reversed(components) if c["compressible"]]
+        targets = [(c["user_idx"], c["terminal_idx"]) for c in native[:1]]
     elif action == "count":
         assert isinstance(value, int)
-        native = [c for c in reversed(components) if c["compressible"]]
-        selected = native[:value]
-        targets = [(c["user_idx"], c["terminal_idx"]) for c in selected]
+        if mode == "degenerate":
+            native = [c for c in reversed(components) if c["degenerable"]]
+        else:
+            native = [c for c in reversed(components) if c["compressible"]]
+        targets = [(c["user_idx"], c["terminal_idx"]) for c in native[:value]]
     elif action == "index":
-        targets: list[tuple[int, int]] = []
         for comp in components:
             if comp["idx"] == value:
                 targets.append((comp["user_idx"], comp["terminal_idx"]))
@@ -355,14 +506,20 @@ async def execute(state: Any, arg: str) -> tuple[bool, str]:
     if not targets:
         return (True, "没有可短路的连通块，或指定的连通块编号不存在")
 
-    # ── 执行压缩（命令层自组装，纯函数操作消息列表） ──
-    refiner: Refiner | None = None if mode == "crop" else _build_regenerate_refiner(state)
-    success, msg, saved, new_messages = await _shortcircuit(messages, refiner, targets, mode)
+    # ── 执行（命令层自组装，纯函数操作消息列表） ──
+    if mode == "degenerate":
+        # 命令情境无进行中循环，不保护调用点
+        success, msg, saved, new_messages = _degenerate(messages, targets, protect_callsite=False)
+    else:
+        refiner: Refiner | None = None if mode == "crop" else _build_regenerate_refiner(state)
+        success, msg, saved, new_messages = await _shortcircuit(messages, refiner, targets, mode)
 
     if success:
         # 通过公共 API 写回
         state.conversation.set_messages(state.conversation.system_prompt, new_messages)
         state.session.save_context(state.conversation.to_serializable())
+        if mode == "degenerate":
+            return (True, f"✅ 已退化 {len(targets)} 个连通块，清理 {saved} 条消息")
         return (True, f"✅ 已处理 {len(targets)} 个连通块，节省 {saved} 条消息")
     else:
         return (True, msg)
@@ -375,13 +532,17 @@ def _format_components_display(components: list[Component]) -> str:
 
     lines: list[str] = [
         f"## 📦 连通块列表（共 {len(components)} 个）",
-        "`~` = 已充分压缩，`*` = 未完成",
+        "`D` = 可退化（有工具噪音），`~` = 已充分压缩，`*` = 未完成",
     ]
     for comp in components:
         msg_count = comp["message_count"]
         complete = comp["complete"]
+        degenerable = comp["degenerable"]
 
-        if msg_count == 1:
+        if degenerable:
+            flag = "`D`"
+            ai_preview = comp["assistant_preview"][:80].replace("\n", " ")
+        elif msg_count == 1:
             flag = "`*`"
             ai_preview = "（待回复）"
         elif not complete:

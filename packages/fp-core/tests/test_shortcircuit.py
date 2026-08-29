@@ -137,7 +137,8 @@ class TestDegenerate:
         assert new == messages
 
     def test_protect_callsite_keeps_calling_point(self):
-        """工具情境：进行中块的调用点（最后一条 assistant+tool_calls）本轮不动"""
+        """工具情境：进行中块的调用点（最后一条 assistant+tool_calls）本轮不动，
+        其前的纯文本 assistant 逆序并入调用点 content（多条合并一条）"""
         messages: list[Message] = [
             _msg("user", "任务"),
             _msg("assistant", "开始", tool_calls=_tc("s1")),
@@ -148,11 +149,12 @@ class TestDegenerate:
         assert ok
         assert new is not None
         assert changed == 2  # s1 的 assistant 转正 + tool 删除
-        # 调用点原样保留（含 tool_calls）
+        # 调用点原样保留（含 tool_calls），其前的纯文本 assistant 已逆序并入调用点 content
+        assert len(new) == 2  # user + 调用点（合并后不残留独立 assistant）
         assert new[-1]["role"] == "assistant"
         assert new[-1]["tool_calls"][0]["function"]["name"] == "shortcircuit"
-        assert len(new) == 3  # user + 转正的开始 + 调用点
-        assert new[1]["content"] == "开始"
+        # 调用点 content = 前文文本（时间在前） + 调用点原文（时间在后）
+        assert new[-1]["content"] == "开始\n第1步完成"
 
     def test_protect_callsite_only_block_of_user_and_callsite(self):
         """块内只有 user + 调用点 → 无可退化内容，整块原样保留"""
@@ -167,8 +169,61 @@ class TestDegenerate:
         assert len(new) == 2
         assert new[1]["tool_calls"][0]["function"]["name"] == "shortcircuit"
 
-    def test_three_step_no_glue(self):
-        """核心场景：三步任务连续退化不粘合，每步文本独立保留"""
+    def test_degenerate_merges_consecutive_assistant_into_callsite(self):
+        """退化哲学：受保护调用点前的连续纯文本 assistant 逆序并入调用点 content
+        （多条合并一条，消除连续 assistant 结构）。"""
+        cases: list[tuple[list[Message], str]] = [
+            # 调用点前是纯文本 assistant（阶段回复）
+            (
+                [
+                    _msg("user", "任务"),
+                    _msg("assistant", "第1步开始", tool_calls=_tc("s1")),
+                    _msg("tool", "T1"),
+                    _msg("assistant", "阶段总结", tool_calls=_tc("sc")),
+                ],
+                "第1步开始\n阶段总结",
+            ),
+            # 调用点前有多个纯文本 assistant（多步转正，逆序保持时间顺序）
+            (
+                [
+                    _msg("user", "任务"),
+                    _msg("assistant", "第1步", tool_calls=_tc("s1")),
+                    _msg("tool", "T1"),
+                    _msg("assistant", "第2步", tool_calls=_tc("s2")),
+                    _msg("tool", "T2"),
+                    _msg("assistant", "总结", tool_calls=_tc("sc")),
+                ],
+                "第1步\n第2步\n总结",
+            ),
+            # 连续两次 sc：上次调用点残骸（转正文本 + tool）在退化块内被清理
+            (
+                [
+                    _msg("user", "任务"),
+                    _msg("assistant", "第1步文本", tool_calls=_tc("sc1")),
+                    _msg("tool", "上次sc结果"),
+                    _msg("assistant", "第2步总结", tool_calls=_tc("sc")),
+                ],
+                "第1步文本\n第2步总结",
+            ),
+        ]
+        for messages, expected_content in cases:
+            ok, _, _, new = _degenerate(messages, [(0, len(messages) - 1)], protect_callsite=True)
+            assert ok
+            assert new is not None
+            # 调用点（最后一条带 tool_calls）本身保留 tool_calls
+            assert new[-1]["role"] == "assistant"
+            assert new[-1]["tool_calls"][0]["function"]["name"] == "sc"
+            # 多条合并一条：调用点前不残留纯文本 assistant（只有 user 在它前面）
+            assert len(new) == 2, f"应合并为 user + 调用点: {new}"
+            assert new[0]["role"] == "user"
+            # 调用点 content = 前文文本（时间在前） + 调用点原文（时间在后）
+            assert new[-1]["content"] == expected_content, f"期望 {expected_content!r}, 实际 {new[-1]['content']!r}"
+            # 所有工具噪音已清理
+            assert not any(m["role"] == "tool" for m in new)
+
+    def test_three_step_merge_into_callsite(self):
+        """核心场景：三步任务连续退化，前文文本逆序全部合并进调用点 content
+        （多条合并一条），无信息丢失、无连续 assistant 结构"""
         # 第1步
         msgs: list[Message] = [
             _msg("user", "分3步做X"),
@@ -185,19 +240,20 @@ class TestDegenerate:
         msgs.append(_msg("assistant", "第二步开始", tool_calls=_tc("step2")))
         msgs.append(_msg("tool", "T2"))
         msgs.append(_msg("assistant", "第2步完成：结果B", tool_calls=_tc("shortcircuit")))
-        # 第2次退化：只应清理第2步的工具噪音，第1步文本安然无恙
+        # 第2次退化：第1步文本合并进新的调用点 content，不丢失
         ok, _, _, result = _degenerate(msgs, [(0, len(msgs) - 1)], protect_callsite=True)
         assert ok
         assert result is not None
         msgs = result
-        texts = [m.get("content", "") for m in msgs if m["role"] == "assistant"]
-        assert "第1步完成：结果A" in texts  # 第1步结果未被吞
-        assert "第2步完成：结果B" in msgs[-1]["content"]  # 调用点 content 是第2步结果
-        # 第1步 sc 调用点已转正为文本，第2步调用点保留
+        assert msgs[-1]["role"] == "assistant"
         assert msgs[-1]["tool_calls"][0]["function"]["name"] == "shortcircuit"
+        assert "第1步完成：结果A" in msgs[-1]["content"]  # 第1步结果未被吞
+        assert "第2步完成：结果B" in msgs[-1]["content"]  # 第2步结果在调用点原文
+        # 多条合并一条：调用点前只残留 user，无独立纯文本 assistant
+        assert len(msgs) == 2 and msgs[0]["role"] == "user"
         # 第2步的工具噪音（step2/T2/sc 结果）已清理
         assert not any(m["role"] == "tool" for m in msgs)
-        # 第3步开始时能同时看到第1步与第2步的结果
+        # 第3步：继续退化，第1/2步文本仍保留（合并进最终调用点 content）
         step3_start = msgs + [
             _msg("assistant", "第三步开始", tool_calls=_tc("step3")),
             _msg("tool", "T3"),
@@ -206,10 +262,14 @@ class TestDegenerate:
         ok, _, _, final = _degenerate(step3_start, [(0, len(step3_start) - 1)], protect_callsite=True)
         assert ok
         assert final is not None
-        all_text: list[str] = [m.get("content", "") for m in final]
-        assert any("第1步完成：结果A" in t for t in all_text)
-        assert any("第2步完成：结果B" in t for t in all_text)
-        assert any("第三步开始" in t for t in all_text)
+        assert len(final) == 2  # user + 调用点（所有文本合并）
+        assert "第1步完成：结果A" in final[1]["content"]
+        assert "第2步完成：结果B" in final[1]["content"]
+        assert "第三步开始" in final[1]["content"]
+        assert "第3步完成：结果C" in final[1]["content"]
+        # 文本按时间顺序排列（最早在前，调用点原文最后）
+        c = final[1]["content"]
+        assert c.index("第1步完成：结果A") < c.index("第2步完成：结果B") < c.index("第3步完成：结果C")
 
     def test_multi_target(self):
         """多个目标块分别退化（对应 block_ids / range 选择）"""
