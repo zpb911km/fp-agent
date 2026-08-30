@@ -1,63 +1,35 @@
 """
-ShortcircuitPlugin — 自我上下文修剪工具
+ShortcircuitPlugin — 自我上下文修剪插件
 
-通过 ON_INIT 获取 state + tool_registry，注册 shortcircuit 工具。
-使 AI 能在上下文过长时主动压缩已完成的连通块。
+通过 ON_INIT 钩子：
+  1. 注册 shortcircuit 工具（工具层硬性策略：当前块强制退化、其他块默认 crop）
+  2. 注入 /sc 命令（命令层无硬性约束，自由处理任意块）
 
-全部逻辑通过公共 API + commands/shortcircuit 的纯函数实现。
+全部逻辑位于同包 core.py（纯函数），本模块只做注册与装配。
 """
 
-from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
-from fp_core.commands import shortcircuit as _sc_impl
+from fp_core.commands import get_command, register_command
 from fp_core.core.conversation import ConversationState
 from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
-from fp_core.core.state import State
 from fp_core.plugins.base.plugin import Plugin, PluginConfig
 from fp_core.tools import ToolRegistry
 from fp_core.tools.core import OpenAISchema
 
-# ── commands/shortcircuit 纯函数：经 getattr 注入精确类型（规避私有符号导入） ──
-Component = dict[str, Any]
-Refiner = Callable[[str, str, str], Awaitable[tuple[str, str]]]
-
-_scan_components = cast(
-    Callable[[list[dict[str, Any]]], list[Component]],
-    _sc_impl._scan_components,  # type: ignore[reportPrivateUsage]
-)
-_degenerate = cast(
-    Callable[
-        [list[dict[str, Any]], list[tuple[int, int]], bool],
-        tuple[bool, str, int, list[Component] | None],
-    ],
-    _sc_impl._degenerate,  # type: ignore[reportPrivateUsage]
-)
-_shortcircuit = cast(
-    Callable[
-        [list[dict[str, Any]], Refiner | None, list[tuple[int, int]], str],
-        Awaitable[tuple[bool, str, int, list[Component] | None]],
-    ],
-    _sc_impl._shortcircuit,  # type: ignore[reportPrivateUsage]
-)
-_build_regenerate_refiner = cast(
-    Callable[[State], Refiner],
-    _sc_impl._build_regenerate_refiner,  # type: ignore[reportPrivateUsage]
-)
-_format_components_display = cast(
-    Callable[[list[Component]], str],
-    _sc_impl._format_components_display,  # type: ignore[reportPrivateUsage]
-)
+from . import command as sc_command
+from .core import execute_plan, format_components_display, scan_components
 
 TOOL_DEFINITION = {
     "type": "function",
     "function": {
         "name": "shortcircuit",
         "description": (
-            "管理对话历史的连通块。默认对当前进行中的连通块执行退化(degenerate)："
+            "管理对话历史的连通块。硬性策略：当前块（最后一个连通块）只能退化(degenerate)——"
             "删除块内的工具调用与工具返回消息，保留 AI 每一步输出的文本记录，"
-            "把工具调用链退化为纯文本消息链，保持上下文简短且语义完整。"
-            "也可对历史连通块执行合并压缩(crop/regenerate)。"
+            "把工具调用链退化为纯文本消息链，保持上下文简短且语义完整；"
+            "其他块（历史块）默认合并压缩(crop)，未显式指定 mode 时按 crop 处理；"
+            "若指定/范围涉及当前块，其他块按指定行为、当前块强制退化。"
             "先用 action=list 查看概览，再按需处理。"
         ),
         "parameters": {
@@ -90,11 +62,11 @@ TOOL_DEFINITION = {
                     "type": "string",
                     "enum": ["degenerate", "crop", "regenerate"],
                     "description": (
-                        "degenerate=退化（默认）：删除工具调用/返回消息，保留 AI 文本记录，"
-                        "当前进行中的块永远安全，不破坏 agent 循环; "
+                        "不传时：当前块强制退化，其他块默认 crop。"
+                        "显式指定时：其他块按此处理，当前块仍强制退化。"
+                        "degenerate=退化：删除工具调用/返回消息，保留 AI 文本记录，当前进行中的块永远安全; "
                         "crop=合并删除工具消息; regenerate=合并并调 LLM 提炼"
                     ),
-                    "default": "degenerate",
                 },
             },
         },
@@ -103,7 +75,7 @@ TOOL_DEFINITION = {
 
 
 class ShortcircuitPlugin(Plugin):
-    """自我上下文修剪插件"""
+    """自我上下文修剪插件（工具 + /sc 命令注入）"""
 
     name = "shortcircuit"
     version = "1.0.0"
@@ -111,6 +83,7 @@ class ShortcircuitPlugin(Plugin):
     def __init__(self, config: PluginConfig | None = None):
         super().__init__(config)
         self._registered = False
+        self._command_injected = False
 
     def on_register(self, lifecycle: LifecycleManager):
         lifecycle.register(
@@ -122,18 +95,21 @@ class ShortcircuitPlugin(Plugin):
 
     def on_unregister(self):
         self._registered = False
+        self._command_injected = False
 
     async def _on_init(self, ctx: HookContext, **kwargs: Any) -> HookContext:
         if self._registered:
             return ctx
 
         tool_registry: ToolRegistry | None = kwargs.get("tool_registry")
-        state: State | None = kwargs.get("state")
+        # state 为动态对象（fp_core 无 py.typed，State 在 pyright 中解析为 Unknown），
+        # 一律用 Any 兜底避免 Unknown 级联
+        state: Any | None = kwargs.get("state")
         if tool_registry is None or state is None:
             return ctx
 
         registry: ToolRegistry = tool_registry
-        st: State = state
+        st: Any = state
 
         async def execute(params: dict[str, Any]) -> str:
             action: str = params.get("action", "compress")
@@ -144,74 +120,52 @@ class ShortcircuitPlugin(Plugin):
 
             # ── list：查看连通块概览 ──
             if action == "list":
-                components: list[Component] = _scan_components(messages)
-                return _format_components_display(components)
+                components = scan_components(messages)
+                return format_components_display(components)
 
-            # ── compress：执行退化或合并 ──
-            mode: str = params.get("mode", "degenerate")
+            # ── compress：执行退化或合并（统一策略：当前块强制退化，其他块默认 crop） ──
+            mode: str | None = params.get("mode")
+            mode_explicit = "mode" in params
             block_ids: list[int] | None = params.get("block_ids")
             range_param: list[int] | None = params.get("range")
             count: int = params.get("count", 1)
 
-            components = _scan_components(messages)
-            if not components:
-                return "没有连通块需要处理"
-
-            # 确定要处理的目标（非 system 空间索引）
-            # 过滤条件随模式变化：degenerate 看工具噪音（degenerable），合并看内容量（compressible）
-            usable_key: str = "degenerable" if mode == "degenerate" else "compressible"
-
-            target_raw: list[tuple[int, int]] = []
+            # 目标选择过滤字段：显式 crop/regenerate 看内容量（compressible），
+            # 其余（未指定或显式 degenerate）看工具噪音（degenerable）——保持工具层
+            # 默认意图「优先处理含工具噪音的块（通常是当前进行中的块）」。
+            usable_key: str = "degenerable" if (not mode_explicit or mode == "degenerate") else "compressible"
 
             if range_param is not None:
-                start, end = range_param
-                selected = [c for c in components if start <= c["idx"] <= end]
-                if not selected:
-                    return f"未找到编号 {start}~{end} 的连通块"
-                min_user: int = selected[0]["user_idx"]
-                max_terminal: int = selected[-1]["terminal_idx"]
-                target_raw = [(min_user, max_terminal)]
-
+                plan_action: str = "range"
+                plan_value: Any = (range_param[0], range_param[1])
             elif block_ids is not None:
-                for bid in block_ids:
-                    for comp in components:
-                        if comp["idx"] == bid:
-                            target_raw.append((comp["user_idx"], comp["terminal_idx"]))
-                            break
-                    else:
-                        return f"未找到编号 {bid} 的连通块"
-
+                plan_action = "indices"
+                plan_value = block_ids
             else:
-                # 默认：从最晚的连通块开始取前 count 个（与命令层一致）
-                usable = [c for c in reversed(components) if c[usable_key]]
-                if not usable:
-                    if mode == "degenerate":
-                        return "没有可退化的连通块（无工具调用噪音）"
-                    return "所有连通块均已达最小状态（2 条消息），无需压缩"
-                target_raw = [(c["user_idx"], c["terminal_idx"]) for c in usable[:count]]
+                plan_action = "count"
+                plan_value = count
 
-            if not target_raw:
-                return "没有可处理的连通块"
+            success, msg, saved, new_messages = await execute_plan(
+                messages, st, plan_action, plan_value, mode, usable_key, True
+            )
 
-            # ── 执行（工具情境：保护调用点，保证 agent loop 不断开） ──
-            if mode == "degenerate":
-                success, msg, saved, new_messages = _degenerate(messages, target_raw, True)
-            else:
-                refiner: Refiner | None = None if mode == "crop" else _build_regenerate_refiner(st)
-                success, msg, saved, new_messages = await _shortcircuit(messages, refiner, target_raw, mode)
-
-            if success:
-                # 通过公共 API 写回
-                conv.set_messages(conv.system_prompt, cast(list[Component], new_messages))
-                st.session.save_context(conv.to_serializable())
-                if mode == "degenerate":
-                    return f"已退化 {len(target_raw)} 个连通块，清理 {saved} 条工具消息"
-                if range_param is not None:
-                    return f"已合并 #{range_param[0]}~#{range_param[1]} 为一个连通块，节省 {saved} 条消息"
-                return f"已压缩 {len(target_raw)} 个连通块，节省 {saved} 条消息"
-            else:
+            if not success:
                 return f"处理失败: {msg}"
+
+            # 通过公共 API 写回
+            assert new_messages is not None
+            conv.set_messages(conv.system_prompt, new_messages)
+            st.session.save_context(conv.to_serializable())
+            return f"✅ {msg}，清理/节省 {saved} 条消息"
 
         registry.register_tool("shortcircuit", cast(OpenAISchema, TOOL_DEFINITION), execute)
         self._registered = True
+
+        # ── 注入 /sc 命令（插件入口注入，不走自动发现） ──
+        # reload 重建 Agent 后 ON_INIT 重跑：若注册表里仍是本插件旧模块对象则无需重复注入
+        if not self._command_injected:
+            existing = get_command("sc")
+            if existing is not sc_command:
+                register_command("sc", sc_command)
+            self._command_injected = True
         return ctx

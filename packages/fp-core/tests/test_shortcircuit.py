@@ -1,16 +1,15 @@
-"""测试 shortcircuit 命令/工具 — 连通块扫描、退化（degenerate）、合并（crop/regenerate）"""
-
-# 测试需要直接验证私有实现函数，关闭私有符号告警
-# pyright: reportPrivateUsage=false
+"""测试 shortcircuit 插件（core.py）— 连通块扫描、退化（degenerate）、合并（crop/regenerate）"""
 
 from collections.abc import Coroutine
 
-from fp_core.commands.shortcircuit import (
+from fp_core.plugins.shortcircuit.core import (
     Message,
-    _degenerate,
-    _parse_args,
-    _scan_components,
-    _shortcircuit,
+    degenerate,
+    execute,
+    execute_plan,
+    parse_args,
+    scan_components,
+    shortcircuit,
 )
 
 
@@ -47,7 +46,7 @@ class TestScanComponents:
             _msg("user", "任务B"),
             _msg("assistant", "回复B"),
         ]
-        comps = _scan_components(messages)
+        comps = scan_components(messages)
         assert len(comps) == 2
         assert comps[0]["idx"] == 1 and comps[0]["message_count"] == 2
         assert comps[1]["idx"] == 2 and comps[1]["message_count"] == 2
@@ -59,7 +58,7 @@ class TestScanComponents:
             _msg("tool", "结果1"),
             _msg("assistant", "总结"),
         ]
-        comps = _scan_components(messages)
+        comps = scan_components(messages)
         assert comps[0]["degenerable"] is True
         assert comps[0]["compressible"] is True
         assert comps[0]["complete"] is True
@@ -69,7 +68,7 @@ class TestScanComponents:
             _msg("user", "任务"),
             _msg("assistant", "回复"),
         ]
-        comps = _scan_components(messages)
+        comps = scan_components(messages)
         assert comps[0]["degenerable"] is False
         assert comps[0]["compressible"] is False
 
@@ -78,7 +77,7 @@ class TestScanComponents:
             _msg("user", "任务"),
             _msg("assistant", "", tool_calls=_tc("s1")),
         ]
-        comps = _scan_components(messages)
+        comps = scan_components(messages)
         assert comps[0]["complete"] is False
         assert comps[0]["degenerable"] is True
 
@@ -97,7 +96,7 @@ class TestDegenerate:
             _msg("tool", "结果1"),
             _msg("assistant", "第1步完成"),
         ]
-        ok, _, changed, new = _degenerate(messages, [(0, 3)], protect_callsite=False)
+        ok, _, changed, new = degenerate(messages, [(0, 3)], protect_callsite=False)
         assert ok
         assert new is not None
         assert changed == 2  # 1 条 tool 删除 + 1 条 assistant 转正
@@ -116,7 +115,7 @@ class TestDegenerate:
             _msg("tool", "结果1"),
             _msg("assistant", "完成"),
         ]
-        ok, _, changed, new = _degenerate(messages, [(0, 3)], protect_callsite=False)
+        ok, _, changed, new = degenerate(messages, [(0, 3)], protect_callsite=False)
         assert ok
         assert new is not None
         assert changed == 2  # 空 content assistant + tool 删除
@@ -130,7 +129,7 @@ class TestDegenerate:
             _msg("user", "任务"),
             _msg("assistant", "回复"),
         ]
-        ok, _, changed, new = _degenerate(messages, [(0, 1)], protect_callsite=False)
+        ok, _, changed, new = degenerate(messages, [(0, 1)], protect_callsite=False)
         assert ok
         assert new is not None
         assert changed == 0
@@ -145,7 +144,7 @@ class TestDegenerate:
             _msg("tool", "结果1"),
             _msg("assistant", "第1步完成", tool_calls=_tc("shortcircuit")),  # 调用点
         ]
-        ok, _, changed, new = _degenerate(messages, [(0, 3)], protect_callsite=True)
+        ok, _, changed, new = degenerate(messages, [(0, 3)], protect_callsite=True)
         assert ok
         assert new is not None
         assert changed == 2  # s1 的 assistant 转正 + tool 删除
@@ -162,7 +161,7 @@ class TestDegenerate:
             _msg("user", "任务"),
             _msg("assistant", "回复中", tool_calls=_tc("shortcircuit")),
         ]
-        ok, _, changed, new = _degenerate(messages, [(0, 1)], protect_callsite=True)
+        ok, _, changed, new = degenerate(messages, [(0, 1)], protect_callsite=True)
         assert ok
         assert new is not None
         assert changed == 0
@@ -207,7 +206,7 @@ class TestDegenerate:
             ),
         ]
         for messages, expected_content in cases:
-            ok, _, _, new = _degenerate(messages, [(0, len(messages) - 1)], protect_callsite=True)
+            ok, _, _, new = degenerate(messages, [(0, len(messages) - 1)], protect_callsite=True)
             assert ok
             assert new is not None
             # 调用点（最后一条带 tool_calls）本身保留 tool_calls
@@ -231,7 +230,7 @@ class TestDegenerate:
             _msg("tool", "T1"),
             _msg("assistant", "第1步完成：结果A", tool_calls=_tc("shortcircuit")),
         ]
-        ok, _, _, result = _degenerate(msgs, [(0, 3)], protect_callsite=True)
+        ok, _, _, result = degenerate(msgs, [(0, 3)], protect_callsite=True)
         assert ok
         assert result is not None
         msgs = result
@@ -241,7 +240,7 @@ class TestDegenerate:
         msgs.append(_msg("tool", "T2"))
         msgs.append(_msg("assistant", "第2步完成：结果B", tool_calls=_tc("shortcircuit")))
         # 第2次退化：第1步文本合并进新的调用点 content，不丢失
-        ok, _, _, result = _degenerate(msgs, [(0, len(msgs) - 1)], protect_callsite=True)
+        ok, _, _, result = degenerate(msgs, [(0, len(msgs) - 1)], protect_callsite=True)
         assert ok
         assert result is not None
         msgs = result
@@ -259,7 +258,7 @@ class TestDegenerate:
             _msg("tool", "T3"),
             _msg("assistant", "第3步完成：结果C", tool_calls=_tc("shortcircuit")),
         ]
-        ok, _, _, final = _degenerate(step3_start, [(0, len(step3_start) - 1)], protect_callsite=True)
+        ok, _, _, final = degenerate(step3_start, [(0, len(step3_start) - 1)], protect_callsite=True)
         assert ok
         assert final is not None
         assert len(final) == 2  # user + 调用点（所有文本合并）
@@ -283,7 +282,7 @@ class TestDegenerate:
             _msg("tool", "B结果"),
             _msg("assistant", "B完成"),
         ]
-        ok, _, changed, new = _degenerate(messages, [(0, 3), (4, 7)], protect_callsite=False)
+        ok, _, changed, new = degenerate(messages, [(0, 3), (4, 7)], protect_callsite=False)
         assert ok
         assert new is not None
         assert changed == 4  # 两个块的 tool 删除 + 两个 assistant 转正
@@ -305,7 +304,7 @@ class TestShortcircuitMerge:
             _msg("tool", "结果1"),
             _msg("assistant", "总结"),
         ]
-        ok, _, saved, new = await_result(_shortcircuit(messages, None, [(0, 3)], "crop"))
+        ok, _, saved, new = await_result(shortcircuit(messages, None, [(0, 3)], "crop"))
         assert ok
         assert new is not None
         assert saved == 2
@@ -321,7 +320,7 @@ class TestShortcircuitMerge:
             _msg("user", "任务B"),
             _msg("assistant", "B完成"),
         ]
-        ok, _, _, new = await_result(_shortcircuit(messages, None, [(0, 3)], "crop"))
+        ok, _, _, new = await_result(shortcircuit(messages, None, [(0, 3)], "crop"))
         assert ok
         assert new is not None
         assert len(new) == 2
@@ -336,22 +335,291 @@ class TestShortcircuitMerge:
 
 class TestParseArgs:
     def test_default_crop(self):
-        assert _parse_args("") == ("default", 1, "crop")
+        assert parse_args("") == ("default", 1, "crop")
 
     def test_d_flag(self):
-        assert _parse_args("-d") == ("default", 1, "degenerate")
-        assert _parse_args("#2 -d") == ("index", 2, "degenerate")
-        assert _parse_args("3 -d") == ("count", 3, "degenerate")
-        assert _parse_args("#1-#3 -d") == ("range", (1, 3), "degenerate")
+        assert parse_args("-d") == ("default", 1, "degenerate")
+        assert parse_args("#2 -d") == ("index", 2, "degenerate")
+        assert parse_args("3 -d") == ("count", 3, "degenerate")
+        assert parse_args("#1-#3 -d") == ("range", (1, 3), "degenerate")
 
     def test_mode_flags_override(self):
         # 最后一个模式修饰生效
-        assert _parse_args("-d -c") == ("default", 1, "crop")
-        assert _parse_args("-r") == ("default", 1, "regenerate")
+        assert parse_args("-d -c") == ("default", 1, "crop")
+        assert parse_args("-r") == ("default", 1, "regenerate")
 
     def test_list(self):
-        assert _parse_args("list") == ("list", None, "crop")
-        assert _parse_args("list -d") == ("list", None, "degenerate")
+        assert parse_args("list") == ("list", None, "crop")
+        assert parse_args("list -d") == ("list", None, "degenerate")
+
+
+# ═══════════════════════════════════════════════════════
+# execute_plan（统一策略：当前块只能 -d，其他块默认 crop）
+# ═══════════════════════════════════════════════════════
+
+
+class TestExecutePlan:
+    def test_mixed_others_crop_currentdegenerate(self):
+        """工具层典型场景（count=2, mode=None）：历史块默认 crop，
+        当前块（含调用点）强制退化并保护调用点"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A开始", tool_calls=_tc("a")),
+            _msg("tool", "A结果"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B开始", tool_calls=_tc("b")),
+            _msg("tool", "B结果"),
+            _msg("assistant", "B完成", tool_calls=_tc("shortcircuit")),  # 调用点
+        ]
+        ok, msg, saved, new = await_result(execute_plan(messages, None, "count", 2, None, "degenerable", True))
+        assert ok
+        assert "裁剪" in msg and "退化当前块" in msg
+        assert new is not None
+        assert saved == 4  # #1 crop 省 2 + #2 退化清 2
+        # #1 被 crop：压缩为 user + terminal 两条
+        assert new[0]["content"] == "任务A"
+        assert new[1]["content"] == "A完成"
+        # #2 被退化且保护调用点：调用点保留 tool_calls，其前文本合并进 content
+        assert len(new) == 4
+        assert new[2]["role"] == "user" and new[2]["content"] == "任务B"
+        assert new[3]["role"] == "assistant"
+        assert new[3]["tool_calls"][0]["function"]["name"] == "shortcircuit"
+        assert new[3]["content"] == "B开始\nB完成"
+        assert not any(m["role"] == "tool" for m in new)
+
+    def test_current_forced_degenerate_even_if_crop(self):
+        """当前块强制 -d：显式 crop 指定当前块 → 实际执行退化（保留 AI 文本）"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B开始", tool_calls=_tc("b")),
+            _msg("tool", "B结果"),
+            _msg("assistant", "B完成"),
+        ]
+        ok, msg, _, new = await_result(execute_plan(messages, None, "index", 2, "crop", "compressible", False))
+        assert ok
+        assert "退化当前块" in msg and "裁剪" not in msg
+        assert new is not None
+        # 退化而非 crop：B开始 转正为独立 assistant（crop 则会压缩为 2 条）
+        assert [m["role"] for m in new] == ["user", "assistant", "user", "assistant", "assistant"]
+        assert new[3]["content"] == "B开始"
+        assert new[4]["content"] == "B完成"
+        assert not any(m["role"] == "tool" for m in new)
+
+    def test_others_default_crop_when_mode_none(self):
+        """其他块默认 crop：未指定 mode 处理历史块 → 压缩而非退化"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A开始", tool_calls=_tc("a")),
+            _msg("tool", "A结果"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B完成"),
+        ]
+        ok, msg, saved, new = await_result(execute_plan(messages, None, "index", 1, None, "compressible", False))
+        assert ok
+        assert "裁剪" in msg
+        assert new is not None
+        assert saved == 2
+        # #1 被 crop（压缩为2条），#2 原样保留
+        assert len(new) == 4
+        assert new[0]["content"] == "任务A"
+        assert new[1]["content"] == "A完成"
+        assert new[2]["content"] == "任务B"
+        assert new[3]["content"] == "B完成"
+
+    def test_range_merges_others_currentdegenerate(self):
+        """范围指定涉及当前块：其他块按指定行为（crop 合并），当前块强制 -d"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B完成"),
+            _msg("user", "任务C"),
+            _msg("assistant", "C开始", tool_calls=_tc("c")),
+            _msg("tool", "C结果"),
+            _msg("assistant", "C总结", tool_calls=_tc("shortcircuit")),
+        ]
+        ok, msg, _, new = await_result(execute_plan(messages, None, "range", (1, 3), "crop", "compressible", True))
+        assert ok
+        assert "裁剪 2 个连通块" in msg and "退化当前块" in msg
+        assert new is not None
+        # #1+#2 按 range 合并为一个连通块（user 取首、assistant 取末）
+        assert len(new) == 4
+        assert new[0]["content"] == "任务A"
+        assert new[1]["content"] == "B完成"
+        # #3 退化且保护调用点
+        assert new[2]["content"] == "任务C"
+        assert new[3]["role"] == "assistant"
+        assert new[3]["tool_calls"][0]["function"]["name"] == "shortcircuit"
+        assert new[3]["content"] == "C开始\nC总结"
+        assert not any(m["role"] == "tool" for m in new)
+
+    def test_all_degenerate_when_mode_explicit(self):
+        """显式 -d 且目标含当前块：全部退化（其他块也按指定行为 -d），保持原全退化语义"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A开始", tool_calls=_tc("a")),
+            _msg("tool", "A结果"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B开始", tool_calls=_tc("b")),
+            _msg("tool", "B结果"),
+            _msg("assistant", "B完成", tool_calls=_tc("shortcircuit")),
+        ]
+        ok, msg, _, new = await_result(execute_plan(messages, None, "count", 2, "degenerate", "degenerable", True))
+        assert ok
+        assert "退化" in msg
+        assert new is not None
+        # #1 退化保留转正文本（非 crop 压缩）；#2 调用点保护 + 文本合并
+        assert new[0]["content"] == "任务A"
+        assert new[1]["content"] == "A开始"
+        assert new[2]["content"] == "A完成"
+        assert new[3]["content"] == "任务B"
+        assert new[4]["role"] == "assistant"
+        assert new[4]["tool_calls"][0]["function"]["name"] == "shortcircuit"
+        assert new[4]["content"] == "B开始\nB完成"
+        assert not any(m["role"] == "tool" for m in new)
+
+    def test_default_targets_current_block(self):
+        """默认（未指定 mode/编号）：目标为最晚可退化块（当前块）→ 强制 -d"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B开始", tool_calls=_tc("b")),
+            _msg("tool", "B结果"),
+            _msg("assistant", "B完成"),
+        ]
+        ok, msg, _, new = await_result(execute_plan(messages, None, "default", None, None, "degenerable", True))
+        assert ok
+        assert "退化当前块" in msg
+        assert new is not None
+        assert [m["role"] for m in new] == ["user", "assistant", "user", "assistant", "assistant"]
+        assert new[3]["content"] == "B开始"
+        assert not any(m["role"] == "tool" for m in new)
+
+
+# ═══════════════════════════════════════════════════════
+# execute（命令层 /sc —— 无硬性约束，可自由处理任意块含当前块）
+# ═══════════════════════════════════════════════════════
+
+
+class _FakeConversation:
+    def __init__(self, messages: list[Message]) -> None:
+        self._msgs = list(messages)
+        self.system_prompt = {"role": "system", "content": "sys"}
+
+    def get_non_system_messages(self) -> list[Message]:
+        return list(self._msgs)
+
+    def set_messages(self, system_prompt: object, messages: list[Message]) -> None:
+        self._msgs = list(messages)
+
+    def to_serializable(self) -> dict[str, object]:
+        return {"messages": self._msgs}
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.saved: list[dict[str, object]] = []
+
+    def save_context(self, data: dict[str, object]) -> None:
+        self.saved.append(data)
+
+
+class _FakeState:
+    def __init__(self, messages: list[Message]) -> None:
+        self.conversation = _FakeConversation(messages)
+        self.session = _FakeSession()
+
+
+class TestExecuteCommand:
+    def test_command_can_crop_current_block(self):
+        """命令层无硬性约束：/sc #N -c 可以 crop 当前块（不强制退化）"""
+        st = _FakeState([
+            _msg("user", "任务A"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B开始", tool_calls=_tc("b")),
+            _msg("tool", "B结果"),
+            _msg("assistant", "B完成"),
+        ])
+        ok, text = run_cmd(st, "#2 -c")
+        assert ok
+        assert "已处理" in text
+        msgs = st.conversation._msgs
+        # 当前块 #2 被 crop：压缩为 2 条（而非强制退化保留文本）
+        assert len(msgs) == 4
+        assert msgs[2]["content"] == "任务B"
+        assert msgs[3]["content"] == "B完成"
+        assert not any(m["role"] == "tool" for m in msgs)
+
+    def test_command_range_merges_current_block(self):
+        """命令层无硬性约束：/sc #1-#3 默认 crop 合并含当前块"""
+        st = _FakeState([
+            _msg("user", "任务A"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B完成"),
+            _msg("user", "任务C"),
+            _msg("assistant", "C开始", tool_calls=_tc("c")),
+            _msg("tool", "C结果"),
+            _msg("assistant", "C总结"),
+        ])
+        ok, text = run_cmd(st, "#1-#3")
+        assert ok
+        assert "已处理" in text
+        msgs = st.conversation._msgs
+        # 整个范围合并为一个块（range 语义），当前块不强制退化
+        assert len(msgs) == 2
+        assert msgs[0]["content"] == "任务A"
+        assert msgs[1]["content"] == "C总结"
+
+    def test_command_default_crop_on_current(self):
+        """命令层无硬性约束：默认（无修饰）crop 最近可压缩块——即使它是当前块"""
+        st = _FakeState([
+            _msg("user", "任务A"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B开始", tool_calls=_tc("b")),
+            _msg("tool", "B结果"),
+            _msg("assistant", "B完成"),
+        ])
+        ok, text = run_cmd(st, "")
+        assert ok
+        assert "已处理" in text
+        msgs = st.conversation._msgs
+        assert len(msgs) == 4
+        assert msgs[2]["content"] == "任务B"
+        assert msgs[3]["content"] == "B完成"
+        assert not any(m["role"] == "tool" for m in msgs)
+
+    def test_command_explicit_degenerate_current(self):
+        """命令层显式 -d 处理当前块：正常退化（本就允许）"""
+        st = _FakeState([
+            _msg("user", "任务A"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B开始", tool_calls=_tc("b")),
+            _msg("tool", "B结果"),
+            _msg("assistant", "B完成"),
+        ])
+        ok, text = run_cmd(st, "#2 -d")
+        assert ok
+        assert "已退化" in text
+        msgs = st.conversation._msgs
+        assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant", "assistant"]
+        assert msgs[3]["content"] == "B开始"
+        assert not any(m["role"] == "tool" for m in msgs)
+
+
+def run_cmd(state: _FakeState, arg: str) -> tuple[bool, str]:
+    import asyncio
+
+    return asyncio.run(execute(state, arg))
 
 
 def await_result(

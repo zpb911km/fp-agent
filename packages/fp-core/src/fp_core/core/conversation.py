@@ -227,4 +227,4 @@ class ConversationState:
             state._messages.append(msg)
         return state
 
-    # ── Shortcircuit / scan 已迁移至 commands/shortcircuit.py ──
+    # ── Shortcircuit / scan 已迁移至 plugins/shortcircuit/core.py（/sc 命令由插件注入） ──

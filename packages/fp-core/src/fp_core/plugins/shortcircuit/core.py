@@ -1,11 +1,9 @@
-"""shortcircuit 命令 — 短路连通块
+"""shortcircuit 核心 — 连通块扫描 / 退化（degenerate）/ 合并（crop/regenerate）
 
-将交互（连通块）压缩为 user + assistant 消息对，
-移除中间的工具调用细节。
+shortcircuit 插件包的核心实现：连通块检测、退化、合并、命令与工具的执行逻辑。
+命令 `/sc` 与工具 `shortcircuit` 共用本模块的纯函数，不依赖 core 层业务策略。
 
-全部通公共 API 自组装，不依赖 core 层的业务策略。
-
-用法:
+命令用法（/sc）:
   /sc                    短路最近 1 个可压缩态的连通块
   /sc N                  短路最近 N 个可压缩态的连通块
   /sc list               显示所有连通块概览
@@ -17,6 +15,12 @@
   -r                     提炼模式（regenerate）：调 LLM 重新生成精简回复
   -d                     退化模式（degenerate）：删除目标块内的工具调用/工具返回消息，
                         把工具调用链退化为纯文本 assistant 消息链（保留 AI 文本记录）
+
+硬性策略（仅 shortcircuit 工具，命令层 /sc 不适用）:
+  - 当前块（最后一个连通块）只能使用 -d（degenerate），其余模式被强制覆盖
+  - 其他块默认 crop：未显式指定 mode 时按 crop 处理
+  - 序号/范围/批量指定涉及当前块时：其他块按指定行为，当前块强制 -d
+  - 命令层 /sc 保持自由：按显式 -c/-r/-d 处理任意块（含当前块），无硬性约束
 
 状态标记（/sc list）:
   D = 可退化（块内存在工具调用噪音）
@@ -31,7 +35,7 @@ Message = dict[str, Any]
 
 
 class Component(TypedDict):
-    """连通块记录（见 _scan_components 的文档注释）"""
+    """连通块记录（见 scan_components 的文档注释）"""
 
     idx: int
     user_idx: int
@@ -46,16 +50,13 @@ class Component(TypedDict):
 
 Refiner = Callable[[str, str, str], Awaitable[tuple[str, str]]]
 
-name = "sc"
-description = "短路(shortcircuit)已完成的连通块。用法: /sc list 查看, /sc 或 /sc N 短路最近的, /sc #N 短路指定编号的"
-
 
 # ═══════════════════════════════════════════════════════
-# 公共函数（plugin 也导入使用）
+# 核心纯函数（plugin / command 共用）
 # ═══════════════════════════════════════════════════════
 
 
-def _scan_components(messages: list[Message]) -> list[Component]:
+def scan_components(messages: list[Message]) -> list[Component]:
     """
     扫描非 system 消息列表，返回从旧到新排序的连通块。
 
@@ -103,7 +104,7 @@ def _scan_components(messages: list[Message]) -> list[Component]:
     return components
 
 
-def _degenerate(
+def degenerate(
     messages: list[Message],
     targets: list[tuple[int, int]],
     protect_callsite: bool = False,
@@ -237,7 +238,7 @@ def _degenerate(
         return (False, f"退化失败: {e}", 0, None)
 
 
-async def _shortcircuit(
+async def shortcircuit(
     messages: list[Message],
     refiner: Refiner | None,
     targets: list[tuple[int, int]],
@@ -339,7 +340,132 @@ async def _shortcircuit(
         return (False, f"短路失败: {e}", 0, None)
 
 
-def _build_regenerate_refiner(state: Any) -> Refiner:
+_MODE_CN = {"crop": "裁剪", "regenerate": "提炼", "degenerate": "退化"}
+
+
+async def execute_plan(
+    messages: list[Message],
+    state: Any,
+    action: str,
+    value: int | tuple[int, int] | list[int] | None,
+    mode: str | None,
+    usable_key: str,
+    protect_callsite: bool,
+) -> tuple[bool, str, int, list[Message] | None]:
+    """
+    工具层策略执行（插件 shortcircuit 专用；命令层 /sc 不经过此函数）。
+
+    硬性策略约束（仅工具层）：
+      1. 当前块（最后一个连通块）只能 degenerate（强制，不可被 crop/regenerate 覆盖）。
+      2. 其他块默认 crop：未显式指定 mode（mode=None）时按 crop 处理。
+      3. 序号/范围/批量指定涉及当前块时：其他块按指定行为（mode），当前块强制 degenerate。
+
+    Args:
+        messages:         非 system 消息列表
+        state:            用于 regenerate 提炼（crop/degenerate 传 None 亦可）
+        action:           "default" | "count" | "index" | "indices" | "range"
+        value:            default=None / count=int / index=int / indices=list[int] /
+                          range=(start, end)
+        mode:             显式指定 mode；None = 未指定（其他块默认 crop）
+        usable_key:       "degenerable" | "compressible"，default/count 目标选择的过滤字段
+        protect_callsite: 工具情境传 True（agent loop 进行中，保护本次调用点）；
+                          命令情境传 False（无进行中循环）
+
+    Returns:
+        (是否成功, 中文描述, 清理/节省的消息数, 新的消息列表或 None)
+        失败时返回 (False, 错误信息, 0, None)，原始 messages 不受影响。
+
+    执行顺序：先处理其他块（按指定/默认 mode），最后退化当前块
+    ——当前块在历史块处理后的消息上重新定位（编号可能前移，但始终是最后一块）。
+    """
+    components = scan_components(messages)
+    if not components:
+        return (False, "没有连通块需要处理", 0, None)
+    current_idx = components[-1]["idx"]
+
+    # ── 1. 解析目标块编号（1-based） ──
+    target_ids: list[int] = []
+    range_merge = False  # range 语义：其他块合并为一个连通块（crop 时）
+
+    if action in ("default", "count"):
+        usable = [c for c in reversed(components) if c[usable_key]]
+        if not usable:
+            key_label = "可退化" if usable_key == "degenerable" else "可压缩"
+            return (False, f"没有{key_label}的连通块", 0, None)
+        n = 1 if action == "default" else value
+        assert isinstance(n, int)
+        target_ids = [c["idx"] for c in usable[:n]]
+    elif action == "index":
+        assert isinstance(value, int)
+        if not any(c["idx"] == value for c in components):
+            return (False, f"未找到编号 {value} 的连通块", 0, None)
+        target_ids = [value]
+    elif action == "indices":
+        assert isinstance(value, list)
+        for bid in value:
+            if not any(c["idx"] == bid for c in components):
+                return (False, f"未找到编号 {bid} 的连通块", 0, None)
+        target_ids = list(value)
+    elif action == "range":
+        assert isinstance(value, tuple) and len(value) == 2
+        start, end = value
+        selected = [c for c in components if start <= c["idx"] <= end]
+        if not selected:
+            return (False, f"未找到编号 {start}~{end} 的连通块", 0, None)
+        range_merge = True
+        target_ids = [c["idx"] for c in selected]
+    else:
+        return (False, "未知操作", 0, None)
+
+    if not target_ids:
+        return (False, "没有可处理的连通块", 0, None)
+
+    # ── 2. 拆分：其他块 vs 当前块（当前块强制 degenerate） ──
+    has_current = current_idx in target_ids
+    other_ids = [i for i in target_ids if i != current_idx]
+
+    # ── 3. 执行其他块（指定 mode；未指定默认 crop） ──
+    new_messages = list(messages)
+    total = 0
+    parts: list[str] = []
+
+    if other_ids:
+        if range_merge:
+            other_comps = [c for c in components if c["idx"] in other_ids]
+            other_targets = [(other_comps[0]["user_idx"], other_comps[-1]["terminal_idx"])]
+        else:
+            other_targets = [(c["user_idx"], c["terminal_idx"]) for c in components if c["idx"] in other_ids]
+        others_mode = mode if mode is not None else "crop"
+        if others_mode == "degenerate":
+            ok, msg, n, new_messages = degenerate(new_messages, other_targets, False)
+        else:
+            refiner: Refiner | None = None if others_mode == "crop" else build_regenerate_refiner(state)
+            ok, msg, n, new_messages = await shortcircuit(new_messages, refiner, other_targets, others_mode)
+        if not ok:
+            return (False, msg, 0, None)
+        total += n
+        parts.append(f"{_MODE_CN[others_mode]} {len(other_ids)} 个连通块")
+
+    # ── 4. 当前块强制退化（在 other 处理后的消息上重新定位最后一块） ──
+    if has_current:
+        assert new_messages is not None
+        comps2 = scan_components(new_messages)
+        if not comps2:
+            return (False, "处理其他块后找不到当前块", 0, None)
+        cur = comps2[-1]
+        assert new_messages is not None
+        ok, msg, n, new_messages = degenerate(new_messages, [(cur["user_idx"], cur["terminal_idx"])], protect_callsite)
+        if not ok:
+            return (False, msg, 0, None)
+        total += n
+        parts.append("退化当前块")
+
+    if not parts:
+        parts.append("无目标变化")
+    return (True, "；".join(parts), total, new_messages)
+
+
+def build_regenerate_refiner(state: Any) -> Refiner:
     """构建提炼回调 — 调用 LLM 精炼 assistant 回复"""
 
     async def refiner(user_text: str, assistant_text: str, context_text: str) -> tuple[str, str]:
@@ -389,7 +515,7 @@ def _build_regenerate_refiner(state: Any) -> Refiner:
 # ═══════════════════════════════════════════════════════
 
 
-def _parse_args(arg: str) -> tuple[str, int | tuple[int, int] | None | str, str]:
+def parse_args(arg: str) -> tuple[str, int | tuple[int, int] | None | str, str]:
     """解析短路命令参数
 
     Returns:
@@ -449,7 +575,7 @@ def _parse_args(arg: str) -> tuple[str, int | tuple[int, int] | None | str, str]
 
 
 async def execute(state: Any, arg: str) -> tuple[bool, str]:
-    action, value, mode = _parse_args(arg)
+    action, value, mode = parse_args(arg)
 
     if action == "error":
         return (True, f"❌ {value}")
@@ -459,13 +585,13 @@ async def execute(state: Any, arg: str) -> tuple[bool, str]:
 
     # ── /sc list ─────────────────────────────────────────
     if action == "list":
-        components = _scan_components(messages)
+        components = scan_components(messages)
         if not components:
             return (True, "没有已完成的连通块")
-        return (True, _format_components_display(components))
+        return (True, format_components_display(components))
 
-    # ── 执行短路 ─────────────────────────────────────────
-    components = _scan_components(messages)
+    # ── 执行短路（命令层无硬性约束：按显式 -c/-r/-d 处理任意块，含当前块） ──
+    components = scan_components(messages)
     if not components:
         return (True, "没有已完成的连通块需要短路")
 
@@ -487,6 +613,7 @@ async def execute(state: Any, arg: str) -> tuple[bool, str]:
             native = [c for c in reversed(components) if c["compressible"]]
         targets = [(c["user_idx"], c["terminal_idx"]) for c in native[:value]]
     elif action == "index":
+        assert isinstance(value, int)
         for comp in components:
             if comp["idx"] == value:
                 targets.append((comp["user_idx"], comp["terminal_idx"]))
@@ -509,10 +636,10 @@ async def execute(state: Any, arg: str) -> tuple[bool, str]:
     # ── 执行（命令层自组装，纯函数操作消息列表） ──
     if mode == "degenerate":
         # 命令情境无进行中循环，不保护调用点
-        success, msg, saved, new_messages = _degenerate(messages, targets, protect_callsite=False)
+        success, msg, saved, new_messages = degenerate(messages, targets, protect_callsite=False)
     else:
-        refiner: Refiner | None = None if mode == "crop" else _build_regenerate_refiner(state)
-        success, msg, saved, new_messages = await _shortcircuit(messages, refiner, targets, mode)
+        refiner: Refiner | None = None if mode == "crop" else build_regenerate_refiner(state)
+        success, msg, saved, new_messages = await shortcircuit(messages, refiner, targets, mode)
 
     if success:
         # 通过公共 API 写回
@@ -525,7 +652,7 @@ async def execute(state: Any, arg: str) -> tuple[bool, str]:
         return (True, msg)
 
 
-def _format_components_display(components: list[Component]) -> str:
+def format_components_display(components: list[Component]) -> str:
     """格式化连通块列表用于 /sc list 展示"""
     if not components:
         return "没有已完成的连通块"

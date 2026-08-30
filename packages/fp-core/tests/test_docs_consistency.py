@@ -37,9 +37,22 @@ def _hook_count() -> int:
     return len(re.findall(r"^    ([A-Z_]+) = auto\(\)", m.group(1), re.M))
 
 
+def _plugin_injected_commands() -> set[str]:
+    """生命周期插件通过 register_command 动态注入的命令名（不走自动发现）"""
+    names: set[str] = set()
+    for f in (SRC / "plugins").rglob("*.py"):
+        if "__pycache__" in str(f):
+            continue
+        src = f.read_text(encoding="utf-8")
+        names.update(re.findall(r'register_command\(\s*"([^"]+)"', src))
+    return names
+
+
 def _command_count() -> int:
+    """命令总数 = commands/ 自动发现文件数 + 插件注入命令数"""
     d = SRC / "commands"
-    return len([f for f in os.listdir(d) if f.endswith(".py") and f != "__init__.py"])
+    files = len([f for f in os.listdir(d) if f.endswith(".py") and f != "__init__.py"])
+    return files + len(_plugin_injected_commands())
 
 
 def _core_tool_count() -> int:
@@ -155,6 +168,8 @@ def test_no_ghost_components_in_docs():
     """文档不应引用源码中不存在的命令/工具名（幽灵组件）"""
     cmd_dir = SRC / "commands"
     real_cmds = {f[:-3] for f in os.listdir(cmd_dir) if f.endswith(".py") and f != "__init__.py"}
+    # 插件注入命令（如 shortcircuit 插件注册的 sc）也是合法触发词
+    real_cmds.update(_plugin_injected_commands())
     # name 可能与文件名不同（如 shortcircuit.py 的 name="sc"）；aliases 也是合法触发词
     for f in os.listdir(cmd_dir):
         if not f.endswith(".py") or f == "__init__.py":

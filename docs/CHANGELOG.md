@@ -3,6 +3,12 @@
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/) 和 [Keep a Changelog](https://keepachangelog.com/) 规范。
 
 
+## [Unreleased]
+
+### Changed
+
+- **shortcircuit 迁移至插件包，命令层清空**: `/sc` 命令不再由 `commands/` 自动发现，改由 shortcircuit 插件在 `ON_INIT` 通过 `register_command("sc", command)` 注入——命令实现随插件包走（`plugins/shortcircuit/{core,command,plugin}.py`），`commands/shortcircuit.py` 删除；插件被禁用时 `/sc` 一并消失。核心逻辑符号公共化（`scan_components`/`degenerate`/`shortcircuit`/`parse_args`/`format_components_display`），插件层消除跨模块 cast hack；命令系统新增「插件注入命令」注册路径说明。
+
 ## [0.1.12] — 2026-08-04
 
 ### Added
