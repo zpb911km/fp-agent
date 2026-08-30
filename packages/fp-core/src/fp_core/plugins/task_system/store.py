@@ -83,10 +83,21 @@ class TaskStore:
         return task
 
     def update(self, task_id: int, status: str) -> Task | None:
-        """更新任务状态"""
+        """更新任务状态
+
+        task_id 采用类型宽容匹配：
+        LLM 工具调用参数可能把整数 id 传成字符串（"2" 而非 2）或浮点（2.0），
+        若严格比较 int == str 会恒为 False，导致"找不到任务"误报。
+        策略：优先 int() 归一化匹配数值，无法解析时回退到字符串比较。
+        """
         tasks, next_id = self.load()
+        try:
+            target_id: int | None = int(task_id)  # 2 / "2" / 2.0 → 2
+        except (TypeError, ValueError):
+            target_id = None
+        raw = str(task_id).strip()
         for t in tasks:
-            if t.id == task_id:
+            if (target_id is not None and t.id == target_id) or str(t.id) == raw:
                 if not TaskStatus.is_valid(status):
                     raise ValueError(f"无效状态: {status}，必须是 {[s.value for s in TaskStatus]}")
                 t.status = TaskStatus(status)

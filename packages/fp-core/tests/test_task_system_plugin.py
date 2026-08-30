@@ -170,6 +170,33 @@ class TestTaskSystemPlugin(unittest.IsolatedAsyncioTestCase):
         tasks = store.list_all()
         self.assertEqual(tasks[0].status.value, "in_progress")
 
+    async def test_tool_update_str_id(self):
+        """回归：task_id 以字符串传入（如 "2"）也应能匹配到任务
+
+        之前 store.update 用 int == str 严格比较，LLM 把整数 id
+        序列化成字符串时会导致"未找到任务"误报。
+        """
+        store = TaskStore()
+        t = store.create("测试任务")
+
+        result = await handle_update({"task_id": str(t.id), "status": "in_progress"})
+        self.assertIn("✅ 任务", result)
+        self.assertIn("in_progress", result)
+
+        tasks = store.list_all()
+        self.assertEqual(tasks[0].status.value, "in_progress")
+
+    async def test_tool_update_float_id(self):
+        """回归：task_id 以 float 形式传入（如 2.0）也应能匹配到任务"""
+        store = TaskStore()
+        t = store.create("测试任务")
+
+        result = await handle_update({"task_id": float(t.id), "status": "completed"})
+        self.assertIn("✅ 任务", result)
+
+        tasks = store.list_all()
+        self.assertEqual(tasks[0].status.value, "completed")
+
     async def test_tool_list(self):
         """task_list 工具应列出所有任务"""
         store = TaskStore()

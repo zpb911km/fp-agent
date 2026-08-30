@@ -115,6 +115,8 @@ async def handle_update(params: dict[str, Any]) -> str:
     store = TaskStore()
     task = store.update(task_id, status)
     if task is None:
+        # 类型宽容已在 store.update 内部处理（str/int 均可匹配），
+        # 走到这里说明该 id 确实不存在
         return f"错误：未找到任务 #{task_id}（任务可能已被清除，可用 task_list 查看当前任务）"
     return f"✅ 任务 #{task.id} 状态已更新为 [{status}]"
 
