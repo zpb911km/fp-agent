@@ -107,8 +107,10 @@ async def execute(state: State, arg: str) -> tuple[bool, str]:
             "## 📂 会话列表",
             "使用 `/resume <sid>` 切换，`/resume latest` 切换到最新",
             "`[subagent]` = 子代理任务会话，`/resume --main` 只看主会话",
+            "（列表从大到小打印：越靠下越新，**[1] = 最新会话**）",
         ]
-        for i, (sid, meta) in enumerate(sorted_items, 1):
+        # 倒序打印：序号从大到小，最新的 [1] 落在输出末尾（紧邻输入提示行，可见）
+        for i, (sid, meta) in reversed(list(enumerate(sorted_items, 1))):
             summary = meta.get("summary", "") or "(无摘要)"
             msg_count = meta.get("message_count", 0)
             marker = " ⬅" if sid == current_sid else ""
@@ -125,18 +127,25 @@ async def execute(state: State, arg: str) -> tuple[bool, str]:
 
         current_sid = state.session_id
         sorted_items = sorted(
-            ((sid, meta) for sid, meta in sessions.items() if meta.get("source") != "subagent"),
+            sessions.items(),
             key=lambda x: x[1].get("updated", ""),
             reverse=True,
         )
-        if not sorted_items:
+        # 序号基于全量列表（与 _resolve_sid 的解析池一致），subagent 仅隐藏不重编号，
+        # 保证 [n] 在 list / --main 两个视图里指向同一会话（序号不连续属正常）
+        main_items = [
+            (i, sid, meta) for i, (sid, meta) in enumerate(sorted_items, 1) if meta.get("source") != "subagent"
+        ]
+        if not main_items:
             return (True, "没有主会话（当前全部为 subagent 子任务会话）")
 
         lines = [
-            "## 📂 主会话列表（已过滤 subagent）",
+            "## 📂 主会话列表（已过滤 subagent，序号不连续属正常）",
             "使用 `/resume <sid>` 切换，`/resume latest` 切换到最新",
+            "（列表从大到小打印：越靠下越新，**[1] = 最新会话**）",
         ]
-        for i, (sid, meta) in enumerate(sorted_items, 1):
+        # 倒序打印，理由同上
+        for i, sid, meta in reversed(main_items):
             summary = meta.get("summary", "") or "(无摘要)"
             msg_count = meta.get("message_count", 0)
             marker = " ⬅" if sid == current_sid else ""
