@@ -436,6 +436,8 @@ class Agent:
             return msg, usage
 
         msg = {"role": "assistant", "content": assistant_msg.get("content", "")}
+        if assistant_msg.get("reasoning_content"):
+            msg["reasoning_content"] = assistant_msg["reasoning_content"]
         if assistant_msg.get("tool_calls"):
             msg["tool_calls"] = assistant_msg["tool_calls"]
         msg["_interrupted"] = False
@@ -644,7 +646,15 @@ class Agent:
             if ctx.data.get("cancelled"):
                 return Response(content=ctx.data.get("cancel_reason", "已取消"))
 
-            messages_for_llm = ctx.data.get("modified_messages", self._conv.get_messages_for_llm())
+            messages_for_llm = ctx.data.get(
+                "modified_messages",
+                self._conv.get_messages_for_llm(
+                    # 本轮请求是否携带 tools —— 决定 reasoning_content 回传策略：
+                    # DeepSeek v4 官方要求带 tools 时回传历史思维链；不带 tools 时
+                    # 回传会被忽略，直接剥离省 token
+                    with_tools=bool(self._tool_exec.get_definitions()),  # type: ignore[reportUnknownMemberType]
+                ),
+            )
 
             self._processing = True
             try:

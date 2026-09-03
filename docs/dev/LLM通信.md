@@ -208,3 +208,23 @@ reasoning = message.reasoning_content
 # 统一获取回复内容
 reply = message.content or "（无文本回复）"
 ```
+
+---
+
+## 思考内容（reasoning_content）跨轮回传
+
+思考模型（qwen enable_thinking / deepseek v4 thinking 系列）返回的
+`reasoning_content` 会随 assistant 消息保留在上下文中，回传策略按请求是否携带 tools 区分：
+
+| 请求形态 | 历史 reasoning_content | 依据 |
+|----------|------------------------|------|
+| 带 `tools` | **回传**（拼入上下文） | DeepSeek v4 官方要求：工具调用场景需把各轮 CoT 传回 |
+| 不带 `tools` | **剥离** | API 会忽略这些字段，回传只浪费 token |
+
+实现位置：
+- `llm_service.chat/chat_stream` — done 结果的 assistant_msg 携带 `reasoning_content`
+- `agent._invoke_llm` → `add_assistant_message` — 保留进会话状态；持久化（`to_serializable`）同样保留
+- `conversation.get_messages_for_llm(with_tools=...)` — 发送前按上表裁剪；agent 主循环以 `bool(tool_definitions)` 传入
+
+轻量任务（摘要 `LLMService.summarize`、webui 会话标题）通过 `config.no_thinking_body()`
+强制关闭思考——thinking 模型在非流式 + 小 max_tokens 下会因思考 token 挤占预算而报错或截断。

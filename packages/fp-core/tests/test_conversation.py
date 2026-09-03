@@ -263,3 +263,41 @@ class TestEdgeCases:
         msgs = cs.get_messages_for_llm()
         assert len(msgs) == 1
         assert msgs[0]["role"] == "system"
+
+
+class TestReasoningContentForLLM:
+    """get_messages_for_llm 的 reasoning_content 回传策略"""
+
+    def test_with_tools_keeps_reasoning(self):
+        from fp_core.core.conversation import ConversationState
+
+        cs = ConversationState("sys")
+        cs.add_user_message("q")
+        cs._messages.append({
+            "role": "assistant",
+            "content": "a",
+            "reasoning_content": "think",
+            "tool_calls": [{"id": "1"}],
+        })
+        msgs = cs.get_messages_for_llm(with_tools=True)
+        asst = [m for m in msgs if m["role"] == "assistant"][0]
+        assert asst.get("reasoning_content") == "think"
+
+    def test_without_tools_strips_reasoning(self):
+        from fp_core.core.conversation import ConversationState
+
+        cs = ConversationState("sys")
+        cs.add_user_message("q")
+        cs._messages.append({"role": "assistant", "content": "a", "reasoning_content": "think"})
+        msgs = cs.get_messages_for_llm(with_tools=False)
+        asst = [m for m in msgs if m["role"] == "assistant"][0]
+        assert "reasoning_content" not in asst
+        assert asst["content"] == "a"
+
+    def test_default_keeps_reasoning(self):
+        from fp_core.core.conversation import ConversationState
+
+        cs = ConversationState("sys")
+        cs._messages.append({"role": "assistant", "content": "a", "reasoning_content": "t"})
+        msgs = cs.get_messages_for_llm()
+        assert msgs[1].get("reasoning_content") == "t"

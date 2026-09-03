@@ -109,6 +109,9 @@ class LLMService:
         usage = response.usage  # 可能为 None，由调用方处理
 
         msg: dict[str, Any] = {"role": "assistant", "content": message.content or ""}
+        if getattr(message, "reasoning_content", None):
+            # 思考模型（qwen/deepseek v4 等）的思维链，随消息保留供回传上下文
+            msg["reasoning_content"] = message.reasoning_content
         if message.tool_calls:
             msg["tool_calls"] = [
                 {
@@ -208,6 +211,9 @@ class LLMService:
         # ── 构造完整 assistant_msg ──
         content = "".join(content_chunks)
         msg: dict[str, Any] = {"role": "assistant", "content": content}
+        if reasoning_chunks:
+            # 思维链保留在消息上：带 tools 的请求需回传（DeepSeek v4 官方要求）
+            msg["reasoning_content"] = "".join(reasoning_chunks)
         if tool_call_acc:
             msg["tool_calls"] = [
                 {
@@ -231,10 +237,17 @@ class LLMService:
         system_prompt: str = "你是一个对话压缩助手，擅长提炼关键信息。",
         max_tokens: int = 1000,
     ) -> str:
-        """通用摘要接口"""
+        """通用摘要接口
+
+        轻量任务，强制关闭思考：thinking 模型（qwen/deepseek v4）在非流式
+        + 小 max_tokens 下会因思考 token 挤占预算而报错或截断。
+        参数格式由 config.no_thinking_body() 按激活 provider 选择。
+        """
+        from fp_core.config import no_thinking_body
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"{instruction}\n\n{text}"},
         ]
-        result = await self.chat(messages, tools=None, max_tokens=max_tokens)
+        result = await self.chat(messages, tools=None, max_tokens=max_tokens, extra_body=no_thinking_body())
         return result.message.get("content", "").strip()

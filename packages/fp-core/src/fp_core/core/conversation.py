@@ -120,13 +120,24 @@ class ConversationState:
     def get_system_count(self) -> int:
         return sum(1 for m in self._messages if m["role"] == "system")
 
-    def get_messages_for_llm(self) -> list[dict[str, Any]]:
-        """返回传给 LLM 的消息（含 tool ordering 修复）"""
-        if len(self._messages) <= 1:
-            return list(self._messages)
-        system = self._messages[0]
-        repaired = self._repair_ordering(self._messages[1:])
-        return [system] + repaired
+    def get_messages_for_llm(self, with_tools: bool = True) -> list[dict[str, Any]]:
+        """返回传给 LLM 的消息（含 tool ordering 修复）
+
+        reasoning_content 回传策略（思考模型跨轮上下文）：
+        - with_tools=True：保留历史 assistant 消息的 reasoning_content。
+          DeepSeek v4 / DashScope 带 tools 的请求要求把各轮思维链回传并拼入上下文。
+        - with_tools=False：剥离 reasoning_content。不带 tools 时 API 会忽略
+          这些字段，回传纯属浪费 token。
+        """
+        msgs = list(self._messages)
+        if len(msgs) <= 1:
+            return msgs
+        system = msgs[0]
+        repaired = self._repair_ordering(msgs[1:])
+        result = [system] + repaired
+        if not with_tools:
+            result = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in result]
+        return result
 
     def get_last_assistant_message(self) -> dict[str, Any] | None:
         """获取最后一条 assistant 消息"""

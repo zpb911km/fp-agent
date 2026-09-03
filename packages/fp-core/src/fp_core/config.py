@@ -244,6 +244,50 @@ def _merge_extra_body(*bodies: Any) -> dict[str, Any]:
     return merged
 
 
+# ── 思考开关跨 provider 归一化 ────────────────────────────────
+# fp 的规范意图键是布尔 "enable_thinking"（DashScope/qwen 原生参数名）。
+# 解析时按目标 provider 翻译为各自的原生请求格式，用户在配置里只需写一种语义：
+#   - deepseek → {"thinking": {"type": "enabled"/"disabled"}}
+#     （reasoning_effort 若用户显式提供则保留并平铺到请求体顶层）
+#   - 其余（qwen/未知/直连）→ 保持 enable_thinking 布尔
+# 用户直接写的 thinking / reasoning_effort 原生键不受影响，透传。
+_THINKING_NATIVE_KEYS = ("thinking", "reasoning_effort")
+
+
+def _normalize_thinking_params(provider: str, extra_body: dict[str, Any]) -> dict[str, Any]:
+    """把规范意图键 enable_thinking 翻译为目标 provider 的原生请求参数。"""
+    out = dict(extra_body)
+    intent = out.pop("enable_thinking", None)
+    if intent is None:
+        return out
+    if "deepseek" in provider.lower():
+        # 用户已显式写了 thinking:{...} 原生格式 → 以原生为准，丢弃意图键
+        if "thinking" not in out:
+            out["thinking"] = {"type": "enabled"} if intent else {"type": "disabled"}
+        # reasoning_effort 若存在则原样保留（llm_client body.update 平铺 → 顶层字段）
+    else:
+        out["enable_thinking"] = bool(intent)
+    return out
+
+
+def no_thinking_body() -> dict[str, Any]:
+    """返回"关闭思考"的 extra_body（按当前激活 provider 的原生格式）。
+
+    供轻量任务（会话标题、摘要等）显式禁用思考，避免：
+      - thinking 模型非流式 + 小 max_tokens 直接报错/截断
+      - 无谓的思考 token 开销
+    """
+    active = str(_value(ACTIVE_LLM_KEY, "") or "")
+    provider = active.split("/", 1)[0] if "/" in active else ""
+    if not provider:
+        # 无 ACTIVE_LLM → 退化到顶层 base_url 推断
+        base = str(_value("LLM_API_BASE_URL", "") or "").lower()
+        provider = "deepseek" if "deepseek" in base else ""
+    if "deepseek" in provider.lower():
+        return {"thinking": {"type": "disabled"}}
+    return {"enable_thinking": False}
+
+
 def resolve_llm_params(provider: str, model: str) -> dict[str, Any] | None:
     """解析 (provider, model) 的完整 LLM 参数。
 
@@ -269,8 +313,11 @@ def resolve_llm_params(provider: str, model: str) -> dict[str, Any] | None:
     timeout = pick(p.get("timeout"), _value("TIMEOUT", 300))
     retry_count = pick(p.get("retry_count"), _value("RETRY_COUNT", 3))
     extra_body = _merge_extra_body(p.get("extra_body"), m.get("extra_body"))
-    if not extra_body:
-        extra_body = {"enable_thinking": False}
+    # 兜底注入用 setdefault（而非 update）：provider/model 任一级已显式声明思考
+    # 意图键或原生 thinking 格式时，绝不覆盖用户意图
+    if "enable_thinking" not in extra_body and "thinking" not in extra_body:
+        extra_body["enable_thinking"] = False
+    extra_body = _normalize_thinking_params(provider, extra_body)
 
     return {
         "provider": provider,
@@ -347,7 +394,7 @@ def set_active_llm_state(
     globals()["LLM_MODEL"] = model
     globals()["LLM_TEMPERATURE"] = float(temperature)
     globals()["LLM_MAX_TOKENS"] = int(max_tokens)
-    globals()["LLM_EXTRA_BODY"] = dict(extra_body) if extra_body is not None else {}
+    globals()["LLM_EXTRA_BODY"] = dict(extra_body) if extra_body else {"enable_thinking": False}
     if timeout is not None:
         globals()["LLM_TIMEOUT"] = int(timeout)
     if retry_count is not None:

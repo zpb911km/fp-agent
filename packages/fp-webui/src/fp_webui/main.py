@@ -51,6 +51,8 @@ except ImportError as e:
 # ── Agent 核心导入 ──────────────────────────────────────
 # 注意：运行时创建 Agent 实例应使用本地 re-import（确保 reload 后拿到最新类）。
 # 这里的顶层 import 仅用于类型标注。
+# 轻量任务（会话标题）关闭思考的统一入口，按激活 provider 选原生参数格式
+from fp_core.config import no_thinking_body as _no_think_body
 from fp_core.core.agent import Agent
 from fp_core.core.io import RestIO, WebSocketIO
 from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
@@ -685,7 +687,7 @@ async def create_new_session():
                 messages=summary_msgs,
                 temperature=0.3,
                 max_tokens=32,
-                extra_body={"enable_thinking": False},
+                extra_body=_no_think_body(),
             )
             summary = response.choices[0].message.content or ""
             summary = summary.strip().strip('"').strip("'").strip("「」『』")
@@ -936,7 +938,7 @@ async def switch_session_endpoint(session_id: str):
                 messages=summary_msgs,
                 temperature=0.3,
                 max_tokens=32,
-                extra_body={"enable_thinking": False},
+                extra_body=_no_think_body(),
             )
             summary = response.choices[0].message.content or ""
             summary = summary.strip().strip('"').strip("'").strip("「」『』")

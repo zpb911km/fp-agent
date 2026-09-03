@@ -286,3 +286,76 @@ class TestChatStream:
         assert events[0].type == "done"
         assert events[0].data is not None
         assert events[0].data["content"] == "降级结果"
+
+
+class TestReasoningContentPreserved:
+    """思考模型的 reasoning_content 在 chat/chat_stream 结果中保留"""
+
+    @pytest.mark.asyncio
+    async def test_chat_keeps_reasoning(self):
+        client = _make_fake_client()
+
+        async def fake_create(**kwargs):
+            data = {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "answer",
+                            "reasoning_content": "think-1",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+            return CompletionResponse(data)
+
+        client.chat.completions.create = fake_create
+        svc = LLMService(client, LLMConfig(model="m"))
+        result = await svc.chat([{"role": "user", "content": "hi"}])
+        assert result.message["reasoning_content"] == "think-1"
+        assert result.message["content"] == "answer"
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_keeps_reasoning(self):
+        client = _make_fake_client()
+
+        async def fake_create_stream(**kwargs):
+            chunks = [
+                StreamChunk({"choices": [{"delta": {"reasoning_content": "r1"}}]}),
+                StreamChunk({"choices": [{"delta": {"reasoning_content": "r2"}}]}),
+                StreamChunk({"choices": [{"delta": {"content": "ans"}, "finish_reason": "stop"}]}),
+            ]
+            for c in chunks:
+                yield c
+
+        client.chat.completions.create_stream = fake_create_stream
+        svc = LLMService(client, LLMConfig(model="m"))
+        events = [e async for e in svc.chat_stream([{"role": "user", "content": "hi"}])]
+        done = next(e for e in events if e.type == "done")
+        assert done.data["reasoning_content"] == "r1r2"
+        assert done.data["content"] == "ans"
+
+
+class TestSummarizeNoThinking:
+    """summarize 强制关闭思考（按激活 provider 的原生格式）"""
+
+    @pytest.mark.asyncio
+    async def test_summarize_overrides_extra_body(self):
+        from fp_core import config as _cfg
+
+        client = _make_fake_client()
+        captured = {}
+
+        async def fake_create(**kwargs):
+            captured.update(kwargs)
+            data = {"choices": [{"message": {"role": "assistant", "content": "摘要"}, "finish_reason": "stop"}]}
+            return CompletionResponse(data)
+
+        client.chat.completions.create = fake_create
+        svc = LLMService(client, LLMConfig(model="m", extra_body={"enable_thinking": True}))
+        out = await svc.summarize("some text")
+        assert out == "摘要"
+        # 配置的 enable_thinking:True 被覆盖为关思考参数（具体格式随激活 provider）
+        assert captured["extra_body"] == _cfg.no_thinking_body()
+        assert captured["extra_body"]  # 非空

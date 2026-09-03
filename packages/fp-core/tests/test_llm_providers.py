@@ -121,14 +121,16 @@ class TestResolveParams:
         assert r["api_key"] == "sk-ds"
         assert r["temperature"] == 0.8  # 顶层
         assert r["timeout"] == 60  # provider 级
-        assert r["extra_body"] == {"enable_thinking": False}  # 默认
+        # deepseek → 意图键 enable_thinking 归一化为原生 thinking 格式
+        assert r["extra_body"] == {"thinking": {"type": "disabled"}}  # 默认关闭
 
     def test_model_level_override(self):
         """模型级 temperature/extra_body 覆盖"""
         self._setup_two_level()
         r = config.resolve_llm_params("deepseek", "reasoner")
         assert r["temperature"] == 0.1
-        assert r["extra_body"] == {"enable_thinking": True}
+        # deepseek provider：enable_thinking 意图被翻译为 thinking:{type:enabled}
+        assert r["extra_body"] == {"thinking": {"type": "enabled"}}
 
     def test_provider_level_extra_body_merged_with_model(self):
         """extra_body 浅合并：provider 打底，model 覆盖同名键、保留其余"""
@@ -286,3 +288,105 @@ class TestActiveStateSync:
         provs = {"p1": {"models": {"m": {}}}, "p2": {"models": {"m": {}}}}
         assert config.infer_active_from_top(provs, "m", "", "k2") is None  # key 无命中
         assert config.infer_active_from_top(provs, "x", "", "") is None
+
+
+class TestThinkingNormalization:
+    """enable_thinking 意图键跨 provider 归一化 + no_thinking_body 统一入口"""
+
+    def test_deepseek_intent_translated(self):
+        _reset(
+            LLM_PROVIDERS={
+                "deepseek": {
+                    "api_key": "k",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "models": {"d": {"extra_body": {"enable_thinking": True, "reasoning_effort": "high"}}},
+                }
+            }
+        )
+        r = config.resolve_llm_params("deepseek", "d")
+        assert r is not None
+        # 意图键翻译为原生格式，reasoning_effort 原样保留（客户端平铺到顶层）
+        assert r["extra_body"] == {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}
+        assert "enable_thinking" not in r["extra_body"]
+
+    def test_deepseek_native_passthrough(self):
+        """用户直接写 thinking:{...} 原生格式 → 不被意图键覆盖"""
+        _reset(
+            LLM_PROVIDERS={
+                "deepseek": {
+                    "api_key": "k",
+                    "base_url": "u",
+                    "models": {"d": {"extra_body": {"thinking": {"type": "disabled"}, "enable_thinking": True}}},
+                }
+            }
+        )
+        r = config.resolve_llm_params("deepseek", "d")
+        assert r is not None
+        assert r["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    def test_qwen_keeps_enable_thinking(self):
+        _reset(
+            LLM_PROVIDERS={
+                "aliyun-qwen": {
+                    "api_key": "k",
+                    "base_url": "u",
+                    "models": {"q": {"extra_body": {"enable_thinking": True}}},
+                }
+            }
+        )
+        r = config.resolve_llm_params("aliyun-qwen", "q")
+        assert r is not None
+        assert r["extra_body"] == {"enable_thinking": True}
+
+    def test_no_thinking_body_by_provider(self):
+        _reset(ACTIVE_LLM="deepseek/x", LLM_PROVIDERS={})
+        assert config.no_thinking_body() == {"thinking": {"type": "disabled"}}
+        _reset(ACTIVE_LLM="aliyun-qwen/q")
+        assert config.no_thinking_body() == {"enable_thinking": False}
+        # 无 ACTIVE_LLM → 由顶层 base_url 推断
+        _reset(LLM_API_BASE_URL="https://api.deepseek.com/v1")
+        assert config.no_thinking_body() == {"thinking": {"type": "disabled"}}
+
+    def test_set_active_empty_extra_body_fallback(self):
+        """热切换传空 extra_body → 兜底显式关闭，而非缺省字段"""
+        _reset()
+        config.set_active_llm_state(
+            provider="p",
+            model="m",
+            api_key="k",
+            base_url="u",
+            temperature=0.5,
+            max_tokens=1024,
+            extra_body={},
+        )
+        assert config.LLM_EXTRA_BODY == {"enable_thinking": False}
+
+    def test_provider_false_model_true_wins(self):
+        """provider 打底关思考 + model 显式开 → model 级胜出（兜底不压制用户意图）"""
+        _reset(
+            LLM_PROVIDERS={
+                "aliyun-qwen": {
+                    "api_key": "k",
+                    "base_url": "u",
+                    "extra_body": {"enable_thinking": False},
+                    "models": {"plus": {"extra_body": {"enable_thinking": True}}, "flash": {}},
+                }
+            }
+        )
+        assert config.resolve_llm_params("aliyun-qwen", "plus")["extra_body"] == {"enable_thinking": True}
+        assert config.resolve_llm_params("aliyun-qwen", "flash")["extra_body"] == {"enable_thinking": False}
+
+    def test_native_thinking_key_blocks_default_injection(self):
+        """任一级写了原生 thinking 格式 → 不再注入 enable_thinking 兜底"""
+        _reset(
+            LLM_PROVIDERS={
+                "deepseek": {
+                    "api_key": "k",
+                    "base_url": "u",
+                    "models": {"d": {"extra_body": {"thinking": {"type": "enabled"}}}},
+                }
+            }
+        )
+        r = config.resolve_llm_params("deepseek", "d")["extra_body"]
+        assert r == {"thinking": {"type": "enabled"}}
+        assert "enable_thinking" not in r

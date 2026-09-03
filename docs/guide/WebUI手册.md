@@ -508,7 +508,7 @@ ws://host:port/ws/chat?token=your_token
 
 切换/新建会话时，自动为旧会话生成摘要（5~10 个汉字的名字）：
 
-1. **主方案**：调用 LLM，prompt 为 *"请总结一下，给这次对话起一个5到10个汉字的名字"*
+1. **主方案**：调用 LLM，prompt 为 *"请总结一下，给这次对话起一个5到10个汉字的名字"*（通过 `config.no_thinking_body()` 强制关闭思考——thinking 模型非流式 + 小 max_tokens 会报错/截断）
 2. **回退方案**：取首条用户消息的前 50 个字符
 3. **最终回退**：`"empty_session"`
 
