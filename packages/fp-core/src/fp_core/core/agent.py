@@ -825,7 +825,8 @@ class Agent:
         """确保已触发初始化钩子（线程安全，asyncio.Lock 保护）
 
         向 ON_INIT 传递 tool_registry，供插件注册工具。
-        插件可通过 context.data.system_prompt_append 返回要附加到 system prompt 的文本。
+        插件可通过 context.data.system_prompt_append 返回要附加到 system prompt 的文本
+        （单个 str = 向后兼容覆盖式；list[str] = 多插件收集，见 apply_system_prompt_append）。
         """
         async with self._init_lock:
             if hasattr(self, "_initialized") and self._initialized:
@@ -839,11 +840,10 @@ class Agent:
             )
 
             # 插件可通过 system_prompt_append 追加内容到 system prompt
-            append_text = ctx.data.get("system_prompt_append")
-            if append_text:
-                current = self._conv.system_prompt
-                new_prompt = current + "\n\n" + append_text
-                self._conv.set_system_prompt(new_prompt)
+            # （统一交给 helper：归一化 str/list、过滤空白段、空行拼接）
+            from fp_core.prompts import apply_system_prompt_append
+
+            apply_system_prompt_append(self._conv, ctx.data.get("system_prompt_append"))
 
     async def shutdown(self) -> None:
         """关闭 Agent（清理生命周期钩子 + 释放连接池）"""

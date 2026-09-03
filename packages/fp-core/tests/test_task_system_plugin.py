@@ -86,9 +86,11 @@ class TestTaskSystemPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertIn("task_list", tool_names)
         self.assertIn("task_clear", tool_names)
 
-        # 验证 system_prompt_append
+        # 验证 system_prompt_append（list 收集语义：任一段含关键词即可）
         self.assertIn("system_prompt_append", ctx.data)
-        self.assertIn("task_create", ctx.data["system_prompt_append"])
+        append_parts = ctx.data["system_prompt_append"]
+        self.assertIsInstance(append_parts, list)
+        self.assertTrue(any("task_create" in part for part in append_parts))
 
     async def test_on_before_llm_call_adds_hint(self):
         lifecycle = LifecycleManager()
@@ -258,17 +260,19 @@ class TestTaskSystemPlugin(unittest.IsolatedAsyncioTestCase):
     # ── 测试 6: system_prompt_append ────────────────
 
     async def test_system_prompt_append_content(self):
-        """ON_INIT 应通过 context 返回 system_prompt_append"""
+        """ON_INIT 应通过 context 返回 system_prompt_append（list 收集）"""
         lifecycle = LifecycleManager()
         plugin = TaskSystemPlugin()
         plugin.on_register(lifecycle)
 
         ctx = await lifecycle.emit(LifecycleHook.ON_INIT)
-        append_text = ctx.data.get("system_prompt_append", "")
-        self.assertIn("task_create", append_text)
-        self.assertIn("task_update", append_text)
-        self.assertIn("task_list", append_text)
-        self.assertIn("task_clear", append_text)
+        append_parts = ctx.data.get("system_prompt_append", [])
+        self.assertIsInstance(append_parts, list)
+        joined = "\n".join(append_parts)
+        self.assertIn("task_create", joined)
+        self.assertIn("task_update", joined)
+        self.assertIn("task_list", joined)
+        self.assertIn("task_clear", joined)
 
 
 if __name__ == "__main__":

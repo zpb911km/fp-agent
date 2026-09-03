@@ -75,9 +75,9 @@ class TaskSystemPlugin(Plugin):
         # 2. 标记描述已注入（ON_BEFORE_LLM_CALL 不再重复注入）
         self._description_injected = True
 
-        # 3. 返回 system_prompt_append
-        #    通过 HookContext.data 传递，Agent 会在 emit 后读取并追加到 system prompt
-        ctx.data["system_prompt_append"] = TASK_SYSTEM_DESCRIPTION
+        # 3. 返回 system_prompt_append（list 收集正道：不覆盖其他插件注入）
+        #    通过 HookContext.data 传递，Agent 在 emit 后读取并追加到 system prompt
+        ctx.data.setdefault("system_prompt_append", []).append(TASK_SYSTEM_DESCRIPTION)
 
         return ctx
 
