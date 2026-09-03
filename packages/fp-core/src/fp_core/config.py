@@ -124,6 +124,237 @@ def _value(key: str, default: Any = None) -> Any:
 
 
 # ═══════════════════════════════════════════════════════════════
+# LLM 供应商/模型两级结构
+# ═══════════════════════════════════════════════════════════════
+# 旧版把「供应商」与「模型」焊死为一维 key（LLM_PROVIDERS 每个 value 直接带一个
+# model 字段），导致：
+#   - 一个供应商多个模型 → 复制 api_key/base_url，违反 DRY
+#   - 不同供应商模型同名 → 只能靠人为造合成 key（aliyun-qwen）消歧，匹配脆弱
+# 新版为两级命名空间：
+#   LLM_PROVIDERS = {
+#     "<provider>": {
+#       "api_key": ..., "base_url": ...,
+#       "timeout"?: ..., "retry_count"?: ...,        # 连接类（provider 级）
+#       "temperature"?: ..., "max_tokens"?: ...,     # 生成类（provider 级默认）
+#       "extra_body"?: {...},
+#       "models": { "<model>": { temperature/max_tokens/extra_body 等差异 } }
+#     }
+#   }
+# 激活 = ACTIVE_LLM 键，值为 "provider/model"（唯一引用，取代顶层三键副本）。
+# 兼容：顶层三键 LLM_API_KEY/BASE_URL/MODEL 仍保留，作为「无表时的直连配置」，
+#       也作为激活态的兼容镜像（/model 切换时同步更新，供旧读者读取）。
+
+ACTIVE_LLM_KEY = "ACTIVE_LLM"
+LLM_PROVIDERS_KEY = "LLM_PROVIDERS"
+
+# 模型级差异参数（迁移旧格式时从 provider 对象上剥出这些键下沉到模型）
+_LLM_MODEL_KEYS = ("temperature", "max_tokens", "extra_body")
+
+
+def normalize_providers(raw: Any) -> dict[str, dict[str, Any]]:
+    """把 LLM_PROVIDERS 值规范化为两级结构（纯函数，无副作用）。
+
+    - 新格式（value.models 为 dict）→ 原样（坏 models 条目丢弃）
+    - 旧格式（value.model 为 str）→ 包装为 {"models": {model: 差异参数}}，
+      api_key/base_url/连接参数留在 provider 级，生成参数下沉为模型级差异
+    - 无表 / 非 dict / 无任何有效模型 / 名字含斜杠 → 丢弃
+
+    Returns:
+        规范化后的 dict[str, dict]；空 dict 表示未配置或全部无效。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for pname, pval in raw.items():
+        if not isinstance(pval, dict):
+            continue
+        name = str(pname)
+        if "/" in name:  # 斜杠是 ACTIVE_LLM 的分隔符，provider 名不得含斜杠
+            continue
+        models_raw = pval.get("models")
+        if isinstance(models_raw, dict) and models_raw:
+            models: dict[str, dict[str, Any]] = {}
+            for mname, mval in models_raw.items():
+                mkey = str(mname)
+                if "/" in mkey:
+                    continue
+                models[mkey] = dict(mval) if isinstance(mval, dict) else {}
+            if not models:
+                continue
+            p = {k: v for k, v in pval.items() if k != "models"}
+        else:
+            # ── 旧格式：model → models.{model} ──
+            legacy_model = pval.get("model")
+            if not isinstance(legacy_model, str) or not legacy_model.strip():
+                continue
+            mkey = legacy_model.strip()
+            if "/" in mkey:
+                continue
+            legacy_diff = {k: v for k, v in pval.items() if k in _LLM_MODEL_KEYS}
+            p = {k: v for k, v in pval.items() if k != "model" and k not in _LLM_MODEL_KEYS}
+            models = {mkey: dict(legacy_diff) if legacy_diff else {}}
+        out[name] = {**p, "models": models}
+    return out
+
+
+def get_llm_providers() -> dict[str, dict[str, Any]]:
+    """返回规范化后的 LLM_PROVIDERS 表（空 dict = 未配置/全部无效）。"""
+    return normalize_providers(_json_cfg.get(LLM_PROVIDERS_KEY))
+
+
+def infer_active_from_top(
+    providers: dict[str, dict[str, Any]],
+    top_model: str,
+    top_base: str = "",
+    top_key: str = "",
+) -> str | None:
+    """顶层三键兼容推导：在表中找 model/base_url/api_key 全部命中的 provider。
+
+    旧格式 / 新格式但缺 ACTIVE_LLM 时，顶层三键 = 上次切换留下的激活镜像，
+    据此推导 "provider/model"。找不到 → None（调用方决定兜底行为）。
+    """
+    if not top_model or not providers:
+        return None
+    top_base = top_base.rstrip("/")
+    for pname, p in providers.items():
+        if top_model not in p.get("models", {}):
+            continue
+        if top_base and top_base != str(p.get("base_url", "") or "").rstrip("/"):
+            continue
+        if top_key and top_key != p.get("api_key", ""):
+            continue
+        return f"{pname}/{top_model}"
+    return None
+
+
+def _split_active(active: str) -> tuple[str, str] | None:
+    """拆分 'provider/model' 为二元组；格式不合法 → None。"""
+    provider, sep, model = active.partition("/")
+    if not sep or not provider or not model or "/" in model:
+        return None
+    return provider, model
+
+
+def _merge_extra_body(*bodies: Any) -> dict[str, Any]:
+    """浅合并 extra_body：靠后的覆盖同名键；非 dict 输入忽略。"""
+    merged: dict[str, Any] = {}
+    for b in bodies:
+        if isinstance(b, dict):
+            merged.update(b)
+    return merged
+
+
+def resolve_llm_params(provider: str, model: str) -> dict[str, Any] | None:
+    """解析 (provider, model) 的完整 LLM 参数。
+
+    覆盖链（低→高）：内置默认 → 顶层全局键(TEMPERATURE/…) → provider 级
+    → model 级（extra_body 为浅合并：provider 打底，model 覆盖）。
+    表内无此 provider/model → None。
+    """
+    p = get_llm_providers().get(provider)
+    if p is None:
+        return None
+    m = p.get("models", {}).get(model)
+    if m is None:
+        return None
+
+    def pick(*cands: Any) -> Any:
+        for c in cands:
+            if c is not None:
+                return c
+        return None
+
+    temperature = pick(m.get("temperature"), p.get("temperature"), _value("TEMPERATURE", 0.8))
+    max_tokens = pick(m.get("max_tokens"), p.get("max_tokens"), _value("MAX_TOKENS", 32768))
+    timeout = pick(p.get("timeout"), _value("TIMEOUT", 300))
+    retry_count = pick(p.get("retry_count"), _value("RETRY_COUNT", 3))
+    extra_body = _merge_extra_body(p.get("extra_body"), m.get("extra_body"))
+    if not extra_body:
+        extra_body = {"enable_thinking": False}
+
+    return {
+        "provider": provider,
+        "model": model,
+        "api_key": p.get("api_key", ""),
+        "base_url": str(p.get("base_url", "") or ""),
+        "temperature": float(temperature),
+        "max_tokens": int(max_tokens),
+        "timeout": int(timeout),
+        "retry_count": int(retry_count),
+        "extra_body": dict(extra_body),
+    }
+
+
+def resolve_active_llm() -> dict[str, Any] | None:
+    """解析当前激活 LLM 的完整参数。
+
+    优先 ACTIVE_LLM 键（"provider/model"）；缺失/失效时退化为顶层三键推导
+    （兼容旧配置，不写盘）。无 providers 表 → None（调用方走顶层直连逻辑）。
+    """
+    providers = get_llm_providers()
+    if not providers:
+        return None
+    active = _value(ACTIVE_LLM_KEY, "")
+    if active:
+        pair = _split_active(str(active))
+        if pair:
+            resolved = resolve_llm_params(*pair)
+            if resolved is not None:
+                return resolved
+    inferred = infer_active_from_top(
+        providers,
+        str(_value("LLM_MODEL", "") or ""),
+        str(_value("LLM_API_BASE_URL", "") or ""),
+        _value("LLM_API_KEY", ""),
+    )
+    if inferred:
+        pair = _split_active(inferred)
+        if pair:
+            resolved = resolve_llm_params(*pair)
+            if resolved is not None:
+                return resolved
+    return None
+
+
+def set_active_llm_state(
+    provider: str,
+    model: str,
+    api_key: str,
+    base_url: str,
+    temperature: float,
+    max_tokens: int,
+    extra_body: dict[str, Any] | None = None,
+    timeout: int | None = None,
+    retry_count: int | None = None,
+) -> None:
+    """把模块内存态同步到新激活项（供 /model 热切换成功后调用）。
+
+    更新：
+    - _json_cfg["ACTIVE_LLM"] = "provider/model"（唯一真源）
+    - _json_cfg 顶层三键 LLM_API_KEY/BASE_URL/MODEL = 激活镜像（兼容旧读者）
+    - LLM_* 模块常量（LLM_MODEL/TEMPERATURE/MAX_TOKENS/…）→ 生效值
+
+    注意：顶层 TEMPERATURE/MAX_TOKENS 是「用户全局默认」，不做镜像写回
+    （避免上次激活的生效值污染后续无自定义参数模型的解析兜底）。
+    """
+    _json_cfg[ACTIVE_LLM_KEY] = f"{provider}/{model}"
+    _json_cfg["LLM_API_KEY"] = api_key
+    _json_cfg["LLM_API_BASE_URL"] = base_url
+    _json_cfg["LLM_MODEL"] = model
+    globals()["LLM_ACTIVE_ID"] = f"{provider}/{model}"
+    globals()["LLM_API_KEY"] = api_key
+    globals()["LLM_API_BASE_URL"] = base_url
+    globals()["LLM_MODEL"] = model
+    globals()["LLM_TEMPERATURE"] = float(temperature)
+    globals()["LLM_MAX_TOKENS"] = int(max_tokens)
+    globals()["LLM_EXTRA_BODY"] = dict(extra_body) if extra_body is not None else {}
+    if timeout is not None:
+        globals()["LLM_TIMEOUT"] = int(timeout)
+    if retry_count is not None:
+        globals()["LLM_RETRY_COUNT"] = int(retry_count)
+
+
+# ═══════════════════════════════════════════════════════════════
 # LLM 配置
 # ═══════════════════════════════════════════════════════════════
 
@@ -134,6 +365,25 @@ LLM_TEMPERATURE: float = _value("TEMPERATURE", 0.8)
 LLM_MAX_TOKENS: int = _value("MAX_TOKENS", 32768)
 LLM_TIMEOUT: int = _value("TIMEOUT", 300)
 LLM_RETRY_COUNT: int = _value("RETRY_COUNT", 3)
+
+# ── 两级结构：解析激活 & 回填 LLM_* 常量 ────────────────────────
+# 有 LLM_PROVIDERS 表时，顶层三键仅是兼容镜像，真源 = ACTIVE_LLM 引用
+# （或从顶层三键推导出的 "provider/model"）。模块加载时解析一次，把激活项的
+# 完整参数回填到 LLM_* 常量 —— agent.py 等既读常量者零改动即获正确激活。
+_resolved_active = resolve_active_llm()
+if _resolved_active is not None:
+    LLM_ACTIVE_ID: str = f"{_resolved_active['provider']}/{_resolved_active['model']}"
+    LLM_EXTRA_BODY: dict[str, Any] = dict(_resolved_active["extra_body"])
+    LLM_API_KEY = _resolved_active["api_key"]
+    LLM_API_BASE_URL = _resolved_active["base_url"]
+    LLM_MODEL = _resolved_active["model"]
+    LLM_TEMPERATURE = float(_resolved_active["temperature"])
+    LLM_MAX_TOKENS = int(_resolved_active["max_tokens"])
+    LLM_TIMEOUT = int(_resolved_active["timeout"])
+    LLM_RETRY_COUNT = int(_resolved_active["retry_count"])
+else:
+    LLM_ACTIVE_ID = ""
+    LLM_EXTRA_BODY = {"enable_thinking": False}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -233,6 +483,13 @@ def check_llm_config() -> bool:
     global _validation_issues
     if _validation_issues:
         log.warning(f"配置文件中存在 {len(_validation_issues)} 个配置问题（通过 check_llm_config() 可知详情）")
+
+    # LLM_PROVIDERS 表存在但激活解析失败 → 顶层三键兜底（提示，不阻断）
+    if _json_cfg.get(LLM_PROVIDERS_KEY) and not LLM_ACTIVE_ID:
+        log.warning(
+            "ACTIVE_LLM 无法解析（指向的 provider/model 不在 LLM_PROVIDERS 表中），"
+            "当前按顶层 LLM_API_KEY/BASE_URL/MODEL 直连运行。"
+        )
 
     return ok
 

@@ -134,6 +134,7 @@ class Agent:
             model=config.LLM_MODEL,
             temperature=config.LLM_TEMPERATURE,
             max_tokens=config.LLM_MAX_TOKENS,
+            extra_body=config.LLM_EXTRA_BODY,
         )
         self._llm = LLMService(self.client, llm_config)
 
@@ -157,6 +158,7 @@ class Agent:
                         model=model_override,
                         temperature=getattr(role, "temperature", None) or config.LLM_TEMPERATURE,
                         max_tokens=config.LLM_MAX_TOKENS,
+                        extra_body=config.LLM_EXTRA_BODY,
                     ),
                 )
 
