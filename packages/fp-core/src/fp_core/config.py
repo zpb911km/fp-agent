@@ -1,6 +1,6 @@
 """
 Agent v2 配置管理
-优先级: 环境变量 > ~/.config/fp/config.json > 内置硬编码默认值
+优先级: ~/.config/fp/config.json > 环境变量 > 内置硬编码默认值
 """
 
 import json
