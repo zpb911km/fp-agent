@@ -143,6 +143,13 @@ def _iter_claims(line: str):
                 break
 
 
+# 用户级扩展命令白名单：由 fp-ext 资产分发系统提供，非仓库内置，
+# 但属于本项目认可的官方部署组件，用户环境真实存在（如 ~/.local/share/fp/public/commands/model.py）。
+# 文档引用它们描述部署环境实际行为（如配置系统的 /model 热切换），不应误判为幽灵。
+# 新增官方扩展命令时在此登记，并在注释注明其分发位置。
+EXT_CMDS = {"model"}  # /model：LLM 供应商/模型查看与切换（author zpb，public/commands）
+
+
 def test_hook_command_tool_counts_known():
     """事实源自洽性：让失败信息可读（若权威计算本身有问题，先暴露）"""
     assert HOOKS > 0
@@ -169,6 +176,7 @@ def test_no_ghost_components_in_docs():
     """文档不应引用源码中不存在的命令/工具名（幽灵组件）"""
     cmd_dir = SRC / "commands"
     real_cmds = {f[:-3] for f in os.listdir(cmd_dir) if f.endswith(".py") and f != "__init__.py"}
+    real_cmds.update(EXT_CMDS)  # 官方用户级扩展命令（见模块级注释）
     # 插件注入命令（如 shortcircuit 插件注册的 sc）也是合法触发词
     real_cmds.update(_plugin_injected_commands())
     # name 可能与文件名不同（如 shortcircuit.py 的 name="sc"）；aliases 也是合法触发词

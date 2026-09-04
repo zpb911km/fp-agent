@@ -34,6 +34,10 @@ PLUGIN_DEFINITION = {
                 "name": {"type": "string", "description": "记忆名称，英文短词，在同一分类下唯一"},
                 "description": {"type": "string", "description": "一句话描述"},
                 "content": {"type": "string", "description": "记忆正文内容"},
+                "hint": {
+                    "type": "string",
+                    "description": "可选：路径/命令等短硬事实（≤40 字符），写入 frontmatter 并在顶层索引行内联展示。",
+                },
             },
             "required": ["root", "category", "name", "description", "content"],
         },
@@ -80,17 +84,46 @@ async def execute(params: dict[str, Any]) -> str:
     safe_name = name.replace(" ", "_").replace("/", "_")
     path = os.path.join(memory_dir, f"{safe_name}.md")
     date = datetime.now().strftime("%Y-%m-%d %H:%M")
+    hint = str(params.get("hint") or "").strip()[:80]
 
     loop = asyncio.get_running_loop()
 
+    def _read_old_meta() -> dict[str, Any]:
+        """读取既有文件 frontmatter（保留原 created）；文件不存在/损坏 → {}。"""
+        try:
+            with open(path, encoding="utf-8") as f:
+                content = f.read()
+        except OSError:
+            return {}
+        lines = content.split("\n")
+        if not lines or lines[0].strip() != "---":
+            return {}
+        end = 1
+        while end < len(lines) and lines[end].strip() != "---":
+            end += 1
+        if end >= len(lines):
+            return {}
+        import yaml
+
+        try:
+            fm = yaml.safe_load("\n".join(lines[1:end]))
+            return fm if isinstance(fm, dict) else {}
+        except Exception:
+            return {}
+
     def _write():
+        old = _read_old_meta()
+        created = old.get("created") if isinstance(old.get("created"), str) and old["created"].strip() else date
         os.makedirs(memory_dir, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write("---\n")
             f.write(f"name: {safe_name}\n")
             f.write(f"description: {description}\n")
             f.write(f"type: {category}\n")
-            f.write(f"created: {date}\n")
+            f.write(f"created: {created}\n")
+            f.write(f"updated: {date}\n")
+            if hint:
+                f.write(f"hint: {hint}\n")
             f.write("---\n\n")
             f.write(content + "\n")
 

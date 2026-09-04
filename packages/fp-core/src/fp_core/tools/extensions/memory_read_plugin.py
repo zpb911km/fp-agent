@@ -15,9 +15,13 @@ Memory Read 插件 v2 — 读取/搜索长期记忆（异步版本）
 import asyncio
 import os
 import re
+from datetime import datetime
 from typing import Any, cast
 
 from fp_core import config
+
+# 记忆新鲜度阈值：updated 距今超过该天数时，精确读取会附加过期提醒
+STALE_DAYS = 30
 
 # ── 插件定义（OpenAI function calling schema） ──────────────────────
 
@@ -104,11 +108,17 @@ def _list_memories(memory_dir: str, root_label: str = ".") -> list[dict[str, str
         fm = _parse_frontmatter(content)
         mem_type: str = fm.get("type", "unknown")
         description: str = fm.get("description", "")
+        created: str = fm.get("created", "")
+        updated: str = fm.get("updated", "") or created
+        hint: str = fm.get("hint", "")
 
         memories.append({
             "name": name,
             "type": mem_type,
             "description": description,
+            "created": created,
+            "updated": updated,
+            "hint": hint,
             "path": fpath,
             "content": content,
             "root": root_label,
@@ -152,6 +162,27 @@ def _categorize(memories: list[dict[str, str]], root_label: str) -> dict[str, li
     return groups
 
 
+def _entry_label(m: dict[str, str]) -> str:
+    """索引行条目：name 或 name→hint（hint 为短硬事实，截断至 40 字符）"""
+    hint = m.get("hint") or ""
+    if hint:
+        h = hint if len(hint) <= 40 else hint[:40] + "…"
+        return f"{m['name']}→{h}"
+    return m["name"]
+
+
+def _stale_note(updated: str) -> str:
+    """updated 距今超过 STALE_DAYS 天时返回过期提醒，解析失败/未超期 → 空串。"""
+    try:
+        dt = datetime.strptime(updated.strip(), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return ""
+    days = (datetime.now() - dt).days
+    if days > STALE_DAYS:
+        return f"⚠️ 记忆已 {days} 天未更新（> {STALE_DAYS} 天）。若涉及环境/权限/路径/端口，使用前请先验证是否仍有效。"
+    return ""
+
+
 def _build_tree_index(global_memories: list[dict[str, str]], local_memories: list[dict[str, str]]) -> str:
     """构建顶层树状索引"""
     lines = ["## 我的长期记忆索引", ""]
@@ -161,7 +192,7 @@ def _build_tree_index(global_memories: list[dict[str, str]], local_memories: lis
     global_count = len(global_memories)
     lines.append(f"~/（全局，{global_count}条）")
     for cat in sorted(global_groups):
-        names = ", ".join(m["name"] for m in global_groups[cat])
+        names = ", ".join(_entry_label(m) for m in global_groups[cat])
         lines.append(f"  {cat}:    {names}")
     lines.append("")
 
@@ -171,7 +202,7 @@ def _build_tree_index(global_memories: list[dict[str, str]], local_memories: lis
     if local_count > 0:
         lines.append(f"./（本地 📍 .fp/memory，{local_count}条）")
         for cat in sorted(local_groups):
-            names = ", ".join(m["name"] for m in local_groups[cat])
+            names = ", ".join(_entry_label(m) for m in local_groups[cat])
             lines.append(f"  {cat}:    {names}")
         lines.append("")
 
@@ -189,7 +220,8 @@ def _build_category_browse(category: str, memories: list[dict[str, str]], root_l
     """浏览某个分类下的所有记忆"""
     lines = [f"📂 {root_label}/{category}/（共 {len(memories)} 条）", ""]
     for m in memories:
-        lines.append(f"{m['name']:30s} — {m['description']}")
+        suffix = f"（🕒 {m['updated']}）" if m.get("updated") else ""
+        lines.append(f"{_entry_label(m):30s} — {m['description']}{suffix}")
     return "\n".join(lines)
 
 
@@ -237,7 +269,15 @@ async def execute(params: dict[str, Any]) -> str:
         body = _parse_memory_body(selected["content"])
         root_tag = "~" if selected["root"] == "~" else "📍 ./"
         header = f"[{root_tag}/{selected['type']}] {selected['name']} — {selected['description']}"
-        return f"📋 {header}\n\n{body}"
+        lines = [f"📋 {header}"]
+        if selected.get("updated"):
+            lines.append(f"🕒 {selected['created'] or '?'} 创建 / {selected['updated']} 更新")
+            note = _stale_note(selected["updated"])
+            if note:
+                lines.append(note)
+        lines.append("")
+        lines.append(body)
+        return "\n".join(lines)
 
     # ── 入口③：memory_read(path="~/skill") — 浏览分类 ──
     if path:

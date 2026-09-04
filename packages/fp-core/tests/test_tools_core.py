@@ -24,6 +24,7 @@ from fp_core.tools.core import (
     _execute_write_file,
     _file_registry,
     _mask_quoted,
+    _suggest_paths,
     execute_core_tool,
     get_core_definitions,
 )
@@ -131,6 +132,43 @@ class TestReadFile:
     async def test_read_not_found(self):
         result = await _execute_read_file("/nonexistent/file.txt")
         assert "文件不存在" in result
+
+    @pytest.mark.asyncio
+    async def test_read_not_found_suggests_similar(self, tmp_path):
+        """父目录存在但文件名打错 → 模糊匹配相似文件名候选"""
+        (tmp_path / "config_backup.json").write_text("x", encoding="utf-8")
+        (tmp_path / "settings.json").write_text("x", encoding="utf-8")
+        result = await _execute_read_file(str(tmp_path / "config.json"))
+        assert "文件不存在" in result
+        assert "候选路径" in result
+        assert "config_backup.json" in result
+
+    @pytest.mark.asyncio
+    async def test_read_not_found_relative_path_hints_cwd(self, tmp_path, monkeypatch):
+        """相对路径不存在的文件 → 提示当前工作目录与绝对路径用法"""
+        monkeypatch.chdir(tmp_path)
+        result = await _execute_read_file("no_such_file.py")
+        assert "文件不存在" in result
+        assert "当前工作目录" in result
+        assert str(tmp_path) in result
+
+    @pytest.mark.asyncio
+    async def test_read_not_found_missing_parent(self, tmp_path):
+        """父目录段拼错 → 模糊纠错给出最近候选目录"""
+        real = tmp_path / "agent"
+        real.mkdir()
+        result = await _execute_read_file(str(tmp_path / "agen" / "sub" / "x.py"))
+        assert "文件不存在" in result
+        assert "候选路径" in result
+        assert str(real) in result
+
+    def test_suggest_paths_returns_something_when_dir_missing(self, tmp_path):
+        """父目录存在但无候选文件 → 给出可操作指引而非裸错误"""
+        d = tmp_path / "empty_proj"
+        d.mkdir()
+        out = _suggest_paths(str(d / "zzz_absent.py"))
+        assert out != ""
+        assert "未找到" in out
 
     @pytest.mark.asyncio
     async def test_read_offset_beyond(self, tmp_path):

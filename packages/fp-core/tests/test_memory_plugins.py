@@ -7,6 +7,7 @@
 """
 
 import os
+from datetime import datetime
 
 import pytest
 
@@ -147,6 +148,58 @@ class TestMemorySave:
         assert "新内容" in content
         assert "旧内容" not in content
 
+    @pytest.mark.asyncio
+    async def test_save_writes_created_and_updated(self, memory_env):
+        """新建文件应同时写 created 与 updated（freshness 追踪）"""
+        await mem_save.execute({
+            "root": "~",
+            "category": "skill",
+            "name": "fresh",
+            "description": "d",
+            "content": "c",
+        })
+        with open(os.path.join(memory_env["global"], "fresh.md"), encoding="utf-8") as f:
+            content = f.read()
+        assert "created: " in content
+        assert "updated: " in content
+        # 新建时 created == updated
+        c = content.split("created: ")[1].split("\n")[0]
+        u = content.split("updated: ")[1].split("\n")[0]
+        assert c == u
+
+    @pytest.mark.asyncio
+    async def test_save_overwrite_keeps_created_refreshes_updated(self, memory_env):
+        """覆盖更新应保留原 created、刷新 updated"""
+        _write_mem(memory_env["global"], "dup2", "skill", "旧", "旧内容")
+        await mem_save.execute({
+            "root": "~",
+            "category": "skill",
+            "name": "dup2",
+            "description": "新",
+            "content": "新内容",
+        })
+        with open(os.path.join(memory_env["global"], "dup2.md"), encoding="utf-8") as f:
+            content = f.read()
+        assert "created: 2024-01-01 10:00" in content  # 保留原 created
+        assert "updated: " in content
+        u = content.split("updated: ")[1].split("\n")[0]
+        assert u != "2024-01-01 10:00"
+
+    @pytest.mark.asyncio
+    async def test_save_with_hint(self, memory_env):
+        """可选 hint（路径/命令等短硬事实）写入 frontmatter"""
+        await mem_save.execute({
+            "root": "~",
+            "category": "user",
+            "name": "with_hint",
+            "description": "d",
+            "content": "c",
+            "hint": "/media/zpb/data/codes/AI/agent",
+        })
+        with open(os.path.join(memory_env["global"], "with_hint.md"), encoding="utf-8") as f:
+            content = f.read()
+        assert "hint: /media/zpb/data/codes/AI/agent" in content
+
 
 # ═══════════════════════════════════════════════════════════
 # memory_read — 工具函数
@@ -214,6 +267,46 @@ class TestMemoryReadHelpers:
         out = mem_read._build_category_browse("skill", mems, "~")
         assert "~/skill/（共 1 条）" in out
         assert "n1" in out
+
+    def test_entry_label_no_hint(self):
+        assert mem_read._entry_label({"name": "n1", "hint": ""}) == "n1"
+
+    def test_entry_label_with_hint(self):
+        m = {"name": "my_code_location", "hint": "/media/zpb/data/codes/AI/agent"}
+        assert mem_read._entry_label(m) == "my_code_location→/media/zpb/data/codes/AI/agent"
+
+    def test_entry_label_hint_truncated(self):
+        m = {"name": "x", "hint": "a" * 100}
+        assert len(mem_read._entry_label(m)) < 60
+        assert "…" in mem_read._entry_label(m)
+
+    def test_stale_note_over_threshold(self):
+        note = mem_read._stale_note("2024-01-01 10:00")
+        assert note.startswith("⚠️ 记忆已")
+
+    def test_stale_note_fresh(self):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        assert mem_read._stale_note(now) == ""
+
+    def test_stale_note_bad_format(self):
+        assert mem_read._stale_note("not-a-date") == ""
+
+    def test_build_tree_index_shows_hint(self, memory_env):
+        """索引行应内联 hint 硬事实，免一次 memory_read"""
+        mems = [
+            {
+                "name": "loc",
+                "type": "user",
+                "description": "d",
+                "hint": "/path/to/x",
+                "created": "2026-01-01 10:00",
+                "updated": "2026-01-01 10:00",
+                "content": "---\n---\n",
+                "root": "~",
+            }
+        ]
+        idx = mem_read._build_tree_index(mems, [])
+        assert "loc→/path/to/x" in idx
 
 
 # ═══════════════════════════════════════════════════════════

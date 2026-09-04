@@ -16,6 +16,7 @@
 
 import asyncio
 import contextlib
+import difflib
 import hashlib
 import locale
 import os
@@ -360,6 +361,53 @@ async def _execute_bash(command: str, timeout: int = 300, force: bool = False) -
             return f"错误：{e}"
 
 
+def _suggest_paths(file_path: str) -> str:
+    """为 read_file 的 FileNotFoundError 生成候选提示。
+
+    策略：
+      - 相对路径 → 提示当前工作目录（read_file 应使用绝对路径）
+      - 绝对路径且父目录不存在 → 向上找最近存在的目录，用输入各路径段模糊匹配候选
+      - 父目录存在但文件缺失 → 模糊匹配同目录相似文件名，或提示先 ls 确认
+    """
+    lines: list[str] = []
+    cwd = os.getcwd()
+
+    if not os.path.isabs(file_path):
+        lines.append(f"提示：read_file 应使用绝对路径；当前工作目录: {cwd}")
+
+    probe = os.path.dirname(file_path) if os.path.isabs(file_path) else cwd
+    segs = [p for p in file_path.replace("\\", "/").split("/") if p]
+
+    while probe and not os.path.isdir(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+
+    if probe and os.path.isdir(probe):
+        try:
+            cands = os.listdir(probe)
+        except OSError:
+            cands = []
+        hits: list[str] = []
+        for seg in segs:
+            for c in difflib.get_close_matches(seg, cands, n=5, cutoff=0.4):
+                full = os.path.join(probe, c)
+                if full not in hits:
+                    hits.append(full)
+        if hits:
+            lines.append("候选路径: " + ", ".join(hits[:5]))
+        elif probe != (os.path.dirname(file_path) if os.path.isabs(file_path) else cwd):
+            lines.append(f"最近存在的父目录: {probe}（中间路径可能拼错，请先 ls 确认实际目录）")
+        else:
+            target = segs[-1] if segs else ""
+            lines.append(f"目标目录存在但未找到 {target!r}，可先 ls {probe!r} 查看实际文件名")
+    else:
+        lines.append("路径根目录不可访问，请检查绝对路径是否完整")
+
+    return "\n".join(lines) if lines else ""
+
+
 async def _execute_read_file(file_path: str, offset: int | None = None, limit: int | None = None) -> str:
     """异步读取文件。末尾附带文件哈希（6字符），供 edit_file 陈旧检测。"""
     if not file_path:
@@ -411,7 +459,9 @@ async def _execute_read_file(file_path: str, offset: int | None = None, limit: i
 
         return await loop.run_in_executor(None, _read)
     except FileNotFoundError:
-        return f"错误：文件不存在 {file_path}"
+        msg = f"错误：文件不存在 {file_path}"
+        hint = _suggest_paths(file_path)
+        return f"{msg}\n{hint}" if hint else msg
     except Exception as e:
         return f"错误：{e}"
 
