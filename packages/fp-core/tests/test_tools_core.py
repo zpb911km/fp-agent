@@ -16,12 +16,14 @@ import pytest
 
 from fp_core.tools.core import (
     CORE_TOOLS,
+    _check_side_effect,
     _compute_file_hash,
     _execute_bash,
     _execute_edit_file,
     _execute_read_file,
     _execute_write_file,
     _file_registry,
+    _mask_quoted,
     execute_core_tool,
     get_core_definitions,
 )
@@ -299,7 +301,7 @@ class TestBash:
         with (
             patch("fp_core.tools.core.asyncio.wait_for", new_callable=AsyncMock, side_effect=asyncio.TimeoutError),
             patch("fp_core.tools.core._kill_process_group") as mock_kill,
-            patch("fp_core.tools.core.asyncio.create_subprocess_shell") as mock_create,
+            patch("fp_core.tools.core.asyncio.create_subprocess_exec") as mock_create,
         ):
             mock_proc = MagicMock()
             mock_proc.wait = AsyncMock(return_value=None)
@@ -312,9 +314,101 @@ class TestBash:
 
     @pytest.mark.asyncio
     async def test_exception_returns_error(self):
-        with patch("fp_core.tools.core.asyncio.create_subprocess_shell", side_effect=OSError("boom")):
+        with patch("fp_core.tools.core.asyncio.create_subprocess_exec", side_effect=OSError("boom")):
             result = await _execute_bash("anything")
         assert "错误：" in result
+
+    @pytest.mark.asyncio
+    async def test_unix_branch_uses_explicit_bash(self):
+        """非 Windows 分支必须显式 create_subprocess_exec(find_bash()...) 而非 shell。
+
+        回归锚点：旧实现用 create_subprocess_shell 走 /bin/sh（dash），
+        导致 ${var:0:6} / [[ ]] / heredoc 等 bash 语法 Bad substitution。
+        """
+        from fp_core.platform_utils import is_windows
+
+        if is_windows():
+            pytest.skip("仅验证 Unix 分支")
+        with (
+            patch("fp_core.tools.core.is_windows", return_value=False),
+            patch("fp_core.tools.core.find_bash", return_value="/bin/bash"),
+            patch("fp_core.tools.core.asyncio.create_subprocess_exec") as mock_exec,
+        ):
+            mock_proc = MagicMock()
+            mock_proc.wait = AsyncMock(return_value=0)
+            mock_exec.return_value = mock_proc
+            await _execute_bash("echo hi")
+
+        mock_exec.assert_awaited_once()
+        args = mock_exec.await_args.args
+        assert args[0] == "/bin/bash"
+        assert args[1] == "-c"
+
+
+# ═══════════════════════════════════════════════════════════
+# 副作用检查（危险命令拦截）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestSideEffect:
+    """_check_side_effect：真阳性必须拦、引用性文本必须放。
+
+    回归锚点：旧版全文正则把 grep/echo/git commit 消息里的
+    pkill、rm -rf / 等字面量一并拦截，正常检索被迫拆词。
+    """
+
+    R = "rm -rf"  # 拆开写：防本测试源码被别处全文 grep 误伤可读性
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "pkill -f nginx",
+            "echo hi && pkill -f foo",
+            "sudo pkill -f python",
+            "sudo " + "rm -rf /",
+            R + " /",
+            R + " ~",
+            R + " .",
+            R + " ../",
+            "cd /tmp; " + R + " .",
+            "sudo mkfs.ext4 /dev/sdb1",
+            "dd if=/dev/zero of=/dev/sda",
+            "shutdown -h now",
+            "sudo shutdown now",
+            "chmod -R 777 /",
+            "chown -R root /",
+            "( pkill -f x )",
+            "$(pkill foo)",
+            "x=$(echo hi) && pkill -f y",
+        ],
+    )
+    def test_blocks_dangerous(self, cmd):
+        assert _check_side_effect(cmd), f"应拦截: {cmd}"
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "grep -rn 'pkill' packages/ --include='*.py'",
+            "grep -rn pkill file.txt",
+            "echo 'rm -rf / is dangerous'",
+            "sed -i 's/pkill/foo/' x.sh",
+            "git commit -m 'fix: prevent pkill suicide in checker'",
+            "python3 -c \"print('shutdown' in text)\"",
+            "cat notes.md | grep 'dd if='",
+            "echo 'rm -rf /tmp/xxx' > cleanup.sh",
+            R + " /tmp/build-cache",  # 正常删除 /tmp 子目录
+            "dd if=in.img of=out.img",
+            "grep -rn 'shutdown|reboot' docs/",
+            'grep -rn "rm -rf /" scripts/',
+        ],
+    )
+    def test_allows_referential_text(self, cmd):
+        assert not _check_side_effect(cmd), f"不应拦截: {cmd}"
+
+    def test_mask_quoted_preserves_length(self):
+        masked = _mask_quoted("echo 'rm -rf /' && ls")
+        assert len(masked) == len("echo 'rm -rf /' && ls")
+        assert "rm" not in masked
 
 
 # ═══════════════════════════════════════════════════════════

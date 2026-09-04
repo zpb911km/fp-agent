@@ -93,6 +93,7 @@ class ParamSpec:
     type: str
     required: bool
     description: str
+    error_hint: str = ""  # 缺失时附加到报错的补救指引（校验层已知答案就应送到报错里）
 
     def to_openai(self) -> OpenAIParameter:
         return {"type": self.type, "description": self.description}
@@ -132,7 +133,11 @@ class ToolSpec:
         """
         missing = [p.name for p in self.params if p.required and p.name not in params]
         if missing:
-            raise ValueError(f"工具 {self.name} 缺少必填参数: {', '.join(missing)}")
+            hint = next((p.error_hint for p in self.params if p.name == missing[0] and p.error_hint), "")
+            msg = f"工具 {self.name} 缺少必填参数: {', '.join(missing)}"
+            if hint:
+                msg += f"\n{hint}"
+            raise ValueError(msg)
         kwargs = {p.name: params[p.name] for p in self.params if p.name in params}
         return await self.handler(**kwargs)
 
@@ -164,28 +169,53 @@ async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
 # command 全文，因此 pkill -f <任何词> 几乎必然命中执行它的 shell——故 pkill 直接 BLOCK。
 
 # BLOCK：毁灭级（数据/系统级破坏）或极高自伤风险，必须 force=true 才放行
+#
+# 命令位锚定：纯文本正则会误伤引用性内容（grep/文档字符串里写 pkill、echo "rm -rf /"
+# 曾被整体拦截）。改为只匹配"出现在命令位"的命令词——行首、;&| 之后、$(`/反引号
+# 之后，可带 sudo/time/env 类前缀。引号内的字面量不处于命令位 → 放行。
+# 定位是提醒层而非安全层：漏报可由 force 流程兜底，误报却直接阻塞正常工作。
+_CMD_PREFIX = r"(?:^|[;&|`(]|\$\{?[A-Za-z0-9_]*:)[ \t]*(?:(?:sudo|doas|time|nohup|env|command)[ \t]+)*"
+
 _BLOCK_PATTERNS: list[tuple[str, str]] = [
-    (r"rm\s+-rf\s+(/\s*$|/\s+|/\*|~+\s*$|\.\s*$)", "rm -rf 根目录/家目录/当前目录"),
-    (r"(^|[;&|]\s*)mkfs(\.\w+)?\b", "磁盘格式化 mkfs"),
-    (r"(^|[;&|]\s*)fdisk\b", "磁盘分区 fdisk"),
-    (r"(^|[;&|]\s*)parted\b", "磁盘分区 parted"),
-    (r"\bdd\b[^|;]*\bof=/dev/", "dd 直接写 /dev/ 设备"),
-    (r"(^|[;&|]\s*)(shutdown|reboot|poweroff|halt)\b", "关机/重启/停机"),
+    (
+        rf"{_CMD_PREFIX}rm[ \t]+(?=\S*[rR])(?=\S*[fF])\S+[ \t]+(?:/(?:\*)?(?=$|[\s;&|`])|~+(?:/)?(?=$|[\s;&|`])|\.{{1,2}}/?(?=$|[\s;&|`]))",  # noqa: E501
+        "rm -rf 根目录/家目录/当前目录",
+    ),
+    (rf"{_CMD_PREFIX}mkfs(\.\w+)?\b", "磁盘格式化 mkfs"),
+    (rf"{_CMD_PREFIX}fdisk\b", "磁盘分区 fdisk"),
+    (rf"{_CMD_PREFIX}parted\b", "磁盘分区 parted"),
+    (rf"{_CMD_PREFIX}dd\b[^\n]*\bof=/dev/", "dd 直接写 /dev/ 设备"),
+    (rf"{_CMD_PREFIX}(shutdown|reboot|poweroff|halt)\b", "关机/重启/停机"),
     (r":\(\s*\)\s*\{\s*:\s*\|", "fork 炸弹"),
-    (r"chmod\s+-R\s+777\s+(/\s*$|/\s+|/\*)", "chmod -R 777 根目录"),
-    (r"chown\s+-R\b[^|;]*\s/\s*$", "chown -R 整个根目录"),
-    (r"\bpkill\b", "pkill 不排除自身进程，bash 工具内执行极易杀死执行命令的 shell（曾真实发生）"),
+    (rf"{_CMD_PREFIX}chmod[ \t]+-R[ \t]+777[ \t]+(/[\s;&|]*|/[*])", "chmod -R 777 根目录"),
+    (rf"{_CMD_PREFIX}chown[ \t]+-R\b[^\n]*\s/[\s;&|]*$", "chown -R 整个根目录"),
+    (rf"{_CMD_PREFIX}pkill\b", "pkill 不排除自身进程，bash 工具内执行极易杀死执行命令的 shell（曾真实发生）"),
 ]
+
+
+def _mask_quoted(command: str) -> str:
+    """把引号字面量替换为等长空格，使引号内文本不再参与命令位匹配。
+
+    单引号→双引号两轮屏蔽（串内引号天然交替，简单交替即可覆盖常见形态）。
+    长度保持不变，避免影响 ^ 锚定与后续偏移。
+    """
+    masked = re.sub(r"'[^']*'", lambda m: " " * len(m.group(0)), command)
+    masked = re.sub(r'"[^"]*"', lambda m: " " * len(m.group(0)), masked)
+    return masked
 
 
 def _check_side_effect(command: str) -> str:
     """检查命令是否命中 BLOCK 规则。返回拦截原因；无风险返回空字符串。
 
+    匹配采用命令位锚定（见 _CMD_PREFIX 注释）+ 引号字面量剥离，
+    多行命令用 re.MULTILINE 让 ^ 匹配每行开头（兼容 heredoc/脚本片段写法）。
+
     设计取舍：只保留执行前拦截（BLOCK）——同步工具协议下事后提示无意义，
     且工具调用记录本身常驻上下文，透明可审计，故不设 WARN 层。
     """
+    masked = _mask_quoted(command)
     for pat, reason in _BLOCK_PATTERNS:
-        if re.search(pat, command):
+        if re.search(pat, masked, re.MULTILINE):
             return reason
     return ""
 
@@ -251,7 +281,12 @@ async def _execute_bash(command: str, timeout: int = 300, force: bool = False) -
                     )
                     cmd_prefix = "[cmd.exe 回退] "
             else:
-                proc = await asyncio.create_subprocess_shell(
+                # 显式用 bash 而非 create_subprocess_shell（后者走 /bin/sh，
+                # Linux 上常为 dash：不支持 ${var:0:6}、[[ ]]、heredoc 差异等
+                # bash 语法，曾导致部署脚本反复 Bad substitution 返工）
+                proc = await asyncio.create_subprocess_exec(
+                    find_bash() or "bash",
+                    "-c",
                     command,
                     stdout=out_f,
                     stderr=err_f,
@@ -533,6 +568,7 @@ CORE_TOOLS: list[ToolSpec] = [
                 True,
                 "文件的哈希标识（6字符，read_file 末尾返回的【文件哈希】）。"
                 "必需：只有此 hash 在文件注册表中存在且匹配当前文件内容时编辑才生效。",
+                error_hint="补救：先 read_file 目标文件，取其末尾【文件哈希】作为 file_hash 重试。",
             ),
             ParamSpec(
                 "old_string",

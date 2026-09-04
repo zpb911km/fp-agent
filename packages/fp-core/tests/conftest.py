@@ -6,6 +6,52 @@ from unittest.mock import patch
 
 import pytest
 
+# ── config 模块级 LLM_* 常量的"出厂快照" ──────────────────────────
+# conftest 在测试 import 前加载，此刻 config 未被任何 set_active_llm_state()
+# 污染，可作为还原基准。_MISSING 标记出厂时未定义的常量（LLM_EXTRA_BODY
+# 在无激活项配置时才定义），还原时需删除而非 setattr。
+_LLM_CONST_NAMES = (
+    "LLM_ACTIVE_ID",
+    "LLM_API_KEY",
+    "LLM_API_BASE_URL",
+    "LLM_MODEL",
+    "LLM_TEMPERATURE",
+    "LLM_MAX_TOKENS",
+    "LLM_EXTRA_BODY",
+    "LLM_TIMEOUT",
+    "LLM_RETRY_COUNT",
+)
+_MISSING = object()
+
+
+def _snapshot_llm_constants(module) -> dict[str, object]:
+    return {name: getattr(module, name, _MISSING) for name in _LLM_CONST_NAMES}
+
+
+_LLM_FACTORY = _snapshot_llm_constants(__import__("fp_core.config", fromlist=["x"]))
+
+
+@pytest.fixture(autouse=True)
+def _restore_llm_constants_after_each():
+    """每个测试后还原 config 模块级 LLM_* 常量到出厂值。
+
+    背景：config.set_active_llm_state() 用 globals() 写 LLM_ACTIVE_ID /
+    LLM_MODEL / LLM_API_KEY / LLM_EXTRA_BODY 等（/model 热切换入口），
+    测试若调用过它（如 test_llm_providers），常量即被污染成"上次激活项"。
+    若不还原，同进程后续测试读到的是上一个测试遗留的激活态——定时炸弹。
+
+    _reset_config_cache 只清 _json_cfg（读取缓存），不触及模块常量，
+    二者互补：前者管"文件配置缓存"，本 fixture 管"内存激活态"。
+    """
+    yield
+    import fp_core.config as cfg
+
+    for name, value in _LLM_FACTORY.items():
+        if value is _MISSING:
+            cfg.__dict__.pop(name, None)
+        else:
+            setattr(cfg, name, value)
+
 
 @pytest.fixture(autouse=True)
 def _reset_config_cache():
