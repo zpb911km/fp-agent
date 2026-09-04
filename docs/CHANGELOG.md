@@ -7,6 +7,9 @@
 
 ### Changed
 
+- **`fp docs` 面向 agent 重设计**: 默认不再自动调用 xdg-open 打开文件管理器（曾阻塞工具调用）；空参/help 输出用法帮助，`fp docs <相对路径>` 直接打印文档内容（含路径越界防护与相近文档候选提示），GUI 打开降级为显式 `--open`。
+- **`fp ext` 参数错误友好化**: 空参显示完整帮助（不再 argparse 报错），错参在 usage 后追加文档引导（`fp ext <命令> -h` / `fp docs self/扩展分发.md`）；`list` 各来源行尾打印资产目录绝对路径；子命令改由 main 前置路由（修复 `fp ext -h` 被顶层 argparse 劫持显示顶层帮助）。
+- **agent 提示词自举段新增 ext 资产说明**: `fp ext` 三来源（fetched/public/private，private 胜出）+ `list`/`info` 查询入口，agent 可自助定位扩展资产文件。
 - **shortcircuit 迁移至插件包，命令层清空**: `/sc` 命令不再由 `commands/` 自动发现，改由 shortcircuit 插件在 `ON_INIT` 通过 `register_command("sc", command)` 注入——命令实现随插件包走（`plugins/shortcircuit/{core,command,plugin}.py`），`commands/shortcircuit.py` 删除；插件被禁用时 `/sc` 一并消失。核心逻辑符号公共化（`scan_components`/`degenerate`/`shortcircuit`/`parse_args`/`format_components_display`），插件层消除跨模块 cast hack；命令系统新增「插件注入命令」注册路径说明。
 
 ## [0.1.12] — 2026-08-04

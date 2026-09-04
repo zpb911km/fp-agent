@@ -26,7 +26,7 @@ import os
 import re
 import shutil
 import sys
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, NoReturn, TypedDict, cast
 
 from fp.ext_assets import (
     ASSET_TYPES,
@@ -730,7 +730,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                 lines.append(f"  {atype}/{display}")
                 total += 1
         if lines:
-            print(f"◉ {source}/")
+            print(f"◉ {source}/  [{source_root(source)}]")
             print("\n".join(lines))
     if total == 0:
         print("（空）")
@@ -1393,12 +1393,24 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 # ═══════════════════════════════════════════════════════════════
 
 
+class _ExtParser(argparse.ArgumentParser):
+    """参数错误时只输出文档引导（argparse 原始 error 与 usage 均为噪声：
+    choices 列表重复出现，且 agent 顺着引导读文档即可获得全部信息）。"""
+
+    def error(self, message: str) -> NoReturn:  # noqa: N802 — argparse 签名
+        sys.stderr.write("fp ext: 参数错误。命令详情：fp ext <命令> -h\n")
+        sys.stderr.write("完整文档：fp docs self/扩展分发.md    目录树：fp docs --list\n")
+        sys.exit(2)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _ExtParser(
         prog="fp ext",
         description="扩展资产分发（管道工具：拉取→审查→落地→管理）",
+        epilog="完整文档：fp docs self/扩展分发.md    目录树：fp docs --list",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
 
     p = sub.add_parser("fetch", help="拉取资产到暂存区")
     p.add_argument("source", help="git URL / 本地路径 / 单文件 URL")
@@ -1469,6 +1481,10 @@ def ext_main(argv: list[str] | None = None) -> int:
     """fp ext 入口。返回进程退出码。"""
     parser = build_parser()
     args = parser.parse_args(argv)
+    if not getattr(args, "func", None):
+        # 空参 → 帮助 + 文档引导（而非 argparse 报错）
+        parser.print_help()
+        return 0
     try:
         return args.func(args)
     except GitError as e:

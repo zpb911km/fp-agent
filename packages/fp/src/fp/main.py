@@ -7,9 +7,22 @@ import sys
 
 
 def main():
+    # ── 子命令前置路由：fp ext / fp docs 在顶层 argparse 之前识别 ──
+    # 若在 parse_known_args 之后才识别，`fp ext -h` 的 -h 会被顶层解析劫持，
+    # 显示顶层帮助而非子命令帮助。前置路由让子命令拿到原始参数。
+    argv_rest = sys.argv[1:]
+    if argv_rest[:1] == ["ext"]:
+        from fp.ext import ext_main
+
+        sys.exit(ext_main(argv_rest[1:]))
+    if argv_rest[:1] == ["docs"]:
+        from fp.docs import open_docs
+
+        sys.exit(open_docs(*argv_rest[1:]))
+
     parser = argparse.ArgumentParser(
         "fp",
-        epilog="子命令：fp docs — 查看离线文档（等价于 fp --docs）",
+        epilog="子命令：fp docs — 查看离线文档；fp ext — 扩展资产管理（各自 -h 看详情）",
     )
     parser.add_argument(
         "--docs",
@@ -39,25 +52,8 @@ def main():
 
     args, rest = parser.parse_known_args()
 
-    # ── 子命令：fp docs / fp --docs — 查看离线文档（不触发更新检查） ──
-    # 注意：不能用 argparse 位置参数实现 fp docs——
-    # 位置参数（nargs="?"）会吞掉透传给子包的首个非选项参数
-    # （如 fp -r s_xxx 中的 s_xxx）并触发 choices 校验，破坏参数透传。
-    # 这里手动识别 rest 首项是否为 "docs"。
-    if rest[:1] == ["docs"]:
-        rest = rest[1:]
-        is_docs = True
-    else:
-        is_docs = False
-
-    # ── 子命令：fp ext — 扩展资产分发（纯 CLI 管道，不触发更新检查） ──
-    if rest[:1] == ["ext"]:
-        rest = rest[1:]
-        from fp.ext import ext_main
-
-        sys.exit(ext_main(rest))
-
-    if args.docs or is_docs:
+    # fp --docs（等价形式；fp docs 已在函数开头前置路由）
+    if args.docs:
         from fp.docs import open_docs
 
         sys.exit(open_docs(*rest))
