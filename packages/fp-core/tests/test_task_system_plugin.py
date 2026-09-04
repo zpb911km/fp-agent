@@ -249,12 +249,84 @@ class TestTaskSystemPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tasks[0].id, t1.id)
 
     async def test_tool_clear_none(self):
-        """无已完成任务时 task_clear 应提示"""
+        """无终态任务时 task_clear 应提示"""
         store = TaskStore()
         store.create("待办任务")
 
         result = await handle_clear({})
-        self.assertIn("没有已完成的任务", result)
+        self.assertIn("没有终态任务", result)
+
+    # ── 测试 4.1: 新状态 delivered/superseded ───────
+
+    async def test_status_machine_delivered_completed(self):
+        """正常流：pending → in_progress → delivered → completed"""
+        store = TaskStore()
+        t = store.create("交付任务")
+        store.update(t.id, "in_progress")
+        store.update(t.id, "delivered")
+        store.update(t.id, "completed")
+        self.assertEqual(store.list_all()[0].status.value, "completed")
+
+    async def test_status_machine_superseded(self):
+        """用户推翻：旧交付置 superseded，另建新任务"""
+        store = TaskStore()
+        old = store.create("旧交付 T2")
+        store.update(old.id, "delivered")
+        store.update(old.id, "superseded")
+        new = store.create("重写 T2")
+        store.update(new.id, "in_progress")
+
+        tasks = {t.id: t for t in store.list_all()}
+        self.assertEqual(tasks[old.id].status.value, "superseded")
+        self.assertEqual(tasks[new.id].status.value, "in_progress")
+        # 旧交付被推翻后，仍能区分于新任务（不叠加混淆）
+
+    async def test_clear_keeps_delivered(self):
+        """task_clear 不得清除 delivered（待批准不能丢）"""
+        store = TaskStore()
+        t1 = store.create("已交付任务")
+        store.update(t1.id, "delivered")
+        t2 = store.create("已完成任务")
+        store.update(t2.id, "completed")
+
+        result = await handle_clear({})
+        self.assertIn("已清除 1 个", result)  # 只清 completed，不动 delivered
+
+        tasks = store.list_all()
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].id, t1.id)
+        self.assertEqual(tasks[0].status.value, "delivered")
+
+    async def test_clear_removes_superseded(self):
+        """task_clear 清除已作废任务"""
+        store = TaskStore()
+        t = store.create("被推翻任务")
+        store.update(t.id, "superseded")
+        result = await handle_clear({})
+        self.assertIn("已清除 1 个", result)
+        self.assertEqual(len(store.list_all()), 0)
+
+    async def test_list_shows_new_labels(self):
+        """task_list 展示 delivered/superseded 中文标签"""
+        store = TaskStore()
+        t1 = store.create("待批准任务")
+        store.update(t1.id, "delivered")
+        t2 = store.create("被推翻任务")
+        store.update(t2.id, "superseded")
+
+        result = await handle_list({})
+        self.assertIn("交付待批", result)
+        self.assertIn("已作废", result)
+
+    async def test_summarize_delivered_flag(self):
+        """store.summarize 在 delivered 时输出 ⏸ 待批准标记"""
+        store = TaskStore()
+        t = store.create("待批准任务")
+        store.update(t.id, "delivered")
+        summary = store.summarize()
+        self.assertIn("⏸", summary)
+        self.assertIn(str(t.id), summary)
+        self.assertIn("待批准", summary)
 
     # ── 测试 5: 通过 ToolRegistry 调用 ──────────────
 

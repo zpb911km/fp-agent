@@ -11,7 +11,7 @@ from typing import Any, cast
 
 from fp_core.logger import get_logger
 
-from .models import Task, TaskStatus
+from .models import TERMINAL_STATUSES, Task, TaskStatus
 
 TASKS_FILE = os.path.join(".fp", "tasks.json")
 
@@ -111,9 +111,13 @@ class TaskStore:
         return tasks
 
     def clear_completed(self) -> int:
-        """清除已完成任务，返回清除数量"""
+        """清除终态任务（已完成 + 已作废），返回清除数量
+
+        注意：delivered（已交付待批准）不是终态，不会被清除——
+        它代表"等用户批准后继续"，清掉会导致交付物失去跟踪。
+        """
         tasks, next_id = self.load()
-        pending = [t for t in tasks if t.status != TaskStatus.COMPLETED]
+        pending = [t for t in tasks if t.status not in TERMINAL_STATUSES]
         cleared = len(tasks) - len(pending)
         if cleared == 0:
             return 0
@@ -121,18 +125,29 @@ class TaskStore:
         return cleared
 
     def summarize(self) -> str | None:
-        """生成紧凑状态摘要，供 [task] 提醒使用"""
+        """生成紧凑状态摘要，供 [task] 提醒使用
+
+        展示规则：
+        - in_progress → ▶#N
+        - delivered   → ⏸#N（等待用户批准，提醒 LLM 停手）
+        - pending     → ⬜N
+        - 终态（completed/superseded）不展示，避免噪声
+        """
         tasks, _ = self.load()
         if not tasks:
             return None
 
         in_progress = [t for t in tasks if t.status == TaskStatus.IN_PROGRESS]
+        delivered = [t for t in tasks if t.status == TaskStatus.DELIVERED]
         pending = [t for t in tasks if t.status == TaskStatus.PENDING]
 
         parts: list[str] = []
         if in_progress:
             ids = ",".join(str(t.id) for t in in_progress)
             parts.append(f"▶#{ids}")
+        if delivered:
+            ids = ",".join(str(t.id) for t in delivered)
+            parts.append(f"⏸#{ids} 待批准")
         if pending:
             parts.append(f"⬜{len(pending)}")
 

@@ -21,13 +21,20 @@ from .tools import ALL_DEFINITIONS, handle_clear, handle_create, handle_list, ha
 
 TASK_SYSTEM_DESCRIPTION = """【任务系统】
 每次 LLM 调用前会在消息末尾看到 [task] 进度标记：
-  [task] ▶#N        — 进行中的任务 #N
-  [task] ⬜M         — M 个待办任务
-  [task] ▶#N ⬜M    — 进行中 #N + 待办 M 个
+  [task] ▶#N          — 进行中的任务 #N
+  [task] ⏸#N 待批准   — 任务 #N 已交付，停下汇报，等用户批准后再置 completed
+  [task] ⬜M           — M 个待办任务
+  [task] ▶#N ⬜M      — 进行中 #N + 待办 M 个
 无标记 = 无待办任务
 
 看到 [task] 时，根据需要调用 task_create/task_update/task_clear 管理进度。
-通过 task_list 查看完整清单，使用 #ID 引用追踪任务。"""
+通过 task_list 查看完整清单，使用 #ID 引用追踪任务。
+
+状态机：
+  pending(待办) → in_progress(进行中) → delivered(已交付待批准) → completed(已完成)
+  用户推翻/要求重写时：旧任务置 superseded(已作废)，再 task_create 新建任务承接；
+  delivered 状态下必须停手等用户表态，不得自行推进下一步。
+终态（completed/superseded）可 task_clear 清除；delivered 不会被清除。"""
 
 
 class TaskSystemPlugin(Plugin):

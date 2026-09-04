@@ -5,7 +5,7 @@
 
 from typing import Any
 
-from .models import TaskStatus
+from .models import TERMINAL_STATUSES
 from .store import TaskStore
 
 # ── OpenAI Function Calling Schema ─────────────────────────────
@@ -42,8 +42,13 @@ DEF_UPDATE = {
                 },
                 "status": {
                     "type": "string",
-                    "enum": ["pending", "in_progress", "completed"],
-                    "description": "新状态：pending=待办, in_progress=进行中, completed=已完成",
+                    "enum": ["pending", "in_progress", "delivered", "completed", "superseded"],
+                    "description": (
+                        "新状态：pending=待办, in_progress=进行中, "
+                        "delivered=已交付待批准（做完停下等用户确认）, "
+                        "completed=已完成（用户已批准）, "
+                        "superseded=已作废（用户推翻/要求重写，另建新任务承接）"
+                    ),
                 },
             },
             "required": ["task_id", "status"],
@@ -68,7 +73,8 @@ DEF_CLEAR: dict[str, Any] = {
     "function": {
         "name": "task_clear",
         "description": (
-            "清除全部已完成（completed）状态的任务。注意：此操作不可撤销，且无法指定单个任务（会清掉所有已完成任务）。"
+            "清除终态任务（已完成 completed 和已作废 superseded）。"
+            "注意：此操作不可撤销，且无法指定单个任务；delivered（已交付待批准）不会被清除。"
         ),
         "parameters": {
             "type": "object",
@@ -86,7 +92,9 @@ ALL_DEFINITIONS: list[dict[str, Any]] = [DEF_CREATE, DEF_UPDATE, DEF_LIST, DEF_C
 STATUS_LABELS = {
     "pending": "待办",
     "in_progress": "进行中",
+    "delivered": "交付待批",
     "completed": "已完成",
+    "superseded": "已作废",
 }
 
 
@@ -118,7 +126,15 @@ async def handle_update(params: dict[str, Any]) -> str:
         # 类型宽容已在 store.update 内部处理（str/int 均可匹配），
         # 走到这里说明该 id 确实不存在
         return f"错误：未找到任务 #{task_id}（任务可能已被清除，可用 task_list 查看当前任务）"
-    return f"✅ 任务 #{task.id} 状态已更新为 [{status}]"
+
+    tail = {
+        "delivered": "⏸ 等待用户批准：停下汇报交付物，用户确认后再置为 completed",
+        "completed": "用户已批准，任务闭环",
+        "superseded": "旧交付已作废：如需重做，请 task_create 新建任务承接",
+        "pending": "",
+        "in_progress": "",
+    }.get(status, "")
+    return f"✅ 任务 #{task.id} 状态已更新为 [{status}]{'。' + tail if tail else ''}"
 
 
 async def handle_list(params: dict[str, Any]) -> str:
@@ -138,13 +154,13 @@ async def handle_list(params: dict[str, Any]) -> str:
 
 
 async def handle_clear(params: dict[str, Any]) -> str:
-    """清除已完成任务"""
+    """清除终态任务（已完成 + 已作废）"""
     store = TaskStore()
     before = store.list_all()
-    cleared_tasks = [t for t in before if t.status == TaskStatus.COMPLETED]
+    cleared_tasks = [t for t in before if t.status in TERMINAL_STATUSES]
     cleared = store.clear_completed()
     if cleared == 0:
-        return "没有已完成的任务需要清除"
+        return "没有终态任务需要清除（无已完成/已作废任务）"
     remaining = len(store.list_all())
     detail = "、".join(f"#{t.id} {t.subject}" for t in cleared_tasks)
-    return f"✅ 已清除 {cleared} 个已完成任务（{detail}），剩余 {remaining} 个待办任务"
+    return f"✅ 已清除 {cleared} 个终态任务（{detail}），剩余 {remaining} 个非终态任务"
