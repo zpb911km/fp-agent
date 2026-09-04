@@ -40,6 +40,8 @@ class TaskSystemPlugin(Plugin):
         super().__init__(config)
         self._store = TaskStore()
         self._description_injected = False
+        self._tool_registry: ToolRegistry | None = None
+        self._registered_tools: list[str] = []
 
     def on_register(self, lifecycle: LifecycleManager):
         """注册两个生命周期钩子"""
@@ -52,7 +54,11 @@ class TaskSystemPlugin(Plugin):
         )
 
     def on_unregister(self):
-        """插件卸载时清理"""
+        """插件卸载时清理：清掉自己注入的任务工具，防止禁用后残留"""
+        if self._tool_registry is not None:
+            for tool_name in self._registered_tools:
+                self._tool_registry.unregister_tool(tool_name)
+        self._registered_tools.clear()
         self._store = TaskStore()
 
     # ── 钩子实现 ───────────────────────────────────
@@ -64,13 +70,16 @@ class TaskSystemPlugin(Plugin):
         通过 context.data.system_prompt_append 返回描述文本，
         由 Agent 在 ON_INIT emit 后追加到 system prompt。
         """
-        # 1. 注册工具
+        # 1. 注册工具（记录清单，on_unregister 成对清理）
         tool_registry: ToolRegistry | None = kwargs.get("tool_registry")
         if tool_registry is not None:
+            self._tool_registry = tool_registry
             for defn in ALL_DEFINITIONS:
                 tool_name: str = defn["function"]["name"]
                 executor = self._get_executor(tool_name)
                 tool_registry.register_tool(tool_name, cast(OpenAISchema, defn), executor)
+                if tool_name not in self._registered_tools:
+                    self._registered_tools.append(tool_name)
 
         # 2. 标记描述已注入（ON_BEFORE_LLM_CALL 不再重复注入）
         self._description_injected = True

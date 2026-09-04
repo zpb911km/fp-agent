@@ -10,7 +10,7 @@ ShortcircuitPlugin — 自我上下文修剪插件
 
 from typing import Any, cast
 
-from fp_core.commands import get_command, register_command
+from fp_core.commands import get_command, register_command, unregister_command
 from fp_core.core.conversation import ConversationState
 from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 from fp_core.plugins.base.plugin import Plugin, PluginConfig
@@ -84,6 +84,7 @@ class ShortcircuitPlugin(Plugin):
         super().__init__(config)
         self._registered = False
         self._command_injected = False
+        self._tool_registry: ToolRegistry | None = None
 
     def on_register(self, lifecycle: LifecycleManager):
         lifecycle.register(
@@ -94,8 +95,15 @@ class ShortcircuitPlugin(Plugin):
         )
 
     def on_unregister(self):
+        if self._tool_registry is not None and self._registered:
+            # 工具/命令由 ON_INIT 注入，但 on_unregister 可能先于 Agent 重建
+            # 被调用（PluginRegistry.unregister → plugin.on_unregister）。
+            # 必须成对清理：命令否则 /sc 残留，工具否则 shortcircuit 仍可被 LLM 调用。
+            self._tool_registry.unregister_tool("shortcircuit")
+        if self._command_injected:
+            unregister_command("sc")
+            self._command_injected = False
         self._registered = False
-        self._command_injected = False
 
     async def _on_init(self, ctx: HookContext, **kwargs: Any) -> HookContext:
         if self._registered:
@@ -110,6 +118,7 @@ class ShortcircuitPlugin(Plugin):
 
         registry: ToolRegistry = tool_registry
         st: Any = state
+        self._tool_registry = registry
 
         async def execute(params: dict[str, Any]) -> str:
             action: str = params.get("action", "compress")

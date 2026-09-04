@@ -24,6 +24,11 @@ from fp_core.logger import get_logger
 # 缓存：命令名 → 模块对象
 _commands: dict[str, ModuleType] = {}
 
+# 动态注册登记簿：仅记录 register_command() 注册过的主名。
+# 用途：unregister 只允许撤销动态命令，防止误删自动发现的文件命令
+# （文件命令以文件存在为生命周期，不参与动态清理）。
+_dynamic_names: set[str] = set()
+
 
 # 类型标注
 class CommandModule:
@@ -40,8 +45,9 @@ class CommandModule:
 
 def _discover_commands():
     """扫描并注册所有命令模块（内置 → 三来源，同名覆盖 + 警告）"""
-    global _commands
+    global _commands, _dynamic_names
     _commands = {}
+    _dynamic_names = set()
 
     builtin_dir = os.path.dirname(os.path.abspath(__file__))
     _scan_dir(builtin_dir, "fp_core.commands")
@@ -149,7 +155,12 @@ async def execute(state: object, cmd_name: str, arg: str) -> tuple[bool, str]:
 
 
 def register_command(name: str, module: ModuleType) -> None:
-    """动态注册一条命令（供插件在 on_register 中调用）
+    """动态注册一条命令（供插件使用，通常在 ON_INIT 生命周期钩子中调用）
+
+    注意：插件注入命令的正规时机是 ON_INIT（reload 重建 Agent 后会自动重跑），
+    而非 on_register——后者只负责挂载钩子，不应直接操作注册表。
+    与命令文件扫描不同，动态注册**不会**随插件禁用自动清理，
+    调用方须在插件 on_unregister() 中成对调用 unregister_command()。
 
     Args:
         name: 命令名（不含斜杠，如 'office'）
@@ -158,7 +169,8 @@ def register_command(name: str, module: ModuleType) -> None:
     注册后 /<name> 即可被 Agent.handle_command 识别并执行。
     与文件扫描注册的命令地位完全相同，也支持别名覆盖。
     """
-    global _commands
+    global _commands, _dynamic_names
+    _dynamic_names.add(name)
     if name in _commands:
         get_logger().warning(f"⚠️  动态命令 [{name}] 与现有命令重复，已覆盖")
     _commands[name] = module
@@ -168,3 +180,34 @@ def register_command(name: str, module: ModuleType) -> None:
             get_logger().warning(f"⚠️  别名 [{alias}] 冲突，已跳过")
             continue
         _commands[alias] = module
+
+
+def unregister_command(name: str) -> None:
+    """撤销 register_command 的动态命令注册（供插件 on_unregister 中成对调用）
+
+    删除主名及该模块注册的全部别名——即 _commands 中所有指向
+    同一模块对象的键。只影响动态注册，不触碰自动发现的文件命令
+    （文件命令以文件存在为生命周期，重新发现时会重建注册表）。
+
+    Args:
+        name: 动态注册时的主命令名（如 'sc'）
+
+    若主名不是动态命令（文件命令/不存在/别名入口），视为无操作并告警（幂等）。
+    """
+    global _commands, _dynamic_names
+    if name not in _dynamic_names:
+        get_logger().warning(f"⚠️  动态命令 [{name}] 未注册或为文件命令，unregister 无操作")
+        return
+
+    mod = _commands.get(name)
+    if mod is None:
+        _dynamic_names.discard(name)  # 状态不一致自愈
+        get_logger().warning(f"⚠️  动态命令 [{name}] 已在注册表中缺失，仅清理登记簿")
+        return
+
+    removed = [key for key, value in _commands.items() if value is mod]
+    for key in removed:
+        del _commands[key]
+    _dynamic_names.discard(name)
+    extra = f"，含别名 {removed[1:]}" if removed[1:] else ""
+    get_logger().info(f"✓ 已注销动态命令 [{name}]{extra}")

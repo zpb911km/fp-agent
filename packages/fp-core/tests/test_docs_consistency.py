@@ -79,9 +79,10 @@ def _plugin_registered_tool_count() -> int:
     # task_system：tools.py 中 function.name
     ts = (SRC / "plugins" / "task_system" / "tools.py").read_text(encoding="utf-8")
     total += len(re.findall(r'"name"\s*:\s*"([^"]+)"', ts))
-    # shortcircuit：register_tool("<name>", ...)
+    # shortcircuit：register_tool("<name>", ...)（负向后顾排除 unregister_tool，
+    # 否则 on_unregister 中的成对清理会被误计为注册）
     sc = (SRC / "plugins" / "shortcircuit" / "plugin.py").read_text(encoding="utf-8")
-    total += len(re.findall(r'register_tool\(\s*"([^"]+)"', sc))
+    total += len(re.findall(r'(?<!un)register_tool\(\s*"([^"]+)"', sc))
     return total
 
 

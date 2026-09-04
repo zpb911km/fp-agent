@@ -92,6 +92,25 @@ class TestTaskSystemPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(append_parts, list)
         self.assertTrue(any("task_create" in part for part in append_parts))
 
+    async def test_on_unregister_cleans_tools(self):
+        """on_unregister 必须清掉自己注册的 4 个任务工具（插件禁用后不残留）"""
+        lifecycle = LifecycleManager()
+        plugin = TaskSystemPlugin()
+        plugin.on_register(lifecycle)
+        mock_registry = self._make_mock_registry()
+
+        await lifecycle.emit(LifecycleHook.ON_INIT, tool_registry=mock_registry)
+        names_before = {d["function"]["name"] for d in mock_registry.get_all_definitions()}
+        self.assertIn("task_create", names_before)
+
+        # 模拟 PluginRegistry.unregister → plugin.on_unregister()
+        plugin.on_unregister()
+
+        names_after = {d["function"]["name"] for d in mock_registry.get_all_definitions()}
+        for n in ("task_create", "task_update", "task_list", "task_clear"):
+            self.assertNotIn(n, names_after, f"{n} 应在插件卸载后被清理")
+        self.assertEqual(plugin._registered_tools, [])
+
     async def test_on_before_llm_call_adds_hint(self):
         lifecycle = LifecycleManager()
         plugin = TaskSystemPlugin()

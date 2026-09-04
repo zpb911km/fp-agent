@@ -127,6 +127,25 @@ class ToolRegistry:
             "source": "lifecycle_plugin",
         }
 
+    def unregister_tool(self, name: str) -> None:
+        """撤销 register_tool 动态注册的工具（供生命周期插件 on_unregister 成对调用）
+
+        只影响 register_tool 写入的 lifecycle/ 键，不触碰扩展目录扫描加载的
+        插件工具（那些以文件存在为生命周期，重建 registry 时重扫）。
+
+        Args:
+            name: 动态注册时的工具名（如 'task_create'）
+
+        若不存在则视为幂等无操作。
+        """
+        keys = [
+            key
+            for key, entry in self._plugins.items()
+            if key == f"lifecycle/{name}" or entry["definition"]["function"]["name"] == name
+        ]
+        for key in keys:
+            del self._plugins[key]
+
     def get_all_definitions(self) -> list[OpenAISchema]:
         """获取所有工具的 OpenAI function calling schema 列表"""
         definitions = list(self._core_defs)
