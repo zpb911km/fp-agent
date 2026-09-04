@@ -188,6 +188,16 @@ class WebUIPlugin(Plugin):
 
     def on_register(self, lifecycle: LifecycleManager) -> None:
         """注册所有需要监听的生命周期钩子"""
+        # 捕获 ON_INIT 时各插件写入的 system_prompt_append 段。
+        # priority=500 保证排在注入插件（prompt_extender=60、task_system=60 等）之后执行，
+        # 读到全量；供 _reapply_prompt_append 在会话重建（reset）后重放。
+        self._prompt_append_cache: list[str] = []
+        lifecycle.register(
+            LifecycleHook.ON_INIT,
+            self._on_init_capture_prompt_append,
+            priority=500,
+            name="webui_capture_prompt_append",
+        )
         lifecycle.register(
             LifecycleHook.ON_BEFORE_LLM_CALL,
             self._on_before_llm,
@@ -232,6 +242,22 @@ class WebUIPlugin(Plugin):
             priority=5,
             name="webui_shutdown",
         )
+
+    async def _on_init_capture_prompt_append(self, ctx: HookContext, **kwargs: Any) -> None:
+        """ON_INIT 最后执行：缓存所有插件写入的 system_prompt_append 段。
+
+        Agent.ensure_initialized() 会把该字段 apply 到 conversation.system_prompt；
+        但 WebUI 的会话重建路径（新建/reload/恢复）会用 PromptBuilder 重建
+        system prompt 覆盖注入。此处先捕获全量段，供 _reapply_prompt_append
+        在 reset 后重放，保证插件注入跨会话重建不丢失。
+        """
+        raw = ctx.data.get("system_prompt_append")
+        if isinstance(raw, str):
+            self._prompt_append_cache = [raw]
+        elif isinstance(raw, list):
+            self._prompt_append_cache = [s for s in raw if s and str(s).strip()]
+        else:
+            self._prompt_append_cache = []
 
     async def _emit(self, event_type: str, **data: Any) -> None:
         """向 EventBus 发布事件"""
@@ -293,6 +319,43 @@ class WebUIPlugin(Plugin):
         # WebUIPlugin 是桥接插件，随 Agent 生命周期自动管理，
         # EventBus 由 WebUI 服务器全局管理，此处无需额外清理
         pass
+
+
+# ════════════════════════════════════════════════════════════
+# 2b. system prompt 重建 helper（会话管理专用）
+# ════════════════════════════════════════════════════════════
+
+
+def _reapply_prompt_append(agent: Agent) -> None:
+    """会话重建路径的消息组装完成后，重放插件注入到 system prompt 的段。
+
+    背景：Agent.ensure_initialized() 会把 ON_INIT 的 system_prompt_append
+    apply 到 conversation.system_prompt；但 WebUI 的新建会话/reload/恢复路径
+    会用 PromptBuilder().build_system_prompt() reset，覆盖掉插件注入内容。
+    本函数在这些路径的消息组装完成后调用，从 WebUIPlugin 的捕获缓存重放注入段。
+
+    调用约定（防重复）：
+    - 仅在「system prompt 已被 PromptBuilder 重建/被 replace_all 冲掉」后调用，
+      此时 system prompt 不含注入段，重放是安全的；
+    - switch/clear 等保留 conversation.system_prompt 的路径不要调用。
+    """
+    conv = agent.state.conversation
+
+    # 兜底：_replace_agent 恢复分支的 replace_all(saved) 会把 system 消息整体
+    # 冲掉（saved 来自 load_context，不含 system）→ 先恢复 PromptBuilder 基础。
+    if not conv.system_prompt:
+        from fp_core.core.prompt_builder import PromptBuilder
+
+        conv.set_system_prompt(PromptBuilder().build_system_prompt())
+
+    plugin = agent.plugins.get(WebUIPlugin.name)
+    cache = getattr(plugin, "_prompt_append_cache", None) if plugin else None
+    if not cache:
+        return
+
+    from fp_core.prompts import apply_system_prompt_append
+
+    apply_system_prompt_append(conv, list(cache))
 
 
 # ════════════════════════════════════════════════════════════
@@ -604,6 +667,7 @@ async def _replace_agent(
                 saved = _agent.state.session.load_context(prompt)
                 if len(saved) > 1:
                     _agent.state.conversation.replace_all(saved)
+                _reapply_prompt_append(_agent)
                 get_logger().info(f"[WebUI] 🔄 已恢复会话: {old_sid}")
             except Exception as e:
                 get_logger().warning(f"[WebUI] ⚠️ 会话恢复失败: {e}")
@@ -615,6 +679,7 @@ async def _replace_agent(
                 saved = _agent.state.session.load_context(prompt)
                 if len(saved) > 1:
                     _agent.state.conversation.replace_all(saved)
+                _reapply_prompt_append(_agent)
                 new_sid = _agent.state.session.session_id
                 get_logger().info(f"[WebUI] 🆕 已使用新会话: {new_sid}")
             except Exception as e:
@@ -674,6 +739,7 @@ async def create_new_session():
     saved = agent.state.session.load_context(prompt)
     if len(saved) > 1:
         agent.state.conversation.replace_all(saved)
+    _reapply_prompt_append(agent)
 
     # 同步生成旧会话摘要（不传 tools，确保 LLM 返回纯文本标题）
     history_msgs = [m for m in old_context if m["role"] != "system"]
