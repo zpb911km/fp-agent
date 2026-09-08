@@ -3,12 +3,43 @@
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/) 和 [Keep a Changelog](https://keepachangelog.com/) 规范。
 
 
-## [Unreleased]
+## [0.1.13] — 2026-09-08
+
+### Added
+
+- **LLM 思考模式跨 provider 统一控制**（e8228a2）: `enable_thinking` 意图键按 provider 归一化（deepseek → `thinking:{type}`，qwen/其余保持原生布尔），`reasoning_effort` 透传至请求体顶层；`chat`/`chat_stream` 保留 `reasoning_content` 回传，带 tools 请求回传历史 CoT（DeepSeek v4 官方要求），不带 tools 时剥离省 token；`summarize` 强制关思考避免 API 报错。
+- **shortcircuit 退化模式 degenerate**（d4fe2e5）: 删除块内工具调用/返回消息，将带 `tool_calls` 的 assistant 退化为纯文本记录；`protect_callsite` 保护进行中的调用点使 agent loop 不断开，连续纯文本 assistant 逆序合并消除非法结构；命令层 `-d`、工具层默认 mode 改为 degenerate。
+- **任务状态机扩展 delivered / superseded**（5b20173）: 状态 3→5，`delivered`=交付待批挂起（LLM 停手等批准，`[task]` 显示 ⏸#N），`superseded`=用户推翻时作废旧交付，消除新旧完成记录叠加混淆；`task_clear` 清终态但不清 delivered。
+- **bash 副作用检查**（7251712）: 执行前 BLOCK 高危命令（rm -rf 根/家/当前、pkill、磁盘操作、关机、fork 炸弹等），`force=true` 显式跳过；`timeout` 参数化（1~3600）；取消 WARN 层（事后提示在同步协议下无意义，调用记录本身透明可审计）。
+- **插件对称注销 unregister_command / unregister_tool**（a88a5e3）: 插件禁用即清理其注入的命令与工具（文件命令受保护），shortcircuit / task_system 提供 `on_unregister` 成对清理。
+- **system_prompt_append 多插件收集与重建重放**（5241cc0 / a41add3）: `apply_system_prompt_append` helper 归一化 str（旧覆盖式）与 `list[str]`（多插件收集），内置示范改 `setdefault().append()` 避免互相覆盖；webui 会话重建路径（新建/切换/恢复）消息组装后重放注入段，修复插件注入跨重建丢失。
+- **IOChannel 前端身份标识**（b2e5949）: 新增 `frontend` 字段（terminal/webui/acp/rest），供扩展统一判断运行环境。
+- **记忆系统自足性增强**（69bd923）: `memory_save` frontmatter 记录 `created`/`updated`（覆盖保留原创建时间）+ 可选 `hint` 参数存路径/命令等硬事实；`memory_read` 索引行内联 hint（免一次读取）、精确读取展示创建/更新时间、超 30 天未更新附 ⚠️ 过期提醒。
+- **resume 会话列表倒序打印**（6db15fb）: 序号从大到小，`[1]`（最新）紧邻提示行，解决 600+ 会话时最新条目被顶出屏幕；`--main` 视图编号基于全量排序池，`[n]` 在两视图指向同一会话。
 
 ### Changed
 
-- **`fp docs` 面向 agent 重设计**: 默认不再自动调用 xdg-open 打开文件管理器（曾阻塞工具调用）；空参/help 输出用法帮助，`fp docs <相对路径>` 直接打印文档内容（含路径越界防护与相近文档候选提示），GUI 打开降级为显式 `--open`。
-- **`fp ext` 参数错误友好化**: 空参显示完整帮助（不再 argparse 报错），错参在 usage 后追加文档引导（`fp ext <命令> -h` / `fp docs self/扩展分发.md`）；`list` 各来源行尾打印资产目录绝对路径；子命令改由 main 前置路由（修复 `fp ext -h` 被顶层 argparse 劫持显示顶层帮助）。
+- **LLM 供应点两级结构**（64a265e）: `LLM_PROVIDERS` 由一维 key 改为 `provider → {api_key, base_url, models → {model: 差异参数}}`，激活态收敛为 `ACTIVE_LLM="provider/model"` 唯一引用（取代顶层三键副本）；一供应商多模型不再需复制 key/base_url，同名模型天然消歧。模块加载时回填 `LLM_*` 常量使旧读者零改动，旧扁平格式内存兼容 + `/model` 侧一次性写回迁移，`TEMPERATURE`/`MAX_TOKENS` 回归全局默认语义。
+- **`fp docs` 面向 agent 重设计**（ed93b7a）: 默认不再自动调用 xdg-open（曾阻塞工具调用）；空参/help 输出用法，`fp docs <相对路径>` 直接打印文档正文（realpath 越界防护 + difflib 相近文档候选），GUI 打开降级为显式 `--open`。
+- **`fp ext` 参数错误友好化**（ed93b7a）: 空参显示完整帮助，错参只输出两行文档引导（去除 argparse 原始 error/usage 噪声）；`list` 各来源行尾打印资产目录绝对路径；子命令改由 main 前置路由（修复 `fp ext -h` 被顶层 argparse 劫持）。
+- **shortcircuit 迁移至插件包**（7215600）: `/sc` 不再由 `commands/` 自动发现，改由插件 `ON_INIT` 注入注册，命令实现随插件包走，插件禁用时 `/sc` 一并消失；核心逻辑符号公共化，消除跨模块 cast hack。
+- **全项目 pyright strict 类型债清零**（a8bff3c…606d186，18 个提交）: 2840 → 0 errors；5 包补 `py.typed` 标记；覆盖 core/prompts/tools/commands/plugins/cli/webui/acp/terminal 各层，`TypedDict` 精确 schema 去 `Any`。
+- **工具调用显示优化**（9a5684d）: 参数改为每行一个，嵌套结构展开上限 400→4000。
+- **bash 大输出预览结构化**（664e643）: 由「仅头部 200 字符」改为「头部 + 尾部 + stderr 摘要 + 行数统计」，避免漏掉通常在尾部/err 的关键信息。
+- **工程卫生**（e860372）: 删除 `PROGRESS.md`（过程脚手架不应进 git 跟踪）。
+
+### Fixed
+
+- **task_update 永远匹配不到任务**（4b2173d）: `store.update` 用 `t.id == task_id` 严格比较，LLM 常把整数 `task_id` 序列化为字符串（`"2"`）导致恒 False，连带 `task_clear` 显示「没有已完成」；改为 `int()` 归一化 + 字符串兜底的双层宽容匹配。
+- **任务管理语义与容错**（664e643）: `task_clear` 描述去除虚假的「更新 ID 序列」并返回被清明细；`task_update` 找不到任务给出补救提示；`store.load` JSON 损坏时告警 + 备份原文件（不静默清空），单条坏数据跳过保留好条目。
+- **bash 在 dash 下的 Bad substitution**（6b689a6）: Linux 分支由 `create_subprocess_shell`（走 `/bin/sh`=dash）改为 `create_subprocess_exec(find_bash())`，根除 `${var:0:6}`/`[[ ]]`/heredoc 返工。
+- **危险命令拦截器误拦与漏报**（6b689a6）: 命令位锚定 + 引号字面量剥离 + `rm` 危险目标收紧，引用性文本不再误拦，`sudo mkfs`/`shutdown` 等漏报兜住。
+- **配置读取浅合并压制显式值**（e8228a2）: 兜底默认不再覆盖 model 级显式 `extra_body` 配置。
+- **edit_file 缺参报错无引导**（6b689a6）: `ParamSpec.error_hint` 补「先 read_file 取哈希」提示。
+- **测试跨用例状态污染**（6b689a6 / a23c752）: conftest autouse 还原 config 模块级 `LLM_*` 出厂常量，拦截 `set_active_llm_state()` 泄漏；`test_shortcircuit` 消除 7 处 `Any` 类型 warning。
+- **`/model` 幽灵组件误报**（69bd923）: 实为 fp-ext 分发的用户级扩展命令而非仓库内置，`test_no_ghost_components` 增 `EXT_CMDS` 白名单消除 5 处误报。
+- **memory_read_plugin.py 末尾重复残句**（69bd923）: 潜在语法错误清除。
+- **配置优先级注释与实现不符**（507aa8f）: 修正为 config.json > 环境变量 > 默认值。
 - **agent 提示词自举段新增 ext 资产说明**: `fp ext` 三来源（fetched/public/private，private 胜出）+ `list`/`info` 查询入口，agent 可自助定位扩展资产文件。
 - **shortcircuit 迁移至插件包，命令层清空**: `/sc` 命令不再由 `commands/` 自动发现，改由 shortcircuit 插件在 `ON_INIT` 通过 `register_command("sc", command)` 注入——命令实现随插件包走（`plugins/shortcircuit/{core,command,plugin}.py`），`commands/shortcircuit.py` 删除；插件被禁用时 `/sc` 一并消失。核心逻辑符号公共化（`scan_components`/`degenerate`/`shortcircuit`/`parse_args`/`format_components_display`），插件层消除跨模块 cast hack；命令系统新增「插件注入命令」注册路径说明。
 
@@ -338,6 +369,7 @@
 
 | 版本 | 日期 | 摘要 |
 |------|------|------|
+| 0.1.13 | 2026-09-08 | LLM 供应点两级结构 + 思考模式统一控制 + shortcircuit 退化模式 + 任务状态机扩展 + bash 副作用检查 + 全项目类型债清零 |
 | 0.1.12 | 2026-08-04 | fp ext 扩展分发系统 + 文档同步门禁 + 测试覆盖提升 + 多项修复 |
 | 0.1.11 | 2026-07-31 | rebrand→FP + fp docs 离线文档 + edit_file v3 + WebUI 重构与安全修复 + 终端显示升级 |
 | 0.1.10 | 2026-07-27 | 端到端流式输出 + fp --update + edit_file v2 + 终端权责重划 |
