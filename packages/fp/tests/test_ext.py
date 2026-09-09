@@ -157,9 +157,10 @@ class TestReviewGate:
         assert reg["status"] == "active"
         assert reg["note"] == "审查通过"
         assert reg["reviewed_at"]
-        # 落地到 fetched/
-        fetched_dir = os.path.join(source_dir("fetched", "tools"), "hello")
-        assert os.path.isdir(fetched_dir)
+        # 落地到 fetched/：单文件资产 → 单文件标准名（非目录化，加载器才可自发现）
+        fetched_file = os.path.join(source_dir("fetched", "tools"), "hello_plugin.py")
+        assert os.path.isfile(fetched_file)
+        assert not os.path.isdir(os.path.join(source_dir("fetched", "tools"), "hello"))
 
     def test_review_reject_then_install_blocked(self, tmp_path):
         src = self._make_local_pkg(tmp_path)
@@ -225,7 +226,7 @@ class TestReviewGate:
         assert reg["tools/foo"]["staging"] == reg["commands/bar"]["staging"]
 
     def test_install_extracts_asset_body(self, tmp_path):
-        """install 单位=资产：只复制资产本体到 fetched/<type>/<name>/，不带仓库无关文件。"""
+        """install 单位=资产：只提取资产本体到 fetched/ 标准形态（单文件/目录），不带仓库无关文件。"""
         repo = tmp_path / "bundle"
         repo.mkdir()
         (repo / "foo_plugin.py").write_text(
@@ -236,8 +237,9 @@ class TestReviewGate:
         assert _run("fetch", str(repo)) == 0
         assert _run("review", "foo", "--approve", "--note", "OK") == 0
         assert _run("install", "foo") == 0
-        dest = os.path.join(source_dir("fetched", "tools"), "foo")
+        dest = os.path.join(source_dir("fetched", "tools"))
         assert os.path.isfile(os.path.join(dest, "foo_plugin.py"))
+        assert not os.path.isdir(os.path.join(dest, "foo"))
         # 仓库内无关文件不得进入 fetched
         assert not os.path.exists(os.path.join(dest, "notes.md"))
 
@@ -257,19 +259,20 @@ class TestReviewGate:
         assert reg["tools/codegraph"]["relpath"].endswith(os.path.join("tools", "extensions", "codegraph_plugin.py"))
         assert _run("review", "codegraph", "--approve", "--note", "OK") == 0
         assert _run("install", "codegraph") == 0
-        dest = os.path.join(source_dir("fetched", "tools"), "codegraph")
+        dest = os.path.join(source_dir("fetched", "tools"))
         assert os.path.isfile(os.path.join(dest, "codegraph_plugin.py"))
+        assert not os.path.isdir(os.path.join(dest, "codegraph"))
         # .git / 隐藏项不得进入 fetched
         assert not os.path.exists(os.path.join(dest, ".git"))
 
     def test_remove_fetched_asset(self, tmp_path):
-        """fetched 目录型资产可正常 remove（布局修复后的回归防护）。"""
+        """fetched 单文件资产可正常 remove（安装形态修复后的回归防护）。"""
         src = self._make_local_pkg(tmp_path)
         _run("fetch", src)
         _run("review", "hello", "--approve", "--note", "OK")
         _run("install", "hello")
-        dest = os.path.join(source_dir("fetched", "tools"), "hello")
-        assert os.path.isdir(dest)
+        dest = os.path.join(source_dir("fetched", "tools"), "hello_plugin.py")
+        assert os.path.isfile(dest)
         assert _run("remove", "hello") == 0
         assert not os.path.exists(dest)
         assert "tools/hello" not in load_registry()["assets"]
@@ -294,10 +297,10 @@ class TestReviewGate:
         _run("fetch", str(src))
         _run("review", "same", "--approve", "--note", "OK")
         _run("install", "same")
-        assert os.path.isdir(os.path.join(source_dir("fetched", "commands"), "same"))
+        assert os.path.isfile(os.path.join(source_dir("fetched", "commands"), "same.py"))
         # remove → 只删 fetched，public 保留
         assert _run("remove", "same") == 0
-        assert not os.path.exists(os.path.join(source_dir("fetched", "commands"), "same"))
+        assert not os.path.exists(os.path.join(source_dir("fetched", "commands"), "same.py"))
         assert os.path.exists(os.path.join(source_dir("public", "commands"), "same.py"))
         assert "commands/same" not in load_registry()["assets"]
 
@@ -310,14 +313,14 @@ class TestReviewGate:
             f.write('{"schema": 1, "author": "t", "license": "MIT", "assets": {}}')
         _run("new", "commands", "same")
         assert _run("promote", "same") == 0
-        # 手工构造 fetched 孤儿：目录型布局，但 registry 无记录
-        os.makedirs(os.path.join(source_dir("fetched", "commands"), "same"), exist_ok=True)
-        with open(os.path.join(source_dir("fetched", "commands"), "same", "same.py"), "w", encoding="utf-8") as f:
+        # 手工构造 fetched 孤儿（registry 无记录但文件残留）：单文件标准形态
+        os.makedirs(source_dir("fetched", "commands"), exist_ok=True)
+        with open(os.path.join(source_dir("fetched", "commands"), "same.py"), "w", encoding="utf-8") as f:
             f.write('__fp__ = {"name": "same", "version": "0.1.0", "type": "commands"}\n\ndef x():\n    pass\n')
         assert load_registry()["assets"] == {}
         assert _run("remove", "same") == 0
         # 只删 fetched 孤儿，public 保留
-        assert not os.path.exists(os.path.join(source_dir("fetched", "commands"), "same"))
+        assert not os.path.exists(os.path.join(source_dir("fetched", "commands"), "same.py"))
         assert os.path.exists(os.path.join(source_dir("public", "commands"), "same.py"))
 
     def test_update_remote_asset_removed(self, tmp_path):
@@ -329,6 +332,38 @@ class TestReviewGate:
         # 模拟远程移除：本地源目录删掉该资产文件
         os.unlink(os.path.join(src, "hello_plugin.py"))
         assert _run("update", "hello") == 1
+
+    def test_install_command_lands_single_file_discoverable(self, tmp_path):
+        """回归（用户反馈）：单文件命令 install 后不得被目录化，core 命令加载器须可自发现。
+
+        历史 bug：install 曾统一落地为 fetched/commands/<name>/<name>.py（多一层目录），
+        而命令加载器按单层 *.py 扫描 → 装完 /<name> 无法使用。
+        """
+        repo = tmp_path / "cmds"
+        os.makedirs(os.path.join(str(repo), "commands"), exist_ok=True)
+        (repo / "commands" / "pizza.py").write_text(
+            '__fp__ = {"name": "pizza", "version": "1.0.0", "type": "commands", "description": "订披萨"}\n'
+            'name = "pizza"\n'
+            "aliases = []\n"
+            'description = "订披萨"\n'
+            'def execute(state, arg):\n    return (True, "pizza!")\n',
+            encoding="utf-8",
+        )
+        assert _run("fetch", str(repo)) == 0
+        assert _run("review", "pizza", "--approve", "--note", "OK") == 0
+        assert _run("install", "pizza") == 0
+
+        cmd_dir = source_dir("fetched", "commands")
+        assert os.path.isfile(os.path.join(cmd_dir, "pizza.py"))
+        assert not os.path.isdir(os.path.join(cmd_dir, "pizza"))
+
+        # core 命令加载器应能自发现刚安装的 pizza
+        import fp_core.commands as cmds
+
+        cmds._commands = {}
+        cmds._dynamic_names = set()
+        cmds._discover_commands()
+        assert cmds.get_command("pizza") is not None
 
 
 class TestCli:

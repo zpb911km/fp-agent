@@ -402,9 +402,12 @@ def _scan_repo_assets(staging: str) -> list[_RepoAsset]:
                 key = f"{atype}/{name}"
                 if key in seen:
                     continue
-                # 目录型判定：主文件父目录名 == 资产名（如 plugins/baz/、tools/foo/）
+                # 目录型判定：主文件父目录名 == 资产名 且非 staging 根
+                # （如 plugins/baz/、tools/foo/；staging 根 = 单文件 URL/本地源暂存，
+                #   目录名恰好等于资产名不算目录型，否则 install 会把整仓当目录落地）
                 parent = os.path.dirname(fpath)
-                relpath = os.path.relpath(parent, staging) if os.path.basename(parent) == name else rel
+                is_asset_dir = os.path.basename(parent) == name and os.path.relpath(parent, staging) != "."
+                relpath = os.path.relpath(parent, staging) if is_asset_dir else rel
                 assets.append({"type": atype, "name": name, "relpath": relpath, "manifest": m})
                 seen.add(key)
             elif fname.endswith(".md"):
@@ -522,6 +525,40 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+def _standard_asset_filename(atype: str, name: str) -> str | None:
+    """单文件资产落地 fetched/ 时的标准文件名（对齐 core 加载器识别约定）。
+
+    tools → <name>_plugin.py（保持 *_plugin.py 后缀约定）
+    commands → <name>.py
+    memory → <name>.md
+    plugins → <name>.py（plugins 目录包走目录型 <name>/，不在此列）
+    """
+    safe = name.replace("/", "_")
+    if atype == "tools":
+        return f"{safe}_plugin.py" if not safe.endswith("_plugin") else f"{safe}.py"
+    if atype == "commands":
+        return f"{safe}.py"
+    if atype == "memory":
+        return f"{safe}.md"
+    if atype == "plugins":
+        return f"{safe}.py"
+    return None
+
+
+def _dir_has_extra_entries(d: str, main: str) -> bool:
+    """资产目录 d 除主文件 main 外是否还有实质内容（附属文件/子目录）。
+
+    无附加 → 可把主文件抽出按单文件落地（防「纯包装目录被目录化」）；
+    有附加 → 须整体目录搬迁（阶段二：多文件扩展暂不落地单文件）。
+    """
+    for e in os.listdir(d):
+        if e.startswith(".") or e == "__pycache__" or e.endswith(".disabled"):
+            continue
+        if os.path.join(d, e) != main:
+            return True
+    return False
+
+
 def _find_asset_in_staging(staging: str, atype: str, name: str) -> str | None:
     """在暂存区中按类型/名称定位资产本体（fallback：registry 无 relpath 时）。"""
     for root, _dirs, files in os.walk(staging):
@@ -544,10 +581,17 @@ def _find_asset_in_staging(staging: str, atype: str, name: str) -> str | None:
 
 
 def cmd_install(args: argparse.Namespace) -> int:
-    """从暂存区提取**资产本体**落地到 fetched/<type>/<name>/（门禁：须先 review --approve）。
+    """从暂存区提取**资产本体**落地到 fetched/（门禁：须先 review --approve）。
 
-    与 fetch（单位=仓库）不同，install 的单位=资产：只复制该资产的文件/目录，
-    不带 .git、不带仓库嵌套结构。fetched 布局统一为目录型 <name>/。
+    与 fetch（单位=仓库）不同，install 的单位=资产：只提取该资产本体，
+    不带 .git、不带仓库嵌套结构。落地形态与 private/public 及 core 加载器
+    约定一致：
+      - 单文件资产（tools/commands/memory/plugins）→ 单文件标准名，
+        保持加载器可自发现（tools/<name>_plugin.py、commands/<name>.py、
+        memory/<name>.md、plugins/<name>.py）；
+      - 目录型资产（plugins 目录包，或含附属文件的多文件资产）→ 目录 <name>/。
+    （历史 bug：曾统一落地为 fetched/<type>/<name>/ 目录，而 commands/tools/memory
+    加载器按单层 *.py / *_plugin.py / *.md 扫描，导致安装后无法自发现。）
     """
     name = args.name
     found = _find_reg_entry_by_name(name)
@@ -593,24 +637,52 @@ def cmd_install(args: argparse.Namespace) -> int:
         print(f"❌ 在暂存区未找到资产本体: {name}（{staging}）")
         return 1
 
-    # 落地到 fetched/<type>/<name>/（统一目录型；本体文件或整个目录）
-    dest = os.path.join(source_dir("fetched", atype), name)
-    if os.path.exists(dest) and not args.force:
-        print(f"⚠️  已存在: {dest}")
-        print("   使用 --force 覆盖（同 source 重新安装），或先 fp ext remove。")
-        return 1
-    shutil.rmtree(dest, ignore_errors=True)
-    os.makedirs(dest, exist_ok=True)
+    # ── 落地形态对齐 core 加载器（fetched 与 private/public 同构） ──
+    # 单文件资产 → 标准单文件（名称规范化到语义名，杜绝「多一层目录」；
+    #   目录仅当 src_body 是纯包装目录时抽主文件，否则整体搬目录）。
+    dest_root = source_dir("fetched", atype)
+    os.makedirs(dest_root, exist_ok=True)
+
     if os.path.isdir(src_body):
-        for item in os.listdir(src_body):
-            s = os.path.join(src_body, item)
-            d = os.path.join(dest, item)
-            if os.path.isdir(s):
-                shutil.copytree(s, d, dirs_exist_ok=True)
-            else:
-                shutil.copy2(s, d)
+        # 目录型本体：plugins 目录包 / 多文件资产 → 目录整体落地；
+        # tools/commands/memory 的「纯包装目录」（仅含主文件，如本地目录源）
+        # → 抽出主文件按单文件落地，保证自发现。
+        main = _find_main_file(src_body, atype)
+        if atype != "plugins" and main and not _dir_has_extra_entries(src_body, main):
+            dest = os.path.join(dest_root, _standard_asset_filename(atype, name) or os.path.basename(main))
+            if os.path.exists(dest) and not args.force:
+                print(f"⚠️  已存在: {dest}")
+                print("   使用 --force 覆盖（同 source 重新安装），或先 fp ext remove。")
+                return 1
+            shutil.copy2(main, dest)
+        else:
+            dest = os.path.join(dest_root, name)
+            if os.path.exists(dest) and not args.force:
+                print(f"⚠️  已存在: {dest}")
+                print("   使用 --force 覆盖（同 source 重新安装），或先 fp ext remove。")
+                return 1
+            shutil.rmtree(dest, ignore_errors=True)
+            os.makedirs(dest, exist_ok=True)
+            for item in os.listdir(src_body):
+                s = os.path.join(src_body, item)
+                d = os.path.join(dest, item)
+                if os.path.isdir(s):
+                    shutil.copytree(s, d, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(s, d)
+            if atype != "plugins":
+                print(
+                    f"⚠️  该资产为多文件目录型，{atype} 加载器当前只识别单文件，"
+                    "安装后无法自动发现（多文件扩展属阶段二能力）。"
+                )
     else:
-        shutil.copy2(src_body, os.path.join(dest, os.path.basename(src_body)))
+        # 单文件本体 → 标准单文件落地
+        dest = os.path.join(dest_root, _standard_asset_filename(atype, name) or os.path.basename(src_body))
+        if os.path.exists(dest) and not args.force:
+            print(f"⚠️  已存在: {dest}")
+            print("   使用 --force 覆盖（同 source 重新安装），或先 fp ext remove。")
+            return 1
+        shutil.copy2(src_body, dest)
 
     # 注册表（保留审查字段；无 registry 记录则构造新条目）
     now = __import__("datetime").datetime.now().isoformat(timespec="seconds")
@@ -633,6 +705,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         upsert_asset(f"{atype}/{name}", reg_entry)
     append_audit("install", f"{atype}/{name}", origin=source_origin)
     print(f"✅ 已安装: {_asset_display('fetched', atype, name)}")
+    print(f"   落地: {dest}")
     print(f"   注册表: {atype}/{name} [active]")
     print("🔁 提示: 加载器在会话启动时扫描资产，新会话或 /reload 后生效")
     return 0
