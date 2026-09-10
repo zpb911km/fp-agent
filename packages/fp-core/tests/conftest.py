@@ -89,6 +89,37 @@ def _isolate_sessions_dir(tmp_path) -> Generator[None, None, None]:
         yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_data_dir(tmp_path) -> Generator[None, None, None]:
+    """全局隔离 FP 数据根：任何测试都不允许扫描真实的 fetched/public/private 资产。
+
+    背景：ToolRegistry / Agent 会扫描 user_dirs("tools"/"plugins")，即
+    {DATA}/{fetched,public,private}/...。若测试构造真实 ToolRegistry/Agent，
+    用户安装的 private 插件会污染断言（例如被删除/迁移的旧插件）。
+    把 config._FP_DATA_DIR 指向 tmp，可让 user_dirs() 全部落到临时目录。
+
+    同时 patch 已固化在模块级的 runs.RUNS_ROOT（编排器产物目录）。
+    """
+    import fp_core.config as cfg
+
+    tmp = str(tmp_path / "fp_data")
+    patches = [patch.object(cfg, "_FP_DATA_DIR", tmp)]
+    try:
+        from fp_core.plugins.agent_orchestrator.fp_multiagent import runs as runs_mod
+
+        patches.append(patch.object(runs_mod, "RUNS_ROOT", str(tmp_path / "fp_data" / "runs")))
+    except Exception:  # noqa: BLE001 — 包缺失时跳过
+        pass
+
+    for p in patches:
+        p.start()
+    try:
+        yield
+    finally:
+        for p in reversed(patches):
+            p.stop()
+
+
 @pytest.fixture
 def temp_sessions_dir() -> Generator[str, None, None]:
     """创建临时会话目录，覆盖 config.SESSIONS_DIR。

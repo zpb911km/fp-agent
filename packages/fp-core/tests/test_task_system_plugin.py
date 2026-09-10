@@ -1,13 +1,12 @@
-"""
-Task System Plugin 集成测试
+"""Task System(任务图)插件测试
 
-验证：
-1. 插件通过 PluginRegistry 自动扫描加载
-2. ON_INIT 中注册工具 + 注入 system prompt
-4. 工具可被 ToolRegistry 正常调用
+覆盖: 模型 / 旧格式迁移 / 原子写 / 图 op(含原子回滚) / delta 协议(解析+8校验) /
+渲染 / 6 工具 / 插件钩子。
 """
 
+import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -17,353 +16,382 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from fp_core.core.lifecycle import LifecycleHook, LifecycleManager
 from fp_core.plugins.base.plugin import PluginRegistry
-from fp_core.plugins.task_system import TaskSystemPlugin
-from fp_core.plugins.task_system.store import TaskStore
-from fp_core.plugins.task_system.tools import handle_clear, handle_create, handle_list, handle_update
+from fp_core.plugins.task_system import TaskSystemPlugin, tools
+from fp_core.taskmap import delta as delta_mod
+from fp_core.taskmap import render
+from fp_core.taskmap.graph import GraphOpError, apply_ops
+from fp_core.taskmap.models import MapStatus, NodeStatus, TaskMap
+from fp_core.taskmap.store import TaskMapStore
 from fp_core.tools import ToolRegistry
 
+TASK_TOOLS = {"task_create", "task_read", "task_update", "task_edit", "task_list", "task_clear"}
 
-class TestTaskSystemPlugin(unittest.IsolatedAsyncioTestCase):
-    """TaskSystemPlugin 集成测试"""
 
+def _new_map() -> TaskMap:
+    """扬声器例图: n0 -> n2 -> n1"""
+    m = TaskMap.create(1, "修扬声器", "扬声器正常出声")
+    apply_ops(
+        m,
+        [
+            {"op": "add_node", "desc": "病因已定位"},  # n2
+            {"op": "add_edge", "from": "n0", "to": "n2", "semantic": "requires_decompose"},
+            {"op": "add_edge", "from": "n2", "to": "n1", "semantic": "complete"},
+        ],
+    )
+    return m
+
+
+def _lock(m: TaskMap, nid: str, worker: str, did: str) -> None:
+    n = m.nodes[nid]
+    n.status = NodeStatus.ACTIVE
+    n.owner = worker
+    n.dispatch_id = did
+
+
+class TestModels(unittest.TestCase):
+    def test_create_basic(self):
+        m = TaskMap.create(3, "T", "G")
+        assert m.id == 3 and m.goal == "G" and m.next_nid == 2
+        assert set(m.nodes) == {"n0", "n1"}
+        assert m.nodes["n0"].kind.value == "start"
+        assert m.nodes["n1"].kind.value == "goal"
+        assert m.edges[0].semantic == "requires_decompose"
+
+    def test_roundtrip(self):
+        m = _new_map()
+        m.questions.append({"q": "x", "resolved": False})
+        d = m.to_dict()
+        assert d["edges"][0]["from"] == "n0"  # JSON 键是 from/to
+        m2 = TaskMap.from_dict(d)
+        assert set(m2.nodes) == set(m.nodes) and len(m2.edges) == len(m.edges)
+        assert m2.open_questions()[0]["q"] == "x"
+
+    def test_from_legacy_status(self):
+        m = TaskMap.from_legacy({"id": 5, "subject": "S", "status": "in_progress"})
+        assert m.id == 5 and m.status == MapStatus.ACTIVE and m.goal == "S"
+        m2 = TaskMap.from_legacy({"id": 6, "subject": "S", "description": "D", "status": "completed"})
+        assert m2.status == MapStatus.COMPLETED and m2.goal == "D"
+
+
+class TestStore(unittest.TestCase):
     def setUp(self):
-        # 使用临时目录隔离测试
-        self._orig_cwd = os.getcwd()
-        self._tmpdir = tempfile.mkdtemp(prefix="fp_test_task_")
-        os.chdir(self._tmpdir)
-        # 创建 .fp 目录
-        os.makedirs(".fp")
+        self.tmp = tempfile.mkdtemp()
+        self.fp = os.path.join(self.tmp, ".fp", "tasks.json")
 
     def tearDown(self):
-        os.chdir(self._orig_cwd)
-        import shutil
-
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def _make_mock_registry(self):
-        """创建一个可注入的 mock ToolRegistry（不自动扫描 plugins 目录）"""
-        registry = ToolRegistry()
-        # 清空已有插件（只保留 core 工具）
-        registry._plugins.clear()
-        return registry
-
-    # ── 测试 1: 插件加载 ───────────────────────────
-
-    def test_plugin_instantiation(self):
-        """确保插件可以被实例化"""
-        plugin = TaskSystemPlugin()
-        self.assertEqual(plugin.name, "task_system")
-        self.assertTrue(plugin.is_enabled)
-
-    def test_plugin_scan_discovery(self):
-        """确保插件可以被 PluginRegistry 自动扫描发现"""
-        lifecycle = LifecycleManager()
-        plugin_dir = os.path.join(os.path.dirname(__file__), "..", "src", "fp_core", "plugins")
-        registry = PluginRegistry(lifecycle, plugin_dir=plugin_dir)
-        plugins = registry.list_plugins()
-        self.assertIn("task_system", plugins, f"task_system 插件应被扫描到，已注册: {plugins}")
-
-    # ── 测试 2: ON_INIT 工具注册 ───────────────────
-
-    async def test_on_init_registers_tools(self):
-        """ON_INIT 钩子应通过 tool_registry 注册 4 个工具"""
-        lifecycle = LifecycleManager()
-        plugin = TaskSystemPlugin()
-        plugin.on_register(lifecycle)
-
-        # 创建 mock registry 并注入
-        mock_registry = self._make_mock_registry()
-        self.assertEqual(len(mock_registry.get_all_definitions()), 4)  # 只有 core 工具
-
-        # 触发 ON_INIT
-        ctx = await lifecycle.emit(LifecycleHook.ON_INIT, tool_registry=mock_registry)
-
-        # 验证工具已注册
-        defs = mock_registry.get_all_definitions()
-        tool_names = [d["function"]["name"] for d in defs]
-        self.assertIn("task_create", tool_names)
-        self.assertIn("task_update", tool_names)
-        self.assertIn("task_list", tool_names)
-        self.assertIn("task_clear", tool_names)
-
-        # 验证 system_prompt_append（list 收集语义：任一段含关键词即可）
-        self.assertIn("system_prompt_append", ctx.data)
-        append_parts = ctx.data["system_prompt_append"]
-        self.assertIsInstance(append_parts, list)
-        self.assertTrue(any("task_create" in part for part in append_parts))
-
-    async def test_on_unregister_cleans_tools(self):
-        """on_unregister 必须清掉自己注册的 4 个任务工具（插件禁用后不残留）"""
-        lifecycle = LifecycleManager()
-        plugin = TaskSystemPlugin()
-        plugin.on_register(lifecycle)
-        mock_registry = self._make_mock_registry()
-
-        await lifecycle.emit(LifecycleHook.ON_INIT, tool_registry=mock_registry)
-        names_before = {d["function"]["name"] for d in mock_registry.get_all_definitions()}
-        self.assertIn("task_create", names_before)
-
-        # 模拟 PluginRegistry.unregister → plugin.on_unregister()
-        plugin.on_unregister()
-
-        names_after = {d["function"]["name"] for d in mock_registry.get_all_definitions()}
-        for n in ("task_create", "task_update", "task_list", "task_clear"):
-            self.assertNotIn(n, names_after, f"{n} 应在插件卸载后被清理")
-        self.assertEqual(plugin._registered_tools, [])
-
-    async def test_on_before_llm_call_adds_hint(self):
-        lifecycle = LifecycleManager()
-        plugin = TaskSystemPlugin()
-        plugin.on_register(lifecycle)
-
-        # 先创建一个进行中任务
-        store = TaskStore()
-        store.create("测试任务 1")
-        t2 = store.create("测试任务 2")
-        store.update(t2.id, "in_progress")
-
-        # 触发 ON_BEFORE_LLM_CALL
-        msgs = [{"role": "system", "content": "test prompt"}]
-        ctx = await lifecycle.emit(LifecycleHook.ON_BEFORE_LLM_CALL, messages=msgs, tools=[])
-
-        modified = ctx.data.get("modified_messages", [])
-        last_msg = modified[-1]
-        self.assertEqual(last_msg["role"], "system")
-        # 应有 ▶#2（进行中）和 ⬜1（待办）
-        self.assertIn("▶#2", last_msg["content"])
-        self.assertIn("⬜1", last_msg["content"])
-
-    async def test_on_before_llm_call_no_tasks(self):
-        lifecycle = LifecycleManager()
-        plugin = TaskSystemPlugin()
-        plugin.on_register(lifecycle)
-
-        # 先触发 ON_INIT（真实流程中 ON_INIT 总是在 ON_BEFORE_LLM_CALL 之前）
-        await lifecycle.emit(LifecycleHook.ON_INIT, tool_registry=None)
-
-        msgs = [{"role": "system", "content": "test prompt"}]
-        ctx = await lifecycle.emit(LifecycleHook.ON_BEFORE_LLM_CALL, messages=msgs, tools=[])
-
-        modified = ctx.data.get("modified_messages")
-        # 无任务时不应设置 modified_messages
-        self.assertIsNone(modified)
-
-    async def test_on_before_llm_call_all_done(self):
-        lifecycle = LifecycleManager()
-        plugin = TaskSystemPlugin()
-        plugin.on_register(lifecycle)
-
-        # 先触发 ON_INIT（真实流程中 ON_INIT 总是在 ON_BEFORE_LLM_CALL 之前）
-        await lifecycle.emit(LifecycleHook.ON_INIT, tool_registry=None)
-
-        store = TaskStore()
-        t = store.create("已完成任务")
-        store.update(t.id, "completed")
-
-        msgs = [{"role": "system", "content": "test prompt"}]
-        ctx = await lifecycle.emit(LifecycleHook.ON_BEFORE_LLM_CALL, messages=msgs, tools=[])
-
-        modified = ctx.data.get("modified_messages")
-        self.assertIsNone(modified)
-
-    # ── 测试 4: 工具功能 ───────────────────────────
-
-    async def test_tool_create(self):
-        """task_create 工具应创建任务并持久化"""
-        result = await handle_create({"subject": "实现登录模块"})
-        self.assertIn("✅ 已创建任务", result)
-        self.assertIn("实现登录模块", result)
-
-        store = TaskStore()
-        tasks = store.list_all()
-        self.assertEqual(len(tasks), 1)
-        self.assertEqual(tasks[0].subject, "实现登录模块")
-
-    async def test_tool_update(self):
-        """task_update 工具应更新任务状态"""
-        store = TaskStore()
-        t = store.create("测试任务")
-
-        result = await handle_update({"task_id": t.id, "status": "in_progress"})
-        self.assertIn("✅ 任务", result)
-        self.assertIn("in_progress", result)
-
-        tasks = store.list_all()
-        self.assertEqual(tasks[0].status.value, "in_progress")
-
-    async def test_tool_update_str_id(self):
-        """回归：task_id 以字符串传入（如 "2"）也应能匹配到任务
-
-        之前 store.update 用 int == str 严格比较，LLM 把整数 id
-        序列化成字符串时会导致"未找到任务"误报。
-        """
-        store = TaskStore()
-        t = store.create("测试任务")
-
-        result = await handle_update({"task_id": str(t.id), "status": "in_progress"})
-        self.assertIn("✅ 任务", result)
-        self.assertIn("in_progress", result)
-
-        tasks = store.list_all()
-        self.assertEqual(tasks[0].status.value, "in_progress")
-
-    async def test_tool_update_float_id(self):
-        """回归：task_id 以 float 形式传入（如 2.0）也应能匹配到任务"""
-        store = TaskStore()
-        t = store.create("测试任务")
-
-        result = await handle_update({"task_id": float(t.id), "status": "completed"})
-        self.assertIn("✅ 任务", result)
-
-        tasks = store.list_all()
-        self.assertEqual(tasks[0].status.value, "completed")
-
-    async def test_tool_list(self):
-        """task_list 工具应列出所有任务"""
-        store = TaskStore()
-        store.create("任务 A")
-        store.create("任务 B")
-
-        result = await handle_list({})
-        self.assertIn("📋 任务列表", result)
-        self.assertIn("任务 A", result)
-        self.assertIn("任务 B", result)
-
-    async def test_tool_list_empty(self):
-        """无任务时 task_list 应返回提示"""
-        result = await handle_list({})
-        self.assertEqual(result, "暂无任务")
-
-    async def test_tool_clear(self):
-        """task_clear 应清除已完成任务"""
-        store = TaskStore()
-        t1 = store.create("待办任务")
-        t2 = store.create("已完成任务")
-        store.update(t2.id, "completed")
-
-        result = await handle_clear({})
-        self.assertIn("已清除 1 个", result)
-
-        tasks = store.list_all()
-        self.assertEqual(len(tasks), 1)
-        self.assertEqual(tasks[0].id, t1.id)
-
-    async def test_tool_clear_none(self):
-        """无终态任务时 task_clear 应提示"""
-        store = TaskStore()
-        store.create("待办任务")
-
-        result = await handle_clear({})
-        self.assertIn("没有终态任务", result)
-
-    # ── 测试 4.1: 新状态 delivered/superseded ───────
-
-    async def test_status_machine_delivered_completed(self):
-        """正常流：pending → in_progress → delivered → completed"""
-        store = TaskStore()
-        t = store.create("交付任务")
-        store.update(t.id, "in_progress")
-        store.update(t.id, "delivered")
-        store.update(t.id, "completed")
-        self.assertEqual(store.list_all()[0].status.value, "completed")
-
-    async def test_status_machine_superseded(self):
-        """用户推翻：旧交付置 superseded，另建新任务"""
-        store = TaskStore()
-        old = store.create("旧交付 T2")
-        store.update(old.id, "delivered")
-        store.update(old.id, "superseded")
-        new = store.create("重写 T2")
-        store.update(new.id, "in_progress")
-
-        tasks = {t.id: t for t in store.list_all()}
-        self.assertEqual(tasks[old.id].status.value, "superseded")
-        self.assertEqual(tasks[new.id].status.value, "in_progress")
-        # 旧交付被推翻后，仍能区分于新任务（不叠加混淆）
-
-    async def test_clear_keeps_delivered(self):
-        """task_clear 不得清除 delivered（待批准不能丢）"""
-        store = TaskStore()
-        t1 = store.create("已交付任务")
-        store.update(t1.id, "delivered")
-        t2 = store.create("已完成任务")
-        store.update(t2.id, "completed")
-
-        result = await handle_clear({})
-        self.assertIn("已清除 1 个", result)  # 只清 completed，不动 delivered
-
-        tasks = store.list_all()
-        self.assertEqual(len(tasks), 1)
-        self.assertEqual(tasks[0].id, t1.id)
-        self.assertEqual(tasks[0].status.value, "delivered")
-
-    async def test_clear_removes_superseded(self):
-        """task_clear 清除已作废任务"""
-        store = TaskStore()
-        t = store.create("被推翻任务")
-        store.update(t.id, "superseded")
-        result = await handle_clear({})
-        self.assertIn("已清除 1 个", result)
-        self.assertEqual(len(store.list_all()), 0)
-
-    async def test_list_shows_new_labels(self):
-        """task_list 展示 delivered/superseded 中文标签"""
-        store = TaskStore()
-        t1 = store.create("待批准任务")
-        store.update(t1.id, "delivered")
-        t2 = store.create("被推翻任务")
-        store.update(t2.id, "superseded")
-
-        result = await handle_list({})
-        self.assertIn("交付待批", result)
-        self.assertIn("已作废", result)
-
-    async def test_summarize_delivered_flag(self):
-        """store.summarize 在 delivered 时输出 ⏸ 待批准标记"""
-        store = TaskStore()
-        t = store.create("待批准任务")
-        store.update(t.id, "delivered")
-        summary = store.summarize()
-        self.assertIn("⏸", summary)
-        self.assertIn(str(t.id), summary)
-        self.assertIn("待批准", summary)
-
-    # ── 测试 5: 通过 ToolRegistry 调用 ──────────────
-
-    async def test_tool_registry_integration(self):
-        """通过 ToolRegistry.execute 调用 task 工具"""
-        registry = self._make_mock_registry()
-
-        # 手动注册
-        from fp_core.plugins.task_system.tools import DEF_CREATE, DEF_LIST
-
-        registry.register_tool("task_create", DEF_CREATE, handle_create)
-        registry.register_tool("task_list", DEF_LIST, handle_list)
-
-        # 调用 task_create
-        result = await registry.execute("task_create", {"subject": "通过 registry 创建"})
-        self.assertIn("✅ 已创建任务", result)
-
-        # 调用 task_list
-        result = await registry.execute("task_list", {})
-        self.assertIn("通过 registry 创建", result)
-
-    # ── 测试 6: system_prompt_append ────────────────
-
-    async def test_system_prompt_append_content(self):
-        """ON_INIT 应通过 context 返回 system_prompt_append（list 收集）"""
-        lifecycle = LifecycleManager()
-        plugin = TaskSystemPlugin()
-        plugin.on_register(lifecycle)
-
-        ctx = await lifecycle.emit(LifecycleHook.ON_INIT)
-        append_parts = ctx.data.get("system_prompt_append", [])
-        self.assertIsInstance(append_parts, list)
-        joined = "\n".join(append_parts)
-        self.assertIn("task_create", joined)
-        self.assertIn("task_update", joined)
-        self.assertIn("task_list", joined)
-        self.assertIn("task_clear", joined)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_create_get(self):
+        s = TaskMapStore(self.fp)
+        m = s.create("A", "GA")
+        assert s.get(m.id).title == "A"
+        assert s.get(str(m.id)).id == m.id  # 类型宽容
+        assert s.get(float(m.id)).id == m.id
+        assert s.get(999) is None
+
+    def test_atomic_no_leftover(self):
+        s = TaskMapStore(self.fp)
+        s.create("A")
+        leftovers = [f for f in os.listdir(os.path.dirname(self.fp)) if f.endswith(".tmp")]
+        assert not leftovers
+
+    def test_v2_format(self):
+        s = TaskMapStore(self.fp)
+        s.create("A")
+        with open(self.fp, encoding="utf-8") as f:
+            d = json.load(f)
+        assert d["version"] == 2 and "maps" in d and "tasks" not in d
+
+    def test_legacy_migration(self):
+        os.makedirs(os.path.dirname(self.fp))
+        with open(self.fp, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "tasks": [
+                        {"id": 7, "subject": "A", "status": "in_progress"},
+                        {"id": 8, "subject": "B", "description": "DB", "status": "completed"},
+                    ],
+                    "next_id": 9,
+                },
+                f,
+            )
+        maps, nid = TaskMapStore(self.fp).load()
+        assert nid == 9 and len(maps) == 2
+        assert maps[0].status == MapStatus.ACTIVE and maps[1].goal == "DB"
+
+    def test_corrupt_backup(self):
+        os.makedirs(os.path.dirname(self.fp))
+        with open(self.fp, "w", encoding="utf-8") as f:
+            f.write("{ not json")
+        assert TaskMapStore(self.fp).load() == ([], 1)
+        assert os.path.exists(self.fp + ".bak")
+
+    def test_save_map_and_clear(self):
+        s = TaskMapStore(self.fp)
+        a = s.create("A")
+        b = s.create("B")
+        a.status = MapStatus.DELIVERED
+        s.save_map(a)
+        assert s.get(a.id).status == MapStatus.DELIVERED
+        b.status = MapStatus.COMPLETED
+        s.save_map(b)
+        assert s.clear_terminal() == 1  # 只清 completed, delivered 保留
+        assert s.get(a.id) is not None and s.get(b.id) is None
+
+
+class TestGraphOps(unittest.TestCase):
+    def test_add_node_edge(self):
+        m = TaskMap.create(1, "T")
+        summ = apply_ops(
+            m,
+            [
+                {"op": "add_node", "desc": "X"},
+                {"op": "add_edge", "from": "n1", "to": "n2", "semantic": "complete"},
+                {"op": "set_status", "node": "n2", "status": "active"},
+                {"op": "set_evidence", "node": "n2", "evidence": ["e1", "e2"]},
+            ],
+        )
+        assert m.nodes["n2"].status == NodeStatus.ACTIVE and len(m.nodes["n2"].evidence) == 2
+        assert len(summ) == 4
+
+    def test_atomic_rollback(self):
+        m = _new_map()
+        before = (set(m.nodes), len(m.edges), m.next_nid)
+        with self.assertRaises(GraphOpError):
+            apply_ops(
+                m,
+                [
+                    {"op": "add_node", "desc": "临时"},
+                    {"op": "add_edge", "from": "ghost", "to": "n1", "semantic": "x"},
+                ],
+            )
+        assert (set(m.nodes), len(m.edges), m.next_nid) == before
+
+    def test_invalid_op_word(self):
+        with self.assertRaises(GraphOpError):
+            apply_ops(TaskMap.create(1, "T"), [{"op": "remove_node", "node": "n1"}])
+        with self.assertRaises(GraphOpError):
+            apply_ops(TaskMap.create(1, "T"), [])
+
+
+class TestDelta(unittest.TestCase):
+    def test_extract_variants(self):
+        ok = '正文\n[taskmap-delta]\n{"node":"n1"}\n[/taskmap-delta]'
+        d, note = delta_mod.extract_delta(ok)
+        assert d == {"node": "n1"} and note == ""
+        assert delta_mod.extract_delta("无")[1] == "无 delta 块"
+        assert delta_mod.extract_delta("[taskmap-delta]{bad json}[/taskmap-delta]")[0] is None
+        # 围栏容忍
+        fenced = '```json\n[taskmap-delta]\n{"node":"n1"}\n[/taskmap-delta]\n```'
+        assert delta_mod.extract_delta(fenced)[0] == {"node": "n1"}
+
+    def test_apply_ok_and_release_lock(self):
+        m = _new_map()
+        _lock(m, "n2", "w1", "d1")
+        delta = {
+            "dispatch_id": "d1",
+            "node": "n2",
+            "status": "done",
+            "outcome": "complete",
+            "evidence": ["cmd: x"],
+            "propose": {
+                "nodes": [{"lid": "z", "desc": "重装驱动"}],
+                "edges": [{"from": "n2", "to": "z", "semantic": "complete"}],
+            },
+        }
+        ok, msg, _ = delta_mod.apply_delta(m, delta, worker="w1", dispatch_id="d1")
+        assert ok, msg
+        assert m.nodes["n2"].status == NodeStatus.DONE
+        assert m.nodes["n2"].owner is None and m.nodes["n2"].dispatch_id is None
+        assert any(n.desc == "重装驱动" for n in m.nodes.values())
+
+    def test_stale_dispatch_rejected(self):
+        m = _new_map()
+        _lock(m, "n2", "w1", "d1")
+        ok, msg, _ = delta_mod.apply_delta(
+            m, {"node": "n2", "status": "done", "outcome": "complete"}, worker="w1", dispatch_id="d_OLD"
+        )
+        assert not ok and "陈旧" in msg
+
+    def test_bad_outcome(self):
+        m = _new_map()
+        _lock(m, "n2", "w1", "d1")
+        ok, msg, _ = delta_mod.apply_delta(
+            m, {"node": "n2", "status": "done", "outcome": "nonsense"}, worker="w1", dispatch_id="d1"
+        )
+        assert not ok and "outcome" in msg
+
+    def test_out_of_scope_edge(self):
+        m = _new_map()
+        _lock(m, "n2", "w1", "d1")
+        n_before = set(m.nodes)
+        delta = {
+            "node": "n2",
+            "status": "done",
+            "outcome": "complete",
+            "propose": {
+                "nodes": [{"lid": "y", "desc": "不应落地"}],
+                "edges": [{"from": "n2", "to": "n0", "semantic": "complete"}],
+            },
+        }
+        ok, msg, _ = delta_mod.apply_delta(m, delta, worker="w1", dispatch_id="d1")
+        assert not ok and "越界" in msg
+        assert set(m.nodes) == n_before  # propose 原子回滚
+
+    def test_dedup_existing_node(self):
+        m = _new_map()
+        m.nodes["n3"] = None  # 占位, 下面覆盖
+        apply_ops(m, [{"op": "add_node", "desc": "重装驱动"}])
+        _lock(m, "n2", "w1", "d1")
+        n_before = set(m.nodes)
+        delta = {
+            "node": "n2",
+            "status": "done",
+            "outcome": "complete",
+            "propose": {
+                "nodes": [{"lid": "z", "desc": "重装驱动"}],
+                "edges": [{"from": "n2", "to": "z", "semantic": "complete"}],
+            },
+        }
+        ok, _, _ = delta_mod.apply_delta(m, delta, worker="w1", dispatch_id="d1")
+        assert ok and set(m.nodes) == n_before
+
+    def test_done_requires_outcome(self):
+        m = _new_map()
+        ok, msg, _ = delta_mod.apply_delta(m, {"node": "n2", "status": "done"}, worker="")
+        assert not ok and "outcome" in msg
+
+    def test_delta_instruction_has_ids(self):
+        s = delta_mod.delta_instruction("n7", "d-xyz")
+        assert "n7" in s and "d-xyz" in s and delta_mod.DELTA_START in s
+
+
+class TestRender(unittest.TestCase):
+    def test_full_and_subgraph(self):
+        m = _new_map()
+        full = render.render_full(m)
+        assert "修扬声器" in full and "n2" in full
+        sub = render.render_subgraph(m, "n2", radius=1)
+        assert "n2" in sub and "n1" in sub  # 目标节点恒在
+        assert render.EDGE_LEGEND.split(":")[0] in sub
+
+    def test_summary(self):
+        m = _new_map()
+        s = render.summary([m])
+        assert s and "#1" in s and "待办" in s
+        m.status = MapStatus.COMPLETED
+        assert render.summary([m]) is None
+
+
+class TestTools(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._orig = os.getcwd()
+        self.tmp = tempfile.mkdtemp(prefix="fp_test_task_")
+        os.chdir(self.tmp)
+        os.makedirs(".fp", exist_ok=True)
+
+    def tearDown(self):
+        os.chdir(self._orig)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def test_create_read_list(self):
+        assert "已创建任务图 #1" in await tools.handle_create({"title": "A", "goal": "G"})
+        assert "A" in await tools.handle_read({"id": 1})
+        assert "任务列表" in await tools.handle_list({})
+        assert await tools.handle_list({}) != "暂无任务"
+
+    async def test_edit_and_update(self):
+        await tools.handle_create({"title": "A"})
+        r = await tools.handle_edit({"id": 1, "ops": [{"op": "add_node", "desc": "X"}]})
+        assert "图变更已应用" in r and "+节点 n2" in r
+        r = await tools.handle_update({"id": 1, "status": "delivered", "add_question": "q?"})
+        assert "+question" in r
+        assert "待澄清" in await tools.handle_read({"id": 1})
+
+    async def test_edit_rejected_atomic(self):
+        await tools.handle_create({"title": "A"})
+        r = await tools.handle_edit({
+            "id": 1,
+            "ops": [{"op": "add_edge", "from": "n0", "to": "ghost", "semantic": "x"}],
+        })
+        assert "被拒" in r
+        assert "n2" not in await tools.handle_read({"id": 1})
+
+    async def test_update_resolve_and_bad(self):
+        await tools.handle_create({"title": "A"})
+        await tools.handle_update({"id": 1, "add_question": "q0"})
+        assert "resolve#0" in await tools.handle_update({"id": 1, "resolve_question": 0})
+        with self.assertRaises(ValueError):
+            await tools.handle_update({"id": 1, "status": "bogus"})
+        with self.assertRaises(ValueError):
+            await tools.handle_update({"id": 1, "resolve_question": 5})
+
+    async def test_read_missing_and_clear(self):
+        assert "未找到" in await tools.handle_read({"id": 42})
+        assert "没有终态任务" in await tools.handle_clear({})
+        await tools.handle_create({"title": "A"})
+        await tools.handle_update({"id": 1, "status": "completed"})
+        assert "已清除 1 个" in await tools.handle_clear({})
+
+
+class TestPlugin(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._orig = os.getcwd()
+        self.tmp = tempfile.mkdtemp(prefix="fp_test_taskplugin_")
+        os.chdir(self.tmp)
+        os.makedirs(".fp", exist_ok=True)
+
+    def tearDown(self):
+        os.chdir(self._orig)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _mock_registry() -> ToolRegistry:
+        r = ToolRegistry()
+        r._plugins.clear()
+        return r
+
+    def test_instantiation(self):
+        p = TaskSystemPlugin()
+        assert p.name == "task_system" and p.is_enabled
+
+    def test_scan_discovery(self):
+        lc = LifecycleManager()
+        pdir = os.path.join(os.path.dirname(__file__), "..", "src", "fp_core", "plugins")
+        reg = PluginRegistry(lc, plugin_dir=pdir)
+        assert "task_system" in reg.list_plugins()
+
+    async def test_on_init_and_unregister(self):
+        lc = LifecycleManager()
+        p = TaskSystemPlugin()
+        p.on_register(lc)
+        reg = self._mock_registry()
+        ctx = await lc.emit(LifecycleHook.ON_INIT, tool_registry=reg)
+        names = {d["function"]["name"] for d in reg.get_all_definitions()}
+        assert names >= TASK_TOOLS
+        ap = ctx.data.get("system_prompt_append")
+        assert isinstance(ap, list) and any("任务图" in s for s in ap)
+        p.on_unregister()
+        after = {d["function"]["name"] for d in reg.get_all_definitions()}
+        assert not (TASK_TOOLS & after)
+
+    async def test_before_llm_call_hint(self):
+        lc = LifecycleManager()
+        p = TaskSystemPlugin()
+        p.on_register(lc)
+        await lc.emit(LifecycleHook.ON_INIT, tool_registry=None)
+        TaskMapStore().create("演示")
+        ctx = await lc.emit(LifecycleHook.ON_BEFORE_LLM_CALL, messages=[{"role": "system", "content": "S"}], tools=[])
+        mod = ctx.data.get("modified_messages")
+        assert mod and "[task] ▶#1 演示" in mod[-1]["content"]
+
+    async def test_before_llm_call_no_tasks(self):
+        lc = LifecycleManager()
+        p = TaskSystemPlugin()
+        p.on_register(lc)
+        await lc.emit(LifecycleHook.ON_INIT, tool_registry=None)
+        ctx = await lc.emit(LifecycleHook.ON_BEFORE_LLM_CALL, messages=[{"role": "system", "content": "S"}], tools=[])
+        assert ctx.data.get("modified_messages") is None
 
 
 if __name__ == "__main__":

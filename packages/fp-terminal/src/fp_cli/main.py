@@ -224,12 +224,27 @@ async def main():
 
     from fp_core.core.agent import Agent
 
+    # 角色注入（多智能体编排器）：FP_SUBAGENT_ROLE 传 JSON。
+    # Agent 以 getattr 盲取 role 属性（duck-typed），故用 SimpleNamespace 还原即可，
+    # 无需引入核心 AgentRole 类依赖。
+    _role: Any = None
+    _role_json = os.environ.get("FP_SUBAGENT_ROLE")
+    if _role_json:
+        import json as _json
+        from types import SimpleNamespace as _SimpleNamespace
+
+        try:
+            _role = _SimpleNamespace(**_json.loads(_role_json))
+        except (ValueError, TypeError):
+            _role = None
+
     # subagent 子进程：使用父进程预生成的会话 ID（父进程据此兜底补写 meta）
     _sub_sid = os.environ.get("FP_SUBAGENT_SID") or None
     agent = Agent(
         resume=args.resume,
         session_id=_sub_sid,
         io=CLIIO(),
+        role=_role,
         on_shutdown=display.shutdown_panel,
     )
 

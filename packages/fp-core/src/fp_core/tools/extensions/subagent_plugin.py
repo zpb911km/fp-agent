@@ -249,6 +249,7 @@ async def execute(params: dict[str, Any]) -> str:
         proc = await asyncio.create_subprocess_exec(
             *entry,
             query,
+            stdin=asyncio.subprocess.DEVNULL,  # 不继承父终端 stdin，防 worker 内交互工具读父 TTY 挂起
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,

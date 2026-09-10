@@ -3,6 +3,19 @@
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/) 和 [Keep a Changelog](https://keepachangelog.com/) 规范。
 
 
+## [Unreleased]
+
+### Added
+
+- **任务图(taskmap): task 从线性清单升级为有向图**。新增核心库 `fp_core/taskmap/`（models/store/graph/render/delta）：节点=状态、边=带结果语义的转移（`complete`/`exhausted`/`side_effect`/`blocked`/`partial`/`requires_decompose`），支持「拆图」生长与副作用支线；`TaskMapStore` 单文件 `.fp/tasks.json`（**原子写** + 旧 `{tasks:[]}` **惰性迁移**）；`task_*` 工具 4→6（新增 `task_read`/`task_edit`）。
+- **agent_orchestrator 迁入核心**：由 private 插件移入 `fp_core/plugins/agent_orchestrator/`。`agent_dispatch` 支持 `task_id`/`node_id`：worker 输出的 `[taskmap-delta]` 被解析、8 条校验、由编排器**单写者落图**（`dispatch_id` 幂等；outcome 一律落、propose 全有或全无）。黑板收窄为产物归档 `runs`（`{DATA}/runs/`，不随会话擦除）。
+- **测试**：新增 `test_agent_orchestrator_plugin.py`；重写 `test_task_system_plugin.py`；`conftest.py` 新增数据根隔离 fixture（隔离 fetched/public/private 三来源，防用户插件污染断言）。
+
+### Changed
+
+- `task_system` 插件 2.0.0：`[task]` 提醒改为图摘要（`▶#id 标题 进行:<节点> · 待办:<n> · ❓<n>`）；整体状态机改为 `active`/`blocked`/`delivered`/`completed`/`superseded`。
+- README / docs 同步：工具数 14→16；任务文件格式 v1→v2；内置插件清单增补 `agent_orchestrator`。
+
 ## [0.1.13] — 2026-09-08
 
 ### Added
