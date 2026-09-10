@@ -43,7 +43,8 @@ _current_agent = None
 class SlashCompleter(PtCompleter):
     """自定义补全器：仅在输入 "/" 前缀时匹配命令和工具名。
 
-    补全字典初始化时从 tools/commands 系统动态加载，确保始终同步。
+    补全字典从 tools/commands 系统动态加载，并在每次补全前重载，
+    确保始终同步（/reload 或插件热启停注入的命令能立即出现）。
     每个补全项附带描述信息作为 display_meta，帮助用户快速了解功能。
     """
 
@@ -81,6 +82,10 @@ class SlashCompleter(PtCompleter):
         # 仅在输入以 "/" 开头时才触发补全
         if not text.startswith("/"):
             return
+
+        # 惰性重载：命令表可能因 /reload 或插件热启停而变化，
+        # 每次补全前重新抓取，避免词表停留在 REPL 启动那一刻。
+        self._load_words()
 
         for word in self._words:
             if word.startswith(text):
