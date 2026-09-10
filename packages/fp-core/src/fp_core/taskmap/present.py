@@ -157,7 +157,7 @@ def to_mermaid(m: TaskMap, *, direction: str = "LR", now: float | None = None) -
     for nid in ids:
         n = m.nodes[nid]
         open_, close_ = _SHAPE.get(n.kind, ("[", "]"))
-        label = _esc(f"{n.id} {n.desc}")
+        label = _esc(f"{n.id} {n.desc}", limit=36)
         lines.append(f'  {alias[nid]}{open_}"{label}"{close_}')
 
     for e in m.edges:
@@ -225,7 +225,10 @@ def to_tree(m: TaskMap, *, now: float | None = None) -> str:
         n = m.nodes[nid]
         icon = _STATUS_ICON.get(n.status.value, "?")
         kind = " [副作用]" if n.kind == NodeKind.SIDE_EFFECT else ""
-        return f"{icon} {nid}{kind} {n.desc}"
+        desc = n.desc
+        if len(desc) > 48:
+            desc = desc[:47] + "…"
+        return f"{icon} {nid}{kind} {desc}"
 
     def edge_tag(e) -> str:
         return f"  [{e.semantic}{(' · ' + e.label) if e.label else ''}]"

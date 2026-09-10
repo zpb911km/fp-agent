@@ -111,6 +111,11 @@ class TestTree(unittest.TestCase):
         # n2 有第二条出边直达 n1, 而 n1 已沿 n3->n4->n1 展开过
         self.assertIn("↩", to_tree(_map()))
 
+    def test_long_desc_truncated(self):
+        m = TaskMap.create(1, "t", "很长的目标" * 30)
+        self.assertIn("…", to_tree(m))
+        self.assertIn("…", to_mermaid(m))
+
     def test_unconnected_node_listed(self):
         m = TaskMap.create(1, "t", "g")
         m.nodes["n9"] = Node(id="n9", desc="孤岛")
