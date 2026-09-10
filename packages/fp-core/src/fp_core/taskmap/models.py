@@ -199,6 +199,13 @@ _LEGACY_STATUS = {
 START_NODE_ID = "n0"
 GOAL_NODE_ID = "n1"
 
+#: 旧任务状态 → 目标节点状态(避免"已完成任务却显示有待办")
+_LEGACY_GOAL_NODE_STATUS = {
+    MapStatus.COMPLETED: NodeStatus.DONE,
+    MapStatus.DELIVERED: NodeStatus.DONE,
+    MapStatus.SUPERSEDED: NodeStatus.SKIPPED,
+}
+
 
 @dataclass
 class TaskMap:
@@ -332,5 +339,9 @@ class TaskMap:
         status = MapStatus(_LEGACY_STATUS.get(str(data.get("status", "")), MapStatus.ACTIVE.value))
         m = cls.create(mid, subject or goal, goal)
         m.status = status
+        # 目标节点随旧任务状态对齐: 已完成/已交付 → 目标已达成; 作废 → 跳过
+        goal_node = m.nodes[GOAL_NODE_ID]
+        goal_node.status = _LEGACY_GOAL_NODE_STATUS.get(status, NodeStatus.PENDING)
+        goal_node.log("migrated", by="migration", note=f"status={goal_node.status.value}")
         m.nodes[START_NODE_ID].log("migrated", by="migration")
         return m

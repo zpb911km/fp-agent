@@ -72,6 +72,17 @@ class TestModels(unittest.TestCase):
         m2 = TaskMap.from_legacy({"id": 6, "subject": "S", "description": "D", "status": "completed"})
         assert m2.status == MapStatus.COMPLETED and m2.goal == "D"
 
+    def test_from_legacy_goal_node_status(self):
+        """已完成/已交付的旧任务, 目标节点应随之达成 —— 不残留"待办"。"""
+        done = TaskMap.from_legacy({"id": 7, "subject": "S", "status": "completed"})
+        assert done.nodes["n1"].status == NodeStatus.DONE
+        delivered = TaskMap.from_legacy({"id": 8, "subject": "S", "status": "delivered"})
+        assert delivered.nodes["n1"].status == NodeStatus.DONE
+        dropped = TaskMap.from_legacy({"id": 9, "subject": "S", "status": "superseded"})
+        assert dropped.nodes["n1"].status == NodeStatus.SKIPPED
+        active = TaskMap.from_legacy({"id": 10, "subject": "S", "status": "pending"})
+        assert active.nodes["n1"].status == NodeStatus.PENDING
+
 
 class TestStore(unittest.TestCase):
     def setUp(self):

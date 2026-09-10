@@ -200,7 +200,7 @@ Closes #42
 python -m pytest packages/fp-core/tests -q
 ```
 
-当前 **14 个测试文件 / 274 个用例**（273 通过 + 1 跳过，跳过项为需
+当前 **21 个测试文件 / 445 个用例**（444 通过 + 1 跳过，跳过项为需
 `FP_BENCHMARK=1` 才运行的性能基准）。测试体系详见 [dev/测试.md](dev/测试.md)。
 
 > **会话隔离**：`tests/conftest.py` 通过 autouse fixture 把 `SESSIONS_DIR`
