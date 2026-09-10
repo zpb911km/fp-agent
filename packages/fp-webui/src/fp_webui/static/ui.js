@@ -125,6 +125,11 @@ function renderMarkdown(content) {
     // 包裹所有 <table> 使其可横向滚动
     html = html.replace(/<table>/g, '<div class="table-wrapper"><table>');
     html = html.replace(/<\/table>/g, '</table></div>');
+    // mermaid 代码块 → 图形容器（交由 mermaid.js 渲染；src 已由 marked 转义，安全）
+    html = html.replace(
+      /<pre><code class="language-mermaid">([\s\S]*?)<\/code><\/pre>/g,
+      function (_, src) { return '<div class="mermaid">' + src + '</div>'; }
+    );
     return html;
   } catch (e) {
     return escapeHtml(content);
@@ -1019,3 +1024,33 @@ function renderHistoryMessages(sid, messages) {
   requestAnimationFrame(tick);
 })();
 
+
+
+// ── Mermaid 图渲染（任务图 /task view · md 内嵌 ```mermaid） ──
+var _mermaidInit = false;
+
+function initMermaid() {
+  if (_mermaidInit || typeof mermaid === 'undefined') return;
+  _mermaidInit = true;
+  // strict: 标签内 HTML 被转义，防注入（任务描述来自 LLM/用户）
+  mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'default' });
+  var container = document.getElementById('messagesContainer') || document.body;
+  var pending = null;
+  new MutationObserver(function () {
+    if (pending) clearTimeout(pending);
+    pending = setTimeout(runMermaid, 60);
+  }).observe(container, { childList: true, subtree: true });
+  runMermaid();
+}
+
+function runMermaid() {
+  if (typeof mermaid === 'undefined') return;
+  document.querySelectorAll('.mermaid:not([data-processed])').forEach(function (el) {
+    mermaid.run({ nodes: [el] }).catch(function () {
+      el.setAttribute('data-processed', 'error');
+    });
+  });
+}
+
+window.addEventListener('load', initMermaid);
+if (document.readyState === 'complete') initMermaid();

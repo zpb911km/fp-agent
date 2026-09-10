@@ -1905,3 +1905,23 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   .topbar-btn { padding: 6px 8px; min-width: 40px; }
 }
 
+
+
+/* ═══ Mermaid 图（任务图 /task view） ═══ */
+.mermaid {
+  margin: 8px 0;
+  padding: 10px;
+  background: #fbfbfb;              /* 图自带浅色主题，需浅底保证可读 */
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: 8px;
+  overflow-x: auto;
+  text-align: center;
+}
+.mermaid svg { max-width: 100%; height: auto; }
+.mermaid[data-processed="error"] {
+  color: #c92a2a;
+  font-size: 12px;
+  text-align: left;
+  white-space: pre-wrap;
+  font-family: 'JetBrains Mono', monospace;
+}

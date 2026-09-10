@@ -32,6 +32,7 @@ STATUS_ICONS: dict[str, str] = {
 MAP_LABELS: dict[str, str] = {
     "active": "进行中",
     "blocked": "阻塞",
+    "paused": "已暂停",
     "delivered": "交付待批",
     "completed": "已完成",
     "superseded": "已作废",
@@ -79,12 +80,14 @@ def render_full(m: TaskMap) -> str:
             lines.append(_edge_line(e.src, e.dst, e.semantic, e.label))
     else:
         lines.append("  (无)")
-    qs = m.open_questions()
-    if qs:
+    if m.questions:
+        open_n = len(m.open_questions())
         lines.append("")
-        lines.append(f"待澄清({len(qs)}):")
-        for q in qs:
-            lines.append(f"  ? {q.get('q', '')}")
+        lines.append(f"待澄清({open_n}/{len(m.questions)}):")
+        for i, q in enumerate(m.questions):
+            mark = "✔" if q.get("resolved") else "?"
+            ans = f"  → {q['answer']}" if q.get("answer") else ""
+            lines.append(f"  [{i}] {mark} {q.get('q', '')}{ans}")
     return "\n".join(lines)
 
 
@@ -137,7 +140,7 @@ def summary(maps: list[TaskMap], limit: int = 3) -> str | None:
     live.sort(key=lambda x: x.id)
     parts: list[str] = []
     for m in live[:limit]:
-        icon = "⏸" if m.status == MapStatus.DELIVERED else "▶"
+        icon = {"delivered": "⏸", "paused": "⏳", "blocked": "❗"}.get(m.status.value, "▶")
         active = m.active_nodes()
         act = f" 进行:{active[0].id}({active[0].desc})" if active else ""
         todo = len(m.frontier())

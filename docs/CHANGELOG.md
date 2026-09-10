@@ -10,11 +10,14 @@
 - **任务图(taskmap): task 从线性清单升级为有向图**。新增核心库 `fp_core/taskmap/`（models/store/graph/render/delta）：节点=状态、边=带结果语义的转移（`complete`/`exhausted`/`side_effect`/`blocked`/`partial`/`requires_decompose`），支持「拆图」生长与副作用支线；`TaskMapStore` 单文件 `.fp/tasks.json`（**原子写** + 旧 `{tasks:[]}` **惰性迁移**）；`task_*` 工具 4→6（新增 `task_read`/`task_edit`）。
 - **agent_orchestrator 迁入核心**：由 private 插件移入 `fp_core/plugins/agent_orchestrator/`。`agent_dispatch` 支持 `task_id`/`node_id`：worker 输出的 `[taskmap-delta]` 被解析、8 条校验、由编排器**单写者落图**（`dispatch_id` 幂等；outcome 一律落、propose 全有或全无）。黑板收窄为产物归档 `runs`（`{DATA}/runs/`，不随会话擦除）。
 - **测试**：新增 `test_agent_orchestrator_plugin.py`；重写 `test_task_system_plugin.py`；`conftest.py` 新增数据根隔离 fixture（隔离 fetched/public/private 三来源，防用户插件污染断言）。
+- **任务图可视化 + `/task` 控制台**：新增核心库 `fp_core/taskmap/present.py`（`to_mermaid`/`to_tree`/`to_markdown`——确定性、形状随节点种类、颜色随状态、异常高亮：目标不可达/陈旧锁/环）；`task_system` 新增面向用户的 `/task` 命令（`list`/`show`/`view`/`new`/`approve`/`reject`/`answer`/`pause`/`resume`/`abort`/`clear`），其中**批、答、停**是人特有的权力（交付闸门 / 回应 `blocked` / 自治安全阀）；命令按 `state.io.frontend` 分支——终端出树形文本，其余前端出 md 内嵌 mermaid，**渲染交各显示模块**。webui 引入 mermaid.js 并在 `renderMarkdown` 后处理 `language-mermaid` 代码块（`securityLevel: strict`）。
+- **测试**：新增 `test_taskmap_present.py` / `test_task_command.py`（含插件 `ON_INIT` 注册与 `on_unregister` 清理的接线）。
 
 ### Changed
 
 - `task_system` 插件 2.0.0：`[task]` 提醒改为图摘要（`▶#id 标题 进行:<节点> · 待办:<n> · ❓<n>`）；整体状态机改为 `active`/`blocked`/`delivered`/`completed`/`superseded`。
-- README / docs 同步：工具数 14→16；任务文件格式 v1→v2；内置插件清单增补 `agent_orchestrator`。
+- `MapStatus` 新增 `paused`（用户暂停，安全阀）；`render_full` 待澄清列表带下标与已答内容（供 `/task answer` 定位）。
+- README / docs 同步：工具数 14→16；内置命令数 15→16（`/task` 由插件注入）；任务文件格式 v1→v2；内置插件清单增补 `agent_orchestrator`。
 
 ## [0.1.13] — 2026-09-08
 

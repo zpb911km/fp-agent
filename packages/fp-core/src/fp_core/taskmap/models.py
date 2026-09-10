@@ -56,6 +56,7 @@ class MapStatus(StrEnum):
     """任务图(任务)的整体状态。承接旧 task 状态机语义。"""
 
     ACTIVE = "active"  # 进行中(旧 pending/in_progress 均归此)
+    PAUSED = "paused"  # 用户暂停(安全阀: 停手但不作废)
     BLOCKED = "blocked"  # 卡住待外部输入
     DELIVERED = "delivered"  # 已交付待批准(停手等用户)
     COMPLETED = "completed"  # 用户已批准

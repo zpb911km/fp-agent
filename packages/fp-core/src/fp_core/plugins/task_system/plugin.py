@@ -19,6 +19,7 @@ from fp_core.taskmap.store import TaskMapStore
 from fp_core.tools import ToolRegistry
 from fp_core.tools.core import OpenAISchema
 
+from . import command as task_command
 from .tools import (
     ALL_DEFINITIONS,
     handle_clear,
@@ -72,7 +73,10 @@ class TaskSystemPlugin(Plugin):
         )
 
     def on_unregister(self):
-        """插件卸载时清理: 清掉自己注入的任务工具, 防止禁用后残留"""
+        """插件卸载时清理: 清掉自己注入的任务工具与 /task 命令, 防止禁用后残留"""
+        from fp_core.commands import unregister_command
+
+        unregister_command("task")
         if self._tool_registry is not None:
             for tool_name in self._registered_tools:
                 self._tool_registry.unregister_tool(tool_name)
@@ -94,6 +98,11 @@ class TaskSystemPlugin(Plugin):
                     self._registered_tools.append(tool_name)
 
         self._description_injected = True
+
+        # 注入面向用户的 /task 控制台命令(与命令文件扫描地位相同)
+        from fp_core.commands import register_command
+
+        register_command("task", task_command)
 
         # list 收集正道: 不覆盖其他插件注入
         ctx.data.setdefault("system_prompt_append", []).append(TASK_SYSTEM_DESCRIPTION)
