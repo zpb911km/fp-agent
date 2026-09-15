@@ -254,6 +254,12 @@ echo "你是谁" | fp                   # 测试系统提示词
   命令、工具、钩子」这类结构性变化才提醒清单文档。
 - **测试文件同样纳入门禁**：`packages/fp-core/tests/*.py` 与 `packages/fp/tests/*.py`
   变更会要求 [dev/测试.md](dev/测试.md) 确认（尤其新增测试文件时，文件清单表需同步）。
+- **宪章守卫（判据防漂移）**：pre-commit 钩子 `charter-guard` 由
+  `scripts/check_charter.py` 执行，对比 `docs/CHARTER.md` 的内容哈希与锚点，
+  不一致即**拒绝提交**——判据（CHARTER.md）不得被静默修改（宪章第 0 条）。
+  确为有意修宪时显式放行：
+  `FP_CHARTER_ALLOW=1 git commit -m "charter:amend — <理由>"`，
+  并同步更新脚本中的 `ANCHOR` 常量。
 - **显式放行**：确认本次改动确实不影响文档时，用
   `FP_DOCS_SYNC_ALLOW=1 git commit`（仅输出提醒，不阻断）。
 - **手动主动触发**：`python scripts/check_docs_sync.py --since HEAD~N`

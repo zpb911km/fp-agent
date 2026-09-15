@@ -33,3 +33,14 @@ repos:
         require_serial: true
         pass_filenames: false
         files: ^(packages/fp-core/src/|packages/fp-core/tests/|packages/fp/src/|packages/fp-terminal/|packages/fp-webui/|packages/fp-acp/|docs/|README\.md|scripts/)
+
+      # 宪章守卫：docs/CHARTER.md 是 FP 的判据，不得被静默修改。
+      # 逻辑在 scripts/check_charter.py（哈希锚点比对，宪章第 0 条）。
+      # 显式修宪: FP_CHARTER_ALLOW=1 git commit -m "charter:amend — <理由>"
+      - id: charter-guard
+        name: charter guard
+        entry: python scripts/check_charter.py
+        language: system
+        require_serial: true
+        pass_filenames: false
+        files: ^docs/CHARTER\.md$
