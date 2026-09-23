@@ -199,6 +199,12 @@ FastAPI 的 `@app.middleware("http")`，拦截所有 `/api/*` 请求（白名单
 2. 接收前端消息 → 调用 `agent.process()` 处理
 3. 处理过程中产生的所有事件通过 EventBus → WebSocket 实时推送
 
+**连接 ≠ 任务**（断连语义）：处理任务与 `WebSocketIO` 归属会话级
+`SessionRuntime`（单例），不属于任何连接。浏览器关闭/休眠断开时，
+端点 `finally` 只清理推送任务和订阅，**agent 继续运行**；重连后通过
+事件重放续传（见 6.5）。任务只在三种情况下终止：用户显式 `cancel`、
+服务端 shutdown、任务自然结束。
+
 ---
 
 ## 5. API 参考
@@ -411,7 +417,7 @@ ws://host:port/ws/chat?token=your_token
 
 | type | 字段 | 触发时机 |
 |------|------|----------|
-| `connected` | `sub_id` | 连接成功 |
+| `connected` | `sub_id`, `run_id`, `seq`, `session_id`, `processing`, `pending_ask`, `replay`, `resync` | 连接成功 + 运行时快照 + 重放协商（见 6.5） |
 | `ping` | — | 心跳（30 秒超时保活） |
 | `llm_start` | — | Agent 开始调用 LLM |
 | `llm_end` | `content`, `has_tool_calls`, `tool_names` | LLM 返回结果 |
@@ -433,17 +439,39 @@ ws://host:port/ws/chat?token=your_token
 ### 6.4 事件流示例
 
 ```
-← { "type": "connected", "sub_id": "sub_0" }
+← { "type": "connected", "sub_id": "sub_0", "run_id": "a3db74cf",
+     "seq": 42, "session_id": "s_...", "processing": false,
+     "pending_ask": false, "replay": false, "resync": false }
 → { "type": "message", "content": "帮我搜一下今天的新闻" }
-← { "type": "llm_start" }
-← { "type": "tool_select", "tools": ["web_search"] }
-← { "type": "llm_end", "has_tool_calls": true, "tool_names": ["web_search"] }
-← { "type": "tool_call", "name": "web_search", "args": "新闻" }
-← { "type": "tool_result", "name": "web_search", "result": "..." }
-← { "type": "llm_start" }
-← { "type": "llm_end", "content": "今天的新闻有以下几条：...", "has_tool_calls": false }
-← { "type": "done", "session_id": "session_xxx", "final_content": "..." }
+← { "type": "llm_start", "seq": 43 }
+← { "type": "tool_select", "tools": ["web_search"], "seq": 44 }
+← { "type": "llm_end", "has_tool_calls": true, "tool_names": ["web_search"], "seq": 45 }
+← { "type": "tool_call", "name": "web_search", "args": "新闻", "seq": 46 }
+← { "type": "tool_result", "name": "web_search", "result": "...", "seq": 47 }
+← { "type": "llm_start", "seq": 48 }
+← { "type": "llm_end", "content": "今天的新闻有以下几条：...", "has_tool_calls": false, "seq": 49 }
+← { "type": "done", "session_id": "session_xxx", "final_content": "...", "seq": 50 }
 ```
+
+### 6.5 断连、重连与事件重放
+
+**事件缓冲**：服务器为每个事件编号（全局递增 `seq`）并写入
+2000 条环形缓冲。重连时携带 `(seq, run_id)` 协商：
+
+- `run_id` 相同且缓冲未溢出 → `replay: true`，`connected` 之后
+  紧跟重放缺失区间事件，**无缝续传、无重复**
+- 缓冲溢出（断连太久）→ `resync: true`，前端丢弃本地流式区，
+  改用 `GET /api/sessions/<id>/messages` 全量重拉权威历史
+- `run_id` 变化（服务端已重启）→ 同样 `resync: true`，
+  旧 `seq` 作废
+
+**运行时快照**：`connected` 携带 `processing`（是否仍在处理）与
+`pending_ask`（是否阻塞在 `ask()` 等回复）。重连的前端据此恢复
+"处理中"状态与交互输入框，不会因断连而状态错乱。
+
+**保活与半开连接**：客户端断开后服务器 90 秒无上行即主动关闭
+连接；前端 `visibilitychange` 从休眠唤醒时立即重连并发存活 ping，
+不等 3 秒重连定时器。
 
 ---
 
@@ -631,6 +659,22 @@ ss -tlnp | grep 8765
 **Q: 重载后工具命令报错**
 - 可能是因为 `importlib.reload` 未完全刷新所有子模块
 - 尝试「🆕 新建」或完全重启服务器
+
+### C. 相关文件
+
+| 文件 | 用途 |
+|------|------|
+| `fp_webui/main.py` | WebUI 后端服务器 |
+| `fp_webui/static/index.html` | 前端单页应用 |
+| `.webui_token` | 自动生成的认证 Token |
+| `fp_core/core/agent.py` | Agent 核心类 |
+| `fp_core/core/lifecycle.py` | 生命周期钩子系统 |
+| `fp_core/core/io.py` | `WebSocketIO` 通道类 |
+
+---
+
+*文档版本: 1.0 · 最后更新: 2026-06-07*
+新建」或完全重启服务器
 
 ### C. 相关文件
 

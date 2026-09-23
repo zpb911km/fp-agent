@@ -29,6 +29,7 @@ import secrets
 import socket
 import sys
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from typing import Any, cast
@@ -73,11 +74,41 @@ class EventBus:
     背压保护：
       队列（maxsize=1024）满时不丢弃订阅者，而是丢弃最旧事件，
       保证订阅者始终能拿到最新事件，且不会失去连接。
+
+    断连续传（L2）：
+      所有事件带全局递增 seq，并写入环形缓冲（deque maxlen）。
+      重连的连接用 (run_id, last_seq) 协商重放；缓冲溢出（gap）则降级
+      由前端 REST 全量拉取会话历史。
     """
 
-    def __init__(self):
+    def __init__(self, buffer_size: int = 2000):
         self._subscribers: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self._next_id = 0
+        # 本次进程的运行标识：服务端重启后 seq 空间重置，
+        # 前端凭 run_id 变化丢弃旧 last_seq，避免序号错位导致事件被误过滤。
+        self.run_id = secrets.token_hex(4)
+        self._seq = 0
+        self._buffer: deque[dict[str, Any]] = deque(maxlen=buffer_size)
+
+    @property
+    def current_seq(self) -> int:
+        """最新事件序号（0 = 尚无事件）"""
+        return self._seq
+
+    def events_since(self, last_seq: int) -> list[dict[str, Any]] | None:
+        """取回序号 > last_seq 的缓冲事件；缓冲溢出（gap）返回 None。
+
+        前端应据此降级为 REST 全量重拉（resync）。
+        """
+        if last_seq >= self._seq:
+            return []
+        if not self._buffer:
+            # 有事件但缓冲为空 → 必然是被清空/溢出，按 gap 处理
+            return None
+        oldest = self._buffer[0]["seq"]
+        if last_seq + 1 < oldest:
+            return None  # gap：last_seq 之后的部分事件已被挤出缓冲
+        return [e for e in self._buffer if e["seq"] > last_seq]
 
     def subscribe(self) -> tuple[str, asyncio.Queue[dict[str, Any]]]:
         """订阅事件流，返回 (subscriber_id, queue)"""
@@ -97,6 +128,11 @@ class EventBus:
         背压策略：队列满时丢弃最旧事件（get_nowait），而非丢弃订阅者。
         确保订阅者不会因消费慢而被静默移除。
         """
+        # 先编号入缓冲，再分发（同一同步块内完成，保证 seq 与入队顺序一致）
+        self._seq += 1
+        event = {**event, "seq": self._seq}
+        self._buffer.append(event)
+
         dead_subs: list[str] = []
         for sub_id, q in self._subscribers.items():
             try:
@@ -125,6 +161,78 @@ class EventBus:
 
 # 全局事件总线实例
 event_bus = EventBus()
+
+
+# ════════════════════════════════════════════════════════════
+# 1a. SessionRuntime — 会话级运行时（与 WS 连接解耦）
+# ════════════════════════════════════════════════════════════
+
+
+class SessionRuntime:
+    """
+    会话级运行时：agent 处理任务与 IO 通道的归属方。
+
+    L1 改造的核心：任务/IO 原先是 /ws/chat 连接函数的局部变量，
+    WebSocket 断开（浏览器关闭/休眠）时 finally 会 cancel 处理任务，
+    导致 agent 中途停止。现上提为模块级单例：
+      - 断开只清理传输层（push_task + 订阅），不碰处理任务
+      - 重连的任意连接可继续 feed ask 回复 / 发 cancel / 收事件
+      - 任务的取消只来自：用户显式 cancel、服务 shutdown、任务自身结束
+    """
+
+    def __init__(self):
+        self.active_task: asyncio.Task[None] | None = None
+        self.current_io: WebSocketIO | None = None
+
+    @property
+    def is_running(self) -> bool:
+        """是否仍有处理任务在运行"""
+        return self.active_task is not None and not self.active_task.done()
+
+    def start(self, io: WebSocketIO, coro: Any) -> asyncio.Task[None]:
+        """启动处理任务并登记 IO 通道（会话级唯一活跃任务）"""
+        self.current_io = io
+        self.active_task = asyncio.create_task(coro)
+        return self.active_task
+
+    def feed_reply(self, text: str) -> bool:
+        """把用户回复注入当前等待 ask 的 IO（跨连接可用）"""
+        if self.current_io is None:
+            return False
+        return self.current_io.feed_reply(text)
+
+    def cancel_active(self) -> bool:
+        """取消当前处理任务；返回是否找到了可取消的任务"""
+        if self.is_running and self.active_task is not None:
+            self.active_task.cancel()
+            return True
+        return False
+
+    def release(self) -> None:
+        """任务结束后释放登记（由处理任务的 finally 调用）"""
+        self.current_io = None
+
+    async def shutdown(self) -> None:
+        """服务端关闭：取消活跃任务并等待其收尾（唯一非用户主动的取消点）"""
+        if self.active_task is not None and not self.active_task.done():
+            self.active_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.active_task
+        self.release()
+        self.active_task = None
+
+    def snapshot(self) -> dict[str, Any]:
+        """供重连 connected 事件携带的运行时状态快照"""
+        pending_reply = getattr(self.current_io, "_pending_reply", None)
+        pending_ask = pending_reply is not None and not pending_reply.done()
+        return {
+            "processing": self.is_running,
+            "pending_ask": bool(pending_ask),
+        }
+
+
+# 全局会话运行时
+session_runtime = SessionRuntime()
 
 
 # ════════════════════════════════════════════════════════════
@@ -401,6 +509,8 @@ async def lifespan(app: FastAPI):
 
     # 关闭
     get_logger().info("[WebUI] 🛑 正在关闭...")
+    # 服务端决定终止 → 这是 WS 断连之外唯一合法的取消时机
+    await session_runtime.shutdown()
     global _agent
     if _agent is not None:
         await _agent.shutdown()
@@ -531,6 +641,8 @@ async def health_check() -> dict[str, Any]:
         "agent": agent.model,
         "session": agent.session.session_id,
         "subscribers": event_bus.subscriber_count,
+        "processing": session_runtime.is_running,
+        "run_id": event_bus.run_id,
     }
 
 
@@ -1104,7 +1216,12 @@ async def reload_agent():
 
 
 @app.websocket("/ws/chat")
-async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
+async def websocket_chat(
+    websocket: WebSocket,
+    token: str | None = Query(None),
+    seq: int = Query(0),
+    run_id: str = Query(""),
+):
     """
     WebSocket 流式聊天
 
@@ -1112,6 +1229,11 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
       {"type": "message", "content": "你好"}
 
     服务器通过 WebSocket 推送实时事件：
+      {"type": "connected", "run_id", "seq", "session_id",
+       "processing", "pending_ask", "replay", "resync", ...}
+        ← 连接确认 + 运行时快照 + 重放协商
+        ← replay=true 时随后紧跟重放缓冲事件（带 seq）
+        ← resync=true 表示缓冲溢出/服务端已重启，前端应 REST 全量重拉
       {"type": "llm_start", "ts": ...}
       {"type": "llm_end", "content": "...", "has_tool_calls": ..., "tool_names": [...]}
       {"type": "tool_call", "name": "...", "args": "..."}
@@ -1123,6 +1245,9 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
       {"type": "error", "error": "..."}
       {"type": "item", "content": "..."}
       {"type": "done", "session_id": "...", "final_content": "..."}
+
+    断连语义（L1）：连接只是传输层。断开只清理 push_task/订阅，
+    agent 处理任务（session_runtime）继续运行；重连后续传。
     """
     await websocket.accept()
 
@@ -1136,19 +1261,47 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
     client_ip = websocket.client.host if websocket.client else "unknown"
     get_logger().info(f"[WebUI] WS 连接: {client_ip} → /ws/chat（已认证）")
 
-    # 订阅事件总线
+    # 首次获取 Agent 引用（connected 快照需要 session_id；
+    # 主循环每次消息前仍会重取以检测热替换）
+    agent = await get_agent()
+
+    # ── 断连续传协商（L2）──
+    # 「快照重放区间」与「订阅」必须落在同一个同步块内：publish 只在 await 点
+    # 之间穿插，块内无 await → 重放与队列既无 gap 也无重复。
+    #   · replay 列表：seq ≤ 快照点，只从缓冲重放
+    #   · 队列事件：seq > 快照点，由 push_task 实时推送
+    replay: list[dict[str, Any]] | None = None
+    resync = False
+    if seq > 0:
+        if run_id == event_bus.run_id:
+            replay = event_bus.events_since(seq)
+            resync = replay is None  # 缓冲溢出（gap）→ 前端降级 REST 全量重拉
+        else:
+            resync = True  # 服务端已重启，seq 空间不同，无法重放
+    will_replay = replay is not None
     sub_id, event_queue = event_bus.subscribe()
 
-    # 当前连接的 IO 通道（用于交互式命令）
-    current_io: WebSocketIO | None = None
+    # 客户端读活性时间戳（休眠/静默断链检测，由主接收循环刷新）
+    activity: dict[str, float] = {"ts": time.monotonic()}
 
     # 后台任务跟踪（初始化后供 finally 安全清理）
     push_task: asyncio.Task[None] | None = None
-    process_tasks: list[asyncio.Task[None]] = []
 
     try:
-        # 发送连接确认
-        await websocket.send_json({"type": "connected", "sub_id": sub_id})
+        # ── 连接确认：传输信息 + 运行时快照 + 重放协商 ──
+        await websocket.send_json({
+            "type": "connected",
+            "sub_id": sub_id,
+            "run_id": event_bus.run_id,
+            "seq": event_bus.current_seq,
+            "session_id": agent.session.session_id,
+            "replay": will_replay,
+            "resync": resync,
+            **session_runtime.snapshot(),
+        })
+        if replay:
+            for ev in replay:
+                await websocket.send_json(ev)
 
         # 后台任务：读取 EventBus 并推送至 WebSocket
         async def push_events():
@@ -1157,6 +1310,10 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
                     event = await asyncio.wait_for(event_queue.get(), timeout=30)
                     await websocket.send_json(event)
                 except TimeoutError:
+                    # 客户端读活性检查：90s 无任何上行（休眠/网络静默断链）
+                    # → 主动关闭，逼前端走 onclose 快速重连
+                    if time.monotonic() - activity["ts"] > 90:
+                        break
                     # 心跳保活
                     try:
                         await websocket.send_json({"type": "ping"})
@@ -1164,16 +1321,16 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
                         break
                 except Exception:
                     break
+            # 推送通道死亡 → 关传输层让主循环退出。
+            # 只动连接，不碰 session_runtime（处理任务继续跑）。
+            with suppress(Exception):
+                await websocket.close()
 
         push_task = asyncio.create_task(push_events())
 
-        # 主循环：接收客户端消息
-        # 首次获取 Agent 引用（后续每次消息前检查是否已被重载）
-        agent = await get_agent()
-        # process_tasks 已在函数顶部初始化
-
         while True:
             raw = await websocket.receive_text()
+            activity["ts"] = time.monotonic()
             data = json.loads(raw)
 
             # ── 检测 Agent 是否已被重载（热替换）──
@@ -1193,11 +1350,12 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
                     continue
 
                 # ── 如果 IO 通道正在等待用户输入，直接注入回复 ──
-                if current_io and current_io.feed_reply(content):
+                # （会话级 runtime → 跨连接可注入，断连重连后 ask 不再卡死）
+                if session_runtime.feed_reply(content):
                     continue
 
-                # ── 如果 IO 通道还在运行（非 ask 状态），拒绝 ──
-                if current_io and current_io.is_running:
+                # ── 如果处理任务还在运行（非 ask 状态），拒绝 ──
+                if session_runtime.is_running:
                     await websocket.send_json({
                         "type": "error",
                         "error": "正在处理中，请等待当前操作完成",
@@ -1207,7 +1365,6 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
                 # ── 正常处理：创建新 IO 通道并启动处理任务 ──
                 ws_io = WebSocketIO(event_bus)
                 ws_io.is_running = True
-                current_io = ws_io
 
                 async def process_and_notify(msg: str, io: WebSocketIO, agent: Agent = agent):
                     """处理消息并通过 EventBus 推送结果"""
@@ -1254,21 +1411,20 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
                         await event_bus.publish({"type": "done", "error": str(e)})
                     finally:
                         io.is_running = False
+                        # 归还会话级登记（仅当仍是当前任务的 IO，避免误清新任务）
+                        if session_runtime.current_io is io:
+                            session_runtime.release()
 
-                task = asyncio.create_task(process_and_notify(content, ws_io))
-                process_tasks.append(task)
+                # 任务归属会话级 runtime，与 WS 连接解耦（L1 核心）
+                session_runtime.start(ws_io, process_and_notify(content, ws_io))
 
             elif data.get("type") == "cancel":
-                # 用户请求中断 → 取消最近的处理任务
+                # 用户请求中断 → 取消会话级处理任务（可由任意连接发起）
                 # task.cancel() 注入 CancelledError → agent._process_inner 的
                 # tool 执行 except 块捕获 → 标记 _cancelled_by_user = True
                 # → process() 正常返回 → process_and_notify 检查标记 → 发布 cancelled。
                 # 不重新抛出异常，避免 CLI 的 except CancelledError: break 误退出。
-                while process_tasks:
-                    task = process_tasks.pop()
-                    if not task.done():
-                        task.cancel()
-                        break
+                session_runtime.cancel_active()
 
             elif data.get("type") == "ping":
                 await websocket.send_json({"type": "pong"})
@@ -1279,12 +1435,11 @@ async def websocket_chat(websocket: WebSocket, token: str | None = Query(None)):
         with suppress(Exception):
             await websocket.send_json({"type": "error", "error": str(e)})
     finally:
-        # ── 清理后台任务：取消事件推送和处理任务 ──
-        # 防止在 Agent 重载后孤立任务继续使用已关闭的客户端
+        # ── 只清理传输层 ──（L1：处理任务归属 session_runtime，断连不取消）
+        # 浏览器关闭/休眠导致的断开，agent 继续运行；
+        # 重连后通过 connected 快照 + seq 重放续传。
         if push_task is not None:
             push_task.cancel()
-        for t in process_tasks:
-            t.cancel()
         event_bus.unsubscribe(sub_id)
 
 

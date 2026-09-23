@@ -12,6 +12,11 @@ var _finalContentAlreadyShown = false;
 var _lastPingTime = null;
 var _pingInterval = null;
 
+// ── 断连续传（L2）：事件序号去重 + 服务端运行标识 ──
+var _lastSeq = 0;   // 已消费的最大事件 seq（重连时回传给后端做重放协商）
+var _runId = '';    // 服务端 run_id（重启后变化 → 旧 seq 作废，对齐新序号空间）
+var _wakeProbe = null;  // 唤醒存活探测定时器
+
 function withAuth(opts) {
   opts = opts || {};
   opts.headers = opts.headers || {};
@@ -93,12 +98,14 @@ function cancelMessage() {
 }
 
 function connectWebSocket() {
-  if (ws && ws.readyState === WebSocket.OPEN) return;
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
   var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   var host = window.location.host;
   var token = getToken();
-  var wsUrl = protocol + '//' + host + '/ws/chat?token=' + encodeURIComponent(token);
+  // 携带已消费序号与 run_id：后端据此决定重放（replay）还是全量重拉（resync）
+  var wsUrl = protocol + '//' + host + '/ws/chat?token=' + encodeURIComponent(token) +
+    '&seq=' + _lastSeq + '&run_id=' + encodeURIComponent(_runId);
 
   ws = new WebSocket(wsUrl);
 
@@ -141,6 +148,13 @@ function connectWebSocket() {
   ws.onmessage = function(event) {
     try {
       var data = JSON.parse(event.data);
+      // 序号去重：重放/实时事件凡 seq ≤ 已消费序号一律丢弃（防重连重复渲染）
+      // connected 豁免：它携带服务端当前 seq 供对齐用，由其分支单独处理，
+      // 若在此过滤会把 _lastSeq 顶到最新，导致随后的重放事件全被误丢。
+      if (data && typeof data.seq === 'number' && data.type !== 'connected') {
+        if (data.seq <= _lastSeq) return;
+        _lastSeq = data.seq;
+      }
       handleEvent(data);
     } catch (e) {
       console.error('[WS] 解析失败:', e);
@@ -152,17 +166,56 @@ function handleEvent(data) {
   var type = data.type;
 
   switch (type) {
-    case 'connected':
-      sessionId = data.sub_id;
+    case 'connected': {
+      // run_id：服务端重启后变化 → 旧 seq 作废，对齐新序号空间
+      var wasConnected = !!_runId;
+      var canReplay = !!data.replay && data.run_id === _runId;
+      if (data.run_id) _runId = data.run_id;
+      // 无法重放时把本地序号对齐服务端当前值（对齐放在重放事件到达前，
+      // 重放分支保持 _lastSeq 不动，让随后到达的重放事件通过去重器）
+      if (!canReplay) _lastSeq = data.seq || 0;
+
+      if (data.session_id) {
+        sessionId = data.session_id;
+        sessionLabel.textContent = '📄 ' + data.session_id;
+      }
       statusEl.textContent = '🟢 已连接';
+
+      // ── 全量重拉：缓冲溢出或服务端重启，事件流不可续 ──
+      var needHistory = false;
+      if (data.resync) {
+        clearUI();
+        needHistory = true;
+        addSystemMessage('🔄 已重新连接，会话已重新同步');
+      }
+      // DOM 为空（首屏/重开页/刚清空）且无进行中任务 → 补一次权威历史
+      if (!data.processing && sessionId && (needHistory || messagesEl.children.length === 0)) {
+        fetchSessionHistory(sessionId);
+      }
+
+      // ── 运行时快照：任务没死，恢复"处理中"状态机 ──
+      if (data.processing) {
+        setProcessing(true);
+        if (wasConnected) addSystemMessage('🔁 已重连，后台任务继续运行中');
+      } else {
+        setProcessing(false);
+      }
+      // ask 等待回复跨连接存续：恢复输入提示
+      if (data.pending_ask) {
+        inputEl.placeholder = '输入回复... (Enter 发送)';
+        inputEl.focus();
+      }
+
       fetch('/api/health')
         .then(function(r) { return r.json(); })
         .then(function(h) {
           modelBadge.textContent = h.agent || '—';
           sessionLabel.textContent = '📄 ' + (h.session || '—');
+          if (h.session) sessionId = h.session;
         })
         .catch(function() {});
       break;
+    }
 
     case 'ping':
       try { ws.send(JSON.stringify({ type: 'pong' })); } catch(e) {}
@@ -721,6 +774,29 @@ document.addEventListener('DOMContentLoaded', function() {
     resizeTimer = setTimeout(function() {
       if (!processing) scrollToBottom();
     }, 150);
+  });
+
+  // ── 休眠唤醒快速续传 ──
+  // 页面重新可见时立即探测/重连，不等 3s 定时器与 10s ping 周期：
+  //   · 连接已死 → 立即重连（后端任务一直没停，connected 快照续传状态）
+  //   · 半开连接（对端已忘但本端仍 OPEN）→ ping 探测，5s 无 pong 强制关闭
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState !== 'visible') return;
+    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      connectWebSocket();
+      return;
+    }
+    if (ws.readyState === WebSocket.OPEN) {
+      try { _lastPingTime = Date.now(); ws.send(JSON.stringify({ type: 'ping' })); } catch (e) {}
+      if (_wakeProbe) clearTimeout(_wakeProbe);
+      _wakeProbe = setTimeout(function() {
+        _wakeProbe = null;
+        if (_lastPingTime) {  // pong 未回 → 半开，强制关闭走重连
+          try { ws.close(); } catch (e) {}
+        }
+      }, 5000);
+    }
   });
 
   // 阻止 iOS 橡皮筋滚动导致页面整体上移
