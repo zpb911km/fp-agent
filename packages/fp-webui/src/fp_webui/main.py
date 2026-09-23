@@ -1510,6 +1510,11 @@ _UVICORN_LOG_CONFIG: dict[str, Any] = {
 
 def main():
     """启动 WebUI 服务器"""
+    # ── 捕获原始启动命令（reload 激活核心 execve 重启用，新入口契约第 0 步）──
+    from fp_core.core.handoff import capture_launch_command
+
+    capture_launch_command()
+
     parser = argparse.ArgumentParser(description="FP WebUI")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
     parser.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765）")

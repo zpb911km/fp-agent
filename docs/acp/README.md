@@ -18,7 +18,9 @@ ACP 的完整文档（安装、接口定义、调用示例、使用场景）位�
 
 ## 🔄 reload 与会话续接
 
-ACP 实例经 `reload` 热重启后自动恢复会话，并按 handoff 的 `kind` 分流：
+ACP 实例经 `reload` 热重启后自动恢复会话，并按 handoff 的 `kind` 分流
+（`fp-acp` 的 `main()` 首行已捕获启动命令快照 `FP_LAUNCH_JSON`——新入口契约
+第 0 步 `capture_launch_command()`，故直启 `fp-acp` 亦可 execve 重启）：
 
 - **kind=tool**（LLM 携动态口令发起）：自动续接对话，续接完成后为挂起的
   `session/prompt` 请求补发 chunk 通知与带 `"stopReason": "end_turn"` 的 result；

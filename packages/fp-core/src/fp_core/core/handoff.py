@@ -16,7 +16,9 @@
                                  （命令发生在 process 入口，无挂起工具轮，不进续接）
             → 入口在自己的控制点驱动续接 / 显示完成提示
 
-**新入口接入契约（三步，未来新入口照此实现即自动兼容 reload）：**
+**新入口接入契约（四步，未来新入口照此实现即自动兼容 reload）：**
+  0. ``main()`` 首行 ``capture_launch_command()``——捕获原始启动命令
+     （``FP_LAUNCH_JSON``，execve 重启依赖；setdefault 保证重启链恒为首次命令）
   1. 构造 Agent：``resume=os.environ.get("FP_RELOAD_SID")``
   2. Agent 就绪（ensure_initialized 后）：``consume_reload_handoff(agent)``
   3. 返回 True → 驱动 ``await agent.continue_conversation(io=本入口IO)``，
@@ -53,6 +55,20 @@ def handoff_path() -> str:
     return os.path.join(get_data_dir(), "reload_handoff.json")
 
 
+def capture_launch_command() -> None:
+    """入口捕获原始启动命令写入 ``FP_LAUNCH_JSON``（新入口契约第 0 步）。
+
+    三个 console 入口（fp / fp-webui / fp-acp）的 ``main()`` 首行各调一次，
+    未来新入口照此接入。必须在任何 argv 改写/前置路由之前调用；
+    ``setdefault`` 保证重启链上始终是首次启动命令。
+    契约：``{"argv": [...], "cwd": "..."}``。
+    """
+    os.environ.setdefault(
+        "FP_LAUNCH_JSON",
+        json.dumps({"argv": sys.argv, "cwd": os.getcwd()}),
+    )
+
+
 def perform_exec_reload(state: State, *, kind: str, tool_result_text: str | None = None) -> str:
     """跨进程热重启的激活核心（工具面与命令面共用）。
 
@@ -78,7 +94,7 @@ def perform_exec_reload(state: State, *, kind: str, tool_result_text: str | None
     # ── 前置检查：启动命令快照 ──
     launch_raw = os.environ.get("FP_LAUNCH_JSON", "")
     if not launch_raw:
-        return "❌ 缺少 FP_LAUNCH_JSON（本进程不是经 fp 入口启动），无法重启。请用 `fp` 启动。"
+        return "❌ 缺少 FP_LAUNCH_JSON（本进程未捕获启动命令——须经 fp / fp-webui / fp-acp 入口启动），无法重启。"
     try:
         launch = json.loads(launch_raw)
         launch_argv: list[str] = list(launch["argv"])

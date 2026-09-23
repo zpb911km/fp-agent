@@ -1253,6 +1253,11 @@ class ACPServer:
 
 def main() -> None:
     """启动 ACP Server 的入口函数"""
+    # ── 捕获原始启动命令（reload 激活核心 execve 重启用，新入口契约第 0 步）──
+    from fp_core.core.handoff import capture_launch_command
+
+    capture_launch_command()
+
     server = ACPServer()
     try:
         asyncio.run(server.start())

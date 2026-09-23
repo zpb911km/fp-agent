@@ -370,6 +370,8 @@ FastAPI 的 `@app.middleware("http")`，拦截所有 `/api/*` 请求（白名单
 
 同进程 `importlib.reload` 热重载端点已删除——热重启统一到命令面 `/reload`
 （进程级 execve，见 §9；前端「🔄 重载」按钮即转发该聊天命令）。
+`fp-webui` 入口 `main()` 首行捕获启动命令快照（`FP_LAUNCH_JSON`，新入口契约
+第 0 步 `capture_launch_command()`），**直启 `fp-webui`（不经 `fp --mode`）同样可正常热重启**。
 `POST /api/agent/new` 仍走 `_replace_agent()`，但只剩"内存清空、新建 Agent"
 语义，不再重载模块、不恢复旧会话。
 
