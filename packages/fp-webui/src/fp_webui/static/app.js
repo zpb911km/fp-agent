@@ -324,9 +324,9 @@ function handleEvent(data) {
       break;
 
     case 'reload':
-      statusEl.textContent = '🟠 Agent 重载中...';
+      statusEl.textContent = '🟠 Agent 重建中...';
       setProcessing(false);
-      addSystemMessage('🔄 Agent 正在重载，连接即将断开...');
+      addSystemMessage('🔄 Agent 正在新建，连接即将断开...');
       break;
 
     case 'reload_done':
@@ -574,35 +574,16 @@ function deleteSession(sid, btnEl) {
     });
 }
 
-// ── 重载 Agent ──
+// ── 重载 Agent（统一走命令面 /reload：进程级 execve 热重启，
+//    落盘 → 重启 → 自动重连 → reload_done 提示，见 core/handoff 契约）──
 
 function reloadAgent() {
   if (processing) { showError('正在处理中，请等待完成'); return; }
+  if (!ws || ws.readyState !== WebSocket.OPEN) { showError('连接未就绪，请稍后重试'); return; }
 
-  var btn = document.querySelector('.topbar-btn[onclick*="reloadAgent"]');
-  var originalText = btn.textContent;
-  btn.textContent = '⏳...';
-  btn.disabled = true;
-
-  authFetch('/api/reload', { method: 'POST' })
-    .then(function(r) {
-      if (!r.ok) return r.json().then(function(e) { throw new Error(e.detail || 'HTTP ' + r.status); });
-      return r.json();
-    })
-    .then(function(data) {
-      if (data.status === 'ok') {
-        modelBadge.textContent = data.model || '—';
-        sessionLabel.textContent = '📄 ' + (data.session_id || '—');
-        fetch('/api/health')
-          .then(function(r) { return r.json(); })
-          .then(function(h) { modelBadge.textContent = h.agent || '—'; })
-          .catch(function() {});
-        loadSessionsList();
-        addSystemMessage('🔄 Agent 重载完成');
-      }
-    })
-    .catch(function(err) { showError('重载失败: ' + err.message); })
-    .finally(function() { btn.textContent = originalText; btn.disabled = false; });
+  inputEl.value = '/reload';
+  addSystemMessage('🔄 正在热重启（进程级）：落盘 → 重启 → 自动重连…');
+  sendMessage();
 }
 
 function clearSession() {
@@ -726,12 +707,45 @@ function toggleTheme() {
   applyTheme(!root.classList.contains('light-theme'));
 }
 
+// ── 光环背景开关（可选装饰，默认关闭以省 GPU）──
+function syncHaloBtn(on) {
+  var btn = document.getElementById('haloBtn');
+  if (!btn) return;
+  btn.innerHTML = '<span aria-hidden="true">' + (on ? '✨' : '💤') + '</span>';
+  btn.title = on ? '光环背景：开（点击关闭以节省 GPU）' : '光环背景：关（点击开启，较耗 GPU）';
+}
+
+function applyHalo(on) {
+  if (typeof window.setHaloEnabled === 'function') {
+    on = window.setHaloEnabled(on);
+  } else {
+    // ui.js 兜底：直接隐藏元素
+    var haloEl = document.getElementById('halo-bg');
+    if (haloEl) haloEl.style.display = on ? '' : 'none';
+    on = !!on;
+  }
+  try { localStorage.setItem('webui_halo', on ? 'on' : 'off'); } catch (e) {}
+  syncHaloBtn(on);
+  return on;
+}
+
+function toggleHalo() {
+  var on = (typeof window.isHaloEnabled === 'function')
+    ? window.isHaloEnabled()
+    : (localStorage.getItem('webui_halo') === 'on');
+  applyHalo(!on);
+}
+
 // ── 初始化与登录流程 ──
 
 function initApp() {
   // 恢复主题偏好
   var saved = localStorage.getItem('webui_theme');
   if (saved === 'light') applyTheme(true);
+  // 恢复光环开关状态（同步按钮图标）
+  applyHalo((typeof window.isHaloEnabled === 'function')
+    ? window.isHaloEnabled()
+    : (localStorage.getItem('webui_halo') === 'on'));
   connectWebSocket();
   inputEl.focus();
 }

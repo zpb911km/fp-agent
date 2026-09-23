@@ -366,32 +366,12 @@ FastAPI 的 `@app.middleware("http")`，拦截所有 `/api/*` 请求（白名单
 409 { "detail": "Agent 正在处理请求，请稍后重试" }
 ```
 
-#### `POST /api/reload`
+#### `POST /api/reload`（已移除）
 
-热重载 Agent（不重启服务器）。
-
-**流程**：
-1. 保存当前会话上下文
-2. shutdown 旧 Agent
-3. `importlib.reload` 所有核心模块（按依赖顺序）
-4. 创建新 Agent，注册 WebUIPlugin
-5. 恢复旧会话
-6. 通知 WebSocket 客户端重连
-
-**热重载模块顺序**（按依赖）：
-
-| 层级 | 模块 |
-|------|------|
-| 1 | `config`, `display` |
-| 2 | `core.io`, `core.lifecycle`, `core.session`, `core.llm_client` |
-| 3 | `plugins.base.plugin`, `prompts.agent` |
-| 4 | `commands`, `tools`（含全局注册表重建） |
-| 5 | `core.agent` |
-
-```json
-// 响应
-{ "status": "ok", "session_id": "session_xxx", "model": "deepseek/..." }
-```
+同进程 `importlib.reload` 热重载端点已删除——热重启统一到命令面 `/reload`
+（进程级 execve，见 §9；前端「🔄 重载」按钮即转发该聊天命令）。
+`POST /api/agent/new` 仍走 `_replace_agent()`，但只剩"内存清空、新建 Agent"
+语义，不再重载模块、不恢复旧会话。
 
 ---
 
@@ -546,43 +526,48 @@ ws://host:port/ws/chat?token=your_token
 
 ### 9.1 适用场景
 
-- **修改了核心代码**（`fp_core/core/`、`fp_core/prompts/`、`fp_core/tools/` 等模块）
-- **想在不重启 WebUI 服务器的前提下测试变更**
-- 点击顶栏「🔄 重载」按钮或 `POST /api/reload`
+- **修改了核心代码**（`fp_core/` 任何模块、用户目录扩展）
+- 点击顶栏「🔄 重载」按钮，或聊天框输入 `/reload` —— 两者等价，同一条路径
 
-### 9.2 原理
+### 9.2 原理：命令面 /reload（进程级 execve 热重启）
 
-使用 Python 的 `importlib.reload()` 按依赖顺序逐层重新加载模块。
+按钮向聊天发送 `/reload` 命令 → core 命令面经
+`fp_core.core.handoff.perform_exec_reload`：落盘会话（`ensure_on_disk`
+硬校验，文件不在盘上绝不重启）→ 写 handoff `{sid, ts, frontend, kind="command"}`
+→ `os.execve` 按原启动命令替换进程 → 新实例恢复会话、置 `_reload_notice`
+→ 入口显示「热重启完成」。**WebUI 服务器进程整体被替换**，前端自动重连。
+同进程 `importlib.reload` 路径（原 `/api/reload` 端点与 `_reload_modules`）
+已删除，全站只此一条激活路径。
 
 ### 9.3 安全保证
 
 | 场景 | 行为 |
 |------|------|
-| Agent 正在处理请求 | 返回 `409 Conflict`，拒绝重载 |
-| 重载过程中模块报错 | `_agent` 保持 `None`，下次请求自动重建 |
-| WebSocket 连接活跃 | 旧连接保有旧 `agent` 引用，可继续工作 |
-| 重载完成后 | 自动恢复旧会话，WebSocket 透明切换到新 Agent |
+| Agent 正在处理请求 | 命令面返回 `409 Conflict`，稍后重试 |
+| 会话文件未能落盘 | 拒绝重启并回滚，当前实例无损 |
+| exec 失败 | 全量回滚（内存快照+磁盘+删 handoff），当前实例继续运行 |
+| WebSocket 连接活跃 | 进程替换时断开，前端凭 `run_id` 重连/`resync` 续传（见 6.5） |
 
 ### 9.4 前端行为
 
-重载触发时，前端会：
+1. 点击「🔄 重载」→ 发送 `/reload` 聊天命令，显示「正在热重启」系统消息
+2. 进程替换 → 收到 `reload_done` 事件 → 更新 session_id 和 model，显示「重载完成，新代码已生效」
+3. **已知行为**：进程替换瞬间的旧 WS 连接不会收到即时 close（fd 被新进程继承），
+   前端靠 10s ping/pong 检测自愈重连（见 6.5），重连时从环形缓冲拿到 `reload_done`
 
-1. 收到 `reload` 事件 → 显示「Agent 正在重载」
-2. 收到 `reload_done` 事件 → 更新 session_id 和 model
-3. 后台事件推送任务自动切换到新 EventBus 订阅
+### 9.5 工具面 reload 与会话续接（LLM 发起）
 
-### 9.5 reload 热重启与会话续接
+core 内置 `reload` 工具为两段式：先调用获得隔离测试告示与一次性动态口令，
+子进程完成隔离测试后再携口令执行——同一 `perform_exec_reload`（`kind="tool"`）：
 
-core 内置的 `reload` 工具为两段式：先调用获得隔离测试告示与一次性动态口令，子进程完成隔离测试后再携口令执行，按原启动命令 execve 热重启。WebUI 在重启后：
-
-1. 凭 handoff 自动恢复会话并续接对话，续接输出写入 EventBus 环形缓冲
+1. 补齐全轮缺失 tool 结果并落盘 → handoff → execve；新实例恢复会话并
+   **续接对话**（`_pending_continue` → `continue_conversation`，输出入
+   EventBus 环形缓冲）
 2. 前端凭 `run_id` 重连，缓冲溢出时以 `resync: true` 补取最新状态（见 6.5）
 3. 重启期间的新请求由 `session_runtime.is_running` 拦截，不与续接并发
 
-**命令面**：聊天框输入 `/reload`（人触发、免口令）走同一 execve 热重启，但
-`kind=command` 不进续接——重启后仅恢复会话并向 EventBus 发 `reload_done`
-（前端显示"Agent 重载完成"）。它与 §9.1–9.4 顶栏「🔄 重载」按钮
-（`POST /api/reload`，同进程 `importlib.reload`、服务器不退出）是两条独立路径。
+两面差异只在门禁与续接：**工具面**有口令门禁+对话续接；**命令面**（本节 §9.2）
+免口令+一行完成提示。
 
 ---
 

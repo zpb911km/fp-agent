@@ -122,11 +122,14 @@
         <button class="topbar-btn" onclick="newAgent()" title="新建 Agent（shutdown 旧实例，创建全新实例和会话）" aria-label="新建 Agent">
           <span aria-hidden="true">🆕</span><span class="btn-label"> 新建</span>
         </button>
-        <button class="topbar-btn" onclick="reloadAgent()" title="热重载 Agent（不重启服务器，加载修改后的代码）" aria-label="热重载 Agent">
+        <button class="topbar-btn" onclick="reloadAgent()" title="热重启（进程级，等价聊天命令 /reload：落盘重启后自动重连）" aria-label="热重启 Agent">
           <span aria-hidden="true">🔄</span><span class="btn-label"> 重载</span>
         </button>
         <button class="topbar-btn danger" onclick="clearSession()" title="清空当前会话" aria-label="清空当前会话">
           <span aria-hidden="true">🗑️</span><span class="btn-label"> 清空</span>
+        </button>
+        <button class="topbar-btn halo-btn" onclick="toggleHalo()" title="光环背景" aria-label="光环背景开关" id="haloBtn">
+          <span aria-hidden="true">💤</span>
         </button>
         <button class="topbar-btn theme-btn" onclick="toggleTheme()" title="切换主题" aria-label="切换主题" id="themeBtn">
           <span aria-hidden="true">☀️</span>
@@ -191,7 +194,7 @@
   <!-- ════════════════════════════════════════
        脚本加载（顺序重要：ui.js → app.js）
        ════════════════════════════════════════ -->
-  <script src="/static/ui.js?_t=20260923v7"></script>
-  <script src="/static/app.js?_t=20260923v7"></script>
+  <script src="/static/ui.js?_t=20260923v9"></script>
+  <script src="/static/app.js?_t=20260923v9"></script>
 </body>
 </html>

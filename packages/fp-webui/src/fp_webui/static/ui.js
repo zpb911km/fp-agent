@@ -805,6 +805,15 @@ function renderHistoryMessages(sid, messages) {
   var haloEl = document.getElementById('halo-bg');
   if (!haloEl) return;
 
+  // ── 开关（可选功能，默认关闭以省 GPU；localStorage: webui_halo = on/off）──
+  var haloEnabled = false;
+  var running = false;
+  try {
+    haloEnabled = localStorage.getItem('webui_halo') === 'on';
+  } catch (e) {
+    haloEnabled = false;
+  }
+
   // ── 色板 ──
   var COLORS = {
     idle: {
@@ -869,7 +878,7 @@ function renderHistoryMessages(sid, messages) {
 
   // ── 双色状态切换：监听 _sbData.state ──
   function syncHaloState() {
-    if (!haloEl) return;
+    if (!haloEl || !haloEnabled) return;
     var isThinking = (_sbData.state === 'thinking' || _sbData.state === 'processing');
     applyColors(isThinking ? 'thinking' : 'idle');
   }
@@ -985,6 +994,7 @@ function renderHistoryMessages(sid, messages) {
   }
 
   function tick(now) {
+    if (!running) return; // 关闭状态下不推进动画、不再排下一帧
     for (let i = 0; i < state.length; i++) {
       updateChannel(state[i].inner, now, i, 'inner');
       updateChannel(state[i].outer, now, i, 'outer');
@@ -1021,7 +1031,27 @@ function renderHistoryMessages(sid, messages) {
     requestAnimationFrame(tick);
   }
 
-  requestAnimationFrame(tick);
+  // ── 开关入口：关闭时 display:none + 停 rAF，彻底释放 GPU/JS ──
+  function setHaloEnabled(on) {
+    haloEnabled = !!on;
+    haloEl.style.display = haloEnabled ? '' : 'none';
+    if (haloEnabled) {
+      syncHaloState();
+      if (!running) {
+        running = true;
+        requestAnimationFrame(tick);
+      }
+    } else {
+      running = false;
+    }
+    return haloEnabled;
+  }
+
+  window.setHaloEnabled = setHaloEnabled;
+  window.isHaloEnabled = function() { return haloEnabled; };
+
+  // 初始应用持久化状态（默认关闭时不启动 rAF 循环）
+  setHaloEnabled(haloEnabled);
 })();
 
 

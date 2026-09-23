@@ -438,7 +438,7 @@ def _reapply_prompt_append(agent: Agent) -> None:
     """会话重建路径的消息组装完成后，重放插件注入到 system prompt 的段。
 
     背景：Agent.ensure_initialized() 会把 ON_INIT 的 system_prompt_append
-    apply 到 conversation.system_prompt；但 WebUI 的新建会话/reload/恢复路径
+    apply 到 conversation.system_prompt；但 WebUI 的新建会话路径
     会用 PromptBuilder().build_system_prompt() reset，覆盖掉插件注入内容。
     本函数在这些路径的消息组装完成后调用，从 WebUIPlugin 的捕获缓存重放注入段。
 
@@ -449,7 +449,7 @@ def _reapply_prompt_append(agent: Agent) -> None:
     """
     conv = agent.state.conversation
 
-    # 兜底：_replace_agent 恢复分支的 replace_all(saved) 会把 system 消息整体
+    # 兜底：_replace_agent 新建分支的 replace_all(saved) 会把 system 消息整体
     # 冲掉（saved 来自 load_context，不含 system）→ 先恢复 PromptBuilder 基础。
     if not conv.system_prompt:
         from fp_core.core.prompt_builder import PromptBuilder
@@ -772,22 +772,17 @@ async def list_commands():
 # ════════════════════════════════════════════════════════════
 
 
-async def _replace_agent(
-    *,
-    reload_modules: bool = False,
-    restore_session: bool = True,
-) -> dict[str, Any]:
+async def _replace_agent() -> dict[str, Any]:
     """
-    替换全局 Agent 实例的核心逻辑。
+    替换全局 Agent 实例的核心逻辑（/api/agent/new 专用）。
 
-    Args:
-        reload_modules: 是否先热重载所有核心模块（/reload 用）
-        restore_session: 是否恢复旧会话（/reload 用；新建 Agent 用 False）
+    进程级代码热重启已统一到命令面 `/reload`（fp_core.core.handoff：
+    落盘 → execve 原启动命令重启）——本函数只负责"内存状态清空、
+    新建 Agent"，不再做同进程 importlib 原地重载。
 
     安全保证：
       - 如果 Agent 正在处理请求，返回 409 拒绝
-      - 重载期间 _agent 被设为 None
-      - 模块重载失败时 _agent 保持 None，get_agent() 自动创建新实例
+      - 替换期间 _agent 被设为 None，get_agent() 自动创建新实例
       - 活跃的 WebSocket 连接保有旧 agent 对象引用，仍可继续工作
     """
     global _agent
@@ -797,30 +792,19 @@ async def _replace_agent(
 
     async with _agent_lock:
         # ── 保存旧会话并 shutdown 旧 Agent ──
-        old_sid: str | None = None
         if _agent is not None:
             _agent.state.session.save_context(_agent.state.conversation.to_serializable())
-            old_sid = _agent.state.session.session_id
             with suppress(Exception):
                 await _agent.shutdown()
             _agent = None
 
         # ── 通知前端准备重连 ──
-        label = "重载" if reload_modules else "新建"
         await event_bus.publish({
             "type": "reload",
-            "message": f"🔄 Agent 正在{label}，连接即将断开",
+            "message": "🔄 Agent 正在新建，连接即将断开",
         })
 
-        # ── 热重载所有模块（仅 /reload） ──
-        if reload_modules:
-            try:
-                _reload_modules()
-            except RuntimeError as e:
-                get_logger().error(f"[WebUI] ❌ 模块重载失败: {e}")
-                raise HTTPException(status_code=500, detail=f"模块重载失败: {e}") from e
-
-        # ── 重新导入 Agent 类（确保获取最新代码） ──
+        # ── 重新导入 Agent 类 ──
         from fp_core.core.agent import Agent as NewAgent
 
         # ── 创建新 Agent ──
@@ -833,40 +817,25 @@ async def _replace_agent(
             _agent = None
             raise HTTPException(status_code=500, detail=f"新 Agent 创建失败: {e}") from e
 
-        # ── 会话管理：恢复旧会话 / 创建新会话 ──
+        # ── 会话管理：新建会话 ──
+        # （恢复旧会话分支已随命令面统一删除：会话恢复语义在
+        #   fp_core.core.handoff 的 execve 热重启里，由 resume=FP_RELOAD_SID 完成）
         from fp_core.core.prompt_builder import PromptBuilder
 
-        if restore_session and old_sid:
-            try:
-                _agent.state.session.switch_session(old_sid)
-                prompt = PromptBuilder().build_system_prompt()
-                _agent.state.conversation.reset(prompt)
-                saved = _agent.state.session.load_context(prompt)
-                if len(saved) > 1:
-                    _agent.state.conversation.replace_all(saved)
-                _reapply_prompt_append(_agent)
-                get_logger().info(f"[WebUI] 🔄 已恢复会话: {old_sid}")
-            except Exception as e:
-                get_logger().warning(f"[WebUI] ⚠️ 会话恢复失败: {e}")
-        else:
-            # 新 Agent 构造函数已创建会话，只需重建 context
-            try:
-                prompt = PromptBuilder().build_system_prompt()
-                _agent.state.conversation.reset(prompt)
-                saved = _agent.state.session.load_context(prompt)
-                if len(saved) > 1:
-                    _agent.state.conversation.replace_all(saved)
-                _reapply_prompt_append(_agent)
-                new_sid = _agent.state.session.session_id
-                get_logger().info(f"[WebUI] 🆕 已使用新会话: {new_sid}")
-            except Exception as e:
-                get_logger().error(f"[WebUI] ❌ 新会话初始化失败: {e}")
-                raise HTTPException(status_code=500, detail=f"新会话初始化失败: {e}") from e
+        try:
+            prompt = PromptBuilder().build_system_prompt()
+            _agent.state.conversation.reset(prompt)
+            saved = _agent.state.session.load_context(prompt)
+            if len(saved) > 1:
+                _agent.state.conversation.replace_all(saved)
+            _reapply_prompt_append(_agent)
+            new_sid = _agent.state.session.session_id
+            get_logger().info(f"[WebUI] 🆕 已使用新会话: {new_sid}")
+        except Exception as e:
+            get_logger().error(f"[WebUI] ❌ 新会话初始化失败: {e}")
+            raise HTTPException(status_code=500, detail=f"新会话初始化失败: {e}") from e
 
-        get_logger().info(
-            f"[WebUI] {'🔄' if reload_modules else '🆕'} Agent {'重载' if reload_modules else '新建'}完成 "
-            f"(model={_agent.model}, session={_agent.session.session_id})"
-        )
+        get_logger().info(f"[WebUI] 🆕 Agent 新建完成 (model={_agent.model}, session={_agent.session.session_id})")
 
         # ── 稍等片刻，让前端收到 reload 事件后再推送 done ──
         await asyncio.sleep(0.3)
@@ -890,7 +859,7 @@ async def new_agent():
 
     相当于 Agent 刚启动时的状态，所有内存状态被清空。
     """
-    return await _replace_agent(reload_modules=False, restore_session=False)
+    return await _replace_agent()
 
 
 @app.post("/api/sessions")
@@ -1215,64 +1184,11 @@ async def clear_current_session():
 
 
 # ════════════════════════════════════════════════════════════
-# 4b. 热重载 Agent
+# 4b. （已删除）原 /api/reload 同进程 importlib 热重载
+#     热重启已统一到命令面 /reload：fp_core.core.handoff
+#     （落盘 → handoff → execve 原启动命令重启，入口续接见
+#       _run_reload_continuation）；前端「🔄 重载」按钮转发聊天命令。
 # ════════════════════════════════════════════════════════════
-
-# ── 需要热重载的模块列表（按依赖顺序，子模块由父模块自动重新导入）─
-_RELOAD_MODULES = [
-    # 第 1 层：无项目内部依赖
-    "fp_core.config",
-    # 第 2 层：依赖 config
-    "fp_core.core.io",
-    "fp_core.core.lifecycle",
-    "fp_core.core.session",
-    "fp_core.core.llm_client",
-    # 第 3 层：依赖 core.*
-    "fp_core.plugins.base.plugin",
-    "fp_core.prompts.agent",
-    # 第 4 层：工具和命令（含全局注册表状态）
-    "fp_core.commands",  # _discover_commands() 重新扫描
-    "fp_core.tools",  # ToolRegistry 全局实例重建
-    # 第 5 层：Agent 主干（依赖以上所有）
-    "fp_core.core.agent",
-]
-
-
-def _reload_modules():
-    """按顺序 reload 所有核心模块，返回是否成功。"""
-    import importlib
-
-    # ── 先 reload tools 和 commands 的子模块 ──
-    # tools/commands 的父模块 reload 时会重新扫描子模块，
-    # 但子模块本身的代码可能被用户修改，所以需要先 reload 子模块
-    for prefix in ("fp_core.tools.", "fp_core.commands.", "fp_core.core."):
-        for mod_name in list(sys.modules.keys()):
-            if (
-                mod_name.startswith(prefix) and mod_name in sys.modules and mod_name not in _RELOAD_MODULES
-            ):  # 父模块由主列表处理
-                importlib.reload(sys.modules[mod_name])
-
-    # ── 按依赖顺序 reload 主模块 ──
-    for mod_name in _RELOAD_MODULES:
-        if mod_name in sys.modules:
-            try:
-                importlib.reload(sys.modules[mod_name])
-            except Exception as e:
-                raise RuntimeError(f"重载模块 {mod_name} 失败: {e}") from e
-
-    importlib.invalidate_caches()
-
-
-@app.post("/api/reload")
-async def reload_agent():
-    """
-    热重载 Agent：刷新所有核心代码后创建新 Agent，保留会话上下文。
-
-    与 `/api/agent/new` 的区别：
-      - 本接口 importlib.reload 所有核心模块（命令/工具/LLM 客户端等）
-      - 本接口会恢复旧会话
-    """
-    return await _replace_agent(reload_modules=True, restore_session=True)
 
 
 # ════════════════════════════════════════════════════════════
