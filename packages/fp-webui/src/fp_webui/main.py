@@ -509,7 +509,18 @@ async def _run_reload_continuation() -> None:
         agent = await get_agent()
         from fp_core.core.handoff import consume_reload_handoff
 
-        if not consume_reload_handoff(agent):
+        _cont = consume_reload_handoff(agent)
+        notice = agent.state._reload_notice
+        if notice:
+            agent.state._reload_notice = None  # pyright: ignore[reportPrivateUsage] 设计内跨类协议（handoff 契约）
+            get_logger().info(f"[WebUI] {notice}")
+            # 复用既有 reload_done 事件（前端 app.js 已渲染"重载完成"状态行）
+            await event_bus.publish({
+                "type": "reload_done",
+                "session_id": agent.session.session_id,
+                "model": agent.model,
+            })
+        if not _cont:
             return
     except Exception as e:
         get_logger().error(f"[WebUI] reload handoff 消费失败，跳过续接: {e}")
@@ -1424,21 +1435,6 @@ async def websocket_chat(
                     """处理消息并通过 EventBus 推送结果"""
                     try:
                         response = await agent.process(msg, io=io)
-                        # ── 热重载检测：/reload 命令已将新 Agent 存入 state._reload_result ──
-                        # CLI (fp-terminal) 和 ACP 在 process() 返回后都有同样的检测逻辑。
-                        # 此处必须同步检查并交换全局 _agent 引用，否则下次消息会发给已 shutdown
-                        # 的旧 Agent，导致 I/O 静默失效。
-                        reload_data = getattr(agent.state, "_reload_result", None)
-                        if reload_data is not None:
-                            new_agent, info = reload_data
-                            agent.state._reload_result = None  # type: ignore[reportPrivateUsage]  # 防止重复消费
-                            global _agent
-                            _agent = new_agent
-                            get_logger().info(
-                                f"[WebUI] 🔄 WebSocket 通道已切换到新 Agent "
-                                f"(model={info['model']}, session={info['session_id']})"
-                            )
-                            agent = new_agent  # 让后续代码使用新 Agent 的引用
                         # 检查是否被用户主动中断（工具执行中 task.cancel()）
                         # agent._cancelled_by_user 在 agent._process_inner 的
                         # except 块中被设为 True，process() 返回后检查此标记。

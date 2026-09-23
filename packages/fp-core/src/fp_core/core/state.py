@@ -105,8 +105,9 @@ class State:
     # ── Agent 回引（由 Agent.__init__ 设置，供命令访问 Agent 实例） ──
     agent: "Agent | None" = field(repr=False, default=None)
 
-    # ── 热重载暂存（/reload 命令设置，外层循环消费后交换 agent 引用） ──
-    _reload_result: "tuple[Agent, dict[Any, Any]] | None" = field(repr=False, default=None)
+    # ── reload 完成提示（core.handoff 消费 kind=command 的 handoff 后置位；
+    #    各入口在控制点显示该行并置 None。契约见 core/handoff.py） ──
+    _reload_notice: str | None = field(repr=False, default=None)
 
     # ── reload 续接暂存（core.handoff 消费后置位；各入口在控制点检查，
     #    驱动 agent.continue_conversation() 后置 None。契约见 core/handoff.py） ──

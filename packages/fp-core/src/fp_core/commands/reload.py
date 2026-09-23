@@ -1,39 +1,36 @@
 """
-/reload 命令 — 热重载 Agent
+/reload 命令 — 热重启（命令面，人触发、豁免两段式口令）
 
-重新加载所有核心模块并创建新 Agent 实例（不重启进程）。
-会话上下文自动保留。
+与工具面 reload 共用同一激活核心 fp_core.core.handoff.perform_exec_reload：
+  落盘会话 → 写 handoff(kind=command) → os.execve 按原启动命令重启
+新实例恢复会话后由 consume_reload_handoff 置 state._reload_notice，
+入口显示一行完成提示即回到正常输入（命令发生在 process 入口，无挂起
+工具轮，不进续接）。执行到 execve 即止、永不返回；失败返回错误文本，
+当前实例无损（救火原则）。
+
+历史：曾走 AgentReloader.reload 原地重建（shutdown 旧 → importlib.reload →
+新建）；该路径失败会留下已 shutdown 的僵尸 Agent，已废弃删除。
 
 用法:
-  /reload           — 完整热重载
-  /reload modules   — 仅重载模块，不创建新 Agent（调试用）
-
-工作方式:
-  1. 保存当前会话上下文
-  2. shutdown 旧 Agent（释放连接池 + 清理钩子）
-  3. importlib.reload 所有核心模块（按依赖顺序）
-  4. 创建新 Agent 实例（自动扫描内置+用户插件/工具）
-  5. 恢复旧会话
-  6. 将新 Agent 存入 state._reload_result，外层循环消费后交换引用
+  /reload           — 进程级热重启
+  /reload modules   — 仅重载模块，不创建新 Agent（调试用，原地 importlib.reload）
 """
-
-import time
 
 from fp_core.core.state import State
 
 name = "reload"
 aliases = ["rl", "hotreload"]
-description = "热重载 Agent（重新加载核心模块，保留会话上下文）"
+description = "热重启进程（落盘会话 → execve 原启动命令重启，会话自动恢复）"
 
 
 async def execute(state: State, arg: str) -> tuple[bool, str]:
-    """执行热重载"""
-    from fp_core.core.reloader import AgentReloader
-
+    """执行热重启"""
     arg = arg.strip()
 
     # ── 仅重载模块（调试用） ──
     if arg == "modules":
+        from fp_core.core.reloader import AgentReloader
+
         try:
             AgentReloader.reload_modules()
             return (True, "✅ 核心模块已重载（未重建 Agent）")
@@ -44,30 +41,8 @@ async def execute(state: State, arg: str) -> tuple[bool, str]:
     if state.agent is not None and state.agent.is_processing:
         return (True, "❌ Agent 正在处理请求，请稍后重试")
 
-    t0 = time.time()
+    from fp_core.core.handoff import perform_exec_reload
 
-    # ── 从旧 agent 提取 IO 通道和 shutdown 回调，传给新 Agent ──
-    old_io = state.io
-    old_shutdown = getattr(state.agent, "_shutdown_callback", None) if state.agent else None
-
-    try:
-        new_agent, info = await AgentReloader.reload(state.agent, io=old_io, on_shutdown=old_shutdown)
-    except RuntimeError as e:
-        return (True, f"❌ 重载失败: {e}")
-
-    elapsed = time.time() - t0
-
-    # ── 暂存新 Agent，供外层循环消费 ──
-    state._reload_result = (new_agent, info)  # pyright: ignore[reportPrivateUsage]  # noqa: E501 设计内跨类协议（State 注释明确该字段专供 reload 命令使用）
-
-    session_status = "✅ 已恢复" if info.get("session_restored") else "⚠️ 新建会话"
-    lines = [
-        f"🔄 **热重载完成**（{elapsed:.1f}s）",
-        "",
-        "| 项目 | 值 |",
-        "|------|-----|",
-        f"| 模型 | `{info['model']}` |",
-        f"| 会话 | `{info['session_id']}` {session_status} |",
-        "",
-    ]
-    return (True, "\n".join(lines))
+    # 成功路径 execve 不返回；能返回必是失败（核心内已回滚）。
+    err = perform_exec_reload(state, kind="command")
+    return (True, err)

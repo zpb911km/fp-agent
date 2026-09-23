@@ -390,6 +390,32 @@ class SessionManager:
             with contextlib.suppress(Exception):
                 os.remove(tmp)
 
+    def ensure_on_disk(self) -> bool:
+        """确保会话文件在磁盘上存在；不存在则写 meta-only 占位文件。
+
+        会话文件是惰性创建的（见 _allocate_session）：空会话（仅 system）
+        经 save_context 会因「过滤后为空」被跳过，且 save_context 的写失败
+        会被静默吞掉。reload 激活核心（core.handoff.perform_exec_reload）
+        依赖文件存在才能让新进程 resume 恢复——此处无条件兜底并把
+        「是否真的在盘上」作为可返回的事实交给调用方硬校验。
+
+        Returns:
+            True = 会话文件当前存在于磁盘；False = 占位写入失败。
+        """
+        path = self._session_path()
+        if os.path.exists(path):
+            return True
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(json.dumps(self._meta, ensure_ascii=False) + "\n")
+            os.replace(tmp, path)
+            return True
+        except Exception:
+            with contextlib.suppress(Exception):
+                os.remove(tmp)
+            return False
+
     def load_context(self, system_prompt: str) -> list[dict[str, Any]]:
         """加载上下文历史消息（不含 system prompt，与 save_context 对称）。"""
         context: list[dict[str, Any]] = []

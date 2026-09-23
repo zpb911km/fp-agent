@@ -291,6 +291,10 @@ async def main():
             from fp_core.core.handoff import consume_reload_handoff
 
             _reloaded = consume_reload_handoff(agent)
+            if agent.state._reload_notice:
+                display.divider()
+                display.info(agent.state._reload_notice)
+                agent.state._reload_notice = None  # pyright: ignore[reportPrivateUsage] 设计内跨类协议（handoff 契约）
             if _reloaded:
                 display.divider()
                 display.info("🔄 reload 续接：已恢复会话，继续上一轮对话…")
@@ -340,15 +344,6 @@ async def main():
 
                     try:
                         response = await agent.process(user_input)
-
-                        # ── 热重载检测：/reload 命令已将新 Agent 存入 state._reload_result ──
-                        reload_data = getattr(agent.state, "_reload_result", None)
-                        if reload_data is not None:
-                            new_agent, info = reload_data
-                            agent.state._reload_result = None  # pyright: ignore[reportPrivateUsage]  # noqa: E501 设计内跨类协议（State 注释明确该字段专供 reload 流程使用）
-                            agent = new_agent
-                            _current_agent = agent
-                            display.info(f"🔄 Agent 已切换 (model={info['model']}, session={info['session_id']})")
 
                         # 命令输出：由 response.content 单一通路传递，不再由命令内部 display
                         # 此处用 rich Markdown 渲染（terminal 唯一消费点）

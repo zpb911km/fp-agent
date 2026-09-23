@@ -579,6 +579,11 @@ core 内置的 `reload` 工具为两段式：先调用获得隔离测试告示�
 2. 前端凭 `run_id` 重连，缓冲溢出时以 `resync: true` 补取最新状态（见 6.5）
 3. 重启期间的新请求由 `session_runtime.is_running` 拦截，不与续接并发
 
+**命令面**：聊天框输入 `/reload`（人触发、免口令）走同一 execve 热重启，但
+`kind=command` 不进续接——重启后仅恢复会话并向 EventBus 发 `reload_done`
+（前端显示"Agent 重载完成"）。它与 §9.1–9.4 顶栏「🔄 重载」按钮
+（`POST /api/reload`，同进程 `importlib.reload`、服务器不退出）是两条独立路径。
+
 ---
 
 ## 10. 开发指南

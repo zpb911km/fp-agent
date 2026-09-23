@@ -609,17 +609,22 @@ class ACPServer:
         """reload handoff 续接（机制契约见 fp_core.core.handoff，acp 入口适配）。
 
         旧实例 exec 重启时正有一个 session/prompt 请求挂起（req_id 存于
-        环境变量 FP_ACP_PENDING_REQ）。这里：注入完成的会话直接跑完一轮
-        → 流式 chunk 走 session/update 通知 → 最后为挂起的请求补发 result，
-        客户端无感知地看到这轮对话自然收尾。进 stdin read_loop 之前执行，
-        期间客户端的新请求会在管道里排队。
+        环境变量 FP_ACP_PENDING_REQ）。两种 kind 都必须为其补发 result，
+        否则客户端悬等：
+        - kind=tool：注入完成的会话直接跑完一轮 → 流式 chunk 走 session/update
+          通知 → 为挂起请求补发 result，客户端无感知地看到对话自然收尾；
+        - kind=command：会话已恢复，显示完成提示即回 read_loop。
+        本方法在进 stdin read_loop 之前执行，期间客户端的新请求在管道里排队。
         """
         if not os.environ.get("FP_RELOAD_HANDOFF"):
             return
         from fp_core.core.handoff import consume_reload_handoff
 
-        if not consume_reload_handoff(self._agent):
-            return
+        _cont = consume_reload_handoff(self._agent)
+        notice = self._agent.state._reload_notice
+        if notice:
+            self._agent.state._reload_notice = None  # pyright: ignore[reportPrivateUsage] 设计内跨类协议（handoff 契约）
+            self._log(notice)
 
         pending_raw = os.environ.pop("FP_ACP_PENDING_REQ", None)
         pending_req: Any = None
@@ -628,6 +633,13 @@ class ACPServer:
                 pending_req = json.loads(pending_raw)
             except (ValueError, TypeError):
                 pending_req = None
+
+        if not _cont:
+            # 命令面：无续接轮，只为挂起请求补发 result 防客户端悬等
+            if pending_req is not None:
+                self._send_result(pending_req, {"stopReason": "end_turn"})
+                self._log("🔄 已为挂起的请求补发 result（command 面）")
+            return
 
         sid = self._session_id
         self._processing_prompt = True
@@ -972,17 +984,6 @@ class ACPServer:
                 if buf.strip():
                     self._send_message_notification(buf, session_id=sid)
 
-                # 取消路径也可能有热重载残留（/reload 已执行完毕但 cancel 同时到达）
-                reload_data = getattr(self._agent.state, "_reload_result", None)
-                if reload_data is not None:
-                    new_agent, info = reload_data
-                    self._agent.state._reload_result = None  # type: ignore[reportPrivateUsage]
-                    self._agent = new_agent
-                    self._session_id = self._agent.session.session_id
-                    self._reset_tool_state()
-                    self._register_follow_hooks()
-                    self._log(f"🔄 Agent 已热重载 (model={info['model']})")
-
                 return {"stopReason": "cancelled"}
             finally:
                 self._current_task = None
@@ -998,19 +999,6 @@ class ACPServer:
                 self._send_message_notification(buf, session_id=sid)
             elif reply_text:
                 self._send_message_notification(reply_text, session_id=sid)
-
-            # ── 热重载检测：/reload 命令已将新 Agent 存入 state._reload_result ──
-            # 引用交换后，后续 prompt 由新 Agent 处理（旧 Agent 已 shutdown）
-            reload_data = getattr(self._agent.state, "_reload_result", None)
-            if reload_data is not None:
-                new_agent, info = reload_data
-                self._agent.state._reload_result = None  # type: ignore[reportPrivateUsage]  # 防止重复消费
-                self._agent = new_agent
-                self._session_id = self._agent.session.session_id
-                # 新 Agent 有全新的 lifecycle 实例，需重新注册 Follow Agent 钩子
-                self._reset_tool_state()
-                self._register_follow_hooks()
-                self._log(f"🔄 Agent 已热重载 (model={info['model']}, session={info['session_id']})")
 
             return {"stopReason": "end_turn"}
         finally:
