@@ -18,7 +18,8 @@
 
 **新入口接入契约（四步，未来新入口照此实现即自动兼容 reload）：**
   0. ``main()`` 首行 ``capture_launch_command()``——捕获原始启动命令
-     （``FP_LAUNCH_JSON``，execve 重启依赖；setdefault 保证重启链恒为首次命令）
+     （``FP_LAUNCH_JSON``，setdefault 保证重启链恒为首次命令；
+     快照缺失时激活核心从 ``/proc/self`` 精确重建，不依赖入口版本）
   1. 构造 Agent：``resume=os.environ.get("FP_RELOAD_SID")``
   2. Agent 就绪（ensure_initialized 后）：``consume_reload_handoff(agent)``
   3. 返回 True → 驱动 ``await agent.continue_conversation(io=本入口IO)``，
@@ -92,14 +93,26 @@ def perform_exec_reload(state: State, *, kind: str, tool_result_text: str | None
         return "❌ 无活体会话，无法 reload。"
 
     # ── 前置检查：启动命令快照 ──
+    # 快照缺失（入口早于捕获机制启动的存量实例）→ 从 /proc/self 精确重建：
+    # cmdline/cwd 是内核记录的 exec 事实，与快照同源、非猜测；两者皆不可得才拒绝。
     launch_raw = os.environ.get("FP_LAUNCH_JSON", "")
-    if not launch_raw:
-        return "❌ 缺少 FP_LAUNCH_JSON（本进程未捕获启动命令——须经 fp / fp-webui / fp-acp 入口启动），无法重启。"
-    try:
-        launch = json.loads(launch_raw)
-        launch_argv: list[str] = list(launch["argv"])
-    except (ValueError, KeyError, TypeError):
-        return "❌ FP_LAUNCH_JSON 损坏，无法重启。"
+    launch_argv: list[str]
+    if launch_raw:
+        try:
+            launch = json.loads(launch_raw)
+            launch_argv = list(launch["argv"])
+        except (ValueError, KeyError, TypeError):
+            return "❌ FP_LAUNCH_JSON 损坏，无法重启。"
+    else:
+        try:
+            with open("/proc/self/cmdline", "rb") as f:
+                launch_argv = [p.decode("utf-8", "surrogateescape") for p in f.read().split(b"\0") if p]
+            proc_cwd = os.readlink("/proc/self/cwd")
+        except OSError:
+            return "❌ 缺少 FP_LAUNCH_JSON 且 /proc/self 不可读，无法重启。"
+        if not launch_argv:
+            return "❌ 启动命令无法重建（/proc/self/cmdline 为空），无法重启。"
+        launch = {"argv": launch_argv, "cwd": proc_cwd}
 
     # ── 前置检查：陈旧 handoff 残留 ──
     hp = handoff_path()
