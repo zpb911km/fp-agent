@@ -175,7 +175,7 @@ class ACPServer:
             from fp_core.core.agent import Agent
 
             with contextlib.redirect_stdout(sys.stderr):
-                self._agent = Agent(enable_log=False)
+                self._agent = Agent(enable_log=False, resume=os.environ.get("FP_RELOAD_SID") or None)
 
         self._session_id: str | None = None
 
@@ -605,10 +605,59 @@ class ACPServer:
     # 公共接口
     # ═══════════════════════════════════════════════════════
 
+    async def _reload_continue(self) -> None:
+        """reload handoff 续接（机制契约见 fp_core.core.handoff，acp 入口适配）。
+
+        旧实例 exec 重启时正有一个 session/prompt 请求挂起（req_id 存于
+        环境变量 FP_ACP_PENDING_REQ）。这里：注入完成的会话直接跑完一轮
+        → 流式 chunk 走 session/update 通知 → 最后为挂起的请求补发 result，
+        客户端无感知地看到这轮对话自然收尾。进 stdin read_loop 之前执行，
+        期间客户端的新请求会在管道里排队。
+        """
+        if not os.environ.get("FP_RELOAD_HANDOFF"):
+            return
+        from fp_core.core.handoff import consume_reload_handoff
+
+        if not consume_reload_handoff(self._agent):
+            return
+
+        pending_raw = os.environ.pop("FP_ACP_PENDING_REQ", None)
+        pending_req: Any = None
+        if pending_raw is not None:
+            try:
+                pending_req = json.loads(pending_raw)
+            except (ValueError, TypeError):
+                pending_req = None
+
+        sid = self._session_id
+        self._processing_prompt = True
+        acp_io = ACPIO(send_chunk=lambda text: self._send_message_notification(text, session_id=sid))
+        self._log("🔄 reload 续接：恢复会话并继续上一轮对话…")
+        try:
+            self._current_task = asyncio.create_task(self._agent.continue_conversation(io=acp_io))
+            response = await self._current_task
+            buf = acp_io.flush_text()
+            reply_text = response.content or ""
+            if buf.strip():
+                self._send_message_notification(buf, session_id=sid)
+            elif reply_text:
+                self._send_message_notification(reply_text, session_id=sid)
+            if pending_req is not None:
+                # 为 exec 前挂起的 session/prompt 补发 result，解除客户端等待
+                self._send_result(pending_req, {"stopReason": "end_turn"})
+                self._log("🔄 已为挂起的 prompt 请求补发 result")
+        finally:
+            self._current_task = None
+            self._processing_prompt = False
+            self._agent.state._pending_continue = None  # pyright: ignore[reportPrivateUsage] 设计内跨类协议
+
     async def start(self) -> None:
         """启动 ACP 服务器，从 stdin 读取 JSON-RPC 消息"""
         await self._agent.ensure_initialized()
         self._session_id = self._agent.session.session_id
+
+        # ── reload handoff：在进入消息循环前完成上一轮对话的续接 ──
+        await self._reload_continue()
 
         self._log(f"✅  ACP Server 启动 (session={self._session_id})")
         self._log(f"   模型: {self._agent.state.model_name}")
@@ -683,10 +732,17 @@ class ACPServer:
             return
 
         try:
+            # ── reload handoff：记录挂起的 prompt 请求 ID（exec 重启后由
+            #    新实例 _reload_continue 补发 result，客户端不会悬等） ──
+            if method == "session/prompt":
+                os.environ["FP_ACP_PENDING_REQ"] = json.dumps(req_id)
+
             with contextlib.redirect_stdout(sys.stderr):
                 result = await handler(params)
 
             self._send_result(req_id, result)
+            if method == "session/prompt":
+                os.environ.pop("FP_ACP_PENDING_REQ", None)
 
             # session/new 和 session/load 之后，等待 IDE 完全消化响应并注册 sessionId，
             # 然后再发送 available_commands_update 通知。直接连续发送会导致 Zed

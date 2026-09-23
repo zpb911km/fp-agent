@@ -2,11 +2,17 @@
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 
 
 def main():
+    # ── 捕获原始启动命令（reload 工具 execve 重启用）──
+    # 必须在任何 argv 改写/前置路由之前；setdefault 保证重启链上始终是首次启动命令。
+    # 契约：{"argv": [...], "cwd": "..."}，见 fp_core.core.handoff 与 reload 插件。
+    os.environ.setdefault("FP_LAUNCH_JSON", json.dumps({"argv": sys.argv, "cwd": os.getcwd()}))
+
     # ── 子命令前置路由：fp ext / fp docs 在顶层 argparse 之前识别 ──
     # 若在 parse_known_args 之后才识别，`fp ext -h` 的 -h 会被顶层解析劫持，
     # 显示顶层帮助而非子命令帮助。前置路由让子命令拿到原始参数。

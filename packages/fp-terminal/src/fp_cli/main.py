@@ -246,7 +246,7 @@ async def main():
     # subagent 子进程：使用父进程预生成的会话 ID（父进程据此兜底补写 meta）
     _sub_sid = os.environ.get("FP_SUBAGENT_SID") or None
     agent = Agent(
-        resume=args.resume,
+        resume=args.resume or os.environ.get("FP_RELOAD_SID") or None,
         session_id=_sub_sid,
         io=CLIIO(),
         role=_role,
@@ -283,7 +283,24 @@ async def main():
         display.print_logo(model=agent.model, resume=args.resume)
 
     try:
-        if args.message:
+        # ── reload handoff 续接：新实例注入 tool 返回并自动继续对话 ──
+        # 契约见 fp_core.core.handoff。续接取代本轮 -m 消息处理
+        # （那条消息已在旧实例中执行并触发了 reload，不可重放）。
+        _reloaded = False
+        if os.environ.get("FP_RELOAD_HANDOFF"):
+            from fp_core.core.handoff import consume_reload_handoff
+
+            _reloaded = consume_reload_handoff(agent)
+            if _reloaded:
+                display.divider()
+                display.info("🔄 reload 续接：已恢复会话，继续上一轮对话…")
+                print()
+                resp = await agent.continue_conversation()
+                agent.state._pending_continue = None  # pyright: ignore[reportPrivateUsage] 设计内跨类协议
+                if os.environ.get("FP_SUBAGENT_SILENT") and resp.content:
+                    print(resp.content, end="")
+
+        if args.message and not _reloaded:
             if os.environ.get("FP_SUBAGENT_SILENT"):
                 response = await agent.process(args.message)
                 print(response.content, end="")
@@ -291,7 +308,8 @@ async def main():
                 print(f"> {args.message}")
                 response = await agent.process(args.message)
                 print(f"\nAgent: {response.content}")
-        else:
+        elif not args.message:
+            # 无 -m：进入 REPL（reload 续接完成后同样回到这里等输入）
             inp = InputHandler()
 
             if args.resume:

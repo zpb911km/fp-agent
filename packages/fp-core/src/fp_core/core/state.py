@@ -14,6 +14,7 @@
   Agent 回归「主循环编排」的单一职责。
 """
 
+import contextvars
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -27,6 +28,21 @@ if TYPE_CHECKING:
     from fp_core.core.token_tracker import TokenTracker
     from fp_core.core.tool_executor import ToolExecutor
     from fp_core.plugins.base.plugin import PluginRegistry
+
+
+# ── 执行期 State 导线（contextvar，方案1）──────────────────────
+# 背景：工具契约是 async def execute(params) -> str，签名不携带上下文
+# （见 tools/__init__.py 签名约定），需要活体 State 的工具（如 reload）
+# 经此导线在执行期读取 —— 与 _current_io 同范式的跨层通道。
+# 绑定点：Agent.process() / Agent.continue_conversation() 入口（与 _current_io
+# 同步绑定、finally 恢复）；传播限制同 _current_io —— 子 Task 不自动传播，
+# 需手动 contextvars.copy_context()（见 agent.py 顶部说明）。
+current_state: contextvars.ContextVar["State | None"] = contextvars.ContextVar("fp_current_state", default=None)
+
+
+def get_current_state() -> "State | None":
+    """工具执行期读取活体 State（未绑定时返回 None，调用方须显式判空）。"""
+    return current_state.get()
 
 
 @dataclass
@@ -91,6 +107,10 @@ class State:
 
     # ── 热重载暂存（/reload 命令设置，外层循环消费后交换 agent 引用） ──
     _reload_result: "tuple[Agent, dict[Any, Any]] | None" = field(repr=False, default=None)
+
+    # ── reload 续接暂存（core.handoff 消费后置位；各入口在控制点检查，
+    #    驱动 agent.continue_conversation() 后置 None。契约见 core/handoff.py） ──
+    _pending_continue: dict[str, Any] | None = field(repr=False, default=None)
 
     # ── 标志位 ──────────────────────────────────────────
 

@@ -30,7 +30,7 @@ from fp_core.core.io import IOChannel
 from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 from fp_core.core.llm_service import LLMConfig, LLMService
 from fp_core.core.prompt_builder import PromptBuilder
-from fp_core.core.state import State
+from fp_core.core.state import State, current_state
 from fp_core.core.token_tracker import TokenTracker
 from fp_core.core.tool_executor import ToolExecutor
 from fp_core.logger import get_logger
@@ -593,39 +593,67 @@ class Agent:
         # io=None → fallback 到 self._default_io，保证 get_current_io() 始终返回有效值
         token = _current_io.set(io or self._default_io)
         _current_io_ref = _current_io  # 锁住旧引用：防止热重载后 _current_io 指向新 contextvar
+        _state_ref = current_state  # 锁旧引用：同上，防热重载后指向新 contextvar
+        _state_token = _state_ref.set(self.state)
         try:
             return await self._process_inner(user_input)
         finally:
             _current_io_ref.reset(token)
+            _state_ref.reset(_state_token)
 
-    async def _process_inner(self, user_input: str) -> Response:
-        """处理用户输入的核心逻辑"""
+    async def continue_conversation(self, io: IOChannel | None = None) -> Response:
+        """续接模式入口：会话尾部已含未应答的 assistant(tool_calls)/tool 消息时，
+        不追加用户消息、不走消息过滤，直接进入 LLM 循环继续对话。
+
+        仅供 reload handoff 使用（契约见 fp_core/core/handoff.py）：
+        各入口在启动时消费 handoff 后调用本方法，渲染返回的 Response，
+        然后将 state._pending_continue 置回 None。
+        """
+        await self.ensure_initialized()
+
+        token = _current_io.set(io or self._default_io)
+        _current_io_ref = _current_io  # 锁住旧引用：防止热重载后 _current_io 指向新 contextvar
+        _state_ref = current_state  # 锁旧引用：同上，防热重载后指向新 contextvar
+        _state_token = _state_ref.set(self.state)
+        try:
+            return await self._process_inner("", continuation=True)
+        finally:
+            _current_io_ref.reset(token)
+            _state_ref.reset(_state_token)
+
+    async def _process_inner(self, user_input: str, continuation: bool = False) -> Response:
+        """处理用户输入的核心逻辑
+
+        continuation=True（reload 续接专用）：跳过命令检查/消息过滤/用户消息追加，
+        直接进入 LLM 调用循环——让模型看到自己的 tool 返回后继续对话。
+        """
 
         self._cancelled_by_user = False
 
-        # ── 检查命令 ──
-        if user_input.strip().startswith("/"):
-            handled, output = await self.handle_command(user_input)
-            if handled:
-                # 命令输出走单一通路：Response.content
-                # 不再额外 emit ON_BEFORE_RESPONSE（前端从 done.final_content 消费）
-                return Response(content=output, metadata={"from_command": True})
+        if not continuation:
+            # ── 检查命令 ──
+            if user_input.strip().startswith("/"):
+                handled, output = await self.handle_command(user_input)
+                if handled:
+                    # 命令输出走单一通路：Response.content
+                    # 不再额外 emit ON_BEFORE_RESPONSE（前端从 done.final_content 消费）
+                    return Response(content=output, metadata={"from_command": True})
 
-        # ── 生命周期：MESSAGE_FILTER（插件可 transform/拒绝） ──
-        ctx = await self.lifecycle.emit(
-            LifecycleHook.ON_MESSAGE_FILTER,
-            content=user_input,
-            messages=self._conv.messages,
-        )
-        if ctx.data.get("blocked"):
-            return Response(content=ctx.data.get("block_reason", "消息被插件过滤"))
-        filtered_input = ctx.data.get("filtered_content", user_input)
+            # ── 生命周期：MESSAGE_FILTER（插件可 transform/拒绝） ──
+            ctx = await self.lifecycle.emit(
+                LifecycleHook.ON_MESSAGE_FILTER,
+                content=user_input,
+                messages=self._conv.messages,
+            )
+            if ctx.data.get("blocked"):
+                return Response(content=ctx.data.get("block_reason", "消息被插件过滤"))
+            filtered_input = ctx.data.get("filtered_content", user_input)
 
-        # ── 添加用户消息 ──
-        self._conv.add_user_message(filtered_input)
+            # ── 添加用户消息 ──
+            self._conv.add_user_message(filtered_input)
 
-        # ── 生命周期：消息已接收 ──
-        await self.lifecycle.emit(LifecycleHook.ON_MESSAGE_RECEIVED, content=filtered_input)
+            # ── 生命周期：消息已接收 ──
+            await self.lifecycle.emit(LifecycleHook.ON_MESSAGE_RECEIVED, content=filtered_input)
 
         # ── 子 agent 静默模式：抑制 spinner / LLM 流等 UI 输出 ──
         _silent = os.environ.get("FP_SUBAGENT_SILENT") == "1"

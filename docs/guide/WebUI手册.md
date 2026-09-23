@@ -571,6 +571,14 @@ ws://host:port/ws/chat?token=your_token
 2. 收到 `reload_done` 事件 → 更新 session_id 和 model
 3. 后台事件推送任务自动切换到新 EventBus 订阅
 
+### 9.5 reload 热重启与会话续接
+
+core 内置的 `reload` 工具为两段式：先调用获得隔离测试告示与一次性动态口令，子进程完成隔离测试后再携口令执行，按原启动命令 execve 热重启。WebUI 在重启后：
+
+1. 凭 handoff 自动恢复会话并续接对话，续接输出写入 EventBus 环形缓冲
+2. 前端凭 `run_id` 重连，缓冲溢出时以 `resync: true` 补取最新状态（见 6.5）
+3. 重启期间的新请求由 `session_runtime.is_running` 拦截，不与续接并发
+
 ---
 
 ## 10. 开发指南

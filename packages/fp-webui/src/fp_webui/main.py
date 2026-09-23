@@ -487,13 +487,63 @@ async def get_agent() -> Agent:
                 # 本地 import：即使 reload 后模块缓存已更新，这里取到的总是最新类
                 from fp_core.core.agent import Agent as _AgentClass
 
-                _agent = _AgentClass(enable_log=False)
+                _agent = _AgentClass(enable_log=False, resume=os.environ.get("FP_RELOAD_SID") or None)
                 # 注册 WebUI 桥接插件
                 webui_plugin = WebUIPlugin()
                 _agent.plugins.register(webui_plugin)
                 await _agent.ensure_initialized()
                 get_logger().info(f"[WebUI] Agent 已初始化 (model={_agent.model})")
     return _agent
+
+
+async def _run_reload_continuation() -> None:
+    """reload 后启动续接（机制契约见 fp_core.core.handoff，webui 入口适配）。
+
+    续接事件全部进 EventBus 环形缓冲；客户端重连时凭 run_id 变化触发
+    resync 全量重拉——因此即使续接先于重连完成，结果也不丢。
+    并发由 session_runtime 守住：续接运行期间用户消息会被 is_running 拒绝。
+    """
+    if not os.environ.get("FP_RELOAD_HANDOFF"):
+        return
+    try:
+        agent = await get_agent()
+        from fp_core.core.handoff import consume_reload_handoff
+
+        if not consume_reload_handoff(agent):
+            return
+    except Exception as e:
+        get_logger().error(f"[WebUI] reload handoff 消费失败，跳过续接: {e}")
+        os.environ.pop("FP_RELOAD_HANDOFF", None)
+        os.environ.pop("FP_RELOAD_SID", None)
+        return
+
+    ws_io = WebSocketIO(event_bus)
+    ws_io.is_running = True
+
+    async def _run() -> None:
+        try:
+            response = await agent.continue_conversation(io=ws_io)
+            all_msgs = agent.state.conversation.messages
+            non_sys_count = sum(1 for m in all_msgs if m.get("role") != "system")
+            await event_bus.publish({
+                "type": "done",
+                "session_id": agent.session.session_id,
+                "final_content": response.content,
+                "non_system_count": non_sys_count,
+            })
+        except asyncio.CancelledError:
+            await event_bus.publish({"type": "cancelled"})
+        except Exception as e:
+            await event_bus.publish({"type": "error", "error": str(e)})
+            await event_bus.publish({"type": "done", "error": str(e)})
+        finally:
+            ws_io.is_running = False
+            if session_runtime.current_io is ws_io:
+                session_runtime.release()
+            agent.state._pending_continue = None  # pyright: ignore[reportPrivateUsage] 设计内跨类协议
+
+    session_runtime.start(ws_io, _run())
+    get_logger().info("[WebUI] 🔄 reload 续接任务已启动")
 
 
 # ── 生命周期管理 ─────────────────────────────────────────
@@ -503,6 +553,10 @@ async def get_agent() -> Agent:
 async def lifespan(app: FastAPI):
     """FastAPI 生命周期：启动时初始化 Agent，关闭时清理"""
     get_logger().info("[WebUI] 🚀 FP WebUI 启动中...")
+
+    # ── reload handoff：进程重启后续接上一轮对话（不阻塞启动，
+    #    任务进后台，事件由环形缓冲 + run_id 重放/resync 兜底） ──
+    await _run_reload_continuation()
 
     # Agent 延迟初始化，第一次请求时创建
     yield
