@@ -9,7 +9,7 @@ LLMService — 纯 LLM 调用层
 """
 
 import types
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -52,15 +52,23 @@ class StreamEvent:
 class LLMService:
     """LLM 调用服务"""
 
-    def __init__(self, client: Any, config: LLMConfig):
+    def __init__(
+        self,
+        client: Any,
+        config: LLMConfig,
+        on_usage: Callable[[dict[str, Any] | None, str], None] | None = None,
+    ):
         """
         Args:
             client: LLM client 实例（core.llm_client.Client）
                     （注：llm_client.Client 内部成员类型不完整，此处以 Any 兜底）
             config: LLM 配置
+            on_usage: 隐性调用（summarize 等不经 agent 主循环的路径）的 usage 回流回调。
+                    主循环 chat 路径由 agent 侧累计，故仅 summarize 主动调用，避免双计。
         """
         self._client: Any = client
         self._config = config
+        self._on_usage = on_usage
 
     @property
     def model(self) -> str:
@@ -253,4 +261,7 @@ class LLMService:
             {"role": "user", "content": f"{instruction}\n\n{text}"},
         ]
         result = await self.chat(messages, tools=None, max_tokens=max_tokens, extra_body=no_thinking_body())
+        # #53 面外缺口：隐性调用的 usage 此前在此被丢弃（连聚合统计都没进）——回流给调用方注入的回调
+        if self._on_usage is not None:
+            self._on_usage(result.usage, self.model)
         return result.message.get("content", "").strip()

@@ -137,7 +137,7 @@ class Agent:
             max_tokens=config.LLM_MAX_TOKENS,
             extra_body=config.LLM_EXTRA_BODY,
         )
-        self._llm = LLMService(self.client, llm_config)
+        self._llm = LLMService(self.client, llm_config, on_usage=self._record_aux_usage)
 
         # ToolExecutor：工具执行
         # 不传参数 → ToolExecutor 自动创建独立的 ToolRegistry（不再使用全局单例）
@@ -161,6 +161,7 @@ class Agent:
                         max_tokens=config.LLM_MAX_TOKENS,
                         extra_body=config.LLM_EXTRA_BODY,
                     ),
+                    on_usage=self._record_aux_usage,
                 )
 
             # 角色工具白名单过滤
@@ -653,6 +654,8 @@ class Agent:
         finally:
             _current_io_ref.reset(token)
             _state_ref.reset(_state_token)
+            # #49/#50 contextvar 已复位（正常返回与异常路径均走此 finally）
+            await self.lifecycle.emit(LifecycleHook.ON_CONTEXT_RESTORE, entry="process")
 
     async def continue_conversation(self, io: IOChannel | None = None) -> Response:
         """续接模式入口：会话尾部已含未应答的 assistant(tool_calls)/tool 消息时，
@@ -673,6 +676,8 @@ class Agent:
         finally:
             _current_io_ref.reset(token)
             _state_ref.reset(_state_token)
+            # #49/#50 同 process：contextvar 复位后观察（异常路径同样触发）
+            await self.lifecycle.emit(LifecycleHook.ON_CONTEXT_RESTORE, entry="continue")
 
     async def _process_inner(self, user_input: str, continuation: bool = False) -> Response:
         """处理用户输入的核心逻辑
@@ -1118,8 +1123,17 @@ class Agent:
         if modified_messages is not None:
             self._conv.replace_all(modified_messages)
 
-        # 保存上下文
-        self.session.save_context(self._conv.to_serializable())
+        # 保存上下文 — #46 覆写磁盘前发出 SESSION_SAVE（journal 状态存档点：
+        # 本行 messages=覆写后的最终状态，journal 上一行即被剪枝前状态）
+        _to_save = self._conv.to_serializable()
+        await self.lifecycle.emit(
+            LifecycleHook.ON_SESSION_SAVE,
+            session_id=self.session.session_id,
+            path=self.session.get_session_path(),
+            msg_count=len(_to_save),
+            messages=_to_save,
+        )
+        self.session.save_context(_to_save)
 
         # 提取最终回复
         final_content = self._conv.get_last_content()
@@ -1137,6 +1151,11 @@ class Agent:
         final_content = ctx.data.get("modified_content", final_content)
 
         return Response(content=final_content)
+
+    # ── #53 面外隐性调用的 usage 回流（summarize 等不经主循环，此前 usage 被丢弃）──
+    def _record_aux_usage(self, usage: dict[str, Any] | None, model: str) -> None:
+        """LLMService.on_usage 回调：把隐性 LLM 调用的 usage 并入 TokenTracker 聚合统计"""
+        self._token_tracker.accumulate(usage, model=model)
 
     # ============ 生命周期管理 ============
 

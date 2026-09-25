@@ -41,6 +41,8 @@ import sys
 import time
 from typing import TYPE_CHECKING, Any
 
+from fp_core.core.lifecycle import LifecycleHook
+
 if TYPE_CHECKING:
     from fp_core.core.agent import Agent
     from fp_core.core.state import State
@@ -70,7 +72,7 @@ def capture_launch_command() -> None:
     )
 
 
-def perform_exec_reload(state: State, *, kind: str, tool_result_text: str | None = None) -> str:
+async def perform_exec_reload(state: State, *, kind: str, tool_result_text: str | None = None) -> str:
     """跨进程热重启的激活核心（工具面与命令面共用）。
 
     成功路径 execve 替换当前进程映像，永不返回；
@@ -148,12 +150,20 @@ def perform_exec_reload(state: State, *, kind: str, tool_result_text: str | None
                     continue
                 fn = tc.get("function") or {}
                 if fn.get("name") == "reload":
-                    conv.add_tool_message(tid, tool_result_text)
+                    _msg = conv.add_tool_message(tid, tool_result_text)
                 else:
-                    conv.add_tool_message(
+                    _msg = conv.add_tool_message(
                         tid,
                         "⏸ 该工具调用在 reload 重启时被中断，未执行（如需要请重新发起）。",
                     )
+                # #54 handoff 重放入库后（op=handoff — journal 的 ctx-after 行）
+                await state.lifecycle.emit(
+                    LifecycleHook.ON_CTX_APPEND,
+                    op="handoff",
+                    message=_msg,
+                    msg_count=len(conv.messages),
+                    messages=conv.messages,
+                )
 
     # ── 2) 落盘（原子覆盖；此刻文件 = 新实例要恢复的完整状态）──
     #    save_context 对空上下文静默跳过、写失败也被其内部吞掉——

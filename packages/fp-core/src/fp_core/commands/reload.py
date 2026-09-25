@@ -44,5 +44,5 @@ async def execute(state: State, arg: str) -> tuple[bool, str]:
     from fp_core.core.handoff import perform_exec_reload
 
     # 成功路径 execve 不返回；能返回必是失败（核心内已回滚）。
-    err = perform_exec_reload(state, kind="command")
+    err = await perform_exec_reload(state, kind="command")
     return (True, err)

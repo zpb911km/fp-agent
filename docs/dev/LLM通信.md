@@ -228,3 +228,7 @@ reply = message.content or "（无文本回复）"
 
 轻量任务（摘要 `LLMService.summarize`、webui 会话标题）通过 `config.no_thinking_body()`
 强制关闭思考——thinking 模型在非流式 + 小 max_tokens 下会因思考 token 挤占预算而报错或截断。
+
+`summarize` 的隐性调用不经 agent 主循环，usage 曾在此被丢弃（边 #53 面外缺口）。现经
+`LLMService(on_usage=...)` 回调回流到 `TokenTracker` 聚合统计（agent 构造时注入
+`_record_aux_usage`）；主循环路径由 agent 自行 accumulate、不经过该回调，不会双计。

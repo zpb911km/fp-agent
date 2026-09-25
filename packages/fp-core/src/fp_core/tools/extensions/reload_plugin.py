@@ -117,4 +117,4 @@ async def execute(params: dict[str, Any]) -> str:
     )
     # 激活核心：落盘 → handoff(kind=tool) → execve；失败返回错误文本（已回滚），
     # 成功永不返回。启动命令/陈旧 handoff 等前置检查亦在核心内。
-    return perform_exec_reload(st, kind="tool", tool_result_text=result_text)
+    return await perform_exec_reload(st, kind="tool", tool_result_text=result_text)
