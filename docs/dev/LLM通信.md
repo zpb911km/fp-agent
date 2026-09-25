@@ -222,7 +222,7 @@ reply = message.content or "（无文本回复）"
 | 不带 `tools` | **剥离** | API 会忽略这些字段，回传只浪费 token |
 
 实现位置：
-- `llm_service.chat/chat_stream` — done 结果的 assistant_msg 携带 `reasoning_content`
+- `llm_service.chat/chat_stream` — done 结果的 assistant_msg 携带 `reasoning_content`；`chat()` 被覆写（测试 mock）时降级为非流式，**先 yield `usage` 事件再 yield `done`**——保证 `ON_AFTER_LLM_CALL` 的逐调用统计字段（F1）在降级路径不被架空
 - `agent._invoke_llm` → `add_assistant_message` — 保留进会话状态；持久化（`to_serializable`）同样保留
 - `conversation.get_messages_for_llm(with_tools=...)` — 发送前按上表裁剪；agent 主循环以 `bool(tool_definitions)` 传入
 

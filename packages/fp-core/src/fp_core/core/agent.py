@@ -753,10 +753,23 @@ class Agent:
 
         while True:
             # ── 中断检查（支持 signal handler 和 cancel() 两种途径） ──
+            # ── #13 环顶中断即将抛出（pre — raise 前给插件观察机会） ──
+            if self._interrupted:
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_INTERRUPT,
+                    reason="用户中断",
+                    location="loop_top",
+                )
             self._check_interrupted()
 
-            # 修复 tool ordering
-            self._conv.repair_tool_ordering()
+            # ── #14 修复 tool ordering（post — 静默 mutation 观察点，仅修复发生时触发） ──
+            repaired = self._conv.repair_tool_ordering()
+            if repaired:
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_CTX_REPAIR,
+                    repaired=repaired,
+                    messages=self._conv.messages,
+                )
 
             # ── 生命周期：BEFORE_LLM_CALL（插件可修改 messages / 取消） ──
             ctx = await self.lifecycle.emit(
@@ -765,6 +778,12 @@ class Agent:
                 tools=cast("list[dict[str, Any]]", self._tool_exec.get_definitions()),  # type: ignore[reportUnknownMemberType]
             )
             if ctx.data.get("cancelled"):
+                # ── #15 插件取消本轮 LLM 调用，早退（post — 注意：不落盘，已知弱点保持原状） ──
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_EARLY_EXIT,
+                    reason=ctx.data.get("cancel_reason", "插件取消"),
+                    stage="before_llm_call",
+                )
                 return Response(content=ctx.data.get("cancel_reason", "已取消"))
 
             messages_for_llm = ctx.data.get(
@@ -778,12 +797,21 @@ class Agent:
             )
 
             self._processing = True
+            _llm_t0 = time.perf_counter()
+            _usage: dict[str, Any] | None = None
             try:
                 assistant_msg, _usage = await self._invoke_llm(messages_for_llm, silent=_silent)
                 if _usage:
                     self._token_tracker.accumulate(_usage, model=self.model)
             except (asyncio.CancelledError, KeyboardInterrupt):
                 self._processing = False
+                # ── #19 调用中断直抛 process（post — 无钩子的异常传播路径） ──
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_CANCEL,
+                    reason="LLM 调用被中断/取消",
+                    stage="llm_call",
+                    latency_ms=(time.perf_counter() - _llm_t0) * 1000.0,
+                )
                 raise
             except Exception as e:
                 self._processing = False
@@ -797,23 +825,57 @@ class Agent:
                 if "'tool'" in err_str and "preceding" in err_str:
                     self.io.warning("  🔧 检测到 tool 顺序错误，二次修复...")
                     self._conv.repair_tool_ordering()
+                    # ── #20 修复后二次调用（pre — 不重过 ON_BEFORE_LLM_CALL 门） ──
+                    await self.lifecycle.emit(
+                        LifecycleHook.ON_LLM_RETRY,
+                        error=err_str,
+                        stage="repair_then_retry",
+                    )
+                    _retry_t0 = time.perf_counter()
                     try:
                         self._processing = True
                         assistant_msg, _usage2 = await self._invoke_llm(self._conv.messages, silent=_silent)
                         if _usage2:
                             self._token_tracker.accumulate(_usage2, model=self.model)
+                        _usage = _usage2  # 重试成功后与主路径对齐，供 AFTER 门 usage 字段消费
                     except (asyncio.CancelledError, KeyboardInterrupt):
                         self._processing = False
+                        await self.lifecycle.emit(
+                            LifecycleHook.ON_CANCEL,
+                            reason="LLM 重试被中断/取消",
+                            stage="llm_retry",
+                            latency_ms=(time.perf_counter() - _retry_t0) * 1000.0,
+                        )
                         raise
                     except Exception as e2:
                         self._processing = False
                         self.io.error(f"  ❌ 修复后仍失败: {e2}")
+                        # ── #22 重试仍失败 → break（post） ──
+                        await self.lifecycle.emit(
+                            LifecycleHook.ON_LLM_FATAL,
+                            error=str(e2),
+                            stage="retry_failed",
+                        )
                         break
+                    # ── #21 重试成功 fall-through 至 AFTER 门（post） ──
+                    await self.lifecycle.emit(
+                        LifecycleHook.ON_LLM_RETRY_OK,
+                        error=err_str,
+                        latency_ms=(time.perf_counter() - _retry_t0) * 1000.0,
+                    )
                 else:
+                    # ── #23 非 tool 错误 break（post — 本轮无新响应） ──
+                    await self.lifecycle.emit(
+                        LifecycleHook.ON_LLM_FATAL,
+                        error=err_str,
+                        stage="unrecoverable",
+                    )
                     break
+            _llm_latency_ms = (time.perf_counter() - _llm_t0) * 1000.0
             self._processing = False
 
             # ── 生命周期：AFTER_LLM_CALL（插件可修改回复 / 拦截工具执行） ──
+            # ── #17 post(LLM)/pre(append)：usage/model/latency 字段补强（F1） ──
             tc_names = [tc["function"]["name"] for tc in assistant_msg.get("tool_calls", [])]
             ctx = await self.lifecycle.emit(
                 LifecycleHook.ON_AFTER_LLM_CALL,
@@ -821,14 +883,24 @@ class Agent:
                 has_tool_calls=bool(tc_names),
                 tool_names=tc_names,
                 content=assistant_msg.get("content", ""),
+                usage=_usage,
+                model=self.model,
+                latency_ms=_llm_latency_ms,
             )
             if ctx.data.get("modified_response"):
                 assistant_msg = ctx.data["modified_response"]
-            if ctx.data.get("block_tool_execution"):
-                # 插件阻止了工具执行
+            _tool_blocked = bool(ctx.data.get("block_tool_execution"))
+            if _tool_blocked:
+                # ── #25 block_tool_execution 守卫生效（post） ──
+                _blocked_names = [tc["function"]["name"] for tc in assistant_msg.get("tool_calls", [])]
                 assistant_msg.pop("tool_calls", None)
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_TOOL_BLOCKED,
+                    tool_names=_blocked_names,
+                )
 
             # 流式中断处理
+            _stripped = False
             interrupted = assistant_msg.pop("_interrupted", False)
             if interrupted and "tool_calls" in assistant_msg:
                 tc_names = [tc["function"]["name"] for tc in assistant_msg["tool_calls"]]
@@ -836,11 +908,39 @@ class Agent:
                 note = f"\n\n[用户中断 — 计划调用的工具: {', '.join(tc_names)}，请求已被用户打断]"
                 assistant_msg["content"] = (content + note) if content else note.strip()
                 del assistant_msg["tool_calls"]
+                _stripped = True
+            if _stripped:
+                # ── #24 interrupted 剥离 tool_calls + 注记后（post） ──
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_STREAM_STRIP,
+                    tool_names=tc_names,
+                )
+            if not _tool_blocked and not _stripped:
+                # ── #26 守卫通过（含 modified_response 后） → 正常入库（post） ──
+                # 与 #24/#25 互斥：三者是"响应后处理 → assistant入库"同一转移的替代结果
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_LLM_PASS,
+                    response=assistant_msg,
+                )
 
-            self._conv.add_assistant_message(assistant_msg)
+            assistant_msg = self._conv.add_assistant_message(assistant_msg)
+
+            # ── #27 assistant 消息入库后（post — journal 关键缺口，原为零钩子） ──
+            await self.lifecycle.emit(
+                LifecycleHook.ON_CTX_APPEND,
+                op="assistant",
+                message=assistant_msg,
+                msg_count=len(self._conv.messages),
+                messages=self._conv.messages,
+            )
 
             if interrupted:
                 self.io.info("⏹️ 已中断（保留了已生成的内容）")
+                # ── #28 流式中断 break（post — 本轮已入库 assistant） ──
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_STREAM_INTERRUPT,
+                    content=assistant_msg.get("content", ""),
+                )
                 break
 
             # ── 处理工具调用 ──
@@ -916,6 +1016,12 @@ class Agent:
                     break
                 continue  # 工具全部完成 → 回到 while 循环（再次调用 LLM）
             else:
+                # ── #29 无 tool_calls 正常终答 break（post） ──
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_TURN_END,
+                    content=assistant_msg.get("content", ""),
+                    msg_count=len(self._conv.messages),
+                )
                 break  # 无工具调用 → 跳出 while 循环
 
         # ── 生命周期：上下文已更新（插件可修改本轮消息，保存前生效） ──

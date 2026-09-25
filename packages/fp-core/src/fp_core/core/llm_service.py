@@ -152,6 +152,9 @@ class LLMService:
         bound_chat = self.chat
         if not isinstance(bound_chat, types.MethodType) or bound_chat.__func__ is not LLMService.chat:
             result = await self.chat(messages, tools=tools, **overrides)
+            # 降级路径同样下发 usage 事件 — 否则 F1 字段（逐调用统计）在 mock/降级场景被架空
+            if result.usage:
+                yield StreamEvent(type="usage", data=result.usage)
             yield StreamEvent(type="done", data=result.message)
             return
         model: str = overrides.get("model", self._config.model)

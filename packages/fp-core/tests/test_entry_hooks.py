@@ -226,7 +226,8 @@ async def test_unhandled_slash_falls_through_to_message(make_agent):
         "ON_BEFORE_COMMAND",
         "ON_COMMAND",
         "ON_FALLTHROUGH",
-        "ON_CTX_APPEND",
+        "ON_CTX_APPEND",  # op=user（降级入库）
+        "ON_CTX_APPEND",  # op=assistant（块3：LLM 回复入库）
     ]
     assert rec.of(LifecycleHook.ON_COMMAND)[0]["data"]["handled"] is False
     # fallthrough 路径不发 ON_MSG_ENTER（#7 与 #8 是两条互斥边）
@@ -235,6 +236,8 @@ async def test_unhandled_slash_falls_through_to_message(make_agent):
     ca = rec.of(LifecycleHook.ON_CTX_APPEND)[0]["data"]
     assert ca["op"] == "user"
     assert ca["message"]["content"] == "/no_such_cmd_ever"
+    # 块3 #27：assistant 入库后也有观察点
+    assert rec.of(LifecycleHook.ON_CTX_APPEND)[1]["data"]["op"] == "assistant"
 
 
 # ═══════════════════════════════════════════════════════════════
