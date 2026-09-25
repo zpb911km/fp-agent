@@ -463,14 +463,55 @@ class Agent:
 
         return result
 
+    async def _result_gate(self, tool_name: str, tool_call_id: str, result: str) -> str:
+        """RESULT 门（#35 ON_TOOL_RESULT + #39 ON_RESULT_MUTATED）
+
+        三条路径（插件拒绝 / 错误抑制 / 执行成功）统一走本门 — 修复缺陷①（抑制路径原绕门）。
+        """
+        ctx = await self.lifecycle.emit(
+            LifecycleHook.ON_TOOL_RESULT,
+            tool_name=tool_name,
+            result=result[:5000],
+            tool_call_id=tool_call_id,
+        )
+        blocked = bool(ctx.data.get("blocked"))
+        if blocked:
+            self.io.warning(f"🔧 工具 {tool_name} 的结果被插件过滤")
+            result = ctx.data.get("block_reason", "结果被插件过滤")
+        modified_result = ctx.data.get("modified_result")
+        has_modified = modified_result is not None
+        if has_modified:
+            result = modified_result
+        # ── #39 blocked/modified_result 消费后（post） ──
+        if blocked or has_modified:
+            await self.lifecycle.emit(
+                LifecycleHook.ON_RESULT_MUTATED,
+                tool_name=tool_name,
+                blocked=blocked,
+                has_modified=has_modified,
+                tool_call_id=tool_call_id,
+            )
+        return result
+
+    async def _append_tool_message(self, tool_call_id: str, content: str) -> None:
+        """tool 消息入库 + #42 ON_CTX_APPEND（op=tool — journal 的 ctx-after 行）"""
+        msg = self._conv.add_tool_message(tool_call_id, content)
+        await self.lifecycle.emit(
+            LifecycleHook.ON_CTX_APPEND,
+            op="tool",
+            message=msg,
+            msg_count=len(self._conv.messages),
+            messages=self._conv.messages,
+        )
+
     async def _execute_one_tool(self, tc: dict[str, Any], silent: bool = False) -> tuple[str, str]:
         """并行工具执行单元 — 封装单个工具的完整生命周期
 
         包含：
-          1. ON_TOOL_CALL（插件可拒绝/修改参数）
-          2. 执行工具
-          3. ON_TOOL_RESULT（插件可审查/修改/过滤结果）
-          4. ON_TOOL_ERROR（异常时）
+          1. ON_TOOL_CALL（插件可拒绝/修改参数）→ 拒绝走 #33 ON_TOOL_REJECTED + RESULT 门
+          2. 执行工具（#34 ON_TOOL_EXEC — 参数定稿后）
+          3. RESULT 门（`_result_gate`）— 拒绝/抑制/成功三路统一
+          4. ON_TOOL_ERROR（异常时）→ #37 抑制 / #38 传播
 
         Returns:
             (tool_call_id, result_string)
@@ -493,25 +534,28 @@ class Agent:
         if ctx.data.get("cancelled"):
             reason = ctx.data.get("cancel_reason", "工具被插件拒绝")
             self.io.info(f"🔧 插件拒绝工具 {tool_name}: {reason}")
-            result = f"被插件拒绝: {reason}"
-            # 仍然触发 ON_TOOL_RESULT（保持与原串行行为一致）
-            ctx = await self.lifecycle.emit(
-                LifecycleHook.ON_TOOL_RESULT,
+            # ── #33 拒绝生效（post）→ 仍过 RESULT 门（保持行为一致） ──
+            await self.lifecycle.emit(
+                LifecycleHook.ON_TOOL_REJECTED,
                 tool_name=tool_name,
-                result=result,
                 tool_call_id=tc["id"],
+                reason=reason,
             )
-            if ctx.data.get("blocked"):
-                result = ctx.data.get("block_reason", "结果被插件过滤")
-            modified_result = ctx.data.get("modified_result")
-            if modified_result is not None:
-                result = modified_result
+            result = await self._result_gate(tool_name, tc["id"], f"被插件拒绝: {reason}")
             return (tc["id"], result)
 
         # 插件修改参数
         modified_args = ctx.data.get("modified_tool_args")
         if modified_args is not None:
             tc["function"]["arguments"] = modified_args
+
+        # ── #34 参数定稿后、真正执行前（pre） ──
+        await self.lifecycle.emit(
+            LifecycleHook.ON_TOOL_EXEC,
+            tool_name=tool_name,
+            tool_args=tc["function"]["arguments"][:5000],
+            tool_call_id=tc["id"],
+        )
 
         # 执行工具
         try:
@@ -530,24 +574,27 @@ class Agent:
             if ctx.data.get("suppressed"):
                 reason = ctx.data.get("suppress_reason", "插件已抑制错误")
                 self.io.warning(f"  ⚠️ 错误已被插件抑制: {reason}")
-                return (tc["id"], f"错误已被抑制：{reason}")
-            # 未被抑制 → 让异常传播到外部处理
+                # ── #37 抑制生效（post）— 修复缺陷①：抑制结果同样过 RESULT 门 ──
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_TOOL_SUPPRESSED,
+                    tool_name=tool_name,
+                    error=str(e),
+                    suppress_reason=reason,
+                    tool_call_id=tc["id"],
+                )
+                result = await self._result_gate(tool_name, tc["id"], f"错误已被抑制：{reason}")
+                return (tc["id"], result)
+            # ── #38 未抑制 → 异常传播（post，由 gather return_exceptions 收集） ──
+            await self.lifecycle.emit(
+                LifecycleHook.ON_TOOL_ERROR_PROPAGATED,
+                tool_name=tool_name,
+                error=str(e),
+                tool_call_id=tc["id"],
+            )
             raise
 
-        # ── ON_TOOL_RESULT ──
-        ctx = await self.lifecycle.emit(
-            LifecycleHook.ON_TOOL_RESULT,
-            tool_name=tool_name,
-            result=result[:5000],
-            tool_call_id=tc["id"],
-        )
-        if ctx.data.get("blocked"):
-            self.io.warning(f"🔧 工具 {tool_name} 的结果被插件过滤")
-            result = ctx.data.get("block_reason", "结果被插件过滤")
-        modified_result = ctx.data.get("modified_result")
-        if modified_result is not None:
-            result = modified_result
-
+        # ── #35/#39 RESULT 门（成功路径） ──
+        result = await self._result_gate(tool_name, tc["id"], result)
         return (tc["id"], result)
 
     # ============ 命令处理 ============
@@ -950,7 +997,19 @@ class Agent:
                 sel_tool_names = [tc["function"]["name"] for tc in tool_calls]
                 ctx = await self.lifecycle.emit(LifecycleHook.ON_TOOL_SELECT, tools=sel_tool_names)
                 if ctx.data.get("cancelled"):
-                    self.io.warning(f"⏹️ 工具执行被插件拦截: {ctx.data.get('cancel_reason', '无原因')}")
+                    select_reason = ctx.data.get("cancel_reason", "无原因")
+                    self.io.warning(f"⏹️ 工具执行被插件拦截: {select_reason}")
+                    # 修复缺陷②：全部跳过时为每个 tool_call 补写占位结果，避免悬挂
+                    for tc in tool_calls:
+                        await self._append_tool_message(tc["id"], f"被插件拦截（未执行）: {select_reason}")
+                    # ── #31 SELECT 拦截生效（post） ──
+                    await self.lifecycle.emit(
+                        LifecycleHook.ON_TOOL_CANCELLED,
+                        tools=sel_tool_names,
+                        cancel_reason=select_reason,
+                        placeholder_written=True,
+                        msg_count=len(self._conv.messages),
+                    )
                     break
                 # 如果插件修改了工具列表，按新列表过滤
                 modified_tools = ctx.data.get("modified_tools")
@@ -977,9 +1036,22 @@ class Agent:
                     self._interrupted = False
                     self._cancelled_by_user = True
                     for tc in tool_calls:
-                        self._conv.add_tool_message(tc["id"], "工具调用失败：用户中断")
+                        await self._append_tool_message(tc["id"], "工具调用失败：用户中断")
+                    # ── #41 gather 整体被取消，全量补记完成（post） ──
+                    await self.lifecycle.emit(
+                        LifecycleHook.ON_TOOL_ABORT,
+                        count=len(tool_calls),
+                        reason="gather cancelled",
+                    )
                     self.io.info("⏹️ 已中断（上下文已保留工具调用信息）")
                     break
+
+                # ── #40 gather 全部返回、按序消费前（pre） ──
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_TOOL_RESULTS_READY,
+                    results=raw_results,
+                    count=len(raw_results),
+                )
 
                 # ── 按序处理结果（保持与 LLM 返回顺序一致） ──
                 for tc, result_or_exc in zip(tool_calls, raw_results, strict=True):
@@ -987,18 +1059,18 @@ class Agent:
                         # 用户中断 — 此工具及其后的工具均未完成
                         self._interrupted = False
                         self._cancelled_by_user = True
-                        self._conv.add_tool_message(tc["id"], "工具调用失败：用户中断")
+                        await self._append_tool_message(tc["id"], "工具调用失败：用户中断")
                         tool_interrupted = True
                         break
                     elif isinstance(result_or_exc, Exception):
                         # 工具异常（未被插件抑制）→ 记录错误，不中断其他工具
                         err_msg = f"❌ 工具执行失败 ({tc['function']['name']}): {result_or_exc}"
                         self.io.error(err_msg)
-                        self._conv.add_tool_message(tc["id"], err_msg)
+                        await self._append_tool_message(tc["id"], err_msg)
                     else:
                         assert isinstance(result_or_exc, tuple), f"预期 tuple，实际 {type(result_or_exc)}"
                         tid, result = result_or_exc
-                        self._conv.add_tool_message(tid, result)
+                        await self._append_tool_message(tid, result)
 
                 if tool_interrupted:
                     # 补全未处理工具的中断记录（for break 后剩余的 tool_calls）
@@ -1011,9 +1083,21 @@ class Agent:
                         len(tool_calls),
                     )
                     for remaining in tool_calls[break_out_idx + 1 :]:
-                        self._conv.add_tool_message(remaining["id"], "未执行（工具调用失败：用户中断）")
+                        await self._append_tool_message(remaining["id"], "未执行（工具调用失败：用户中断）")
+                    # ── #43 已记 1 + 补记剩余完成（post） ──
+                    await self.lifecycle.emit(
+                        LifecycleHook.ON_TOOL_PARTIAL,
+                        recorded=break_out_idx + 1,
+                        remaining=len(tool_calls) - break_out_idx - 1,
+                    )
                     self.io.info("⏹️ 已中断（上下文已保留工具调用信息）")
                     break
+                # ── #44 工具轮完成、回环顶再次调 LLM（post） ──
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_ITERATION,
+                    tools_executed=len(tool_calls),
+                    msg_count=len(self._conv.messages),
+                )
                 continue  # 工具全部完成 → 回到 while 循环（再次调用 LLM）
             else:
                 # ── #29 无 tool_calls 正常终答 break（post） ──
