@@ -13,6 +13,7 @@ import contextlib
 import contextvars
 import json
 import os
+import time
 import types
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -587,6 +588,11 @@ class Agent:
         await self.ensure_initialized()
 
         if not user_input.strip():
+            await self.lifecycle.emit(
+                LifecycleHook.ON_EMPTY,
+                content=user_input,
+                messages=self._conv.messages,
+            )
             return Response(content="")
 
         # 使用 contextvars 设置 IO 通道（不修改实例变量，防并发竞态）
@@ -631,13 +637,64 @@ class Agent:
         self._cancelled_by_user = False
 
         if not continuation:
+            # ── #4 输入到达（journal 的 input 行之一） ──
+            await self.lifecycle.emit(
+                LifecycleHook.ON_INPUT,
+                content=user_input,
+                messages=self._conv.messages,
+            )
+
             # ── 检查命令 ──
             if user_input.strip().startswith("/"):
+                # ── #5 命令开始执行（pre，可阻断/改写） ──
+                parts = user_input.strip().split(maxsplit=1)
+                cmd_name = parts[0]
+                cmd_arg = parts[1] if len(parts) > 1 else ""
+                bc_ctx = await self.lifecycle.emit(
+                    LifecycleHook.ON_BEFORE_COMMAND,
+                    name=cmd_name,
+                    arg=cmd_arg,
+                    messages=self._conv.messages,
+                )
+                if bc_ctx.data.get("blocked"):
+                    return Response(
+                        content=bc_ctx.data.get("block_reason", "命令被插件阻断"),
+                        metadata={"from_command": True},
+                    )
+
+                t0 = time.monotonic()
                 handled, output = await self.handle_command(user_input)
+                latency_ms = (time.monotonic() - t0) * 1000.0
+
+                # ── #6 命令输出返回（post，journal 必需：纯读命令唯一观察点） ──
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_COMMAND,
+                    name=cmd_name,
+                    arg=cmd_arg,
+                    output=output,
+                    handled=handled,
+                    latency_ms=latency_ms,
+                    messages=self._conv.messages,
+                )
+
                 if handled:
                     # 命令输出走单一通路：Response.content
                     # 不再额外 emit ON_BEFORE_RESPONSE（前端从 done.final_content 消费）
                     return Response(content=output, metadata={"from_command": True})
+
+                # ── #7 slash 未处理降级为消息 ──
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_FALLTHROUGH,
+                    content=user_input,
+                    messages=self._conv.messages,
+                )
+            else:
+                # ── #8 非命令进入消息处理 ──
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_MSG_ENTER,
+                    content=user_input,
+                    messages=self._conv.messages,
+                )
 
             # ── 生命周期：MESSAGE_FILTER（插件可修改/拒绝） ──
             ctx = await self.lifecycle.emit(
@@ -646,6 +703,14 @@ class Agent:
                 messages=self._conv.messages,
             )
             if ctx.data.get("blocked"):
+                # ── #9 消息被插件拦截（source=filter） ──
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_MESSAGE_BLOCKED,
+                    content=user_input,
+                    block_reason=ctx.data.get("block_reason", "消息被插件过滤"),
+                    source="filter",
+                    messages=self._conv.messages,
+                )
                 return Response(content=ctx.data.get("block_reason", "消息被插件过滤"))
             filtered_input = ctx.data.get("filtered_content", user_input)
 
@@ -656,11 +721,32 @@ class Agent:
                 messages=self._conv.messages,
             )
             if ctx.data.get("blocked"):
+                # ── #9 消息被插件拦截（source=received） ──
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_MESSAGE_BLOCKED,
+                    content=filtered_input,
+                    block_reason=ctx.data.get("block_reason", "消息被插件拦截"),
+                    source="received",
+                    messages=self._conv.messages,
+                )
                 return Response(content=ctx.data.get("block_reason", "消息被插件拦截"))
             filtered_input = ctx.data.get("modified_content", filtered_input)
 
-            # ── 添加用户消息 ──
-            self._conv.add_user_message(filtered_input)
+            # ── 添加用户消息 + post 观察（journal 的 ctx-after 行） ──
+            user_msg = self._conv.add_user_message(filtered_input)
+            await self.lifecycle.emit(
+                LifecycleHook.ON_CTX_APPEND,
+                op="user",
+                message=user_msg,
+                msg_count=len(self._conv.messages),
+                messages=self._conv.messages,
+            )
+        else:
+            # ── #12 handoff 续接入口（跳过 filter/append） ──
+            await self.lifecycle.emit(
+                LifecycleHook.ON_RESUME,
+                messages=self._conv.messages,
+            )
 
         # ── 子 agent 静默模式：抑制 spinner / LLM 流等 UI 输出 ──
         _silent = os.environ.get("FP_SUBAGENT_SILENT") == "1"
@@ -873,6 +959,7 @@ class Agent:
         """
         async with self._init_lock:
             if hasattr(self, "_initialized") and self._initialized:
+                await self.lifecycle.emit(LifecycleHook.ON_INITIALIZED, first_time=False)
                 return
             self._initialized = True
 
@@ -887,6 +974,7 @@ class Agent:
             from fp_core.prompts import apply_system_prompt_append
 
             apply_system_prompt_append(self._conv, ctx.data.get("system_prompt_append"))
+            await self.lifecycle.emit(LifecycleHook.ON_INITIALIZED, first_time=True)
 
     async def shutdown(self) -> None:
         """关闭 Agent（清理生命周期钩子 + 释放连接池）"""

@@ -168,6 +168,7 @@ class CommandEvent:
     latency_ms: float = 0.0  # ON_COMMAND：执行耗时
     blocked: bool = False  # ON_BEFORE_COMMAND 守卫：阻断执行
     block_reason: str = ""
+    messages: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])  # 命令执行后的 ctx（journal 行）
 
 
 @dataclass
