@@ -4,7 +4,7 @@ Agent 主干类（全异步版本 — 重构版）
 职责收敛为"编排层"：
 - 持有注入的服务（ConversationState, LLMService, ToolExecutor, PromptBuilder, SessionManager）
 - 主循环 _process_inner 只做流程控制，具体操作委托给服务
-- 生命周期 emit() 返回值被实际消费，插件能 transform/guard 流程
+- 生命周期 emit() 返回值被实际消费，插件可修改数据、守卫（guard）流程（所有钩子均为执行钩子）
 - 不直接持有 _context — ConversationState 是唯一的事实源
 """
 
@@ -639,7 +639,7 @@ class Agent:
                     # 不再额外 emit ON_BEFORE_RESPONSE（前端从 done.final_content 消费）
                     return Response(content=output, metadata={"from_command": True})
 
-            # ── 生命周期：MESSAGE_FILTER（插件可 transform/拒绝） ──
+            # ── 生命周期：MESSAGE_FILTER（插件可修改/拒绝） ──
             ctx = await self.lifecycle.emit(
                 LifecycleHook.ON_MESSAGE_FILTER,
                 content=user_input,
@@ -649,11 +649,18 @@ class Agent:
                 return Response(content=ctx.data.get("block_reason", "消息被插件过滤"))
             filtered_input = ctx.data.get("filtered_content", user_input)
 
+            # ── 生命周期：消息已接收（提交前最终裁定，插件可修改/拦截） ──
+            ctx = await self.lifecycle.emit(
+                LifecycleHook.ON_MESSAGE_RECEIVED,
+                content=filtered_input,
+                messages=self._conv.messages,
+            )
+            if ctx.data.get("blocked"):
+                return Response(content=ctx.data.get("block_reason", "消息被插件拦截"))
+            filtered_input = ctx.data.get("modified_content", filtered_input)
+
             # ── 添加用户消息 ──
             self._conv.add_user_message(filtered_input)
-
-            # ── 生命周期：消息已接收 ──
-            await self.lifecycle.emit(LifecycleHook.ON_MESSAGE_RECEIVED, content=filtered_input)
 
         # ── 子 agent 静默模式：抑制 spinner / LLM 流等 UI 输出 ──
         _silent = os.environ.get("FP_SUBAGENT_SILENT") == "1"
@@ -694,8 +701,12 @@ class Agent:
                 raise
             except Exception as e:
                 self._processing = False
-                self.io.error(f"API/LLM 错误: {e}")
-                await self.lifecycle.emit(LifecycleHook.ON_ERROR, error=str(e))
+                err_ctx = await self.lifecycle.emit(LifecycleHook.ON_ERROR, error=str(e))
+                if err_ctx.data.get("handled"):
+                    # 插件声明已处理该错误 → 恢复主循环（环顶仍有 interrupt 检查兜底）
+                    self.io.warning(f"♻️ 错误已被插件处理，恢复主循环: {err_ctx.data.get('handled_reason') or e}")
+                    continue
+                self.io.error(f"API/LLM 错误: {err_ctx.data.get('modified_error') or e}")
                 err_str = str(e)
                 if "'tool'" in err_str and "preceding" in err_str:
                     self.io.warning("  🔧 检测到 tool 顺序错误，二次修复...")
@@ -821,11 +832,15 @@ class Agent:
             else:
                 break  # 无工具调用 → 跳出 while 循环
 
-        # ── 生命周期：上下文已更新 ──
-        await self.lifecycle.emit(
+        # ── 生命周期：上下文已更新（插件可修改本轮消息，保存前生效） ──
+        ctx = await self.lifecycle.emit(
             LifecycleHook.ON_CONTEXT_UPDATE,
             msg_count=len(self._conv),
+            messages=self._conv.messages,
         )
+        modified_messages = ctx.data.get("modified_messages")
+        if modified_messages is not None:
+            self._conv.replace_all(modified_messages)
 
         # 保存上下文
         self.session.save_context(self._conv.to_serializable())

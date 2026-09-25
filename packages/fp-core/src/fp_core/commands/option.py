@@ -548,9 +548,9 @@ class OptionManager:
             return []
         hooks: list[dict[str, Any]] = []
         for hook_key, entries in lifecycle._hooks.items():
-            for prio, reg_name, _func, htype in entries:
+            for prio, reg_name, _func in entries:
                 if reg_name.startswith(plugin_name):
-                    hooks.append({"hook": hook_key, "priority": prio, "name": reg_name, "type": htype})
+                    hooks.append({"hook": hook_key, "priority": prio, "name": reg_name, "type": "execute"})
         return hooks
 
     # ── 查找 ──────────────────────────────────────────────
@@ -917,8 +917,7 @@ def _fmt_info(item: Entry) -> str:
         if hooks:
             lines.append(f"\n**注册的钩子**（{len(hooks)} 个）\n")
             for h in hooks:
-                hicon = "👀" if h.get("type") == "observe" else "🔄"
-                lines.append(f"- {hicon} `{h['hook']}` (pri={h['priority']})")
+                lines.append(f"- 🔄 `{h['hook']}` (pri={h['priority']})")
         else:
             lines.append("\n*未加载，无法读取钩子信息*\n")
 

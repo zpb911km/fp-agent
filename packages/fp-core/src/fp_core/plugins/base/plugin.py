@@ -102,11 +102,10 @@ class _TrackingLifecycle(LifecycleManager):
         func: Callable[..., Any],
         priority: int = 100,
         name: str | None = None,
-        hook_type: str | None = None,
     ) -> None:
         resolved_name = name or getattr(func, "__name__", str(id(func)))
         self._tracker.append((hook, resolved_name))
-        return self._lifecycle.register(hook, func, priority, name, hook_type)
+        return self._lifecycle.register(hook, func, priority, name)
 
     async def emit(
         self,

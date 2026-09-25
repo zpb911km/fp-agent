@@ -3,12 +3,12 @@
 基于事件驱动，支持同步/异步钩子
 
 核心设计：
-- observe 型钩子：只通知，不改流程。
-- transform 型钩子：可修改传入数据、守卫（阻止/取消）流程。
+- 所有钩子均为执行钩子（无通知/执行之分）：可修改传入数据、守卫（阻止/取消）流程；
+  载荷本身不可变的钩子点（如 ON_SHUTDOWN/ON_CLEANUP）即插件执行注册/清理动作的时机。
 - 统一异常处理：任何钩子异常都设置 context.error + 停止传播，
   调用方自主检查 context.error 决定是否处理。
-  不再区分 observe/transform 的异常行为。
-- typed event context：为每个关键事件定义明确的输入/输出字段。
+- typed event context：为每个关键事件定义明确的输入/输出字段
+  （modified_* = 修改后的值，blocked/cancelled/handled = 守卫位）。
 """
 
 import asyncio
@@ -30,35 +30,35 @@ class LifecycleHook(Enum):
     """生命周期钩子枚举"""
 
     # ── 初始化阶段 ──
-    ON_INIT = auto()  # Agent 初始化完成
-    ON_CONFIG_LOADED = auto()  # 配置加载完成
+    ON_INIT = auto()  # Agent 初始化完成 — 插件执行注册（工具/命令等）
+    ON_CONFIG_LOADED = auto()  # 配置加载完成 — 插件可改写配置
 
-    # ── 消息处理阶段（transform: 可修改/过滤消息） ──
-    ON_MESSAGE_FILTER = auto()  # 【transform】用户消息过滤/修改
-    ON_MESSAGE_RECEIVED = auto()  # 【observe】消息已接收（仅通知）
+    # ── 消息处理阶段 ──
+    ON_MESSAGE_FILTER = auto()  # 用户消息过滤/修改 — 可修改内容/阻止进入
+    ON_MESSAGE_RECEIVED = auto()  # 消息已接收 — 提交前最终裁定：可修改/拦截
 
-    # ── LLM交互阶段（transform: 可修改入参/出参） ──
-    ON_BEFORE_LLM_CALL = auto()  # 【transform】LLM调用前 — 可修改 messages/tools，或取消调用
-    ON_AFTER_LLM_CALL = auto()  # 【transform】LLM返回后 — 可修改 response，或阻止工具执行
+    # ── LLM交互阶段 ──
+    ON_BEFORE_LLM_CALL = auto()  # LLM调用前 — 可修改 messages/tools，或取消调用
+    ON_AFTER_LLM_CALL = auto()  # LLM返回后 — 可修改 response，或阻止工具执行
 
-    # ── 响应阶段（transform: 可修改最终回复） ──
-    ON_BEFORE_RESPONSE = auto()  # 【transform】返回响应前 — 可修改 content
+    # ── 响应阶段 ──
+    ON_BEFORE_RESPONSE = auto()  # 返回响应前 — 可修改 content
 
-    # ── 工具执行阶段（transform: 可拦截/修改） ──
-    ON_TOOL_SELECT = auto()  # 【transform】工具已选择 — 可修改工具列表/阻止执行
-    ON_TOOL_CALL = auto()  # 【transform】工具即将调用 — 可修改参数/暂停/拒绝
-    ON_TOOL_RESULT = auto()  # 【transform】工具调用完成 — 可审查/修改/过滤结果
-    ON_TOOL_ERROR = auto()  # 【transform】工具调用出错 — 可处理/覆盖错误
+    # ── 工具执行阶段 ──
+    ON_TOOL_SELECT = auto()  # 工具已选择 — 可修改工具列表/阻止执行
+    ON_TOOL_CALL = auto()  # 工具即将调用 — 可修改参数/暂停/拒绝
+    ON_TOOL_RESULT = auto()  # 工具调用完成 — 可审查/修改/过滤结果
+    ON_TOOL_ERROR = auto()  # 工具调用出错 — 可处理/覆盖错误
 
-    # ── 上下文管理（observe） ──
-    ON_CONTEXT_UPDATE = auto()  # 【observe】上下文已更新
+    # ── 上下文管理 ──
+    ON_CONTEXT_UPDATE = auto()  # 上下文已更新 — 可修改本轮对话消息（保存前生效）
 
-    # ── 错误处理（observe） ──
-    ON_ERROR = auto()  # 【observe】发生错误
+    # ── 错误处理 ──
+    ON_ERROR = auto()  # 发生错误 — 可覆盖错误信息；handled=True 恢复主循环
 
-    # ── 资源管理（observe） ──
-    ON_SHUTDOWN = auto()  # 【observe】关闭中
-    ON_CLEANUP = auto()  # 【observe】清理资源
+    # ── 资源管理 ──
+    ON_SHUTDOWN = auto()  # 关闭中 — 插件执行关闭动作
+    ON_CLEANUP = auto()  # 清理资源 — 插件执行清理动作
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -68,7 +68,7 @@ class LifecycleHook(Enum):
 
 @dataclass
 class MessageFilterEvent:
-    """ON_MESSAGE_FILTER 的事件上下文（transform）"""
+    """ON_MESSAGE_FILTER 的事件上下文"""
 
     original_content: str  # 原始用户输入
     filtered_content: str = ""  # 修改后的内容（插件可改）
@@ -78,8 +78,19 @@ class MessageFilterEvent:
 
 
 @dataclass
+class MessageReceivedEvent:
+    """ON_MESSAGE_RECEIVED 的事件上下文（提交进上下文前的最终裁定）"""
+
+    content: str  # 已通过过滤的消息
+    messages: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])  # 当前对话上下文
+    modified_content: str | None = None  # 插件修改后的内容
+    blocked: bool = False  # 守卫：阻止该消息提交进上下文
+    block_reason: str = ""  # 阻止原因
+
+
+@dataclass
 class BeforeLLMCallEvent:
-    """ON_BEFORE_LLM_CALL 的事件上下文（transform）"""
+    """ON_BEFORE_LLM_CALL 的事件上下文"""
 
     messages: list[dict[str, Any]]  # 传给 LLM 的消息（插件可修改）
     tools: list[dict[str, Any]]  # 工具定义列表
@@ -90,7 +101,7 @@ class BeforeLLMCallEvent:
 
 @dataclass
 class AfterLLMCallEvent:
-    """ON_AFTER_LLM_CALL 的事件上下文（transform）"""
+    """ON_AFTER_LLM_CALL 的事件上下文"""
 
     response: dict[str, Any]  # LLM 返回的 assistant message
     has_tool_calls: bool = False  # 是否有工具调用
@@ -102,7 +113,7 @@ class AfterLLMCallEvent:
 
 @dataclass
 class BeforeResponseEvent:
-    """ON_BEFORE_RESPONSE 的事件上下文（transform）"""
+    """ON_BEFORE_RESPONSE 的事件上下文"""
 
     content: str  # 最终回复文本
     modified_content: str | None = None  # 插件修改后的回复
@@ -111,7 +122,7 @@ class BeforeResponseEvent:
 
 @dataclass
 class ToolSelectEvent:
-    """ON_TOOL_SELECT 的事件上下文（transform）"""
+    """ON_TOOL_SELECT 的事件上下文"""
 
     tools: list[str]  # 选中的工具名列表（插件可修改）
     modified_tools: list[str] | None = None  # 插件修改后的工具列表
@@ -121,7 +132,7 @@ class ToolSelectEvent:
 
 @dataclass
 class ToolCallEvent:
-    """ON_TOOL_CALL 的事件上下文（transform）"""
+    """ON_TOOL_CALL 的事件上下文"""
 
     tool_name: str
     tool_args: str  # JSON 字符串
@@ -134,7 +145,7 @@ class ToolCallEvent:
 
 @dataclass
 class ToolResultEvent:
-    """ON_TOOL_RESULT 的事件上下文（transform）"""
+    """ON_TOOL_RESULT 的事件上下文"""
 
     tool_name: str
     result: str  # 原始结果
@@ -147,7 +158,7 @@ class ToolResultEvent:
 
 @dataclass
 class ToolErrorEvent:
-    """ON_TOOL_ERROR 的事件上下文（transform）"""
+    """ON_TOOL_ERROR 的事件上下文"""
 
     tool_name: str
     error: str
@@ -159,16 +170,21 @@ class ToolErrorEvent:
 
 @dataclass
 class ContextUpdateEvent:
-    """ON_CONTEXT_UPDATE 的事件上下文（observe）"""
+    """ON_CONTEXT_UPDATE 的事件上下文"""
 
     msg_count: int
+    messages: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])  # 当前对话消息（插件可修改）
+    modified_messages: list[dict[str, Any]] | None = None  # 插件修改后的消息列表（整体替换，保存前生效）
 
 
 @dataclass
 class ErrorEvent:
-    """ON_ERROR 的事件上下文（observe）"""
+    """ON_ERROR 的事件上下文"""
 
-    error: str
+    error: str  # 原始错误信息
+    modified_error: str | None = None  # 插件修改后的错误信息（用于展示/记录）
+    handled: bool = False  # 守卫：插件声明已处理该错误，主循环恢复执行（否则 break）
+    handled_reason: str = ""  # 处理说明
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -183,12 +199,10 @@ class HookContext:
     metadata: dict[str, Any] = field(default_factory=dict[str, Any])
     stop_propagation: bool = False
     error: Exception | None = None
-    # 标注此钩子点是 observe 还是 transform
-    hook_type: str = "observe"  # "observe" | "transform"
 
 
-# 钩子注册条目：(优先级, 名称, 回调函数, 钩子类型)
-HookEntry = tuple[int, str, Callable[..., Any], str]
+# 钩子注册条目：(优先级, 名称, 回调函数)
+HookEntry = tuple[int, str, Callable[..., Any]]
 
 
 class LifecycleManager:
@@ -198,7 +212,7 @@ class LifecycleManager:
     """
 
     def __init__(self, enable_log: bool = False):
-        self._hooks: dict[str, list[HookEntry]] = {}  # hook_name -> [(priority, name, func, hook_type)]
+        self._hooks: dict[str, list[HookEntry]] = {}  # hook_name -> [(priority, name, func)]
         self._enable_log = enable_log
         self._stats: dict[str, int] = {}
 
@@ -208,49 +222,33 @@ class LifecycleManager:
         func: Callable[..., Any],
         priority: int = 100,
         name: str | None = None,
-        hook_type: str | None = None,  # "observe" | "transform"，None=自动推断
     ):
-        """注册钩子函数"""
+        """注册钩子函数（所有钩子均为执行钩子，无类型之分）"""
         hook_name = hook.name
         if hook_name not in self._hooks:
             self._hooks[hook_name] = []
 
         name = cast(str, name or getattr(func, "__name__", str(id(func))))
 
-        # 自动推断钩子类型
-        if hook_type is None:
-            # transform 型钩子列表
-            _transform_hooks = {
-                "ON_MESSAGE_FILTER",
-                "ON_BEFORE_LLM_CALL",
-                "ON_AFTER_LLM_CALL",
-                "ON_BEFORE_RESPONSE",
-                "ON_TOOL_SELECT",
-                "ON_TOOL_CALL",
-                "ON_TOOL_RESULT",
-                "ON_TOOL_ERROR",
-            }
-            hook_type = "transform" if hook_name in _transform_hooks else "observe"
-
         # 按优先级插入
         hooks_list = self._hooks[hook_name]
         inserted = False
-        for i, (p, _n, _f, _ht) in enumerate(hooks_list):
+        for i, (p, _n, _f) in enumerate(hooks_list):
             if priority < p:
-                hooks_list.insert(i, (priority, name, func, hook_type))
+                hooks_list.insert(i, (priority, name, func))
                 inserted = True
                 break
         if not inserted:
-            hooks_list.append((priority, name, func, hook_type))
+            hooks_list.append((priority, name, func))
 
         if self._enable_log:
-            get_logger().info(f"[Lifecycle] Registered '{name}' ({hook_type}) on {hook.name} (priority={priority})")
+            get_logger().info(f"[Lifecycle] Registered '{name}' on {hook.name} (priority={priority})")
 
     def unregister(self, hook: LifecycleHook, name: str) -> bool:
         """注销钩子"""
         hook_name = hook.name
         if hook_name in self._hooks:
-            for i, (_p, n, _f, _ht) in enumerate(self._hooks[hook_name]):
+            for i, (_p, n, _f) in enumerate(self._hooks[hook_name]):
                 if n == name:
                     self._hooks[hook_name].pop(i)
                     return True
@@ -260,13 +258,12 @@ class LifecycleManager:
         """
         触发钩子。
 
-        返回最终的上下文（可能被 transform 型钩子修改）。
+        返回最终的上下文（可能被钩子修改）。
         调用方应检查返回的 context.data 来获取插件修改后的值。
 
         异常处理策略（统一）：
         - 任何钩子抛出异常 → 设置 context.error，停止传播（stop_propagation=True）
         - 不再自动 raise，调用方自主检查 context.error 决定如何处理
-        - 这使所有钩子类型（observe/transform）的行为一致
         """
         if context is None:
             context = HookContext(hook=hook)
@@ -285,7 +282,7 @@ class LifecycleManager:
         if hook_name not in self._hooks or not self._hooks[hook_name]:
             return context
 
-        for _priority, name, func, _ht in self._hooks[hook_name]:
+        for _priority, name, func in self._hooks[hook_name]:
             if context.stop_propagation:
                 break
 
@@ -331,7 +328,7 @@ class LifecycleManager:
 
     def get_hooks(self) -> list[str]:
         """返回所有已注册的钩子名称（扁平列表）"""
-        return [name for names in self._hooks.values() for _, name, _, _ in names]
+        return [name for names in self._hooks.values() for _, name, _ in names]
 
     def get_stats(self) -> dict[str, int]:
         """获取钩子执行统计"""
@@ -341,11 +338,11 @@ class LifecycleManager:
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-def hook(hook_type: LifecycleHook, priority: int = 100) -> Callable[[F], F]:
+def hook(hook_enum: LifecycleHook, priority: int = 100) -> Callable[[F], F]:
     """装饰器：注册生命周期钩子（保留旧接口）"""
 
     def decorator(func: F) -> F:
-        func._lifecycle_hook = hook_type  # pyright: ignore[reportFunctionMemberAccess]
+        func._lifecycle_hook = hook_enum  # pyright: ignore[reportFunctionMemberAccess]
         func._lifecycle_priority = priority  # pyright: ignore[reportFunctionMemberAccess]
 
         @wraps(func)
