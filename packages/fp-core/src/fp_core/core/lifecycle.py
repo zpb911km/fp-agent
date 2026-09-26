@@ -81,8 +81,8 @@ class LifecycleHook(Enum):
     ON_TOOL_EXEC = auto()  # #34 参数改写后真正执行 — data: tool_name, tool_args, tool_call_id
     ON_TOOL_RESULT = auto()  # #35 工具调用完成 — 可审查/修改/过滤结果；data 含 latency_ms
     ON_TOOL_ERROR = auto()  # #36 工具调用出错 — 可处理/覆盖错误；data 含 latency_ms
-    ON_TOOL_SUPPRESSED = auto()  # #37 错误被抑制直接返回 — data: tool_name, error, suppress_reason
-    ON_TOOL_ERROR_PROPAGATED = auto()  # #38 未抑制错误经 gather 传播 — data: tool_name, error
+    ON_TOOL_SUPPRESSED = auto()  # #37 错误被抑制直接返回 — data: tool_name, error, suppress_reason, latency_ms
+    ON_TOOL_ERROR_PROPAGATED = auto()  # #38 未抑制错误经 gather 传播 — data: tool_name, error, latency_ms
     ON_RESULT_MUTATED = auto()  # #39 RESULT 门 blocked/modified 消费后 — data: tool_name, blocked, has_modified
     ON_TOOL_RESULTS_READY = auto()  # #40 gather 全部返回、按序消费前 — data: results, count
     ON_TOOL_ABORT = auto()  # #41 gather 整体被取消，全量补记 — data: count, reason

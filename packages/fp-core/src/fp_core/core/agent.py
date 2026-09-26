@@ -464,16 +464,20 @@ class Agent:
 
         return result
 
-    async def _result_gate(self, tool_name: str, tool_call_id: str, result: str) -> str:
+    async def _result_gate(self, tool_name: str, tool_call_id: str, result: str, latency_ms: float = 0.0) -> str:
         """RESULT 门（#35 ON_TOOL_RESULT + #39 ON_RESULT_MUTATED）
 
         三条路径（插件拒绝 / 错误抑制 / 执行成功）统一走本门 — 修复缺陷①（抑制路径原绕门）。
+
+        Args:
+            latency_ms: 该工具实际执行耗时；插件拒绝路径无执行，保持 0.0。
         """
         ctx = await self.lifecycle.emit(
             LifecycleHook.ON_TOOL_RESULT,
             tool_name=tool_name,
             result=result[:5000],
             tool_call_id=tool_call_id,
+            latency_ms=latency_ms,
         )
         blocked = bool(ctx.data.get("blocked"))
         if blocked:
@@ -558,12 +562,14 @@ class Agent:
             tool_call_id=tc["id"],
         )
 
-        # 执行工具
+        # 执行工具（计时：F3 — latency_ms 随 RESULT/ERROR 门出口）
+        _tool_t0 = time.perf_counter()
         try:
             result = await self._execute_tool(tc, silent=silent)
         except (KeyboardInterrupt, asyncio.CancelledError):
             raise  # 中断→外部 gather 统一处理
         except Exception as e:
+            _tool_latency_ms = (time.perf_counter() - _tool_t0) * 1000.0
             # 工具异常 → 通知插件，看是否可抑制
             self.io.error(f"工具 {tool_name} 执行错误: {e}")
             ctx = await self.lifecycle.emit(
@@ -571,6 +577,7 @@ class Agent:
                 tool_name=tool_name,
                 error=str(e),
                 tool_call_id=tc["id"],
+                latency_ms=_tool_latency_ms,
             )
             if ctx.data.get("suppressed"):
                 reason = ctx.data.get("suppress_reason", "插件已抑制错误")
@@ -582,8 +589,11 @@ class Agent:
                     error=str(e),
                     suppress_reason=reason,
                     tool_call_id=tc["id"],
+                    latency_ms=_tool_latency_ms,
                 )
-                result = await self._result_gate(tool_name, tc["id"], f"错误已被抑制：{reason}")
+                result = await self._result_gate(
+                    tool_name, tc["id"], f"错误已被抑制：{reason}", latency_ms=_tool_latency_ms
+                )
                 return (tc["id"], result)
             # ── #38 未抑制 → 异常传播（post，由 gather return_exceptions 收集） ──
             await self.lifecycle.emit(
@@ -591,11 +601,14 @@ class Agent:
                 tool_name=tool_name,
                 error=str(e),
                 tool_call_id=tc["id"],
+                latency_ms=_tool_latency_ms,
             )
             raise
 
         # ── #35/#39 RESULT 门（成功路径） ──
-        result = await self._result_gate(tool_name, tc["id"], result)
+        result = await self._result_gate(
+            tool_name, tc["id"], result, latency_ms=(time.perf_counter() - _tool_t0) * 1000.0
+        )
         return (tc["id"], result)
 
     # ============ 命令处理 ============

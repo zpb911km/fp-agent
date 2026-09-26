@@ -273,6 +273,9 @@ async def test_suppressed_error_passes_result_gate(tmp_path, monkeypatch):
     assert len(mutated) == 1
     assert mutated[0]["data"]["blocked"] is True
 
+    # F3：抑制路径无真实执行耗时，但字段必须在场（0.0，非缺失）
+    assert rec.of(LifecycleHook.ON_TOOL_ERROR)[0]["data"]["latency_ms"] >= 0.0
+
 
 # ═══════════════════════════════════════════════════════════════
 #  #38 传播 + #42 CTX_APPEND(op=tool)
@@ -434,3 +437,83 @@ async def test_abort_on_gather_cancel(tmp_path, monkeypatch):
     tool_msgs = [m for m in agent._conv.messages if m["role"] == "tool"]
     assert len(tool_msgs) == 1, "全量补记应写入中断占位"
     assert "中断" in tool_msgs[0]["content"]
+
+
+# ═══════════════════════════════════════════════════════════════
+#  F3 工具耗时（latency_ms 随 RESULT/ERROR 门出口）
+# ═══════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_tool_latency_on_success_and_reject(tmp_path, monkeypatch):
+    """F3：执行耗时随 RESULT 门出口；被拒路径无执行 → 0.0"""
+    reg = fast_registry()
+
+    async def _slow(params: Any) -> str:
+        await asyncio.sleep(0.05)
+        return "slow_ok"
+
+    reg.register_tool(
+        "slowish",
+        {
+            "type": "function",
+            "function": {
+                "name": "slowish",
+                "description": "slow",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        executor=_slow,
+    )
+    mk = make_agent(tmp_path, monkeypatch, reg)
+    agent, rec = mk(LifecycleHook.ON_TOOL_RESULT)
+    agent._llm.chat = single_call_llm([call("c1", "slowish"), call("c2", "t1")])
+
+    async def blocker(ctx: Any, **kwargs: Any) -> Any:
+        if kwargs.get("tool_name") == "t1":
+            ctx.data["cancelled"] = True
+            ctx.data["cancel_reason"] = "不给过"
+        return ctx
+
+    agent.lifecycle.register(LifecycleHook.ON_TOOL_CALL, blocker, name="test_latency_rejector")
+
+    await agent.process("go")
+
+    by_name = {e["data"]["tool_name"]: e["data"] for e in rec.of(LifecycleHook.ON_TOOL_RESULT)}
+    assert by_name["slowish"]["latency_ms"] >= 40.0, "成功路径应带真实耗时"
+    assert by_name["t1"]["latency_ms"] == 0.0, "被拒路径无执行 → 0.0"
+
+
+@pytest.mark.asyncio
+async def test_tool_latency_on_error(tmp_path, monkeypatch):
+    """F3：ERROR 门与传播出口同样携带耗时"""
+    reg = fast_registry()
+
+    async def _fail_late(params: Any) -> str:
+        await asyncio.sleep(0.03)
+        raise RuntimeError("late boom")
+
+    reg.register_tool(
+        "late_fail",
+        {
+            "type": "function",
+            "function": {
+                "name": "late_fail",
+                "description": "fail late",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        executor=_fail_late,
+    )
+    mk = make_agent(tmp_path, monkeypatch, reg)
+    agent, rec = mk(LifecycleHook.ON_TOOL_ERROR, LifecycleHook.ON_TOOL_ERROR_PROPAGATED)
+    agent._llm.chat = single_call_llm([call("c1", "late_fail")])
+
+    await agent.process("go")
+
+    err = rec.of(LifecycleHook.ON_TOOL_ERROR)[0]["data"]
+    assert err["tool_name"] == "late_fail"
+    assert err["latency_ms"] >= 20.0, "ERROR 门应带真实耗时"
+
+    prop = rec.of(LifecycleHook.ON_TOOL_ERROR_PROPAGATED)[0]["data"]
+    assert prop["latency_ms"] >= 20.0, "传播出口同样携带耗时"
