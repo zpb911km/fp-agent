@@ -1,7 +1,8 @@
-"""块1 契约测试：LifecycleHook 枚举扩至 49 + 新增 dataclass 字段补强
+"""块1 契约测试：LifecycleHook 枚举扩至 50 + 新增 dataclass 字段补强
 
 背景：agent loop 边集清单（54 边）中 34 个虚拟钩子 vON_* 正式化为枚举成员，
-总数 15 → 49。本文件锁死：
+外加三方复审补出的 ON_COMMAND_BLOCKED（命令守卫分支的 post 出口），
+总数 15 → 50。本文件锁死：
 1. 枚举成员集合与计数（防漂移）
 2. 新增 typed event context 的字段（F1 usage/model/latency_ms、F3 latency_ms、journal 关键 ctx-after 载荷）
 3. 注册/emit 冒烟（新钩子走 LifecycleManager 全链路）
@@ -24,7 +25,7 @@ from fp_core.core.lifecycle import (
     ToolResultEvent,
 )
 
-# ── 权威清单：34 个新增钩子（原 15 之外）─────────────────────────
+# ── 权威清单：35 个新增钩子（原 15 之外）─────────────────────────
 NEW_HOOKS = {
     # 输入/命令阶段
     "ON_INITIALIZED",
@@ -32,6 +33,7 @@ NEW_HOOKS = {
     "ON_EMPTY",
     "ON_BEFORE_COMMAND",
     "ON_COMMAND",
+    "ON_COMMAND_BLOCKED",
     "ON_FALLTHROUGH",
     "ON_MSG_ENTER",
     "ON_MESSAGE_BLOCKED",
@@ -86,9 +88,9 @@ OLD_HOOKS = {
 
 
 def test_enum_membership_exact():
-    """枚举成员 == 原15 + 新34 == 49，无重无漏"""
+    """枚举成员 == 原15 + 新35 == 50，无重无漏"""
     names = {h.name for h in LifecycleHook}
-    assert len(LifecycleHook) == 49, f"钩子总数应为 49，实际 {len(LifecycleHook)}"
+    assert len(LifecycleHook) == 50, f"钩子总数应为 50，实际 {len(LifecycleHook)}"
     assert len(names) == len(LifecycleHook), "枚举成员重名"
     assert names == OLD_HOOKS | NEW_HOOKS, (
         f"缺: {(OLD_HOOKS | NEW_HOOKS) - names} 多: {names - (OLD_HOOKS | NEW_HOOKS)}"
@@ -97,7 +99,7 @@ def test_enum_membership_exact():
 
 
 def test_new_hooks_register_and_emit():
-    """全部 49 个钩子均可注册 + emit 冒烟（LifecycleManager 全链路）"""
+    """全部 50 个钩子均可注册 + emit 冒烟（LifecycleManager 全链路）"""
 
     async def run() -> None:
         lm = LifecycleManager()
@@ -112,7 +114,7 @@ def test_new_hooks_register_and_emit():
         for h in LifecycleHook:
             lm.register(h, make(h), name=f"t_{h.name}")
             await lm.emit(h, foo="bar")
-        assert len(fired) == 49, f"仅 {len(fired)}/49 触发"
+        assert len(fired) == 50, f"仅 {len(fired)}/50 触发"
 
     asyncio.run(run())
 
@@ -188,4 +190,4 @@ def test_enum_count_matches_docs_authority():
     src = Path(__file__).parent.parent / "src" / "fp_core" / "core" / "lifecycle.py"
     m = re.search(r"class LifecycleHook\(Enum\):(.*?)(?=\n\n#|class )", src.read_text(encoding="utf-8"), re.S)
     assert m
-    assert len(re.findall(r"^    ([A-Z_]+) = auto\(\)", m.group(1), re.M)) == 49
+    assert len(re.findall(r"^    ([A-Z_]+) = auto\(\)", m.group(1), re.M)) == 50

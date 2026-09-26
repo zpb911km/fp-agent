@@ -170,6 +170,10 @@ async def execute(state: State, arg: str) -> tuple[bool, str]:
     state.session.save_and_summarize(state.conversation.to_serializable())
     if state.session.switch_session(sid):
         _rebuild_context(state)
+        # 落盘新会话：启动时按 meta.updated 取「最新会话」，而上面刚把【旧】会话的
+        # updated 刷成了当前时刻 —— 不落盘新会话，崩溃窗口内重启会回退到旧会话，
+        # 本次 /resume 静默失效。与 back/compact/fork 对称：改 ctx 者自落盘。
+        state.session.save_context(state.conversation.to_serializable())
         return (True, f"📂 已切换到会话: `{sid}`")
     else:
         return (True, f"❌ 会话 `{sid}` 不存在。使用 `/resume list` 查看可用会话")

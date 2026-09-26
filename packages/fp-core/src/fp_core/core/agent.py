@@ -709,8 +709,17 @@ class Agent:
                     messages=self._conv.messages,
                 )
                 if bc_ctx.data.get("blocked"):
+                    block_reason = bc_ctx.data.get("block_reason", "命令被插件阻断")
+                    # ── #6b 命令被阻断（post — 守卫分支的出口，与 ON_MESSAGE_BLOCKED 对称） ──
+                    await self.lifecycle.emit(
+                        LifecycleHook.ON_COMMAND_BLOCKED,
+                        name=cmd_name,
+                        arg=cmd_arg,
+                        block_reason=block_reason,
+                        messages=self._conv.messages,
+                    )
                     return Response(
-                        content=bc_ctx.data.get("block_reason", "命令被插件阻断"),
+                        content=block_reason,
                         metadata={"from_command": True},
                     )
 
@@ -812,7 +821,16 @@ class Agent:
                     reason="用户中断",
                     location="loop_top",
                 )
-            self._check_interrupted()
+            try:
+                self._check_interrupted()
+            except asyncio.CancelledError:
+                # ── #13b 环顶中断实际抛出（post — 与 LLM 侧 ON_CANCEL 对称的取消事实记录） ──
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_CANCEL,
+                    reason="用户中断",
+                    stage="loop_top",
+                )
+                raise
 
             # ── #14 修复 tool ordering（post — 静默 mutation 观察点，仅修复发生时触发） ──
             repaired = self._conv.repair_tool_ordering()

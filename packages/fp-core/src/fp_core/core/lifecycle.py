@@ -43,6 +43,7 @@ class LifecycleHook(Enum):
     ON_EMPTY = auto()  # #3 空输入早退（不落盘）— data: messages
     ON_BEFORE_COMMAND = auto()  # #5 命令开始执行 — data: name, arg；blocked 可阻断
     ON_COMMAND = auto()  # #6 命令输出返回 — data: name, arg, output, handled, latency_ms（journal 必需）
+    ON_COMMAND_BLOCKED = auto()  # #6b 命令被守卫阻断（post 出口）— data: name, arg, block_reason, messages
     ON_FALLTHROUGH = auto()  # #7 slash 未处理降级为消息 — data: content
     ON_MSG_ENTER = auto()  # #8 非命令进入消息处理 — data: content, messages
     ON_MESSAGE_BLOCKED = auto()  # #9 消息被插件拦截（早退不落盘）— data: content, block_reason, source
@@ -155,10 +156,12 @@ class AfterLLMCallEvent:
 
 @dataclass
 class CommandEvent:
-    """ON_BEFORE_COMMAND / ON_COMMAND 的事件上下文
+    """ON_BEFORE_COMMAND / ON_COMMAND / ON_COMMAND_BLOCKED 的事件上下文
 
     ON_COMMAND 是命令的唯一 post 观察点（纯读命令如 /token 只有这里能捕获输出），
     且命令输出直接返回、绕过 ON_BEFORE_RESPONSE。
+    ON_COMMAND_BLOCKED 是守卫分支的 post 出口（blocked=True 时补发），
+    避免「被阻断」这一事实只有 pre 门可见、出口无记录（与消息侧 ON_MESSAGE_BLOCKED 对称）。
     """
 
     name: str  # 命令名（含前导 /）
