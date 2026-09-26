@@ -229,3 +229,33 @@ class TestSessionManager:
         # 新实例读取 meta
         sm2 = SessionManager(resume=sm.session_id)
         assert sm2._meta.get("summary") == "测试摘要"
+
+
+class TestCurrentSessionRegistration:
+    """switch_session / create_session 必须同步进程级 `_current_session_id`
+
+    `get_current_session_id()`（session.py）供插件（如 journal）给事件标注会话归属。
+    它原先只在 SessionManager.__init__ 注册，切换会话后停留在旧值 → 归属写错。
+    """
+
+    def test_switch_session_updates_current_sid(self, sessions_dir):
+        from fp_core.core.session import get_current_session_id
+
+        mgr = SessionManager(resume=False)
+        first = mgr.session_id
+        mgr.save_context([{"role": "user", "content": "A"}])
+        assert get_current_session_id() == first
+
+        second = mgr.create_session()
+        assert get_current_session_id() == second, "create_session 未同步进程级 current_sid"
+
+        assert mgr.switch_session(first) is True
+        assert get_current_session_id() == first, "switch_session 未同步进程级 current_sid"
+
+    def test_failed_switch_keeps_current_sid(self, sessions_dir):
+        from fp_core.core.session import get_current_session_id
+
+        mgr = SessionManager(resume=False)
+        before = get_current_session_id()
+        assert mgr.switch_session("s_260101_000000000000") is False  # 不存在
+        assert get_current_session_id() == before

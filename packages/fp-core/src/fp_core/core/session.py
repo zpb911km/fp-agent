@@ -287,6 +287,7 @@ class SessionManager:
             return False
         self._session_id = sid
         self._meta = self._load_meta_from_session()
+        _register_current_session(sid)  # 同步进程级「当前会话」（get_current_session_id 的语义）
         return True
 
     def create_session(self, sid: str | None = None) -> str:
@@ -297,6 +298,7 @@ class SessionManager:
         """
         self._session_id = self._allocate_session(sid)
         self._meta = self._load_meta_from_session()
+        _register_current_session(self._session_id)  # 同步进程级「当前会话」
         return self._session_id
 
     def delete_session(self, sid: str, force: bool = False) -> bool:
