@@ -1955,13 +1955,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 .mz-stage .mermaid {
   margin: 0;
-  background: #fff;
+  background: #fbfbfb;             /* 与内联卡片同底色（非纯白），贴合 webui 统一风格 */
+  border-color: var(--border);
+  box-shadow: var(--shadow-brutal);
   max-width: calc(100vw - 48px);
-  max-height: calc(100vh - 48px);
-  overflow: visible;               /* 浮层整屏裁剪，内容盒放开让缩放不受限 */
+  overflow: visible;               /* 整卡是变换目标：底/边框/阴影随内容平移缩放 */
+  cursor: grab;
 }
 .mz-stage .mermaid svg { cursor: grab; }
-.mz-stage .mermaid.mz-dragging svg { cursor: grabbing; }
+.mz-stage .mermaid.mz-dragging, .mz-stage .mermaid.mz-dragging svg { cursor: grabbing; }
 .mz-close {
   position: absolute;
   top: 12px;
