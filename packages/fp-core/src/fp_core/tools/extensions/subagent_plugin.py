@@ -50,7 +50,7 @@ def _derive_summary_from_file(sid: str) -> str:
                     last_user = content
     except Exception:
         pass
-    return last_user.strip().replace("\n", " ")[:50]
+    return last_user.strip().replace("\n", " ")[:20]
 
 
 def _finalize_subagent_session(sid: str, parent_sid: str, fallback_summary: str = "") -> None:
@@ -65,7 +65,7 @@ def _finalize_subagent_session(sid: str, parent_sid: str, fallback_summary: str 
     try:
         summary = _derive_summary_from_file(sid)
         if not summary and fallback_summary:
-            summary = fallback_summary.strip().replace("\n", " ")[:50]
+            summary = fallback_summary.strip().replace("\n", " ")[:20]
         if summary and not summary.startswith("[subagent] "):
             summary = f"[subagent] {summary}"
         update_session_meta(

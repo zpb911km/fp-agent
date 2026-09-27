@@ -448,7 +448,7 @@ class SessionManager:
         """保存会话上下文并生成摘要（统一入口）。
 
         所有会话切换/退出路径都应调用此方法，确保摘要生成逻辑一致。
-        摘要策略：取最后一条用户消息的前 50 字符，换行转空格。
+        摘要策略：取最后一条用户消息的前 20 字符，换行转空格。
         subagent 会话（meta.source == "subagent"）自动加 "[subagent] " 前缀。
 
         Args:
@@ -470,7 +470,7 @@ class SessionManager:
         if last_user:
             content: str = last_user.get("content", "")
             if content:
-                summary = content.strip().replace("\n", " ")[:50]
+                summary = content.strip().replace("\n", " ")[:20]
 
         # 3. 写回 meta
         target_sid = session_id or self._session_id

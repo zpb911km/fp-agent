@@ -329,7 +329,7 @@ class TestHelpers:
             f.write('{"role": "user", "content": "' + "长" * 100 + '"}\n')
         with patch("fp_core.core.session.SESSIONS_DIR", str(tmp_path)):
             summary = subagent._derive_summary_from_file(sid)
-        assert len(summary) <= 50
+        assert len(summary) <= 20
 
     def test_finalize_subagent_session(self, tmp_path):
         """收尾补写 source/parent_sid/summary"""

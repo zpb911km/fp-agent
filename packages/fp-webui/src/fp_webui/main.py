@@ -52,8 +52,6 @@ except ImportError as e:
 # ── Agent 核心导入 ──────────────────────────────────────
 # 注意：运行时创建 Agent 实例应使用本地 re-import（确保 reload 后拿到最新类）。
 # 这里的顶层 import 仅用于类型标注。
-# 轻量任务（会话标题）关闭思考的统一入口，按激活 provider 选原生参数格式
-from fp_core.config import no_thinking_body as _no_think_body
 from fp_core.core.agent import Agent
 from fp_core.core.io import RestIO, WebSocketIO
 from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
@@ -867,12 +865,12 @@ async def create_new_session():
     """创建新会话并切换到它"""
     agent = await get_agent()
 
-    # 记录旧会话，用于后台生成摘要
     old_sid = agent.session.session_id
-    old_context = agent.state.conversation.messages  # 浅拷贝
 
-    # 保存当前会话上下文
-    agent.state.session.save_context(agent.state.conversation.to_serializable())
+    # 保存当前会话上下文 + 摘要（save_and_summarize 统一入口：最后一条用户消息前 20 字符，零 LLM 调用）
+    summary = agent.state.session.save_and_summarize(agent.state.conversation.to_serializable(), old_sid)
+    if not summary:
+        agent.session.update_meta(old_sid, summary="empty_session")
 
     # 创建新会话（自动切换到新会话）
     new_sid = agent.session.create_session()
@@ -886,36 +884,6 @@ async def create_new_session():
     if len(saved) > 1:
         agent.state.conversation.replace_all(saved)
     _reapply_prompt_append(agent)
-
-    # 同步生成旧会话摘要（不传 tools，确保 LLM 返回纯文本标题）
-    history_msgs = [m for m in old_context if m["role"] != "system"]
-    if len(history_msgs) >= 2:
-        try:
-            summary_msgs = old_context + [
-                {"role": "user", "content": "请总结一下，给这次对话起一个5到10个汉字的名字。不要添加任何多余的文字。"}
-            ]
-            response = await agent.client.chat.completions.create(
-                model=agent.model,
-                messages=summary_msgs,
-                temperature=0.3,
-                max_tokens=32,
-                extra_body=_no_think_body(),
-            )
-            summary = response.choices[0].message.content or ""
-            summary = summary.strip().strip('"').strip("'").strip("「」『』")
-            if not summary or len(summary) > 50:
-                # 回退：取首条用户消息
-                for m in history_msgs:
-                    if m["role"] == "user":
-                        text = m.get("content", "").strip()
-                        if text:
-                            summary = text.split("\n")[0].strip()[:50]
-                            break
-            if not summary:
-                summary = "empty_session"
-            agent.session.update_meta(old_sid, summary=summary)
-        except Exception:
-            pass
 
     return {"session_id": new_sid, "status": "created"}
 
@@ -1122,12 +1090,12 @@ async def switch_session_endpoint(session_id: str):
     """切换到指定会话"""
     agent = await get_agent()
 
-    # 记录旧会话，用于后台生成摘要
     old_sid = agent.session.session_id
-    old_context = agent.state.conversation.messages  # 浅拷贝
 
-    # 保存当前会话
-    agent.state.session.save_context(agent.state.conversation.to_serializable())
+    # 保存当前会话 + 摘要（save_and_summarize 统一入口：最后一条用户消息前 20 字符，零 LLM 调用）
+    summary = agent.state.session.save_and_summarize(agent.state.conversation.to_serializable(), old_sid)
+    if not summary:
+        agent.session.update_meta(old_sid, summary="empty_session")
 
     if not agent.session.switch_session(session_id):
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
@@ -1138,34 +1106,7 @@ async def switch_session_endpoint(session_id: str):
     if _saved:
         agent.state.conversation.set_messages(_prompt, _saved)
 
-    # 同步生成旧会话摘要（不传 tools）
-    history_msgs = [m for m in old_context if m["role"] != "system"]
-    if len(history_msgs) >= 2:
-        try:
-            summary_msgs = old_context + [
-                {"role": "user", "content": "请总结一下，给这次对话起一个5到10个汉字的名字。不要添加任何多余的文字。"}
-            ]
-            response = await agent.client.chat.completions.create(
-                model=agent.model,
-                messages=summary_msgs,
-                temperature=0.3,
-                max_tokens=32,
-                extra_body=_no_think_body(),
-            )
-            summary = response.choices[0].message.content or ""
-            summary = summary.strip().strip('"').strip("'").strip("「」『』")
-            if not summary or len(summary) > 50:
-                for m in history_msgs:
-                    if m["role"] == "user":
-                        text = m.get("content", "").strip()
-                        if text:
-                            summary = text.split("\n")[0].strip()[:50]
-                            break
-            if not summary:
-                summary = "empty_session"
-            agent.session.update_meta(old_sid, summary=summary)
-        except Exception:
-            pass
+    # 摘要已在切换前由 save_and_summarize 同步生成（非 LLM，最后一条用户消息前 20 字符）
 
     return {
         "session_id": session_id,

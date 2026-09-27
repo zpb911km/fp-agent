@@ -28,6 +28,7 @@
 
 ### Fixed
 
+- **webui 会话切换/新建摘要去 LLM 化**（839c83b）: 删除 create/switch 端点内嵌的 LLM 总结块（"起个5到10个汉字的名字"），改走核心 `save_and_summarize` 统一入口——取最后一条用户消息前 20 字符（`[:50]`→`[:20]` 全链路统一，含 subagent 派生兜底），切换/新建**零 LLM 调用**，消除切换卡顿；空会话保留 `empty_session` 回退；随附文档同步（WebUI手册 8.3、命令参考 /exit、会话模块/会话管理/工具系统）。
 - **WS 断连不再终止 agent**（b1b538e）: 会话运行时上提 + 事件重放。
 - **F3 工具耗时接线**（01c1a1d）: `latency_ms` 随 RESULT/ERROR/SUPPRESSED/PROPAGATED 出口回填。
 - **`switch/create_session` 同步进程级 current_sid**（cfd4a32）。
