@@ -1092,6 +1092,8 @@ if (document.readyState === 'complete') initMermaid();
 var _mzState = new WeakMap();
 var _mzMin = 0.2, _mzMax = 6, _mzEdge = 48;
 var _mzDrag = null;
+var _mzClick = null; // pointerdown 起点，供 click 区分「点开预览」与拖拽
+var _mzOpenAt = 0;   // 浮层打开时刻（吞掉双击的第二击）
 
 function _mzSt(container) {
   var st = _mzState.get(container);
@@ -1140,7 +1142,10 @@ function _mzWheel(e) {
 function _mzDown(e) {
   if (e.button !== 0 || !e.target.closest) return;
   var c = e.target.closest('.mermaid');
-  if (!c || !c.classList.contains('mz-zoomed')) return; // 未缩放不劫持（保留文字选择）
+  if (!c) return;
+  _mzClick = { x: e.clientX, y: e.clientY };
+  // 未缩放不劫持（保留文字选择）；预览浮层内例外（浮层专为缩放平移而生）
+  if (!c.classList.contains('mz-zoomed') && !c.closest('.mz-overlay')) return;
   e.preventDefault();
   _mzDrag = { c: c, id: e.pointerId, x: e.clientX, y: e.clientY };
   c.classList.add('mz-dragging');
@@ -1174,8 +1179,64 @@ function initMermaidZoom(container) {
   container._mzBound = true;
   container.addEventListener('wheel', _mzWheel, { passive: false });
   container.addEventListener('pointerdown', _mzDown);
+  container.addEventListener('click', _mzClickOpen);
   container.addEventListener('dblclick', _mzDbl);
   window.addEventListener('pointermove', _mzMove);
   window.addEventListener('pointerup', _mzUp);
   window.addEventListener('pointercancel', _mzUp);
+}
+
+// ── 点开预览（单击未缩放的图 → 全屏浮层 · 滚轮缩放 · 拖拽平移 · 双击复位 · Esc/✕/点空白关闭） ──
+function _mzClickOpen(e) {
+  var info = _mzClick;
+  _mzClick = null;
+  if (!info || Math.abs(e.clientX - info.x) > 5 || Math.abs(e.clientY - info.y) > 5) return; // 拖拽残留的 click 不开
+  if (e.button !== undefined && e.button !== 0) return;
+  var c = e.target && e.target.closest ? e.target.closest('.mermaid') : null;
+  if (!c || !c.querySelector('svg')) return;
+  if (c.closest('.mz-overlay')) return;               // 浮层内点击不开嵌套预览
+  if (c.classList.contains('mz-zoomed')) return;      // 已缩放 = 平移/双击复位模式
+  var sel = window.getSelection && window.getSelection();
+  if (sel && String(sel)) return;                     // 正在选中文本不误开
+  openMzPreview(c);
+}
+
+function openMzPreview(c) {
+  closeMzPreview();
+  var ov = document.createElement('div');
+  ov.className = 'mz-overlay';
+  var stage = document.createElement('div');
+  stage.className = 'mz-stage';
+  var clone = c.cloneNode(true);                      // 克隆已渲染 svg（data-processed 随迁，不触发重渲染）
+  clone.classList.remove('mz-zoomed', 'mz-dragging');
+  clone.style.maxWidth = 'none';
+  stage.appendChild(clone);
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'mz-close';
+  btn.setAttribute('aria-label', '关闭预览');
+  btn.textContent = '✕';
+  ov.appendChild(stage);
+  ov.appendChild(btn);
+  document.body.appendChild(ov);
+  _mzOpenAt = Date.now();
+  initMermaidZoom(stage);                             // 浮层复用同一套 wheel/pointer/dbl/click 委托
+  btn.addEventListener('click', closeMzPreview);
+  ov.addEventListener('click', function (ev) {        // 点空白（stage 背景/遮罩）关闭
+    if (ev.target === ov || ev.target === stage) {
+      if (Date.now() - _mzOpenAt < 300) return;       // 双击的第二击不误关
+      closeMzPreview();
+    }
+  });
+  document.addEventListener('keydown', _mzEsc);
+}
+
+function closeMzPreview() {
+  var ov = document.querySelector('.mz-overlay');
+  if (ov) ov.remove();
+  document.removeEventListener('keydown', _mzEsc);
+}
+
+function _mzEsc(e) {
+  if (e.key === 'Escape') closeMzPreview();
 }
