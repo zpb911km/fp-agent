@@ -1,16 +1,20 @@
-"""测试 AgentReloader — 热重载引擎
+"""测试 AgentReloader — 模块重载引擎
 
 覆盖重点：
 - reload_modules() 静态入口
 - _reload_modules() 依赖顺序（子模块先于主模块）
-- reload() 完整流程：before/after 回调、旧 Agent 关闭、会话保存/恢复、info
-- 异常路径：模块重载失败、会话恢复失败（不阻塞）
+- reload() 已废弃路径的防复活断言
+
+历史：AgentReloader.reload 原地重建路径（shutdown 旧 Agent → importlib.reload →
+新建）已删除——失败时会留下已 shutdown 的僵尸 Agent（自杀窗口），与 reload
+门禁协议的救火原则冲突。进程级热重启统一走 fp_core.core.handoff.perform_exec_reload。
+原 TestReload 类（before/after 回调、会话保存恢复、info 构造）随该路径一并移除。
 """
 
 import importlib
 import sys
 import types
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -96,173 +100,13 @@ class TestReloadModules:
             reloader._reload_modules()
 
 
-class TestReload:
-    def _make_fake_agent(self, session_id="s_test"):
-        """构造一个状态完整的假 Agent"""
-        agent = MagicMock()
-        agent.state.session.session_id = session_id
-        agent.state.session.save_and_summarize = MagicMock()
-        agent.state.session.switch_session = MagicMock(return_value=True)
-        agent.state.session.load_context = MagicMock(return_value=[{"role": "user", "content": "旧消息"}])
-        agent.state.conversation.to_serializable = MagicMock(return_value=[])
-        agent.state.conversation.reset = MagicMock()
-        agent.state.conversation.replace_all = MagicMock()
-        agent.shutdown = AsyncMock()
-        return agent
+class TestAntiRevival:
+    def test_inplace_agent_reload_path_stays_removed(self):
+        """防复活断言：原地重建路径（自杀窗口）不许回来。
 
-    def _make_new_agent_class(self, fail_switch=False, fail_register=False):
-        """构造假的新 Agent 类，reload 内部会实例化它"""
-
-        class FakeAgent:
-            instances = []
-
-            def __init__(self, enable_log=True, io=None, on_shutdown=None):
-                self.enable_log = enable_log
-                self.io = io
-                self.on_shutdown = on_shutdown
-                self.model = "fake-model"
-                self.plugins = MagicMock()
-                if fail_register:
-                    self.plugins.register.side_effect = Exception("bad plugin")
-                self.state = MagicMock()
-                self.state.session = MagicMock()
-                self.state.session.session_id = "s_new"
-                if fail_switch:
-                    self.state.session.switch_session = MagicMock(side_effect=Exception("恢复失败"))
-                else:
-                    self.state.session.switch_session = MagicMock(return_value=True)
-                self.state.session.load_context = MagicMock(return_value=[{"role": "user", "content": "恢复的消息"}])
-                self.state.conversation = MagicMock()
-                self.ensure_initialized = AsyncMock()
-                FakeAgent.instances.append(self)
-
-        return FakeAgent
-
-    @pytest.mark.asyncio
-    async def test_reload_full_flow(self):
-        """完整流程：before→保存→关闭→重载→新agent→恢复会话→after→info"""
-        old_agent = self._make_fake_agent()
-        fake_cls = self._make_new_agent_class()
-
-        before_called = MagicMock()
-        after_called = MagicMock()
-
-        with (
-            patch.object(reloader, "_reload_modules") as mock_reload,
-            patch("fp_core.core.agent.Agent", fake_cls),
-        ):
-            new_agent, info = await AgentReloader.reload(
-                old_agent,
-                before_reload=before_called,
-                after_reload=after_called,
-            )
-
-        # 回调执行
-        before_called.assert_called_once()
-        after_called.assert_called_once_with(new_agent)
-
-        # 旧会话保存 + 关闭
-        old_agent.state.session.save_and_summarize.assert_called_once()
-        old_agent.shutdown.assert_awaited_once()
-        assert old_agent.state.silent_shutdown is True
-
-        # 模块重载
-        mock_reload.assert_called_once()
-
-        # 新 agent 静默创建
-        assert new_agent.enable_log is False
-        assert new_agent.on_shutdown is None
-
-        # 会话恢复
-        new_agent.state.session.switch_session.assert_called_once_with("s_test")
-        new_agent.state.conversation.replace_all.assert_called_once()
-
-        # info
-        assert info["session_id"] == "s_new"
-        assert info["model"] == "fake-model"
-        assert info["session_restored"] is True
-
-    @pytest.mark.asyncio
-    async def test_reload_async_callbacks(self):
-        """异步 before/after 回调被 await"""
-        old_agent = self._make_fake_agent()
-        fake_cls = self._make_new_agent_class()
-        before_async = AsyncMock()
-        after_async = AsyncMock()
-
-        with (
-            patch.object(reloader, "_reload_modules"),
-            patch("fp_core.core.agent.Agent", fake_cls),
-        ):
-            await AgentReloader.reload(old_agent, before_reload=before_async, after_reload=after_async)
-
-        before_async.assert_awaited_once()
-        after_async.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_reload_runtime_error_propagates(self):
-        """模块重载失败 → RuntimeError 上抛，不创建新 agent"""
-        old_agent = self._make_fake_agent()
-        fake_cls = self._make_new_agent_class()
-
-        with (
-            patch.object(reloader, "_reload_modules", side_effect=RuntimeError("重载失败")),
-            patch("fp_core.core.agent.Agent", fake_cls),
-            pytest.raises(RuntimeError, match="重载失败"),
-        ):
-            await AgentReloader.reload(old_agent)
-
-        assert len(fake_cls.instances) == 0
-
-    @pytest.mark.asyncio
-    async def test_reload_session_restore_failure_does_not_block(self):
-        """会话恢复失败只记 warning，不抛异常"""
-        old_agent = self._make_fake_agent()
-        fake_cls = self._make_new_agent_class(fail_switch=True)
-
-        with (
-            patch.object(reloader, "_reload_modules"),
-            patch("fp_core.core.agent.Agent", fake_cls),
-            patch("fp_core.core.reloader.get_logger") as mock_logger,
-        ):
-            new_agent, info = await AgentReloader.reload(old_agent)
-
-        assert info["session_restored"] is False
-        assert info["session_id"] == "s_new"
-        mock_logger.return_value.warning.assert_called()
-
-    @pytest.mark.asyncio
-    async def test_reload_extra_plugins_registered(self):
-        """extra_plugins 注册到新 agent"""
-        old_agent = self._make_fake_agent()
-        fake_cls = self._make_new_agent_class()
-        plugin = MagicMock()
-        plugin.name = "p1"
-
-        with (
-            patch.object(reloader, "_reload_modules"),
-            patch("fp_core.core.agent.Agent", fake_cls),
-        ):
-            new_agent, _ = await AgentReloader.reload(old_agent, extra_plugins=[plugin])
-
-        new_agent.plugins.register.assert_called_once_with(plugin)
-
-    @pytest.mark.asyncio
-    async def test_reload_plugin_register_failure_tolerated(self):
-        """插件注册失败只 warning，不阻塞整体"""
-        old_agent = self._make_fake_agent()
-        fake_cls = self._make_new_agent_class(fail_register=True)
-        plugin = MagicMock()
-        plugin.name = "bad"
-
-        with (
-            patch.object(reloader, "_reload_modules"),
-            patch("fp_core.core.agent.Agent", fake_cls),
-            patch("fp_core.core.reloader.get_logger") as mock_logger,
-        ):
-            new_agent, info = await AgentReloader.reload(old_agent, extra_plugins=[plugin])
-
-        # 注册被调用且抛异常，但整体成功
-        new_agent.plugins.register.assert_called_once_with(plugin)
-        mock_logger.return_value.warning.assert_called()
-        assert info["session_id"] == "s_new"
+        进程级热重启统一走 fp_core.core.handoff.perform_exec_reload；
+        若此断言变红，说明有人把已删除的 AgentReloader.reload 加了回来，
+        必须先回答"失败时旧 Agent 已 shutdown 成僵尸"这一问题。
+        """
+        assert not hasattr(AgentReloader, "reload")
+        assert hasattr(AgentReloader, "reload_modules")

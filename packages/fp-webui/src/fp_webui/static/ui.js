@@ -1065,6 +1065,7 @@ function initMermaid() {
   // strict: 标签内 HTML 被转义，防注入（任务描述来自 LLM/用户）
   mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'default' });
   var container = document.getElementById('messagesContainer') || document.body;
+  initMermaidZoom(container);
   var pending = null;
   new MutationObserver(function () {
     if (pending) clearTimeout(pending);
@@ -1084,3 +1085,97 @@ function runMermaid() {
 
 window.addEventListener('load', initMermaid);
 if (document.readyState === 'complete') initMermaid();
+
+// ── Mermaid 缩放/平移（滚轮缩放 · 拖拽平移 · 双击复位） ──
+// 事件委托挂稳定祖先（消息区重渲染不丢监听）；状态存 WeakMap；
+// 只改 svg 的 inline transform，不动布局；内容盒与视口保持 ≥_mzEdge 像素重叠防"拖丢"。
+var _mzState = new WeakMap();
+var _mzMin = 0.2, _mzMax = 6, _mzEdge = 48;
+var _mzDrag = null;
+
+function _mzSt(container) {
+  var st = _mzState.get(container);
+  if (!st) { st = { s: 1, x: 0, y: 0 }; _mzState.set(container, st); }
+  return st;
+}
+
+function _mzApply(container) {
+  var svg = container.querySelector('svg');
+  if (!svg) return;
+  var st = _mzSt(container);
+  var r0 = container.getBoundingClientRect();
+  for (var pass = 0; pass < 2; pass++) {
+    svg.style.transformOrigin = '0 0';
+    svg.style.transform = 'translate(' + st.x + 'px,' + st.y + 'px) scale(' + st.s + ')';
+    var r = svg.getBoundingClientRect();
+    var ox = r.left - r0.left, oy = r.top - r0.top;
+    var dx = 0, dy = 0;
+    var minX = _mzEdge - r.width, maxX = r0.width - _mzEdge;
+    if (minX <= maxX) dx = Math.min(maxX, Math.max(minX, ox)) - ox;
+    var minY = _mzEdge - r.height, maxY = r0.height - _mzEdge;
+    if (minY <= maxY) dy = Math.min(maxY, Math.max(minY, oy)) - oy;
+    if (!dx && !dy) break;
+    st.x += dx; st.y += dy;
+  }
+  container.classList.toggle('mz-zoomed', st.s !== 1 || st.x !== 0 || st.y !== 0);
+}
+
+function _mzWheel(e) {
+  var c = e.target && e.target.closest ? e.target.closest('.mermaid') : null;
+  if (!c || !c.querySelector('svg')) return;
+  e.preventDefault();
+  var dY = e.deltaY;
+  if (e.deltaMode === 1) dY *= 16; else if (e.deltaMode === 2) dY *= 100;
+  var st = _mzSt(c);
+  var ns = Math.min(_mzMax, Math.max(_mzMin, st.s * Math.exp(-dY * 0.0018)));
+  if (ns === st.s) return;
+  var r = c.querySelector('svg').getBoundingClientRect(); // 旧变换下的原点
+  var k = ns / st.s;
+  st.x += (e.clientX - r.left) * (1 - k);  // 锚点 = 光标下的内容点（zoom-to-cursor）
+  st.y += (e.clientY - r.top) * (1 - k);
+  st.s = ns;
+  _mzApply(c);
+}
+
+function _mzDown(e) {
+  if (e.button !== 0 || !e.target.closest) return;
+  var c = e.target.closest('.mermaid');
+  if (!c || !c.classList.contains('mz-zoomed')) return; // 未缩放不劫持（保留文字选择）
+  e.preventDefault();
+  _mzDrag = { c: c, id: e.pointerId, x: e.clientX, y: e.clientY };
+  c.classList.add('mz-dragging');
+}
+
+function _mzMove(e) {
+  if (!_mzDrag || e.pointerId !== _mzDrag.id) return;
+  var st = _mzSt(_mzDrag.c);
+  st.x += e.clientX - _mzDrag.x;
+  st.y += e.clientY - _mzDrag.y;
+  _mzDrag.x = e.clientX; _mzDrag.y = e.clientY;
+  _mzApply(_mzDrag.c);
+}
+
+function _mzUp(e) {
+  if (!_mzDrag || e.pointerId !== _mzDrag.id) return;
+  _mzDrag.c.classList.remove('mz-dragging');
+  _mzDrag = null;
+}
+
+function _mzDbl(e) {
+  var c = e.target && e.target.closest ? e.target.closest('.mermaid') : null;
+  if (!c || !c.querySelector('svg')) return;
+  e.preventDefault();
+  _mzState.set(c, { s: 1, x: 0, y: 0 });
+  _mzApply(c);
+}
+
+function initMermaidZoom(container) {
+  if (!container || container._mzBound) return;
+  container._mzBound = true;
+  container.addEventListener('wheel', _mzWheel, { passive: false });
+  container.addEventListener('pointerdown', _mzDown);
+  container.addEventListener('dblclick', _mzDbl);
+  window.addEventListener('pointermove', _mzMove);
+  window.addEventListener('pointerup', _mzUp);
+  window.addEventListener('pointercancel', _mzUp);
+}

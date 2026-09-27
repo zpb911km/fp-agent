@@ -111,7 +111,7 @@ PLUGIN_DEFINITION = {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "可选。超时秒数，默认 300，范围 10~900",
+                    "description": "可选。超时秒数；缺省或 0 = 无限时长（默认）。显式值下限 10 秒，无上限",
                 },
                 "constraints": {
                     "type": "object",
@@ -153,7 +153,9 @@ async def execute(params: dict[str, Any]) -> str:
     cwd = params.get("cwd", "")
     context = params.get("context", "")
     store_result = params.get("store_result", "")
-    timeout = params.get("timeout", 300)
+    # 超时语义：缺省/0/负值 = 无限时长（None → 不设 wait_for 超时）
+    # 显式正数 = 定时保护，仅钳制下限 10 秒，无上限
+    timeout = params.get("timeout", 0)
     constraints_raw: Any = params.get("constraints", {})
 
     # 解析约束
@@ -163,11 +165,7 @@ async def execute(params: dict[str, Any]) -> str:
     max_length: Any = constraints.get("max_length", 0)
 
     # 校验 timeout 合法性
-    if not isinstance(timeout, (int, float)) or timeout < 10:
-        timeout = 10
-    elif timeout > 900:
-        timeout = 900
-    timeout = int(timeout)
+    timeout = int(max(10, timeout)) if isinstance(timeout, (int, float)) and timeout > 0 else None  # None = 无限时长
 
     if not task.strip():
         return json.dumps(

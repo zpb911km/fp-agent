@@ -59,7 +59,7 @@ class TestParamValidation:
 
     @pytest.mark.asyncio
     async def test_timeout_bounds(self, tmp_path):
-        """timeout 下限 10 秒、上限 900 秒"""
+        """timeout 显式值下限 10 秒、无上限；缺省 = 无限时长"""
         captured = {}
 
         async def fake_create_subprocess_exec(*args, **kwargs):
@@ -81,7 +81,7 @@ class TestParamValidation:
 
     @pytest.mark.asyncio
     async def test_timeout_clamped_via_wait_for(self, tmp_path):
-        """验证传给 wait_for 的 timeout 被钳制在 [10,900]"""
+        """验证传给 wait_for 的 timeout：下限 10 秒、无上限、缺省 None（无限）"""
         with patch("asyncio.wait_for", new_callable=AsyncMock) as mock_wait:
             mock_wait.return_value = (b"ok", b"")
             with (
@@ -96,9 +96,13 @@ class TestParamValidation:
                 await subagent.execute({"task": "t", "cwd": str(tmp_path), "timeout": 5000})
                 assert mock_wait.await_args is not None
                 second_timeout = mock_wait.await_args.kwargs.get("timeout")
+                await subagent.execute({"task": "t", "cwd": str(tmp_path)})
+                assert mock_wait.await_args is not None
+                default_timeout = mock_wait.await_args.kwargs.get("timeout")
 
         assert first_timeout == 10
-        assert second_timeout == 900
+        assert second_timeout == 5000
+        assert default_timeout is None
 
     @pytest.mark.asyncio
     async def test_recursion_guard(self, tmp_path):

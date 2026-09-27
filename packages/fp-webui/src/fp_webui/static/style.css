@@ -1914,10 +1914,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   background: #fbfbfb;              /* 图自带浅色主题，需浅底保证可读 */
   border: 1px solid rgba(128, 128, 128, 0.3);
   border-radius: 8px;
-  overflow-x: auto;
+  overflow: hidden;                 /* 缩放/平移后裁剪（原 overflow-x:auto 因 svg max-width 永不触发） */
   text-align: center;
 }
-.mermaid svg { max-width: 100%; height: auto; }
+.mermaid svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+.mermaid.mz-zoomed { cursor: grab; touch-action: none; }
+.mermaid.mz-dragging { cursor: grabbing; user-select: none; }
 .mermaid[data-processed="error"] {
   color: #c92a2a;
   font-size: 12px;
