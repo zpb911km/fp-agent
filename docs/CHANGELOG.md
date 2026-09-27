@@ -3,22 +3,38 @@
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/) 和 [Keep a Changelog](https://keepachangelog.com/) 规范。
 
 
-## [Unreleased]
+## [0.1.14] — 2026-09-28
 
 ### Added
 
-- **WebUI 光环背景改为可选开关**：顶栏新增 ✨/💤 按钮（`#haloBtn`），关闭时 `#halo-bg` 置 `display:none` 并**停掉 halo 的 requestAnimationFrame 循环**（实测关闭后 0 帧/700ms，开启约 57fps），状态持久化于 `localStorage.webui_halo`（**默认关闭**，省 GPU）；`ui.js` 暴露 `window.setHaloEnabled/isHaloEnabled`，`app.js` 提供 `toggleHalo/applyHalo`，静态资源缓存参数 bump 至 `_t=20260923v9`。
-- **任务图(taskmap): task 从线性清单升级为有向图**。新增核心库 `fp_core/taskmap/`（models/store/graph/render/delta）：节点=状态、边=带结果语义的转移（`complete`/`exhausted`/`side_effect`/`blocked`/`partial`/`requires_decompose`），支持「拆图」生长与副作用支线；`TaskMapStore` 单文件 `.fp/tasks.json`（**原子写** + 旧 `{tasks:[]}` **惰性迁移**）；`task_*` 工具 4→6（新增 `task_read`/`task_edit`）。
-- **agent_orchestrator 迁入核心**：由 private 插件移入 `fp_core/plugins/agent_orchestrator/`。`agent_dispatch` 支持 `task_id`/`node_id`：worker 输出的 `[taskmap-delta]` 被解析、8 条校验、由编排器**单写者落图**（`dispatch_id` 幂等；outcome 一律落、propose 全有或全无）。黑板收窄为产物归档 `runs`（`{DATA}/runs/`，不随会话擦除）。
-- **测试**：新增 `test_agent_orchestrator_plugin.py`；重写 `test_task_system_plugin.py`；`conftest.py` 新增数据根隔离 fixture（隔离 fetched/public/private 三来源，防用户插件污染断言）。
-- **任务图可视化 + `/task` 控制台**：新增核心库 `fp_core/taskmap/present.py`（`to_mermaid`/`to_tree`/`to_markdown`——确定性、形状随节点种类、颜色随状态、异常高亮：目标不可达/陈旧锁/环）；`task_system` 新增面向用户的 `/task` 命令（`list`/`show`/`view`/`new`/`approve`/`reject`/`answer`/`pause`/`resume`/`abort`/`clear`），其中**批、答、停**是人特有的权力（交付闸门 / 回应 `blocked` / 自治安全阀）；命令按 `state.io.frontend` 分支——终端出树形文本，其余前端出 md 内嵌 mermaid，**渲染交各显示模块**。webui 引入 mermaid.js 并在 `renderMarkdown` 后处理 `language-mermaid` 代码块（`securityLevel: strict`）。
-- **测试**：新增 `test_taskmap_present.py` / `test_task_command.py`（含插件 `ON_INIT` 注册与 `on_unregister` 清理的接线）。
+- **生命周期埋点体系——边集契约 + 全链路落点**（74d5d1d, b7025aa, 98c2bdd, 1a59d43, f63b9d1, 0b111df, 8b13c7c）: 钩子枚举 15→49 + journal 关键 dataclass + F1/F3 字段补强；钩子统一为执行型（移除 observe/execute 分类）；入口区 #1–#12、LLM 循环区 #13–#29、工具子机 #30–#44、出口区 #46/#49/#50 与面外 #53/#54 依次落位 `agent.py`；A 类缺口补齐（#6b ON_COMMAND_BLOCKED、#13b ON_CANCEL(stage=loop_top)、`/resume` 落盘）。
+- **reload 工具升格为内置扩展**（b63f3a8）: 方案1 contextvar 导线 + handoff 跨进程续接；两段式隔离测试门禁（动态口令校验即焚）。
+- **WebUI 光环背景改为可选开关**（eb8fbea）: 顶栏新增 ✨/💤 按钮（`#haloBtn`），关闭时 `#halo-bg` 置 `display:none` 并**停掉 halo 的 requestAnimationFrame 循环**（实测关闭后 0 帧/700ms，开启约 57fps），状态持久化于 `localStorage.webui_halo`（**默认关闭**，省 GPU）；`ui.js` 暴露 `window.setHaloEnabled/isHaloEnabled`，`app.js` 提供 `toggleHalo/applyHalo`，静态资源缓存参数 bump 至 `_t=20260923v9`。
+- **任务图(taskmap): task 从线性清单升级为有向图**（fdfbae2）: 新增核心库 `fp_core/taskmap/`（models/store/graph/render/delta）：节点=状态、边=带结果语义的转移（`complete`/`exhausted`/`side_effect`/`blocked`/`partial`/`requires_decompose`），支持「拆图」生长与副作用支线；`TaskMapStore` 单文件 `.fp/tasks.json`（**原子写** + 旧 `{tasks:[]}` **惰性迁移**）；`task_*` 工具 4→6（新增 `task_read`/`task_edit`）。
+- **agent_orchestrator 迁入核心**（fdfbae2）: 由 private 插件移入 `fp_core/plugins/agent_orchestrator/`。`agent_dispatch` 支持 `task_id`/`node_id`：worker 输出的 `[taskmap-delta]` 被解析、8 条校验、由编排器**单写者落图**（`dispatch_id` 幂等；outcome 一律落、propose 全有或全无）。黑板收窄为产物归档 `runs`（`{DATA}/runs/`，不随会话擦除）。
+- **任务图可视化 + `/task` 控制台**（2f763fe, 694959f）: 新增核心库 `fp_core/taskmap/present.py`（`to_mermaid`/`to_tree`/`to_markdown`——确定性、形状随节点种类、颜色随状态、异常高亮：目标不可达/陈旧锁/环）；`task_system` 新增面向用户的 `/task` 命令（`list`/`show`/`view`/`new`/`approve`/`reject`/`answer`/`pause`/`resume`/`abort`/`clear`），其中**批、答、停**是人特有的权力（交付闸门 / 回应 `blocked` / 自治安全阀）；命令按 `state.io.frontend` 分支——终端出树形文本，其余前端出 md 内嵌 mermaid，**渲染交各显示模块**。webui 引入 mermaid.js 并在 `renderMarkdown` 后处理 `language-mermaid` 代码块（`securityLevel: strict`）。
+- **Mermaid 缩放/平移**（2a27620）: webui mermaid 滚轮缩放（zoom-to-cursor 锚点，0.2~6×）/ 拖拽平移 / 双击复位；事件委托挂稳定祖先、状态存 WeakMap，未缩放不劫持文字选择；容器 `overflow` 裁剪修复。
+- **宪章（charter）v0.1 与宪章守卫**（d50cc53, 34161ca, 56c6bc7, c0b0a48）: 首次立宪；`scripts/check_charter.py` 把第 0 条从承诺做成 pre-commit 机制；自举索引与文档总索引接入宪章入口。
+- **测试**: 新增 `test_agent_orchestrator_plugin.py`（fdfbae2）；重写 `test_task_system_plugin.py`；`conftest.py` 新增数据根隔离 fixture（隔离 fetched/public/private 三来源，防用户插件污染断言）；新增 `test_taskmap_present.py` / `test_task_command.py`（含插件 `ON_INIT` 注册与 `on_unregister` 清理接线）（2f763fe）。
 
 ### Changed
 
+- **reload 架构统一到 execve 激活核心**（8a37a97, eb8fbea, 8074ff2, 05d3e40）: 删除原地重建僵尸路径与 webui 同进程 reload，全站统一命令面 `/reload`；`FP_LAUNCH_JSON` 捕获提升为三入口契约（修复 fp-webui 直启 `/reload` 被拒）；启动快照缺失时从 `/proc/self` 精确重建，存量实例可原地热重启。
 - `task_system` 插件 2.0.0：`[task]` 提醒改为图摘要（`▶#id 标题 进行:<节点> · 待办:<n> · ❓<n>`）；整体状态机改为 `active`/`blocked`/`delivered`/`completed`/`superseded`。
 - `MapStatus` 新增 `paused`（用户暂停，安全阀）；`render_full` 待澄清列表带下标与已答内容（供 `/task answer` 定位）。
+- **edit_file 并行禁令 + subagent 超时语义**（2a27620）: `edit_file` 描述明示同一文件并行编辑禁令（防静默丢笔，多处修改须串行用新哈希）；`subagent` `timeout` 缺省/0 = 无限时长，显式正数仅钳下限 10s（原 300~900 钳制移除）。
+- **核心提示词精简**（95ab08f）: 移除角色/准则/风格段，保留通用 agent 定位与自举索引。
 - README / docs 同步：工具数 14→16；内置命令数 15→16（`/task` 由插件注入）；任务文件格式 v1→v2；内置插件清单增补 `agent_orchestrator`。
+
+### Fixed
+
+- **WS 断连不再终止 agent**（b1b538e）: 会话运行时上提 + 事件重放。
+- **F3 工具耗时接线**（01c1a1d）: `latency_ms` 随 RESULT/ERROR/SUPPRESSED/PROPAGATED 出口回填。
+- **`switch/create_session` 同步进程级 current_sid**（cfd4a32）。
+- **斜杠补全词表惰性重载**（bfb82c5）: `/reload` 后注入的命令立即可见（Tab 补全回归）。
+- **taskmap 旧任务迁移状态对齐**（ba7542a）: 迁移时目标节点状态随旧任务状态对齐。
+- **`fp ext install` 标准形态落地**（ba715ec）: 按加载器标准形态落地，杜绝命令被目录化无法自发现。
+- **测试存量失败清零**（2a27620）: 移除已废弃 `AgentReloader.reload` 原地重建路径测试（防复活断言保留），全量 532 通过 + 1 跳过，无存量失败。
 
 ## [0.1.13] — 2026-09-08
 
@@ -386,6 +402,7 @@
 
 | 版本 | 日期 | 摘要 |
 |------|------|------|
+| 0.1.14 | 2026-09-28 | 生命周期埋点 49 钩子全链路落点 + reload 统一 execve 激活 + 任务图重构与 /task 控制台 + 宪章守卫 |
 | 0.1.13 | 2026-09-08 | LLM 供应点两级结构 + 思考模式统一控制 + shortcircuit 退化模式 + 任务状态机扩展 + bash 副作用检查 + 全项目类型债清零 |
 | 0.1.12 | 2026-08-04 | fp ext 扩展分发系统 + 文档同步门禁 + 测试覆盖提升 + 多项修复 |
 | 0.1.11 | 2026-07-31 | rebrand→FP + fp docs 离线文档 + edit_file v3 + WebUI 重构与安全修复 + 终端显示升级 |
