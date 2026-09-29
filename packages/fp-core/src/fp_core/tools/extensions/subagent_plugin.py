@@ -347,14 +347,19 @@ async def execute(params: dict[str, Any]) -> str:
     # ═══════════════════════════════════════════════════════════
     if store_result:
         try:
-            from .memory_save_plugin import execute as memory_save
+            # 按名走 L1 公共工具注册表（禁止 import 兄弟扩展单元）
+            from fp_core.tools import execute_tool
 
-            await memory_save({
-                "name": store_result,
-                "type": "reference",
-                "description": f"[subagent] {task[:80]}",
-                "content": output,
-            })
+            await execute_tool(
+                "memory_save",
+                {
+                    "root": "~",
+                    "category": "reference",
+                    "name": store_result,
+                    "description": f"[subagent] {task[:80]}",
+                    "content": output,
+                },
+            )
         except Exception as e:
             output += f"\n\n⚠️ 记忆保存失败 ({store_result}): {e}"
 

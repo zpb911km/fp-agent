@@ -254,6 +254,13 @@ echo "你是谁" | fp                   # 测试系统提示词
   命令、工具、钩子」这类结构性变化才提醒清单文档。
 - **测试文件同样纳入门禁**：`packages/fp-core/tests/*.py` 与 `packages/fp/tests/*.py`
   变更会要求 [dev/测试.md](dev/测试.md) 确认（尤其新增测试文件时，文件清单表需同步）。
+- **依赖层级守卫（方向防混乱）**：pre-commit 钩子 `dep-layers` 由
+  `scripts/check_dep_layers.py` 执行，AST 全量扫描 `packages/*/src` 与
+  `scripts/` 的静态 import，按四层模型（L0–L4，见
+  [self/README.md §3](self/README.md)）校验依赖方向：内核 import 扩展、
+  L2 跨单元互依等 ERROR 即**拒绝提交**（无放行口——修代码而不是绕钩子）；
+  入口分发、加载器动态回环为 WARN/INFO 不阻断。
+  手动触发：`python scripts/check_dep_layers.py [--mermaid]`。
 - **宪章守卫（判据防漂移）**：pre-commit 钩子 `charter-guard` 由
   `scripts/check_charter.py` 执行，对比 `docs/CHARTER.md` 的内容哈希与锚点，
   不一致即**拒绝提交**——判据（CHARTER.md）不得被静默修改（宪章第 0 条）。

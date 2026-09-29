@@ -278,23 +278,26 @@ class TestExecutePaths:
 
     @pytest.mark.asyncio
     async def test_store_result_saves_memory(self, tmp_path):
-        """store_result 时调用 memory_save"""
+        """store_result 时按名经 L1 工具注册表调用 memory_save（不 import 兄弟扩展）"""
         proc = _FakeProc(stdout="结果内容".encode())
         with (
             patch.object(asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)),
             patch("fp_core.core.session._generate_sid", return_value="s_sub"),
             patch("fp_core.core.session.get_current_session_id", return_value=""),
             patch("fp_core.tools.extensions.subagent_plugin._finalize_subagent_session"),
-            patch("fp_core.tools.extensions.memory_save_plugin.execute", new_callable=AsyncMock) as mock_save,
+            patch("fp_core.tools.execute_tool", new_callable=AsyncMock) as mock_exec,
         ):
             result = await subagent.execute({"task": "t", "cwd": str(tmp_path), "store_result": "draft_x"})
 
         assert "结果内容" in result
-        mock_save.assert_awaited_once()
-        assert mock_save.await_args is not None
-        args = mock_save.await_args.args[0]
-        assert args["name"] == "draft_x"
-        assert args["content"] == "结果内容"
+        mock_exec.assert_awaited_once()
+        assert mock_exec.await_args is not None
+        tool_name, params = mock_exec.await_args.args[0], mock_exec.await_args.args[1]
+        assert tool_name == "memory_save"
+        assert params["name"] == "draft_x"
+        assert params["content"] == "结果内容"
+        assert params["root"] == "~"
+        assert params["category"] == "reference"
 
 
 # ═══════════════════════════════════════════════════════════

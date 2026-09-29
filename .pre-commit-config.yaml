@@ -34,6 +34,18 @@ repos:
         pass_filenames: false
         files: ^(packages/fp-core/src/|packages/fp-core/tests/|packages/fp/src/|packages/fp-terminal/|packages/fp-webui/|packages/fp-acp/|docs/|README\.md|scripts/)
 
+      # 依赖层级守卫：四层模型（L0–L4，见 docs/self/README.md §3）静态检查。
+      # 内核 import 扩展、L2 跨单元互依 → ERROR 阻断；入口分发/动态加载 → WARN 不阻断。
+      # 手动触发: python scripts/check_dep_layers.py [--mermaid]
+      # 显式放行: 无（ERROR 即真违规，修代码而不是绕钩子）
+      - id: dep-layers
+        name: dependency layer check
+        entry: python scripts/check_dep_layers.py
+        language: system
+        require_serial: true
+        pass_filenames: false
+        files: ^(packages/[^/]+/src/|scripts/)
+
       # 宪章守卫：docs/CHARTER.md 是 FP 的判据，不得被静默修改。
       # 逻辑在 scripts/check_charter.py（哈希锚点比对，宪章第 0 条）。
       # 显式修宪: FP_CHARTER_ALLOW=1 git commit -m "charter:amend — <理由>"
