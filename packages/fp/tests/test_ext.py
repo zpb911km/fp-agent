@@ -87,7 +87,7 @@ class TestScanner:
 
     def test_scan_promote_privacy(self, tmp_path):
         f = tmp_path / "leak.py"
-        f.write_text('path = "/home/zpb/.ssh/id_rsa"\n', encoding="utf-8")
+        f.write_text('path = "/home/user/.ssh/id_rsa"\n', encoding="utf-8")
         hits = scan_file(str(f), scene="promote")
         assert any(h.rule_id == "privacy" for h in hits)
         # install 场景不报隐私

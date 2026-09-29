@@ -132,13 +132,13 @@ wc -l data/sessions/s_260610_153022123456.jsonl
 read_file("config.json")
 
 # 正确：使用绝对路径
-read_file("/media/zpb/data/codes/AI/agent/config.json")
+read_file("/path/to/fp-agent/config.json")
 ```
 
 如果仍然提示不存在，先确认文件是否在预期位置：
 
 ```bash
-ls -lh /media/zpb/data/codes/AI/agent/config.json
+ls -lh /path/to/fp-agent/config.json
 ```
 
 ---

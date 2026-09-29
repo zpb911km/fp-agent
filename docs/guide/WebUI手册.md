@@ -51,7 +51,7 @@ pip install 'fastapi[standard]' uvicorn
 ### 2.2 启动
 
 ```bash
-cd /media/zpb/data/codes/AI/agent
+cd /path/to/fp-agent
 
 # 方式一：模块启动（推荐）
 python3 -m app.webui.main
@@ -78,7 +78,7 @@ fp-webui
   🔌  WS:    ws://0.0.0.0:8765/ws/chat
   📡  API:   http://0.0.0.0:8765/api/health
   🔑  启动 Token: xxxxxx
-  📄  已写入: /media/zpb/data/codes/AI/agent/.webui_token
+  📄  已写入: /path/to/fp-agent/.webui_token
 ```
 
 打开浏览器访问 `http://localhost:8765`，输入 Token 即可使用。
@@ -465,7 +465,7 @@ ws://host:port/ws/chat?token=your_token
 
 - **幂等设计**：文件已存在且内容有效（≥32 字符）则复用，不覆盖
 - **终端显示**：启动时打印在终端，方便复制
-- **路径**：`/media/zpb/data/codes/AI/agent/.webui_token`
+- **路径**：`/path/to/fp-agent/.webui_token`
 
 ### 7.2 验证流程
 

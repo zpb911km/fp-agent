@@ -194,11 +194,11 @@ class TestMemorySave:
             "name": "with_hint",
             "description": "d",
             "content": "c",
-            "hint": "/media/zpb/data/codes/AI/agent",
+            "hint": "/path/to/fp-agent",
         })
         with open(os.path.join(memory_env["global"], "with_hint.md"), encoding="utf-8") as f:
             content = f.read()
-        assert "hint: /media/zpb/data/codes/AI/agent" in content
+        assert "hint: /path/to/fp-agent" in content
 
 
 # ═══════════════════════════════════════════════════════════
@@ -272,8 +272,8 @@ class TestMemoryReadHelpers:
         assert mem_read._entry_label({"name": "n1", "hint": ""}) == "n1"
 
     def test_entry_label_with_hint(self):
-        m = {"name": "my_code_location", "hint": "/media/zpb/data/codes/AI/agent"}
-        assert mem_read._entry_label(m) == "my_code_location→/media/zpb/data/codes/AI/agent"
+        m = {"name": "my_code_location", "hint": "/path/to/fp-agent"}
+        assert mem_read._entry_label(m) == "my_code_location→/path/to/fp-agent"
 
     def test_entry_label_hint_truncated(self):
         m = {"name": "x", "hint": "a" * 100}

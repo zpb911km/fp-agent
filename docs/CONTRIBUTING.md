@@ -52,8 +52,8 @@
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/zpb/agent.git
-cd agent
+git clone https://github.com/zpb911km/fp-agent.git
+cd fp-agent
 
 # 2. 创建虚拟环境（推荐）
 python3 -m venv .venv

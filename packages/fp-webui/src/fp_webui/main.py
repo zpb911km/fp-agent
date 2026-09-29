@@ -11,7 +11,7 @@ FP — WebUI 服务器
   └─────────────┘                  └───────────┘               └──────────┘
 
 用法：
-  cd /media/zpb/data/codes/AI/agent
+  cd /path/to/fp-agent
   python3 -m app.webui.main
 
   或：
