@@ -335,7 +335,7 @@ class TestBash:
 
     @pytest.mark.asyncio
     async def test_timeout_kills_process(self):
-        """超时 → killpg 击杀进程组 + 返回超时错误"""
+        """显式 on_timeout="kill" → killpg 击杀进程组 + 返回超时错误"""
         with (
             patch("fp_core.tools.core.asyncio.wait_for", new_callable=AsyncMock, side_effect=asyncio.TimeoutError),
             patch("fp_core.tools.core._kill_process_group") as mock_kill,
@@ -345,10 +345,39 @@ class TestBash:
             mock_proc.wait = AsyncMock(return_value=None)
             mock_create.return_value = mock_proc
 
-            result = await _execute_bash("sleep 999")
+            result = await _execute_bash("sleep 999", on_timeout="kill")
 
         assert "命令执行超时" in result
         mock_kill.assert_awaited_once_with(mock_proc)
+
+    @pytest.mark.asyncio
+    async def test_timeout_defaults_to_background_handoff(self):
+        """超时默认自动转后台：返回 job_id 收据，不杀进程（on_timeout 缺省 = background）"""
+        import json
+
+        with (
+            patch("fp_core.tools.core.asyncio.wait_for", new_callable=AsyncMock, side_effect=asyncio.TimeoutError),
+            patch("fp_core.tools.core._kill_process_group") as mock_kill,
+            patch("fp_core.tools.core.asyncio.create_subprocess_exec") as mock_create,
+            patch("fp_core.core.jobs.start_job") as mock_start,
+        ):
+            mock_proc = MagicMock()
+            mock_proc.wait = AsyncMock(return_value=None)
+            mock_create.return_value = mock_proc
+
+            def _fake_start(label, coro, job_id=None):
+                coro.close()  # 后台协程不真跑，避免真实任务泄漏
+                return MagicMock(id="j1", label=label, result_path="/tmp/fp_jobs/j1.out.txt")
+
+            mock_start.side_effect = _fake_start
+
+            result = await _execute_bash("sleep 999", timeout=5)
+
+        data = json.loads(result)
+        assert data["status"] == "backgrounded_on_timeout"
+        assert data["job_id"] == "j1"
+        assert data["result_file"].endswith(".out.txt")
+        mock_kill.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_exception_returns_error(self):

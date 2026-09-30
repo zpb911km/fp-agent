@@ -314,7 +314,7 @@ async def _execute_bash(
     timeout: int = 300,
     force: bool = False,
     background: bool = False,
-    on_timeout: str = "kill",
+    on_timeout: str = "background",
 ) -> str:
     """异步执行 shell 命令。
 
@@ -332,6 +332,9 @@ async def _execute_bash(
         force: 设为 true 跳过副作用检查（危险命令直接放行，确认风险后使用）
         background: 设为 true 把执行移交后台任务，立即返回 job 收据
             （完成后环顶注入【系统事实】；wait_job 可精确拉取结果）
+        on_timeout: 超时行为。默认 "background" —— 超时自动转后台继续执行
+            并返回 job_id（可 wait_job 拉取 / kill_job 终止，完成后环顶注入）；
+            显式 "kill" 才杀掉进程组返回超时错误。
     """
     if not command:
         raise ValueError("bash 工具需要 command 参数")
@@ -435,31 +438,39 @@ async def _execute_bash(
             try:
                 returncode = await asyncio.wait_for(proc.wait(), timeout=timeout)
             except TimeoutError:
-                # ── P3: on_timeout=background → 让出不杀，移交后台继续等（设计 §0） ──
-                if str(on_timeout).lower() in ("background", "bg", "让出"):
-                    import json as _json
-
-                    from fp_core.core.jobs import start_job
-
-                    job = start_job(
-                        f"bash(超时转后台): {command.strip()[:50]}",
-                        _bash_collect(proc, out_f, err_f, command, cmd_prefix, start_time),
+                # ── 超时默认自动转后台（返回 job_id，可 wait_job/kill_job，完成后环顶注入）；
+                #    仅显式 on_timeout="kill" 才杀掉返回错误（安全可否决通道，设计 §0） ──
+                if str(on_timeout).strip().lower() in ("kill", "杀"):
+                    await _kill_process_group(proc)
+                    with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                        await asyncio.wait_for(proc.wait(), timeout=2)
+                    return (
+                        f"错误：命令执行超时（{timeout}秒），已按 on_timeout=kill 杀掉；"
+                        "可加大 timeout 参数，或用 on_timeout=background（默认）转后台继续"
                     )
-                    _handed_off = True
-                    return _json.dumps(
-                        {
-                            "status": "backgrounded_on_timeout",
-                            "job_id": job.id,
-                            "label": job.label,
-                            "result_file": job.result_path,
-                            "note": f"前台等待 {timeout}s 超时，已移交后台继续执行；wait_job 等待，kill_job 终止。",
-                        },
-                        ensure_ascii=False,
-                    )
-                await _kill_process_group(proc)
-                with contextlib.suppress(TimeoutError, asyncio.CancelledError):
-                    await asyncio.wait_for(proc.wait(), timeout=2)
-                return f"错误：命令执行超时（{timeout}秒），可加大 timeout 参数重试"
+                # 默认路径：自动移交后台继续等，前台立即返回 job 收据
+                import json as _json
+
+                from fp_core.core.jobs import start_job
+
+                job = start_job(
+                    f"bash(超时转后台): {command.strip()[:50]}",
+                    _bash_collect(proc, out_f, err_f, command, cmd_prefix, start_time),
+                )
+                _handed_off = True
+                return _json.dumps(
+                    {
+                        "status": "backgrounded_on_timeout",
+                        "job_id": job.id,
+                        "label": job.label,
+                        "result_file": job.result_path,
+                        "note": (
+                            f"前台等待 {timeout}s 超时，命令已自动转后台继续执行；"
+                            "wait_job 拉取，kill_job 终止，list_jobs 查看。"
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
             except (KeyboardInterrupt, asyncio.CancelledError):
                 await _kill_process_group(proc)
                 with contextlib.suppress(TimeoutError, asyncio.CancelledError):
@@ -743,7 +754,8 @@ CORE_TOOLS: list[ToolSpec] = [
         "默认超时 300 秒，可用 timeout 参数调整。危险命令（rm -rf 根目录、pkill、磁盘操作、关机等）"
         "会被安全检查拦截并当场向用户求批；也可 force=true 放行。"
         "长任务可 background=true 移交后台执行（立即返回 job_id，"
-        "完成后自动注入通知，wait_job 精确拉取，kill_job 终止）。",
+        "完成后自动注入通知，wait_job 精确拉取，kill_job 终止）；"
+        "命令超时也默认自动转后台继续执行并返回 job_id（on_timeout=kill 才杀掉）。",
         params=[
             ParamSpec("command", "string", True, "要执行的 shell 命令"),
             ParamSpec("timeout", "integer", False, "超时秒数（1~3600，默认 300），长任务可调大"),
@@ -758,7 +770,8 @@ CORE_TOOLS: list[ToolSpec] = [
                 "on_timeout",
                 "string",
                 False,
-                '超时行为："kill"（默认，杀掉返回错误）或 "background"（超时让出到后台继续执行，返回 job_id）',
+                '超时行为："background"（默认，超时自动转后台继续执行并返回 job_id）'
+                '或 "kill"（杀掉进程组返回超时错误）',
             ),
         ],
         handler=_execute_bash,
