@@ -63,3 +63,67 @@ async def test_no_options_still_works():
         assert await CLIIO().ask("自由问答？") == "hi"
     finally:
         b.input = orig
+
+
+# ── 显示时序：工具行不得挤占回答区（返工 n9） ──────────
+
+
+@pytest.mark.asyncio
+async def test_tool_line_flushed_before_question(monkeypatch):
+    """tool_call 展示是异步调度的 — ask 必须先等它落盘再渲染问题块"""
+    import asyncio
+
+    from fp_cli.display import LLMStreamer
+
+    order: list[str] = []
+
+    async def slow_tool(self, name, args):
+        await asyncio.sleep(0.05)  # 模拟逐段流式延迟
+        order.append("tool_line")
+
+    monkeypatch.setattr(LLMStreamer, "tool", slow_tool)
+    monkeypatch.setattr(builtins, "input", lambda _p="": (order.append("input"), "y")[1])
+
+    io = CLIIO()
+    io.tool_call("ask_user", {"prompt": "执行吗？"})  # 入队展示任务
+    assert await io.ask("执行吗？") == "y"
+    assert order == ["tool_line", "input"], f"顺序错误: {order}"
+
+
+@pytest.mark.asyncio
+async def test_answer_area_isolated_from_during_ask_disp(monkeypatch):
+    """问答挂起期间到达的 tool_result 必须在锁外排队，答完才打印"""
+    import asyncio
+    import threading
+
+    from fp_cli.display import LLMStreamer
+
+    order: list[str] = []
+    gate = threading.Event()
+
+    async def tracked_result(self, result):
+        async with LLMStreamer._get_tool_lock():  # 模拟真实实现的锁行为
+            order.append("result_line")
+
+    def blocking_input(_p=""):
+        order.append("input_enter")
+        gate.wait(2.0)
+        order.append("input_exit")
+        return "y"
+
+    monkeypatch.setattr(LLMStreamer, "tool_result_line", tracked_result)
+    monkeypatch.setattr(builtins, "input", blocking_input)
+
+    io = CLIIO()
+    task = asyncio.create_task(io.ask("执行吗？"))
+    await asyncio.sleep(0.1)  # ask 已进入 input（持锁中）
+    assert order == ["input_enter"]
+
+    io.tool_result("后台完成")  # 问答期间到达的展示
+    await asyncio.sleep(0.1)
+    assert "result_line" not in order, "回答区被插队！"
+
+    gate.set()
+    assert await task == "y"
+    await asyncio.sleep(0.05)  # 给排队任务落盘时间
+    assert order.index("input_exit") < order.index("result_line"), f"顺序错误: {order}"

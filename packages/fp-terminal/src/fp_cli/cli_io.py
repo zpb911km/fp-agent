@@ -30,6 +30,15 @@ class CLIIO(IOChannel):
     def __init__(self):
         self._streamer = None
         self._spinner = None
+        # 未落盘的展示任务（tool_call/tool_result 的 create_task 句柄）。
+        # ask() 渲染问题块前先等待这些任务完成 — 否则工具行的异步
+        # 流式输出（逐段 0.02s 延迟）会插进问题块与输入光标之间。
+        self._pending_disp: set[asyncio.Task[Any]] = set()
+
+    def _spawn_disp(self, coro: Any) -> None:
+        task = asyncio.create_task(coro)
+        self._pending_disp.add(task)
+        task.add_done_callback(self._pending_disp.discard)
 
     # ── 文本输出 ─────────────────────────────────────
 
@@ -90,12 +99,12 @@ class CLIIO(IOChannel):
     def tool_call(self, name: str, args: dict[str, Any]):
         if self._streamer is None:
             self._streamer = LLMStreamer(silent=_display_mod._FP_SILENT)  # type: ignore[reportPrivateUsage]
-        asyncio.create_task(cast(_StreamerToolProto, self._streamer).tool(name, args))
+        self._spawn_disp(cast(_StreamerToolProto, self._streamer).tool(name, args))
 
     def tool_result(self, result: str):
         if self._streamer is None:
             self._streamer = LLMStreamer(silent=_display_mod._FP_SILENT)  # type: ignore[reportPrivateUsage]
-        asyncio.create_task(self._streamer.tool_result_line(result))
+        self._spawn_disp(self._streamer.tool_result_line(result))
 
     # ── 交互式输入 ───────────────────────────────────
 
@@ -124,11 +133,24 @@ class CLIIO(IOChannel):
             print("\n".join(lines))
             return input("❯ ").strip()
 
-        loop = asyncio.get_running_loop()
+        # ── 显示时序（返工 n9）：防止工具行挤占回答区 ──
+        # ① 先等已入队的展示任务落盘 — tool_call 是 create_task 异步调度
+        #    （含逐段 0.02s 流式延迟），不等它会插进问题块与输入光标之间；
+        # ② 再持工具行锁渲染问题块并读输入 — 问答挂起期间新到的
+        #    tool_call/tool_result 在锁外排队，答完按序打印，回答区不被插队。
+        if self._pending_disp:
+            await asyncio.wait(list(self._pending_disp), timeout=2.0)
+
+        lock = LLMStreamer._get_tool_lock()  # type: ignore[reportPrivateUsage]
+        await lock.acquire()
         try:
-            raw = await loop.run_in_executor(None, _read)
-        except (EOFError, KeyboardInterrupt):
-            return ""
+            loop = asyncio.get_running_loop()
+            try:
+                raw = await loop.run_in_executor(None, _read)
+            except (EOFError, KeyboardInterrupt):
+                return ""
+        finally:
+            lock.release()
 
         if not raw:
             return suggest  # 空回车 = 采纳推荐值（无推荐值时返回空 = 未回答）
