@@ -36,3 +36,7 @@ include = ["fp_core*"]
 root = "../.."
 local_scheme = "no-local-version"
 write_to = "src/fp_core/_version.py"
+
+[tool.pytest.ini_options]
+# 本仓库测试自洽：src 优先于 editable（editable 默认在旧仓库）
+pythonpath = ["src"]

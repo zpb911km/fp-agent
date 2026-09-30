@@ -49,3 +49,7 @@ Documentation = "https://github.com/zpb911km/fp-agent/tree/main/docs"
 [tool.setuptools_scm]
 root = "../.."
 local_scheme = "no-local-version"
+
+[tool.pytest.ini_options]
+# 本仓库测试自洽：src 优先于 editable（editable 默认在旧仓库）
+pythonpath = ["src"]

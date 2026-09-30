@@ -7,5 +7,12 @@
     "packages/fp-acp/src",
     "packages/fp-terminal/src",
     "packages/fp-webui/src"
+  ],
+  "extraPaths": [
+    "packages/fp-core/src",
+    "packages/fp/src",
+    "packages/fp-acp/src",
+    "packages/fp-terminal/src",
+    "packages/fp-webui/src"
   ]
 }
