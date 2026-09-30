@@ -26,7 +26,7 @@ import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from fp_core.platform_utils import find_bash, is_windows
 
@@ -221,7 +221,101 @@ def _check_side_effect(command: str) -> str:
     return ""
 
 
-async def _execute_bash(command: str, timeout: int = 300, force: bool = False) -> str:
+async def _format_bash_result(
+    command: str,
+    returncode: int,
+    duration: float,
+    output: str,
+    stderr_text: str,
+    cmd_prefix: str,
+    out_f: Any = None,
+    err_f: Any = None,
+) -> str:
+    """bash 结果统一格式化（前台直返与后台收集共用 — 单一出口）"""
+    if cmd_prefix and output.strip():
+        if "\ufffd" in output and out_f is not None:
+            enc = locale.getpreferredencoding()
+            out_f.seek(0)
+            output = out_f.read().decode(enc, errors="replace")
+            if err_f:
+                err_f.seek(0)
+                stderr_text2 = err_f.read().decode(enc, errors="replace")
+                if stderr_text2.strip():
+                    output += f"\n[stderr]\n{stderr_text2}"
+        return cmd_prefix + output.lstrip()
+
+    if returncode != 0:
+        return f"❌ 命令执行失败（exit={returncode}，{duration:.1f}s）\n命令: {command}\n{output}"
+    if len(output) < 3000:
+        return output
+
+    _fd, _path = tempfile.mkstemp(prefix="fp_bash_", suffix=".log")
+    with os.fdopen(_fd, "w", encoding="utf-8") as _f:
+        _f.write(output)
+
+    total_chars = len(output)
+    total_lines = output.count("\n") + 1
+    head = output[:200]
+    tail = output[-200:] if total_chars > 400 else ""
+
+    summary = (
+        f"✅ 命令执行成功（exit=0，{duration:.1f}s）\n"
+        f"输出较长（{total_chars} 字符 / {total_lines} 行），已保存至 {_path}"
+    )
+    if stderr_text.strip():
+        summary += f"\n⚠️ stderr 存在（{len(stderr_text)} 字符），开头：\n{stderr_text[:200]}"
+    return (
+        f"{summary}\n\n"
+        f"── 头部 200 字符 ────────────────────────\n{head}\n"
+        f"────────────────────────────────────────\n"
+        f"── 尾部 200 字符 ────────────────────────\n{tail}\n"
+        f"────────────────────────────────────────\n\n"
+        f"需要完整内容 → read_file({_path!r})"
+    )
+
+
+async def _bash_collect(
+    proc: asyncio.subprocess.Process,
+    out_f: Any,
+    err_f: Any,
+    command: str,
+    cmd_prefix: str,
+    start_time: float,
+) -> str:
+    """超时转后台（P3）的执行体：继续等待进程并收集输出。
+
+    文件所有权已从前台移交至此（finally 关闭）；取消（kill_job/退出清算）
+    → killpg 击杀进程组后重抛，不留孤儿。
+    """
+    try:
+        try:
+            returncode = await proc.wait()
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            await _kill_process_group(proc)
+            with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(proc.wait(), timeout=2)
+            raise
+        duration = time.monotonic() - start_time
+        out_f.seek(0)
+        err_f.seek(0)
+        output = out_f.read().decode("utf-8", errors="replace")
+        stderr_text = err_f.read().decode("utf-8", errors="replace") if err_f else ""
+        if stderr_text.strip():
+            output = f"{output}\n[stderr]\n{stderr_text}" if output else f"[stderr]\n{stderr_text}"
+        return await _format_bash_result(command, returncode, duration, output, stderr_text, cmd_prefix, out_f, err_f)
+    finally:
+        with contextlib.suppress(Exception):
+            out_f.close()
+            err_f.close()
+
+
+async def _execute_bash(
+    command: str,
+    timeout: int = 300,
+    force: bool = False,
+    background: bool = False,
+    on_timeout: str = "kill",
+) -> str:
     """异步执行 shell 命令。
 
     方案：stdout/stderr 重定向到临时文件而非 PIPE——
@@ -236,19 +330,37 @@ async def _execute_bash(command: str, timeout: int = 300, force: bool = False) -
         command: 要执行的 shell 命令
         timeout: 超时秒数（1~3600，默认 300），长任务可调大
         force: 设为 true 跳过副作用检查（危险命令直接放行，确认风险后使用）
+        background: 设为 true 把执行移交后台任务，立即返回 job 收据
+            （完成后环顶注入【系统事实】；wait_job 可精确拉取结果）
     """
     if not command:
         raise ValueError("bash 工具需要 command 参数")
 
-    # ── 副作用检查（force 绕过） ──
+    # ── 副作用检查（force 绕过；危险确认门优先于自授权 force — 设计 §4） ──
     if not force:
         reason = _check_side_effect(command)
         if reason:
-            return (
-                f"⛔ 命令被安全检查拦截：{reason}\n"
-                f"命令: {command}\n"
-                f"若要强制执行，请重新调用并设置 force=true（有风险，请确认后使用）"
-            )
+            # 危险命令 → 向人求批（ask_user 杀手应用，取代 LLM 自授权 force=true）。
+            # headless/问不到人（None）→ 回落原拦截消息，行为不回归。
+            try:
+                from fp_core.core.jobs import human_confirm
+
+                approved = await human_confirm(
+                    f"⛔ 危险命令求批：{reason}\n命令: {command}\n是否执行？(y/n)",
+                    suggest="n",
+                )
+            except Exception:  # noqa: BLE001
+                approved = None
+            if approved is True:
+                pass  # 人类批准 → 本次放行
+            elif approved is False:
+                return f"⛔ 用户拒绝执行该危险命令。\n命令: {command}"
+            else:
+                return (
+                    f"⛔ 命令被安全检查拦截：{reason}\n"
+                    f"命令: {command}\n"
+                    f"若要强制执行，请重新调用并设置 force=true（有风险，请确认后使用）"
+                )
 
     # ── timeout 参数化（clamp 1~3600） ──
     try:
@@ -257,9 +369,35 @@ async def _execute_bash(command: str, timeout: int = 300, force: bool = False) -
         timeout = 300
     timeout = max(1, min(timeout, 3600))
 
+    # ── background=true → 移交后台任务，前台立即返回 job 收据（设计 §0/§3） ──
+    if background:
+        import json as _json
+
+        from fp_core.core.jobs import start_job
+
+        job = start_job(
+            f"bash: {command.strip()[:60]}",
+            _execute_bash(command, timeout=timeout, force=True),  # 检查已过，force 防重复门
+        )
+        return _json.dumps(
+            {
+                "status": "backgrounded",
+                "job_id": job.id,
+                "label": job.label,
+                "result_file": job.result_path,
+                "note": "任务已在后台执行。完成后上下文会自动注入完成通知；也可 wait_job 精确等待。",
+            },
+            ensure_ascii=False,
+        )
+
     cmd_prefix = ""
     start_time = time.monotonic()
-    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+    # 手动管理文件（非 with）：on_timeout=background 移交时所有权转给
+    # _bash_collect，前台不得关闭（否则后台收集器读不到输出）。
+    out_f = tempfile.TemporaryFile()  # noqa: SIM115 — 所有权移交模式，finally 统一关闭
+    err_f = tempfile.TemporaryFile()  # noqa: SIM115 — 同上
+    _handed_off = False
+    try:
         try:
             if is_windows():
                 bash_path = find_bash()
@@ -297,6 +435,27 @@ async def _execute_bash(command: str, timeout: int = 300, force: bool = False) -
             try:
                 returncode = await asyncio.wait_for(proc.wait(), timeout=timeout)
             except TimeoutError:
+                # ── P3: on_timeout=background → 让出不杀，移交后台继续等（设计 §0） ──
+                if str(on_timeout).lower() in ("background", "bg", "让出"):
+                    import json as _json
+
+                    from fp_core.core.jobs import start_job
+
+                    job = start_job(
+                        f"bash(超时转后台): {command.strip()[:50]}",
+                        _bash_collect(proc, out_f, err_f, command, cmd_prefix, start_time),
+                    )
+                    _handed_off = True
+                    return _json.dumps(
+                        {
+                            "status": "backgrounded_on_timeout",
+                            "job_id": job.id,
+                            "label": job.label,
+                            "result_file": job.result_path,
+                            "note": f"前台等待 {timeout}s 超时，已移交后台继续执行；wait_job 等待，kill_job 终止。",
+                        },
+                        ensure_ascii=False,
+                    )
                 await _kill_process_group(proc)
                 with contextlib.suppress(TimeoutError, asyncio.CancelledError):
                     await asyncio.wait_for(proc.wait(), timeout=2)
@@ -359,6 +518,11 @@ async def _execute_bash(command: str, timeout: int = 300, force: bool = False) -
             )
         except Exception as e:
             return f"错误：{e}"
+    finally:
+        if not _handed_off:
+            with contextlib.suppress(Exception):
+                out_f.close()
+                err_f.close()
 
 
 def _suggest_paths(file_path: str) -> str:
@@ -577,11 +741,25 @@ CORE_TOOLS: list[ToolSpec] = [
         name="bash",
         description="执行 shell 命令。小输出直接返回，大输出(≥3K)自动保存文件+返回预览。"
         "默认超时 300 秒，可用 timeout 参数调整。危险命令（rm -rf 根目录、pkill、磁盘操作、关机等）"
-        "会被安全检查拦截，确认风险后可用 force=true 强制执行。",
+        "会被安全检查拦截并当场向用户求批；也可 force=true 放行。"
+        "长任务可 background=true 移交后台执行（立即返回 job_id，"
+        "完成后自动注入通知，wait_job 精确拉取，kill_job 终止）。",
         params=[
             ParamSpec("command", "string", True, "要执行的 shell 命令"),
             ParamSpec("timeout", "integer", False, "超时秒数（1~3600，默认 300），长任务可调大"),
             ParamSpec("force", "boolean", False, "设为 true 跳过副作用检查（危险命令放行，确认风险后使用）"),
+            ParamSpec(
+                "background",
+                "boolean",
+                False,
+                "设为 true 移交后台执行并立即返回 job_id（适合长任务；wait_job 等待，kill_job 终止）",
+            ),
+            ParamSpec(
+                "on_timeout",
+                "string",
+                False,
+                '超时行为："kill"（默认，杀掉返回错误）或 "background"（超时让出到后台继续执行，返回 job_id）',
+            ),
         ],
         handler=_execute_bash,
     ),

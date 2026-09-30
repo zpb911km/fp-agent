@@ -65,6 +65,19 @@ def get_current_io() -> IOChannel | None:
     return _current_io.get()
 
 
+def _drain_background_injects() -> list[dict[str, str]]:
+    """取走后台任务完成/ask_user 回答的待注入消息（环顶调用，惰性导入防循环依赖）。
+
+    插件未加载（测试/最小环境）时安全返回空 —— drain 是增强路径而非主链。
+    """
+    try:
+        from fp_core.core.jobs import drain_ready
+
+        return drain_ready()
+    except Exception:  # noqa: BLE001 — drain 失败不得阻断主循环
+        return []
+
+
 @dataclass
 class Message:
     """消息对象"""
@@ -305,6 +318,14 @@ class Agent:
 
     async def _builtin_shutdown(self, ctx: HookContext, **kwargs: Any) -> HookContext:
         """关闭钩子 — 生成会话摘要 + 保存上下文 + 显示退出面板"""
+        # ── 后台任务退出清算（不变量 I1：独立于 LLM，进程退出不留活任务） ──
+        try:
+            from fp_core.core.jobs import shutdown_all
+
+            shutdown_all("会话退出")
+        except Exception:  # noqa: BLE001 — 清算失败不得阻断保存/摘要
+            pass
+
         # 热重载时不显示关闭面板
         if getattr(self.state, "silent_shutdown", False):
             return ctx
@@ -844,6 +865,20 @@ class Agent:
                     stage="loop_top",
                 )
                 raise
+
+            # ── 后台任务完成/ask_user 回答 的惰性注入（环顶串行 drain — 无锁竞态） ──
+            # 设计见 ASYNC_AGENT_DESIGN.md §3/§6：完成回调只入 pending 队列，
+            # 注入统一发生在环顶（无并发轮次），带来源标记（【系统事实】/【用户回答】），
+            # 以 user 角色落盘 → shortcircuit degenerate 不会删除（不变量 I2/I3）。
+            for _inject_msg in _drain_background_injects():
+                _inj = self._conv.add_user_message(_inject_msg["content"])
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_CTX_APPEND,
+                    op="user",
+                    message=_inj,
+                    msg_count=len(self._conv.messages),
+                    messages=self._conv.messages,
+                )
 
             # ── #14 修复 tool ordering（post — 静默 mutation 观察点，仅修复发生时触发） ──
             repaired = self._conv.repair_tool_ordering()
