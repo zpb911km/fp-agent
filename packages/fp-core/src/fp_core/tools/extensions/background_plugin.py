@@ -222,35 +222,81 @@ async def _kill_job(params: dict[str, Any]) -> str:
     return json.dumps({"status": "killed", "job_id": job_id}, ensure_ascii=False)
 
 
+_STATUS_ORDER = {"running": 0, "done": 1, "failed": 2, "killed": 3}
+
+
+def _make_row(
+    jid: Any,
+    label: Any,
+    status: Any,
+    started: float,
+    finished: float | None,
+    result_path: Any,
+    error: Any,
+    now: float,
+) -> dict[str, Any]:
+    """构造一行任务事实：elapsed 有值、空 error 直接省略字段。"""
+    row: dict[str, Any] = {
+        "id": jid,
+        "label": label,
+        "status": status,
+        "elapsed": round((finished or now) - started, 1),
+        "result_path": result_path,
+    }
+    if error:
+        row["error"] = error
+    return row
+
+
 async def _list_jobs(params: dict[str, Any]) -> str:
-    """列出后台任务（框架渲染的事实表 —— 可见性独立于 LLM）。"""
+    """列出后台任务（框架渲染的事实表 —— 可见性独立于 LLM）。
+
+    硬性筛选策略（无参数，直接筛）：
+    1. 本进程任务全量显示 —— 含刚完成、结果尚未消费的终态任务；
+    2. 磁盘遗留只保留仍在跑的活任务（并行实例）；**跨会话已结束的任务一律
+       不显示**（完成时已环顶注入过；结果文件仍留在 JOB_DIR，可按 id 直读）；
+    3. 排序：running → done → failed → killed，组内开始时间新者在前。
+    """
     sweep_stale()
-    rows: list[dict[str, Any]] = []
+    now = time.time()
+    entries: list[tuple[int, float, dict[str, Any]]] = []
     seen: set[str] = set()
     for job in job_registry.values():
         seen.add(job.id)
-        rows.append({
-            "id": job.id,
-            "label": job.label,
-            "status": job.status,
-            "elapsed": round((job.finished_at or time.time()) - job.started_at, 1),
-            "result_path": job.result_path,
-            "error": job.error,
-        })
+        row = _make_row(
+            job.id,
+            job.label,
+            job.status,
+            job.started_at,
+            job.finished_at,
+            job.result_path,
+            job.error,
+            now,
+        )
+        entries.append((_STATUS_ORDER.get(str(job.status), 9), -job.started_at, row))
     ensure_dir()
     for fname in sorted(os.listdir(JOB_DIR)):
         if not fname.endswith(".json"):
             continue
         data = load_file_job(fname[:-5])
-        if data and data.get("id") not in seen:
-            rows.append({
-                "id": data.get("id"),
-                "label": data.get("label"),
-                "status": data.get("status"),
-                "elapsed": None,
-                "result_path": data.get("result_path"),
-                "error": data.get("error"),
-            })
+        if not data or data.get("id") in seen:
+            continue
+        if data.get("status") != "running":
+            continue  # 跨会话终态 = 历史垃圾，硬筛掉
+        started = float(data.get("started_at") or 0.0)
+        row = _make_row(
+            data.get("id"),
+            data.get("label"),
+            data.get("status"),
+            started,
+            data.get("finished_at"),
+            data.get("result_path"),
+            data.get("error"),
+            now,
+        )
+        entries.append((_STATUS_ORDER.get(str(data.get("status")), 9), -started, row))
+    entries.sort(key=lambda e: (e[0], e[1]))
+    rows = [e[2] for e in entries]
     return json.dumps({"jobs": rows, "count": len(rows)}, ensure_ascii=False)
 
 
@@ -320,7 +366,11 @@ PLUGIN_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "list_jobs",
-            "description": "列出全部后台任务及其状态（框架事实表）。",
+            "description": (
+                "列出后台任务（框架事实表）：本会话全部任务 + 仍在运行的跨实例任务，"
+                "按 running→done→failed→killed 排序。跨会话已结束的任务不显示"
+                "（完成时已注入通知；结果文件仍可按 id 从任务目录直读）。"
+            ),
             "parameters": {"type": "object", "properties": {}},
         },
     },

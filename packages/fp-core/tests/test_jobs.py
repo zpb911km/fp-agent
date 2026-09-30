@@ -140,3 +140,73 @@ async def test_list_jobs_merges_memory_and_files():
     assert job.id in ids
     bp.shutdown_all("清理")
     await asyncio.sleep(0.05)
+
+
+def _seed_disk(data: dict) -> None:
+    with open(os.path.join(jobs_impl.JOB_DIR, f"{data['id']}.json"), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_list_jobs_hard_filters_cross_session_terminal():
+    """硬筛策略：跨会话终态文件不显示；活任务（活 pid）显示；死 pid running 清扫后隐藏"""
+    now = time.time()
+    # 1) 跨会话终态（垃圾主体）→ 必须隐藏
+    _seed_disk({
+        "id": "old-done",
+        "label": "旧会话任务",
+        "status": "done",
+        "result_path": "/tmp/x.out.txt",
+        "started_at": now - 9999,
+        "finished_at": now - 9900,
+        "error": "",
+        "pid": os.getpid(),
+    })
+    _seed_disk({
+        "id": "old-killed",
+        "label": "旧会话被杀任务",
+        "status": "killed",
+        "result_path": "/tmp/y.out.txt",
+        "started_at": now - 9999,
+        "finished_at": now - 9900,
+        "error": "x",
+        "pid": os.getpid(),
+    })
+    # 2) 并行实例的活任务（pid 存活）→ 显示
+    _seed_disk({
+        "id": "alive-run",
+        "label": "并行实例活任务",
+        "status": "running",
+        "result_path": "/tmp/z.out.txt",
+        "started_at": now - 5,
+        "finished_at": None,
+        "error": "",
+        "pid": os.getpid(),
+    })
+    # 3) 死 pid 的 running → sweep 清扫成 killed → 隐藏
+    _seed_disk({
+        "id": "dead-run",
+        "label": "死进程任务",
+        "status": "running",
+        "result_path": "/tmp/w.out.txt",
+        "started_at": now - 60,
+        "finished_at": None,
+        "error": "",
+        "pid": 0,
+    })
+
+    job = bp.start_job("本会话任务", asyncio.sleep(60))
+    res = json.loads(await bp._list_jobs({}))
+    ids = [r["id"] for r in res["jobs"]]
+
+    assert "old-done" not in ids and "old-killed" not in ids  # 跨会话终态 = 硬筛
+    assert "dead-run" not in ids  # 清扫后成终态 → 隐藏
+    assert "alive-run" in ids and job.id in ids
+    # 排序：running 永远在最前
+    assert res["jobs"][0]["status"] == "running"
+    # 字段裁剪：空 error 不出现在行里；elapsed 必有值
+    assert all(r.get("error", "x") for r in res["jobs"])
+    assert all(isinstance(r["elapsed"], float) for r in res["jobs"])
+
+    bp.shutdown_all("清理")
+    await asyncio.sleep(0.05)
