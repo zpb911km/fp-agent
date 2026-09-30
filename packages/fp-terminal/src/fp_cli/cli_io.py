@@ -99,10 +99,41 @@ class CLIIO(IOChannel):
 
     # ── 交互式输入 ───────────────────────────────────
 
-    async def ask(self, prompt: str) -> str:
+    async def ask(
+        self,
+        prompt: str,
+        *,
+        options: list[str] | None = None,
+        suggest: str = "",
+        ask_id: str | None = None,
+    ) -> str:
+        """结构化问答（契约 v2）：问题块渲染 + 编号/默认值解析。
+
+        - options → 编号列表；用户可输入编号或自由文本
+        - suggest → 推荐徽章；空回车采纳
+        - 解析在展示层完成，返回的已是最终文本
+        """
+
+        def _read() -> str:
+            lines = ["", f"❓ {prompt}"]
+            for i, opt in enumerate(options or [], 1):
+                marker = " （推荐）" if suggest and opt == suggest else ""
+                lines.append(f"   {i}. {opt}{marker}")
+            if suggest:
+                lines.append(f"   💡 推荐默认值：{suggest}（直接回车采纳）")
+            print("\n".join(lines))
+            return input("❯ ").strip()
+
         loop = asyncio.get_running_loop()
         try:
-            result = await loop.run_in_executor(None, lambda: input(prompt).strip())
-            return result
+            raw = await loop.run_in_executor(None, _read)
         except (EOFError, KeyboardInterrupt):
             return ""
+
+        if not raw:
+            return suggest  # 空回车 = 采纳推荐值（无推荐值时返回空 = 未回答）
+        if options and raw.isdigit():
+            idx = int(raw)
+            if 1 <= idx <= len(options):
+                return options[idx - 1]  # 编号 → 选项原文
+        return raw

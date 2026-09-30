@@ -19,7 +19,7 @@ import json
 import os
 import time
 import uuid
-from typing import Any
+from typing import Any, cast
 
 from fp_core.core.jobs import (  # noqa: F401 — re-export：下游/测试统一入口
     JOB_DIR,
@@ -50,6 +50,10 @@ from fp_core.core.jobs import (
 async def _ask_user(params: dict[str, Any]) -> str:
     """向人类提问并等待回答（pull：恰在需要信息的时刻阻塞）。
 
+    结构化契约 v2：options → 前端选择按钮；suggest → 推荐徽章（空输入采纳）；
+    timeout → 秒级超时（默认 300，防前端断连后无限挂起）；
+    ask_id → 收据/注入对账。回答以【用户回答 …】user 角色走环顶注入（I2）。
+
     防滥问纪律（写给调用方 LLM）：只问会改变后续行为的阻塞级决策；
     必须给出推荐默认值（suggest）；话题级/探讨级问题应结束本轮，
     由用户自然发言，而非用本工具。主 agent 独占（worker 无 io）。
@@ -59,7 +63,16 @@ async def _ask_user(params: dict[str, Any]) -> str:
         return json.dumps({"status": "error", "error": "prompt 必填"}, ensure_ascii=False)
 
     suggest = str(params.get("suggest") or "").strip()
-    text = f"{prompt}\n[推荐默认值: {suggest}]" if suggest else prompt
+    raw_options = params.get("options")
+    options: list[str] = []
+    if isinstance(raw_options, list):
+        options = [str(o).strip() for o in cast("list[Any]", raw_options) if str(o).strip()]
+    try:
+        timeout = float(params.get("timeout") or 300.0)
+    except (TypeError, ValueError):
+        timeout = 300.0
+    timeout = max(5.0, min(timeout, 3600.0))
+    ask_id = f"ask_{uuid.uuid4().hex[:8]}"
 
     # 缺 io（headless/worker）→ 降级，不挂死（I1）
     try:
@@ -80,21 +93,48 @@ async def _ask_user(params: dict[str, Any]) -> str:
 
     async with ask_lock:
         try:
-            reply = (await io.ask(text)).strip()
+            reply = (
+                await asyncio.wait_for(
+                    io.ask(prompt, options=options, suggest=suggest, ask_id=ask_id),
+                    timeout=timeout,
+                )
+            ).strip()
+        except TimeoutError:
+            return json.dumps(
+                {"status": "timeout", "ask_id": ask_id, "timeout": timeout},
+                ensure_ascii=False,
+            )
         except Exception as e:  # noqa: BLE001 — 询问失败降级，不吞轮次
             return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
 
+    # deferred（ACP 等无带内回复通道）：问题已展示给用户，回答将在
+    # 用户下一条消息（新轮次）自然到达 — 不注入、不回执，如实告知 LLM。
+    if not reply and getattr(io, "ask_deferred", False):
+        return json.dumps(
+            {
+                "status": "deferred",
+                "ask_id": ask_id,
+                "note": "问题已展示给用户；请结束本轮等待，用户的下一条消息即为其回答",
+            },
+            ensure_ascii=False,
+        )
+
     # 回执落盘 + 回答以 user 角色走环顶注入（权威注入原则 I2）
     ensure_dir()
-    receipt = os.path.join(JOB_DIR, f"ask_{uuid.uuid4().hex[:8]}.json")
+    receipt = os.path.join(JOB_DIR, f"{ask_id}.json")
     with contextlib.suppress(OSError), open(receipt, "w", encoding="utf-8") as f:
-        json.dump({"prompt": prompt, "reply": reply, "ts": time.time()}, f, ensure_ascii=False)
+        json.dump(
+            {"ask_id": ask_id, "prompt": prompt, "reply": reply, "ts": time.time()},
+            f,
+            ensure_ascii=False,
+        )
 
     if reply:
-        inject_event("user_reply", f"【用户回答】{reply}")
+        # in_reply_to 随消息文本携带（消息只有 role/content，无 metadata 槽位）
+        inject_event("user_reply", f"【用户回答 {ask_id}】{reply}")
 
     return json.dumps(
-        {"status": "answered" if reply else "empty", "reply_file": receipt},
+        {"status": "answered" if reply else "empty", "ask_id": ask_id, "reply_file": receipt},
         ensure_ascii=False,
     )
 
@@ -218,7 +258,8 @@ async def _list_jobs(params: dict[str, Any]) -> str:
 
 _ASK_DESC = (
     "向用户提问并等待其回答（pull 式人类交互）。回答会以【用户回答】消息进入上下文，"
-    "本工具返回收据。防滥问纪律：只问会改变后续行为的阻塞级决策，必须通过 suggest 给出推荐默认值；"
+    "本工具返回收据。给出 options 时前端渲染为一键选择按钮（推荐）。"
+    "防滥问纪律：只问会改变后续行为的阻塞级决策，必须通过 suggest 给出推荐默认值；"
     "话题级/探讨级问题应结束本轮让用户自然发言。仅主 agent 可用（子 agent 无 io 会返回 unavailable）。"
 )
 
@@ -233,6 +274,15 @@ PLUGIN_DEFINITIONS: list[dict[str, Any]] = [
                 "properties": {
                     "prompt": {"type": "string", "description": "要问的问题（清晰、自包含）"},
                     "suggest": {"type": "string", "description": "推荐默认值（强烈建议提供）"},
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选项列表（2~4 个为宜）— 前端渲染为一键选择按钮",
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "最长等待秒数（默认 300，超时返回 status=timeout）",
+                    },
                 },
                 "required": ["prompt"],
             },

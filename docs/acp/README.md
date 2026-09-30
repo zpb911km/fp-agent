@@ -9,6 +9,19 @@ ACP 的完整文档（安装、接口定义、调用示例、使用场景）位�
 
 👉 **[packages/fp-acp/README.md](../../packages/fp-acp/README.md)**
 
+## ❓ 交互问答（ask_user → deferred）
+
+ACP 无带内回复通道，`ACPIO.ask_deferred = True`：
+
+- `ask_user` 工具调用时，问题（含 `options` 编号列表与 `suggest` 推荐值）被
+  推送为一条 `agent_message_chunk` 展示在 IDE 会话中，`ask()` **立即返回空串**；
+- 编排层识别 deferred → 工具返回 `{"status":"deferred","note":"…下一条消息即为其回答"}`，
+  **不注入、不回执**，LLM 结束本轮等待；
+- 用户在 IDE 对话框的**下一条消息**即其回答，自然走新轮次 user 消息（权威注入，I2）。
+
+> 旧实现 `ask()` 返回 `"q"`，会被当成用户回答注入上下文 —— 伪造人类发言，
+> 已修复（测试：`test_ask_user.py::test_ask_deferred_no_injection`）。
+
 ## 🔗 快速链接
 
 - [安装与使用](../../packages/fp-acp/README.md#快速使用)

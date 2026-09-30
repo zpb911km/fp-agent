@@ -67,7 +67,7 @@ class ACPIO(IOChannel):
       - 每累积约 300 字符或显式调用 partial_flush() 时，
         通过 send_chunk 回调推送一条 agent_message_chunk
       - process() 结束后调用 flush_text() 获取剩余文本
-      - 每次 ask() 先 flush 缓冲区，然后返回 "q" 取消交互
+      - ask() 将问题推送为 chunk 展示后返回空（deferred，回答走下一轮）
 
     为何需要流式？
       长时间运行的 Agent 任务（如代码生成、多步工具调用）中，
@@ -75,6 +75,10 @@ class ACPIO(IOChannel):
     """
 
     frontend = "acp"
+
+    # ACP 无带内回复通道 → deferred 语义：问题展示给用户后立即返回空，
+    # 用户的下一条消息（新轮次）即其回答。禁止伪造回答（旧实现返回 "q"）。
+    ask_deferred = True
 
     _STREAM_THRESHOLD = 300
 
@@ -115,9 +119,27 @@ class ACPIO(IOChannel):
         self._char_count = 0
         return merged
 
-    async def ask(self, prompt: str) -> str:
-        """ACP 模式下无法交互，返回 'q' 取消"""
-        return "q"
+    async def ask(
+        self,
+        prompt: str,
+        *,
+        options: list[str] | None = None,
+        suggest: str = "",
+        ask_id: str | None = None,
+    ) -> str:
+        """ACP 无带内回复通道：把问题推送为 agent_message_chunk 展示给用户，
+        立即返回空串（ask_deferred → 编排层走 deferred 分支，不注入不回执）。
+        旧实现返回 "q" 会被当成用户回答注入 — 伪造人类发言，已修复。
+        """
+        lines = [f"❓ {prompt}"]
+        for i, opt in enumerate(options or [], 1):
+            lines.append(f"   {i}. {opt}")
+        if suggest:
+            lines.append(f"   💡 推荐默认值：{suggest}")
+        lines.append("（请在 IDE 对话框中直接回复此问题）")
+        self._accumulate("\n".join(lines))
+        self._partial_flush()
+        return ""
 
     def say(self, text: str):
         self._accumulate(text)

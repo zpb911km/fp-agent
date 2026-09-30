@@ -8,6 +8,67 @@
 // ── 避免 done.final_content 与 llm_end.content 重复渲染 ──
 var _finalContentAlreadyShown = false;
 
+// ── ask 卡片（契约 v2）：等待中的结构化问答状态 ──
+// replyAsk() 发送时携带 ask_id → 后端精确对账（幂等防重放）
+var _pendingAsk = null;
+
+function showAskCard(data) {
+  var options = data.options || [];
+  var suggest = data.suggest || '';
+  _pendingAsk = { ask_id: data.ask_id || '', prompt: data.prompt || '' };
+
+  var contentEl = addAssistantMessage('❓ ' + (data.prompt || ''));
+  var card = document.createElement('div');
+  card.className = 'ask-card';
+  card.id = 'askCard';
+
+  if (options.length) {
+    var optWrap = document.createElement('div');
+    optWrap.className = 'ask-options';
+    options.forEach(function(opt) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ask-option' + (suggest && opt === suggest ? ' recommended' : '');
+      btn.textContent = (suggest && opt === suggest ? '★ ' : '') + opt;
+      btn.onclick = function() { replyAsk(opt); };
+      optWrap.appendChild(btn);
+    });
+    card.appendChild(optWrap);
+  }
+
+  var foot = document.createElement('div');
+  foot.className = 'ask-foot';
+  foot.textContent = suggest
+    ? '💡 推荐：' + suggest + '（直接回车采纳）'
+    : '输入你的回答后回车';
+  card.appendChild(foot);
+  contentEl.appendChild(card);
+
+  inputEl.placeholder = suggest ? ('回车采纳「' + suggest + '」，或输入回答...') : '输入回答... (Enter 发送)';
+  inputEl.focus();
+  scrollToBottom();
+}
+
+function clearAskCard() {
+  var el = document.getElementById('askCard');
+  if (el) { el.remove(); }
+  _pendingAsk = null;
+  inputEl.placeholder = '输入消息... (Enter 发送)';
+}
+
+// 选项按钮/自由输入统一出口：发送 ask 答复（携带 ask_id 对账）
+function replyAsk(text) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { showError('未连接'); return; }
+  var askId = _pendingAsk ? _pendingAsk.ask_id : '';
+  clearAskCard();
+  addUserMessage(text);
+  lastGroupEl = null;
+  setProcessing(true);
+  var payload = { type: 'message', content: text };
+  if (askId) { payload.ask_id = askId; }
+  try { ws.send(JSON.stringify(payload)); } catch (e) { showError('发送失败'); setProcessing(false); }
+}
+
 // ── WebSocket 延迟测量 ──
 var _lastPingTime = null;
 var _pingInterval = null;
@@ -200,8 +261,11 @@ function handleEvent(data) {
       } else {
         setProcessing(false);
       }
-      // ask 等待回复跨连接存续：恢复输入提示
-      if (data.pending_ask) {
+      // ask 等待回复跨连接存续：v2 携带完整元数据 → 恢复整个问答卡片
+      // （v2 之前只有布尔，降级为仅恢复输入提示）
+      if (data.pending_ask && typeof data.pending_ask === 'object') {
+        showAskCard(data.pending_ask);
+      } else if (data.pending_ask) {
         inputEl.placeholder = '输入回复... (Enter 发送)';
         inputEl.focus();
       }
@@ -282,6 +346,7 @@ function handleEvent(data) {
     case 'done':
       removeThinking();
       setProcessing(false);
+      clearAskCard(); // 轮次结束时清掉未答复的问答卡片（答复/超时由后端判定）
       // ── 渲染最终回复内容 ──
       // 命令和 LLM 回复统一通过 done.final_content 传递，
       // 不再走独立的 response 事件（参见 commits 71927ab）
@@ -342,10 +407,8 @@ function handleEvent(data) {
 
     case 'ask':
       removeThinking();
-      addAssistantMessage('🔍 ' + data.prompt);
+      showAskCard(data);
       setProcessing(false);
-      inputEl.placeholder = '输入回复... (Enter 发送)';
-      inputEl.focus();
       break;
 
     case 'info':
@@ -396,6 +459,14 @@ function sendMessage() {
   closeCmdPalette();
   var text = inputEl.value.trim();
   if (!text || processing || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  // ask 答复通道：等待问答时，自由输入同样携带 ask_id 对账
+  if (_pendingAsk) {
+    inputEl.value = '';
+    autoResize(inputEl);
+    replyAsk(text);
+    return;
+  }
 
   var exitCmds = ['/exit', '/exit!', '/quit'];
   var trimmed = text.trim().toLowerCase();

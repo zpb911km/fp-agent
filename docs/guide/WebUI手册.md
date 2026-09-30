@@ -413,7 +413,7 @@ ws://host:port/ws/chat?token=your_token
 | `shutdown` | — | Agent 关闭 |
 | `reload` | `message` | Agent 开始重载 |
 | `reload_done` | `session_id`, `model` | Agent 重载完成 |
-| `ask` | `prompt` | 交互式命令等待用户输入 |
+| `ask` | `version`, `ask_id`, `prompt`, `options`, `suggest` | 交互式问答（v2 结构化：`options` 渲染一键选择按钮、`suggest` 渲染推荐徽章；v1 旧前端只有 `prompt`） |
 | `info` | `content` | IO 通道信息 |
 | `hint` | `content` | 提示信息 |
 | `item` | `content` | 列表项输出 |
@@ -423,7 +423,7 @@ ws://host:port/ws/chat?token=your_token
 ```
 ← { "type": "connected", "sub_id": "sub_0", "run_id": "a3db74cf",
      "seq": 42, "session_id": "s_...", "processing": false,
-     "pending_ask": false, "replay": false, "resync": false }
+     "pending_ask": null, "replay": false, "resync": false }
 → { "type": "message", "content": "帮我搜一下今天的新闻" }
 ← { "type": "llm_start", "seq": 43 }
 ← { "type": "tool_select", "tools": ["web_search"], "seq": 44 }
@@ -448,8 +448,14 @@ ws://host:port/ws/chat?token=your_token
   旧 `seq` 作废
 
 **运行时快照**：`connected` 携带 `processing`（是否仍在处理）与
-`pending_ask`（是否阻塞在 `ask()` 等回复）。重连的前端据此恢复
-"处理中"状态与交互输入框，不会因断连而状态错乱。
+`pending_ask`（等待中的问答元数据 `{ask_id, prompt, options, suggest}`，无则 `null`）。
+重连的前端据此恢复"处理中"状态与**整个问答卡片**（v1 只有布尔 → 降级为恢复输入提示），
+不会因断连而状态错乱。
+
+**ask 答复**：前端答复消息在 `message` 之上携带 `ask_id` 对账
+（`{type:"message", content, ask_id}`）——服务器 `feed_reply(text, ask_id)`
+精确唤醒对应问答且幂等（重复答/已超时 → 按普通消息处理）；不带 `ask_id`
+则唤醒最新等待中的问答。
 
 **保活与半开连接**：客户端断开后服务器 90 秒无上行即主动关闭
 连接；前端 `visibilitychange` 从休眠唤醒时立即重连并发存活 ping，

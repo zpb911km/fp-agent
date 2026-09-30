@@ -228,8 +228,9 @@ def load_file_job(job_id: str) -> dict[str, Any] | None:
 async def human_confirm(prompt: str, suggest: str = "n") -> bool | None:
     """向人求得批准（True=同意 False=拒绝 None=无法询问）。
 
-    无 io / ask 失败 / 非交互通道问不到人 → None，调用方回落原语义
+    无 io / ask 失败 / 超时 / 非交互通道问不到人 → None，调用方回落原语义
     （如 bash 的拦截消息）—— headless 行为不回归。
+    结构化契约 v2：options 渲染为 y/n 一键按钮，suggest=推荐徽章。
     """
     try:
         from fp_core.core.agent import get_current_io
@@ -243,9 +244,14 @@ async def human_confirm(prompt: str, suggest: str = "n") -> bool | None:
         return None  # 已有交互挂起 → 不叠加询问，回落默认
     async with ask_lock:
         try:
-            reply = (await io.ask(f"{prompt}\n[推荐默认值: {suggest}]")).strip()
-        except Exception:  # noqa: BLE001
+            reply = (
+                await asyncio.wait_for(
+                    io.ask(prompt, options=["y", "n"], suggest=suggest),
+                    timeout=120.0,  # 确认门有界等待 — 超时回落原拦截消息
+                )
+            ).strip()
+        except Exception:  # noqa: BLE001 — 含 TimeoutError/deferred 空答
             return None
     if not reply:
-        return None
+        return None  # deferred（ACP）/ 空答 → 回落原语义，不伪造表态
     return reply.lower() in ("y", "yes", "是", "确认", "ok")

@@ -193,11 +193,11 @@ class SessionRuntime:
         self.active_task = asyncio.create_task(coro)
         return self.active_task
 
-    def feed_reply(self, text: str) -> bool:
-        """把用户回复注入当前等待 ask 的 IO（跨连接可用）"""
+    def feed_reply(self, text: str, ask_id: str | None = None) -> bool:
+        """把用户回复注入当前等待 ask 的 IO（跨连接可用；ask_id 精确对账）"""
         if self.current_io is None:
             return False
-        return self.current_io.feed_reply(text)
+        return self.current_io.feed_reply(text, ask_id)
 
     def cancel_active(self) -> bool:
         """取消当前处理任务；返回是否找到了可取消的任务"""

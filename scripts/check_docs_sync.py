@@ -118,10 +118,16 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
     ("packages/fp-core/tests/*.py", ["docs/dev/测试.md"], ["docs/dev/测试.md"]),
     # fp 包测试（fp ext 分发系统等）
     ("packages/fp/tests/*.py", ["docs/dev/测试.md"], ["docs/dev/测试.md"]),
+    # 终端测试（ask 解析契约等）
+    ("packages/fp-terminal/tests/*.py", ["docs/dev/测试.md"], ["docs/dev/测试.md"]),
+    # WebUI 前端静态资源（ask 卡片等组件行为随 WebUI 手册走）
+    ("packages/fp-webui/src/fp_webui/static/*.js", ["docs/guide/WebUI手册.md"], []),
+    ("packages/fp-webui/src/fp_webui/static/*.css", ["docs/guide/WebUI手册.md"], []),
     # 开发/脚本工具
     ("scripts/*.py", ["docs/CONTRIBUTING.md"], []),
     # 工程配置
     (".pre-commit-config.yaml", ["docs/CONTRIBUTING.md"], []),
+    ("pyproject.toml", ["docs/dev/测试.md"], []),
 ]
 
 # ── 反向关联：文档 → 关联代码文件（相对仓库根） ────────────────────────

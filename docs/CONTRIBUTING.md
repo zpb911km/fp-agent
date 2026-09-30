@@ -252,8 +252,11 @@ echo "你是谁" | fp                   # 测试系统提示词
   结构变更（新增/删除/重命名文件）额外要求 README / guide 参考 / self 扩展
   等清单类文档确认。所以「改一行注释」不会误报 README，只有「新增/删除
   命令、工具、钩子」这类结构性变化才提醒清单文档。
-- **测试文件同样纳入门禁**：`packages/fp-core/tests/*.py` 与 `packages/fp/tests/*.py`
-  变更会要求 [dev/测试.md](dev/测试.md) 确认（尤其新增测试文件时，文件清单表需同步）。
+- **测试文件同样纳入门禁**：`packages/fp-core/tests/*.py`、`packages/fp/tests/*.py`
+  与 `packages/fp-terminal/tests/*.py` 变更会要求 [dev/测试.md](dev/测试.md)
+  确认（尤其新增测试文件时，文件清单表需同步）。WebUI 前端静态资源
+  （`static/*.js|css`）关联 [guide/WebUI手册.md](guide/WebUI手册.md)，
+  根 `pyproject.toml`（工具链配置）同样关联测试文档。
 - **依赖层级守卫（方向防混乱）**：pre-commit 钩子 `dep-layers` 由
   `scripts/check_dep_layers.py` 执行，AST 全量扫描 `packages/*/src` 与
   `scripts/` 的静态 import，按四层模型（L0–L4，见

@@ -28,3 +28,15 @@ preview = true
 # 不参与自动格式化；本地 pre-commit 的 ruff-format 也只作用于 .py。
 # 若未来希望 md 代码块也统一格式，删除此 exclude 即可。
 exclude = ["*.md"]
+
+# ── 全量 pytest 自洽（rootdir=仓库根时各包 src 均入 sys.path）──
+# 单包跑（rootdir=packages/xx）由各包 pyproject 的 pythonpath 覆盖；
+# 此处保证 `python -m pytest` 在根目录一把跑通，不依赖 editable 指向。
+[tool.pytest.ini_options]
+pythonpath = [
+  "packages/fp-core/src",
+  "packages/fp/src",
+  "packages/fp-terminal/src",
+  "packages/fp-webui/src",
+  "packages/fp-acp/src",
+]

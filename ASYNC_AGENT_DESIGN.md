@@ -32,14 +32,30 @@
 ```python
 # signature
 async def execute(params) -> str   # 缺 io → 返回错误串（不 raise）
-# params: {"prompt": str 必填, "suggest": str 可选（推荐默认值，防滥问纪律）}
+# params: {"prompt": str 必填, "suggest": str 可选（推荐默认值，防滥问纪律）,
+#          "options": list[str] 可选（前端一键选择）,
+#          "timeout": number 可选（秒，默认 300，有界等待）}
 ```
 
+**结构化契约 v2（三前端配套）**：
+- `io.ask(prompt, *, options=None, suggest="", ask_id=None) -> str` — 展示层负责渲染与
+  解析（CLI：编号列表 + 空回车采纳 suggest + 编号→选项原文；WebUI：问答卡片，选项
+  按钮 + 推荐徽章，答复消息携带 ask_id 对账；ACP：问题推送为 chunk 后立即返回空）。
+- WebSocketIO 事件 schema v2：`{type:"ask", version:2, ask_id, prompt, options, suggest}`；
+  `_pending_replies: dict[ask_id → Future]`，`feed_reply(text, ask_id=None)` 精确且幂等
+  （重复答/无等待者 → False）；`pending_ask_snapshot()` 随 connected 快照携带完整元数据，
+  断连重连可恢复整个问答卡片（v1 只有布尔）。
+- **deferred 语义（ACP）**：`io.ask_deferred = True` 的通道，ask() 展示问题即返回空 →
+  工具返回 `{"status":"deferred","note":"…下一条消息即为其回答"}`，不注入不回执。
+  旧 ACP 返回 `"q"` 把系统占位当用户回答注入（伪造人类发言）已修复。
+- 注入消息格式带 in_reply_to：`【用户回答 <ask_id>】<原文>`（消息只有 role/content，
+  无 metadata 槽位 → 关联 id 随文本携带；收据 JSON 含 ask_id/prompt/reply）。
+
 流程：
-1. 调用 `await io.ask(prompt)`（四前端原语已备，轮次自然挂起，无状态机）。
+1. 调用 `await asyncio.wait_for(io.ask(...), timeout)`（四前端原语已备，轮次自然挂起，无状态机；超时 → `{"status":"timeout"}` 不挂死）。
 2. 回答到达 → **两条**写入对话：
-   - `{"role":"user","content":"【用户回答】<原文>"}`（由工具调用 agent 的 append 钩子或返回结构约定；若协议修复 accept_user_midturn=True 则免）
-   - 工具返回 `{"status":"answered","reply_file":"/path/ask.json"}`（分离：完整原文落临时文件，tool result 只给收据）
+   - `{"role":"user","content":"【用户回答 <ask_id>】<原文>"}`（环顶注入队列，惰性 drain）
+   - 工具返回 `{"status":"answered","ask_id":…,"reply_file":"/path/<ask_id>.json"}`（分离：完整原文落临时文件，tool result 只给收据）
 3. **防滥问纪律写进工具 docstring**：只问阻塞级决策；必须给推荐默认值；话题级问题仍走结束轮次。
 4. 缺 io（worker/无头）：返回 `{"status":"unavailable","error":"no_io"}`，不 raise。
 5. 并发：**单 flight 锁**（module-level asyncio.Lock），第二个 ask_user 返回 `{"status":"busy"}`。主 agent 独占由结构保证（worker 无 io），docstring 写明。

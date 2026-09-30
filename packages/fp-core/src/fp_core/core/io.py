@@ -26,6 +26,7 @@ CLIIO 实现已在 fp-terminal/packages/fp_cli/cli_io.py 中。
 """
 
 import asyncio
+import uuid
 from typing import Any
 
 
@@ -91,10 +92,33 @@ class IOChannel:
 
     # ── 交互式输入 ───────────────────────────────────
 
-    async def ask(self, prompt: str) -> str:
-        """向用户提问，获取文本回复
+    # ask 语义标记（子类覆盖）：
+    #   False = 同步阻塞等待回答（CLI / WebUI）
+    #   True  = 无带内回复通道：ask() 把问题**展示**给用户后立即返回 ""，
+    #            回答将作为用户的下一条消息在新轮次到达（ACP）。
+    # _ask_user 据此区分"用户未回答(空)"与"deferred 已展示待下轮"。
+    ask_deferred: bool = False
 
-        TODO: 当前无消费方调用此方法，属"基础设施先于业务"的设计预留。
+    async def ask(
+        self,
+        prompt: str,
+        *,
+        options: list[str] | None = None,
+        suggest: str = "",
+        ask_id: str | None = None,
+    ) -> str:
+        """向用户提问，获取文本回复（结构化契约 v2）
+
+        Args:
+            prompt: 问题文本（清晰、自包含）
+            options: 可选项列表 — 前端渲染为选择按钮/编号列表；
+                     用户输入编号时由**展示层**解析为选项文本
+            suggest: 推荐默认值 — 前端展示为推荐徽章，空回车采纳；
+                     展示层在空输入时直接返回该值
+            ask_id: 关联 id（收据/注入对账用）；缺省由实现生成
+
+        返回用户原文（已是最终文本，调用方不再做编号/默认值解析）。
+        空串 = 用户未回答 / 无交互通道（语义由调用方结合 ask_deferred 判定）。
         """
         raise NotImplementedError
 
@@ -116,21 +140,42 @@ class WebSocketIO(IOChannel):
         # event_bus: EventBus 类型定义在 fp-webui 包（fp_webui/main.py），
         # fp-core 不应依赖 fp-webui（分层方向错误），故用 Any 兜底。
         self._event_bus: Any = event_bus
-        self._pending_reply: asyncio.Future[str] | None = None
+        # ask_id → Future（v2：多 ask 对账 + 重连快照；旧单 future 已废）
+        self._pending_replies: dict[str, asyncio.Future[str]] = {}
+        # 当前等待中的 ask 元数据（供 snapshot 跨连接恢复）
+        self._pending_ask_meta: dict[str, Any] | None = None
         self.is_running = False  # WebSocket 处理器用来判断当前是否有任务在处理
 
     # ── 供 WebSocket 处理器调用 ─────────────────────────
 
-    def feed_reply(self, text: str) -> bool:
+    def feed_reply(self, text: str, ask_id: str | None = None) -> bool:
         """
         注入用户回复。
-        若当前有 ask() 在等待，则唤醒它并返回 True；
-        否则返回 False（无等待者）。
+        ask_id 指定 → 精确唤醒对应 ask（幂等：已答复/不存在 → False）；
+        ask_id 缺省 → 唤醒最新的未答复 ask。
+        若当前无等待者 → False（调用方按普通消息处理）。
         """
-        if self._pending_reply is not None and not self._pending_reply.done():
-            self._pending_reply.set_result(text)
+        if ask_id is not None:
+            fut = self._pending_replies.get(ask_id)
+            if fut is None or fut.done():
+                return False
+            fut.set_result(text)
             return True
+        # 无 ask_id → 最新未答复者
+        for fut in reversed(list(self._pending_replies.values())):
+            if not fut.done():
+                fut.set_result(text)
+                return True
         return False
+
+    def pending_ask_snapshot(self) -> dict[str, Any] | None:
+        """供 session_runtime.snapshot：等待中的 ask 元数据（跨连接恢复组件）"""
+        if self._pending_ask_meta is None:
+            return None
+        live = [f for f in self._pending_replies.values() if not f.done()]
+        if not live:
+            return None
+        return dict(self._pending_ask_meta)
 
     # ── IO 接口 ─────────────────────────────────────────
 
@@ -171,14 +216,32 @@ class WebSocketIO(IOChannel):
     def tool_result(self, result: str):
         self._pub("tool_result", result=result)
 
-    async def ask(self, prompt: str) -> str:
-        self._pending_reply = asyncio.get_running_loop().create_future()
-        await self._event_bus.publish({"type": "ask", "prompt": prompt})
+    async def ask(
+        self,
+        prompt: str,
+        *,
+        options: list[str] | None = None,
+        suggest: str = "",
+        ask_id: str | None = None,
+    ) -> str:
+        ask_id = ask_id or uuid.uuid4().hex[:8]
+        fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._pending_replies[ask_id] = fut
+        self._pending_ask_meta = {
+            "ask_id": ask_id,
+            "prompt": prompt,
+            "options": list(options or []),
+            "suggest": suggest,
+            "version": 2,
+        }
+        # 事件 schema v2：结构化 ask（version 字段供旧前端兼容分支）
+        await self._event_bus.publish({"type": "ask", **self._pending_ask_meta})
         try:
-            result = await self._pending_reply
-            return result
+            return await fut
         finally:
-            self._pending_reply = None
+            self._pending_replies.pop(ask_id, None)
+            if self._pending_ask_meta and self._pending_ask_meta.get("ask_id") == ask_id:
+                self._pending_ask_meta = None
 
 
 class RestIO(IOChannel):
@@ -192,7 +255,14 @@ class RestIO(IOChannel):
 
     frontend = "rest"
 
-    async def ask(self, prompt: str) -> str:
+    async def ask(
+        self,
+        prompt: str,
+        *,
+        options: list[str] | None = None,
+        suggest: str = "",
+        ask_id: str | None = None,
+    ) -> str:
         return ""
 
     # 所有显示方法都是 no-op
