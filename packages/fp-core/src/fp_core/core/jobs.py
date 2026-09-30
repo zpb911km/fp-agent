@@ -114,34 +114,81 @@ def drain_ready() -> list[dict[str, str]]:
 # ── jobs 服务 ───────────────────────────────────────────
 
 
-async def _runner(job: Job, coro: Any) -> None:
-    try:
-        res = await coro
-        # 协程返回 str → 落盘到结果文件（wait_job/注入消息引用该路径）
-        if isinstance(res, str) and job.result_path:
-            ensure_dir()
-            with contextlib.suppress(OSError), open(job.result_path, "w", encoding="utf-8") as f:
-                f.write(res)
-    except asyncio.CancelledError:
-        job.status = "killed"
-        job.finished_at = time.time()
-        persist_job(job)
-        inject_event("job_killed", f"【系统事实】后台任务已终止：{job.label}（{job.id}）")
-        raise
-    except Exception as e:  # noqa: BLE001 — 任务失败是数据而非崩溃
-        job.status = "failed"
-        job.error = str(e)
-        job.finished_at = time.time()
-        persist_job(job)
-        inject_event("job_failed", f"【系统事实】后台任务失败：{job.label}（{job.id}），error={e}")
-    else:
-        job.status = "done"
-        job.finished_at = time.time()
-        persist_job(job)
+def _finalize(job: Job, status: str, error: str = "", result: Any = None) -> None:
+    """job 终态登记：结果落盘 + persist + 环顶注入（幂等 — 已终态则跳过）。
+
+    幂等守卫同时修复退出清算的双注入：shutdown_all 先标 killed 再 cancel，
+    迟到的完成回调看到非 running 状态即让位，不会重复注入。
+    """
+    if job.status != "running":
+        return
+    job.status = status
+    if error:
+        job.error = error
+    job.finished_at = time.time()
+    if result is not None and job.result_path:
+        text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+        ensure_dir()
+        with contextlib.suppress(OSError), open(job.result_path, "w", encoding="utf-8") as f:
+            f.write(text)
+    persist_job(job)
+    if status == "done":
         inject_event(
             "job_done",
             f"【系统事实】后台任务已完成：{job.label}（{job.id}），状态=done，结果见 {job.result_path}",
         )
+    elif status == "failed":
+        inject_event(
+            "job_failed",
+            f"【系统事实】后台任务失败：{job.label}（{job.id}），error={job.error}",
+        )
+    else:  # killed
+        inject_event("job_killed", f"【系统事实】后台任务已终止：{job.label}（{job.id}）")
+
+
+async def _runner(job: Job, coro: Any) -> None:
+    try:
+        res = await coro
+    except asyncio.CancelledError:
+        _finalize(job, "killed")
+        raise
+    except Exception as e:  # noqa: BLE001 — 任务失败是数据而非崩溃
+        _finalize(job, "failed", error=str(e))
+    else:
+        _finalize(job, "done", result=res)
+
+
+def _on_task_done(job: Job, task: "asyncio.Task[Any]") -> None:
+    """adopt_task 的完成回调（与 _runner 同语义的终态登记）"""
+    if task.cancelled():
+        _finalize(job, "killed")
+        return
+    exc = task.exception()
+    if exc is not None:
+        _finalize(job, "failed", error=str(exc))
+        return
+    _finalize(job, "done", result=task.result())
+
+
+def adopt_task(label: str, task: "asyncio.Task[Any]", job_id: str | None = None) -> Job:
+    """把一个**已在运行**的 task 登记为后台 job（框架层超时移交用 — 语义同 start_job）。
+
+    Args:
+        label: 人类可读标签（注入消息与 /jobs 列表用）
+        task: 已在运行的 asyncio.Task（调用方不得再自行 await 其结果）
+        job_id: 可选指定 id（测试用）
+
+    Returns:
+        Job 句柄（id / result_path 已定）
+    """
+    ensure_dir()
+    jid = job_id or uuid.uuid4().hex[:8]
+    job = Job(id=jid, label=label, result_path=_result_file(jid))
+    job_registry[jid] = job
+    job.task = task
+    persist_job(job)
+    task.add_done_callback(lambda t: _on_task_done(job, t))
+    return job
 
 
 def start_job(label: str, coro: Any, job_id: str | None = None) -> Job:

@@ -18,7 +18,8 @@
 4. 三测试文件全绿 + pyright 0 error + ruff clean。
 5. 更新 docs：`fp docs --list` 找到工具列表文档补 4 个新工具说明。
 
-**明确不做**（本轮）：bash 的 `background=true` 参数改造、two-phase 确认协议（CP2/CP4 那套）、ACP 独立 ask 通道、prompt_builder 的 ask 纪律段、状态条/前端侧边栏。
+**明确不做**（本轮）：two-phase 确认协议（CP2/CP4 那套）、prompt_builder 的 ask 纪律段、状态条/前端侧边栏。
+（后续轮次已推进：bash `background=true` + 超时默认转后台见 §10 与 736fd9b；ACP deferred ask 语义见 1cc6128。）
 
 ## 1. 权威注入原则（最重要，违反=返工）
 
@@ -123,3 +124,29 @@ JOB_DIR = Path(tempfile.gettempdir()) / "fp_jobs"
 - T3 挂点：仅 `packages/fp-core/src/fp_core/core/agent.py`（环顶 drain、确认门、框架挂点）
 - T4 集成：`background.py` 缺口补齐 + docs 更新（`fp docs --list` 查到的工具文档）
 - 禁改：shortcircuit 插件、prompt_builder、io 四前端（若需 io 扩展，报回 supervisor）。
+
+## 10. 框架层全工具后台化（后续轮次 — 取代 §0 部分范围）
+
+> 用户指令："后台和 wait&kill 全工具推广"。实现点：`core/tool_executor.py`
+> （所有 LLM 工具调用的唯一漏斗）+ `core/jobs.py::adopt_task`。bash 的同款
+> 机制（on_timeout=background 默认）保持自管理，不与框架层叠加。
+
+1. **schema 面**：`ToolExecutor.get_definitions()` 幂等注入全工具可选参数
+   `background: bool`（描述含 job_id/wait_job 语义）。自管理工具豁免：
+   `SELF_MANAGED = {bash, ask_user, wait_job, background, kill_job, list_jobs, reload}`
+   （bash 自带同名参数；ask_user/wait_job 阻塞是设计本意；reload 是 exec 语义）。
+2. **执行面**（`ToolExecutor.execute`）：
+   - `background=true` → `start_job` 立即移交，返回收据
+     `{status: backgrounded, tool, job_id, result_file, note}`；
+   - 默认前台阻塞，超过 `FW_BG_TIMEOUT`（默认 10s，环境变量 `FP_TOOL_BG_TIMEOUT`
+     可调，≤0=关闭）→ `adopt_task` 登记运行中任务为 job，返回
+     `{status: backgrounded_on_timeout, ...}`——**不取消、不断连**；
+   - 中断（cancel/KeyboardInterrupt）→ 工具任务一并取消（协程内清理如 killpg
+     正常传播），不登记悬挂 job；
+   - 异常传播语义不变（ON_TOOL_ERROR 契约）。
+3. **完成路径统一**：`_finalize`（幂等终态：落盘 + persist + 环顶注入）同时
+   服务 `_runner`（start_job）与 `_on_task_done`（adopt_task 的 done_callback）；
+   幂等守卫顺带修复退出清算的双注入（shutdown_all 先标 killed，迟到回调让位）。
+4. **测试**：`packages/fp-core/tests/test_tool_executor_bg.py` — 收据/超时移交/
+   快路径无 job/schema 注入与豁免/异常传播/中断无悬挂。
+
