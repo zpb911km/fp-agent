@@ -139,6 +139,9 @@ class PluginRegistry:
         self._plugin_order: list[str] = []
         self._tracked_hooks: dict[str, list[tuple[LifecycleHook, str]]] = {}  # plugin_name → [(hook, name), ...]
 
+        # 本代扫描已加载的 _plugin_scan_* 模块前缀（scan 清理残留时保留这些）
+        self._scan_modules: set[str] = set()
+
         if plugin_dir is not None:
             self.scan(plugin_dir)
 
@@ -153,7 +156,10 @@ class PluginRegistry:
         # （如 _plugin_scan_1.plugin）残留在 sys.modules 中。
         # 不清除会导致目录插件 from .plugin import X 拿到旧类定义，
         # issubclass(旧类, 新Plugin基类) → False → 插件被静默跳过。
-        stale_keys = [k for k in list(sys.modules) if k.startswith("_plugin_scan_")]
+        # 只清「非本代」：同一实例会连续 scan 多个目录（builtin → 三来源），
+        # 全清会把先扫目录的模块删掉 → 插件的懒加载相对导入报
+        # No module named '_plugin_scan_N'（回归实证：webai 的 provider 懒加载）。
+        stale_keys = [k for k in list(sys.modules) if k.startswith("_plugin_scan_") and not self._owns_module(k)]
         for k in stale_keys:
             del sys.modules[k]
 
@@ -210,17 +216,21 @@ class PluginRegistry:
 
     _import_counter = 0
 
-    @classmethod
-    def _import_module(cls, filepath: str) -> types.ModuleType | None:
+    def _owns_module(self, key: str) -> bool:
+        """key 是否属于本代扫描加载的模块（含其子模块）"""
+        return any(key == p or key.startswith(p + ".") for p in self._scan_modules)
+
+    def _import_module(self, filepath: str) -> types.ModuleType | None:
         """从文件路径导入模块"""
         try:
-            cls._import_counter += 1
-            module_name = f"_plugin_scan_{cls._import_counter}"
+            PluginRegistry._import_counter += 1
+            module_name = f"_plugin_scan_{PluginRegistry._import_counter}"
             spec = importlib.util.spec_from_file_location(module_name, filepath)
             if spec is None or spec.loader is None:
                 return None
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
+            self._scan_modules.add(module_name)
             spec.loader.exec_module(module)
             return module
         except Exception as e:
