@@ -2,7 +2,7 @@
 
 契约：docs/dev/ASYNC_AGENT_DESIGN.md §2/§7
 - 缺 io → unavailable 降级（不挂死，I1）
-- 有 io → 回答以【用户回答 …】入 pending 队列（user 角色，环顶注入 — I2）
+- 有 io → 回答以**裸文本**入 pending 队列（user 角色、无标头 — I2，身份协议）
   + tool result 只回执 reply_file（收据，不含人类话语）
 - 单 flight：并发第二个 → busy
 - v2：options/suggest/ask_id 结构化透传；timeout 有界；deferred 不注入
@@ -84,13 +84,12 @@ async def test_ask_answered_injects_user_msg_not_in_tool_result(monkeypatch):
     assert "选 A" not in raw
     assert os.path.exists(res["reply_file"])
 
-    # 回答已入 pending 队列（环顶 drain 前不在对话里）；in_reply_to 随消息携带
+    # 回答已入 pending 队列（环顶 drain 前不在对话里）；人类话语 = 裸文本、无标头
     drained = bp.drain_ready()
     assert len(drained) == 1
     assert drained[0]["kind"] == "user_reply"
-    assert drained[0]["content"].startswith("【用户回答 ")
-    assert res["ask_id"] in drained[0]["content"]
-    assert "选 A" in drained[0]["content"]
+    assert drained[0]["content"] == "选 A", "人类回答必须裸文本（无 ⁂[ 标记、无任何前缀）"
+    assert res["ask_id"] in res["reply_file"], "ask_id 由收据 JSON 对账承载"
     # drain 恰好一次
     assert bp.drain_ready() == []
 

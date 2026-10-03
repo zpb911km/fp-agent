@@ -5,6 +5,7 @@
   2. Agent.process_wakeup：不追加用户输入，直接进循环消费注入（铃声落对话）
   3. is_run_active：唤醒轮结束后复位（空闲泵判断依据）
   4. portal.run.wake：空闲+待唤醒 → 起一轮；忙碌/无待处理 → None（人类优先）
+  5. 身份协议：非人类注入打 ⁂[kind] 标头（半角中括号）；human=True 裸文本
 """
 
 import asyncio
@@ -67,9 +68,22 @@ def test_wake_flag_and_has_pending_wake():
 def test_drain_returns_kind_content_and_clears_wake():
     jobs.inject_event("peer_ring", "ring", wake=True)
     out = jobs.drain_ready()
-    assert out == [{"kind": "peer_ring", "content": "ring"}]
+    assert out == [{"kind": "peer_ring", "content": "⁂[peer_ring] ring"}], "非人类注入须带 ⁂[kind] 标头"
     assert not jobs.has_pending_wake()
     assert jobs.drain_ready() == []
+
+
+def test_inject_identity_protocol():
+    """身份协议：非人类注入打 ⁂[kind] 标头（半角中括号）；human=True 裸文本不打标。"""
+    jobs.inject_event("job_done", "【系统事实】x")
+    jobs.inject_event("user_reply", "选 A", human=True)
+    out = jobs.drain_ready()
+    assert out[0]["content"] == "⁂[job_done] 【系统事实】x"
+    assert out[1]["content"] == "选 A"
+    assert jobs.is_injected(out[0]["content"]) is True
+    assert jobs.is_injected(out[1]["content"]) is False
+    assert jobs.is_injected(None) is False
+    assert jobs.is_injected("") is False
 
 
 # ── agent 层 ────────────────────────────────────────────
@@ -187,3 +201,39 @@ async def test_wake_pump_autonomously_consumes(tmp_path: Path, monkeypatch: pyte
         await p.ctl.close()
 
     assert p._wake_pump_task is None, "ctl.close 后泵必须停止"
+
+
+@pytest.mark.asyncio
+async def test_wake_pump_reports_background_job_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """异步系列接线：空闲实例的后台任务完成 → 空闲泵自动起一轮报告（job 终态 wake=True）。"""
+    from fp_core.api.portal import Portal
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir(exist_ok=True)
+    monkeypatch.setattr(cfg, "SESSIONS_DIR", str(sessions))
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", str(sessions))
+    monkeypatch.setattr(jobs, "JOB_DIR", str(tmp_path))  # job 状态/结果落盘隔离
+
+    p = Portal()
+    await p.ctl.open(enable_log=False)
+    try:
+        agent = p._require()
+        calls: list[Any] = []
+
+        async def mock_chat(messages: Any, tools: Any = None, **kw: Any) -> LLMResult:
+            calls.append(list(messages))
+            return LLMResult(message={"role": "assistant", "content": "ok"}, usage=None)
+
+        agent._llm.chat = mock_chat
+        assert agent.is_run_active is False, "前置：实例空闲"
+
+        job = jobs.start_job("快任务", asyncio.sleep(0.05, result="ok"))
+        await asyncio.wait_for(job.task, timeout=5)  # 完成时刻实例空闲
+        await asyncio.sleep(0.6)  # > 泵间隔（0.25s）
+
+        contents = [m.get("content", "") for m in agent.state.conversation.messages]
+        assert any("后台任务已完成" in c for c in contents), "空闲泵应自动报告后台任务完成"
+        assert not jobs.has_pending_wake()
+        assert calls, "报告轮应触发一次 LLM 调用"
+    finally:
+        await p.ctl.close()

@@ -906,8 +906,9 @@ class Agent:
 
             # ── 后台任务完成/ask_user 回答 的惰性注入（环顶串行 drain — 无锁竞态） ──
             # 设计见 docs/dev/ASYNC_AGENT_DESIGN.md §3/§6：完成回调只入 pending 队列，
-            # 注入统一发生在环顶（无并发轮次），带来源标记（【系统事实】/【用户回答】），
-            # 以 user 角色落盘 → shortcircuit degenerate 不会删除（不变量 I2/I3）。
+            # 注入统一发生在环顶（无并发轮次），身份由注入协议携带（系统事件 ⁂[kind]
+            # 标头 / 人类回答裸文本），以 user 角色落盘 —— 人类话语恒保留；已闭合块内
+            # 的系统标记消息可由短路作噪声剪除（I2/I3，引擎.md「注入消息身份协议」）。
             for _inject_msg in _drain_background_injects():
                 _inj = self._conv.add_user_message(_inject_msg["content"])
                 await self.lifecycle.emit(

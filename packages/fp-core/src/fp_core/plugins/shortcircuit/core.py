@@ -14,6 +14,7 @@ shortcircuit 插件包的核心实现：连通块检测、退化、合并、命�
   -c                     裁剪模式（crop）：只移除 tool 中间消息，不调 LLM（默认）
   -r                     提炼模式（regenerate）：调 LLM 重新生成精简回复
   -d                     退化模式（degenerate）：删除目标块内的工具调用/工具返回消息，
+                        与已闭合块内的 ⁂[kind] 系统注入标记消息（当前块标记消息不动），
                         把工具调用链退化为纯文本 assistant 消息链（保留 AI 文本记录）
 
 硬性策略（仅 shortcircuit 工具，命令层 /sc 不适用）:
@@ -30,6 +31,8 @@ shortcircuit 插件包的核心实现：连通块检测、退化、合并、命�
 
 from collections.abc import Awaitable, Callable
 from typing import Any, TypedDict
+
+from fp_core.core.jobs import is_injected
 
 Message = dict[str, Any]
 
@@ -60,7 +63,10 @@ def scan_components(messages: list[Message]) -> list[Component]:
     """
     扫描非 system 消息列表，返回从旧到新排序的连通块。
 
-    连通块定义：以 user 消息为分隔符，从前向后切割。
+    连通块定义：以**人类** user 消息（裸文本）为分隔符，从前向后切割。
+    ``⁂[kind]`` 标记的系统注入不是人类轮次 —— 不开新块（块 = 讨论主题分段，
+    系统事件是主题内到达的信息）；出现在首条人类消息之前的标记消息游离于
+    所有块之外（保守保留，不参与压缩）。
     每条记录中的 user_idx / terminal_idx 是 messages 中的索引（0-based）。
 
     每条记录：
@@ -76,7 +82,9 @@ def scan_components(messages: list[Message]) -> list[Component]:
         "degenerable": True/False,   # 块内存在工具调用噪音（tool 消息 / 带 tool_calls 的 assistant）
     }
     """
-    user_indices = [i for i, m in enumerate(messages) if m["role"] == "user"]
+    # 边界 = 人类 user 消息（裸文本）。⁂[kind] 标记的系统注入不是人类轮次，不切块
+    # （块 = 讨论主题分段；系统事件是主题内到达的信息）—— 见引擎.md「注入消息身份协议」。
+    user_indices = [i for i, m in enumerate(messages) if m["role"] == "user" and not is_injected(m.get("content"))]
 
     components: list[Component] = []
     for pos, user_idx in enumerate(user_indices):
@@ -113,7 +121,9 @@ def degenerate(
     退化：将指定连通块内的工具调用链退化为纯文本 assistant 消息链。
 
     逐消息规则（固定，不调 LLM）：
-      - user                      → 保留
+      - user 裸文本（人类话语）      → 保留
+      - user ⁂[kind] 标记（系统注入）→ 当前块保留（可能尚未被 LLM 消费）；
+                                      已闭合块删除（已消费回执，同 tool 噪声）
       - assistant 无 tool_calls   → 保留
       - assistant 有 tool_calls 且有 content → 删除 tool_calls，保留 content（转正）
       - assistant 有 tool_calls 无 content   → 整条删除（免兼容问题）
@@ -173,10 +183,17 @@ def degenerate(
                 continue
 
             block = messages[user_idx : eff_terminal + 1]
+            # 当前块（延伸到消息末尾的块）内的系统注入绝不删 —— 可能尚未被 LLM
+            # 消费（存在 drain 后、报告前的窗口）；已闭合块内的标记消息 = 已消费
+            # 回执，按 tool 噪声同级剪除（引擎.md「注入消息身份协议」）。
+            is_current_block = terminal_idx == len(messages) - 1
             kept: list[Message] = []
             for m in block:
                 role = m["role"]
                 if role == "tool":
+                    total_changed += 1
+                    continue
+                if role == "user" and is_injected(m.get("content")) and not is_current_block:
                     total_changed += 1
                     continue
                 if role == "assistant" and m.get("tool_calls"):
@@ -274,7 +291,10 @@ async def shortcircuit(
             context_parts: list[str] = []
             for j in range(user_idx, terminal_idx + 1):
                 m = messages[j]
-                role_label = "用户" if m["role"] == "user" else "AI" if m["role"] == "assistant" else "工具"
+                if m["role"] == "user":
+                    role_label = "系统" if is_injected(m.get("content")) else "用户"
+                else:
+                    role_label = "AI" if m["role"] == "assistant" else "工具"
                 tc = " [调用工具]" if m.get("tool_calls") else ""
                 content = (m.get("content") or "")[:500]
                 context_parts.append(f"[{role_label}]{tc}: {content}")

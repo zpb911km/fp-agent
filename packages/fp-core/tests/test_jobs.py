@@ -76,6 +76,35 @@ async def test_job_failure_recorded():
 
 
 @pytest.mark.asyncio
+async def test_terminal_injects_are_wake_level():
+    """job 终态事实 = wake 级（异步系列接空闲泵）：空闲实例自动起一轮报告，不必等下次输入"""
+    # done
+    job = bp.start_job("快任务", asyncio.sleep(0.01, result="ok"))
+    await asyncio.wait_for(job.task, timeout=5)
+    assert jobs_impl.has_pending_wake(), "job_done 必须是唤醒级"
+    assert bp.drain_ready()[0]["kind"] == "job_done"
+    assert not jobs_impl.has_pending_wake()
+
+    # failed
+    async def _boom():
+        raise RuntimeError("刻意失败")
+
+    job2 = bp.start_job("必败任务", _boom())
+    await asyncio.wait_for(job2.task, timeout=5)
+    assert jobs_impl.has_pending_wake(), "job_failed 必须是唤醒级"
+    assert bp.drain_ready()[0]["kind"] == "job_failed"
+
+    # killed（退出清算）
+    bp.start_job("长任务", asyncio.sleep(60))
+    await asyncio.sleep(0.05)
+    bp.shutdown_all("清理")
+    assert jobs_impl.has_pending_wake(), "job_killed（shutdown_all）必须是唤醒级"
+    bp.drain_ready()
+    await asyncio.sleep(0.1)  # 给 CancelledError 分支收尾机会
+    assert bp.drain_ready() == [], "幂等守卫：迟到回调不得重复注入"
+
+
+@pytest.mark.asyncio
 async def test_kill_job_marks_killed():
     job = bp.start_job("长任务", asyncio.sleep(60))
     await asyncio.sleep(0.05)

@@ -8,9 +8,10 @@
 
 不变量（见设计文档 §8）：
 - I1 中心性：kill_job/退出清算独立于 LLM；io.ask 失败/无 io 降级，不挂死。
-- I2 权威注入：用户话只以 user 角色到达（【用户回答】注入），tool result
-  只有收据 → 协议配对完好（repair_tool_ordering 0 错误）。
-- I3 shortcircuit 兼容：注入均为 user 角色消息，degenerate 不会删除人类话语。
+- I2 权威注入：用户话只以 user 角色到达（回答**裸文本**、human=True），tool
+  result 只有收据 → 协议配对完好（repair_tool_ordering 0 错误）。
+- I3 注入身份协议：非人类注入带 ⁂[kind] 标头（半角中括号），人类话语裸文本；
+  shortcircuit 依此判连通块边界与幸存（引擎.md「注入消息身份协议」）。
 """
 
 import asyncio
@@ -52,7 +53,8 @@ async def _ask_user(params: dict[str, Any]) -> str:
 
     结构化契约 v2：options → 前端选择按钮；suggest → 推荐徽章（空输入采纳）；
     timeout → 秒级超时（默认 300，防前端断连后无限挂起）；
-    ask_id → 收据/注入对账。回答以【用户回答 …】user 角色走环顶注入（I2）。
+    ask_id → 收据/注入对账。回答以**裸文本**、``human=True`` 走环顶注入（I2；
+    无标头 = 人类输入，见引擎.md「注入消息身份协议」）。
 
     防滥问纪律（写给调用方 LLM）：只问会改变后续行为的阻塞级决策；
     必须给出推荐默认值（suggest）；话题级/探讨级问题应结束本轮，
@@ -130,8 +132,9 @@ async def _ask_user(params: dict[str, Any]) -> str:
         )
 
     if reply:
-        # in_reply_to 随消息文本携带（消息只有 role/content，无 metadata 槽位）
-        inject_event("user_reply", f"【用户回答 {ask_id}】{reply}")
+        # 人类话语：裸文本、human=True —— 不打 ⁂[ 标记、不加任何前缀（身份协议，
+        # docs/dev/引擎.md「注入消息身份协议」）；ask_id 由收据 JSON 对账承载。
+        inject_event("user_reply", reply, human=True)
 
     return json.dumps(
         {"status": "answered" if reply else "empty", "ask_id": ask_id, "reply_file": receipt},
@@ -218,7 +221,7 @@ async def _kill_job(params: dict[str, Any]) -> str:
         job.status = "killed"
         job.finished_at = time.time()
         persist_job(job)
-        inject_event("job_killed", f"【系统事实】后台任务已终止：{job.label}（{job.id}）")
+        inject_event("job_killed", f"【系统事实】后台任务已终止：{job.label}（{job.id}）", wake=True)
     return json.dumps({"status": "killed", "job_id": job_id}, ensure_ascii=False)
 
 
@@ -303,7 +306,7 @@ async def _list_jobs(params: dict[str, Any]) -> str:
 # ── 插件注册（多工具模式） ──────────────────────────────
 
 _ASK_DESC = (
-    "向用户提问并等待其回答（pull 式人类交互）。回答会以【用户回答】消息进入上下文，"
+    "向用户提问并等待其回答（pull 式人类交互）。回答以用户消息（裸文本、无标头）进入上下文，"
     "本工具返回收据。给出 options 时前端渲染为一键选择按钮（推荐）。"
     "防滥问纪律：只问会改变后续行为的阻塞级决策，必须通过 suggest 给出推荐默认值；"
     "话题级/探讨级问题应结束本轮让用户自然发言。仅主 agent 可用（子 agent 无 io 会返回 unavailable）。"

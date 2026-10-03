@@ -628,3 +628,95 @@ def await_result(
     import asyncio
 
     return asyncio.run(coro)
+
+
+# ═══════════════════════════════════════════════════════
+# 注入身份协议（docs/dev/引擎.md「注入消息身份协议」）
+# ═══════════════════════════════════════════════════════
+
+
+class TestInjectIdentity:
+    """⁂[kind] 标记的系统注入：不开新块；已闭合块内可剪除；当前块绝不删；行标注=系统"""
+
+    def test_scan_does_not_split_at_injected(self):
+        """系统注入不是人类轮次 → 不切块，并入前一个连通块"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "回复A"),
+            _msg("user", "⁂[job_done] 后台任务完成"),
+            _msg("assistant", "已报告"),
+            _msg("user", "任务B"),
+            _msg("assistant", "回复B"),
+        ]
+        comps = scan_components(messages)
+        assert len(comps) == 2, "标记消息不产生新块"
+        assert comps[0]["user_preview"] == "任务A"
+        assert comps[0]["message_count"] == 4, "标记消息应并入前块（并回上一人类轮次）"
+        assert comps[1]["user_preview"] == "任务B"
+
+    def test_scan_leading_injected_outside_blocks(self):
+        """首条人类消息之前的标记消息游离于所有块之外（保守保留）"""
+        messages: list[Message] = [
+            _msg("user", "⁂[peer_ring] 铃声"),
+            _msg("assistant", "已接听"),
+            _msg("user", "任务"),
+            _msg("assistant", "回复"),
+        ]
+        comps = scan_components(messages)
+        assert len(comps) == 1
+        assert comps[0]["user_idx"] == 2
+
+    def test_degenerate_drops_injected_in_closed_block(self):
+        """已闭合块内的标记消息 = 已消费回执 → 与 tool 噪声同级剪除"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "", tool_calls=_tc("s1")),
+            _msg("tool", "结果"),
+            _msg("user", "⁂[job_done] 完成"),
+            _msg("assistant", "回复A"),
+            _msg("user", "任务B"),
+            _msg("assistant", "回复B"),
+        ]
+        ok, _desc, saved, new = degenerate(messages, [(0, 4)], protect_callsite=False)
+        assert ok
+        assert new is not None
+        contents = [m.get("content", "") for m in new]
+        assert not any("⁂[job_done]" in str(c) for c in contents), "已闭合块标记消息应剪除"
+        assert "回复A" in contents
+        assert saved >= 2, "tool + 标记消息均计入清理数"
+
+    def test_degenerate_keeps_injected_in_current_block(self):
+        """当前块（延伸到消息末尾）内的标记消息绝不删 —— 可能尚未被 LLM 消费"""
+        messages: list[Message] = [
+            _msg("user", "任务"),
+            _msg("assistant", "", tool_calls=_tc("s1")),
+            _msg("tool", "结果"),
+            _msg("assistant", "回复"),
+            _msg("user", "⁂[job_done] 完成"),
+        ]
+        ok, _desc, _saved, new = degenerate(messages, [(0, 4)], protect_callsite=False)
+        assert ok
+        assert new is not None
+        contents = [m.get("content", "") for m in new]
+        assert any("⁂[job_done]" in str(c) for c in contents), "当前块标记消息必须保留"
+
+    def test_regenerate_labels_injected_as_system(self):
+        """regenerate 上下文里标记消息标注为 [系统]，人类消息才是 [用户]"""
+        captured: dict[str, str] = {}
+
+        async def refiner(user_text: str, assistant_text: str, context_text: str) -> tuple[str, str]:
+            captured["ctx"] = context_text
+            return ("新用户", "新回复")
+
+        messages: list[Message] = [
+            _msg("user", "任务"),
+            _msg("assistant", "", tool_calls=_tc("s1")),
+            _msg("tool", "结果"),
+            _msg("user", "⁂[job_done] 完成"),
+            _msg("assistant", "回复"),
+        ]
+        ok, _desc, _saved, new = await_result(shortcircuit(messages, refiner, [(0, 4)], "regenerate"))
+        assert ok
+        assert "[用户]: 任务" in captured["ctx"]
+        assert "[系统]: ⁂[job_done] 完成" in captured["ctx"]
+        assert new is not None and len(new) == 2

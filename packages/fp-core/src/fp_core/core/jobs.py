@@ -9,17 +9,20 @@ tools/extensions/background_plugin.py（L2），经 L2→L1 合法引用本模�
 
 三件套：
 1. jobs 服务  — start_job 把任意 awaitable 移交后台，完成事实入 pending 队列，
-   agent 环顶 drain_ready() 串行注入（【系统事实】标记），无锁竞态。
-   状态独立落盘 JOB_DIR（不混进 session context），重启可查、可清算。
+   agent 环顶 drain_ready() 串行注入（非人类项带 ⁂[kind] 身份标头，见下），
+   无锁竞态。状态独立落盘 JOB_DIR（不混进 session context），重启可查、可清算。
 2. 注入队列   — 完成回调/ask 回答只入队；环顶 drain 前不进对话。
 3. 确认门     — human_confirm：危险命令命中 BLOCK 规则时向人求批准
    （ask_user 的杀手应用），无 io/非交互通道降级 None，不挂死。
 
 不变量（见设计文档 §8）：
 - I1 中心性：shutdown_all/确认门独立于 LLM；io.ask 失败/无 io 降级。
-- I2 权威注入：用户话只以 user 角色到达；系统事实带【系统事实】前缀；
-  tool result 只有收据 → 协议配对完好（repair_tool_ordering 0 错误）。
-- I3 shortcircuit 兼容：注入均为 user 角色消息，degenerate 不会删除。
+- I2 权威注入：用户话只以 user 角色到达（裸文本）；系统事实正文带【系统事实】
+  前缀、身份带 ⁂[kind] 标头；tool result 只有收据 → 协议配对完好。
+- I3 注入消息身份协议（docs/dev/引擎.md「注入消息身份协议」定死）：
+  非人类注入内容以 ``⁂[<kind>]`` 开头（**半角中括号**硬规定），人类话语
+  裸文本不打标；shortcircuit 依此判连通块边界与幸存 —— 人类话语恒保留，
+  已闭合块内的标记消息可作噪声剪除。
 """
 
 import asyncio
@@ -110,14 +113,33 @@ def persist_job(job: Job) -> None:
         )
 
 
-def inject_event(kind: str, content: str, *, wake: bool = False) -> None:
+# ── 注入消息身份协议（docs/dev/引擎.md「注入消息身份协议」定死） ──
+# 非人类注入的内容以 `⁂[<kind>] ` 开头 —— **中括号硬性规定半角 `[` `]`**，
+# kind 约束 [a-z][a-z0-9_]*；人类话语（human=True）保持裸文本不打标。
+# shortcircuit 只认这一个符号判边界/幸存，永不枚举 kind（加新 kind 零改动）。
+INJECT_MARK = "⁂["
+
+
+def is_injected(content: str | None) -> bool:
+    """内容是否为非人类注入消息（以 ``⁂[`` 开头 —— 身份协议标头）。"""
+    return bool(content) and content.startswith(INJECT_MARK)
+
+
+def inject_event(kind: str, content: str, *, wake: bool = False, human: bool = False) -> None:
     """把一条待注入消息入队（环顶 drain 前不进对话 —— 串行化保证无竞态）。
 
     Args:
         wake: True = 唤醒级事件。若实例空闲，应主动起一轮消费它
               （见 ``Agent.process_wakeup`` / ``portal.run.wake``）；
               忙碌则只入队，等当前轮结束后的空闲泵取走（人类优先，不打断）。
+              wake 是**调度语义**，与消息身份无关。
+        human: True = 人类话语（如 ask_user 回答）→ 内容保持**裸文本**、不打标，
+               在 shortcircuit 中作为连通块边界（真正的用户轮次）。
+               False（默认）= 系统/事件消息 → 内容打标 ``⁂[<kind>] <原文>``
+               （半角中括号），shortcircuit 不把它当人类输入。
     """
+    if not human:
+        content = f"{INJECT_MARK}{kind}] {content}"
     pending_inject.append(InjectItem(kind, content, wake))
 
 
@@ -131,6 +153,7 @@ def drain_ready() -> list[dict[str, str]]:
 
     Returns:
         [{"kind": "job_done"|"job_killed"|"job_failed"|"user_reply"|…, "content": str}, ...]
+        非人类项 content 已带 ``⁂[kind]`` 标头；人类项（human=True）为裸文本。
     """
     out = [{"kind": item.kind, "content": item.content} for item in pending_inject]
     pending_inject.clear()
@@ -142,6 +165,9 @@ def drain_ready() -> list[dict[str, str]]:
 
 def _finalize(job: Job, status: str, error: str = "", result: Any = None) -> None:
     """job 终态登记：结果落盘 + persist + 环顶注入（幂等 — 已终态则跳过）。
+
+    注入为 **wake 级**：实例空闲时由空闲泵自动起一轮报告，不必等下一次用户输入
+    （忙碌则保留到轮末，人类优先）。非终态注入（如 user_reply）仍为普通级。
 
     幂等守卫同时修复退出清算的双注入：shutdown_all 先标 killed 再 cancel，
     迟到的完成回调看到非 running 状态即让位，不会重复注入。
@@ -158,18 +184,21 @@ def _finalize(job: Job, status: str, error: str = "", result: Any = None) -> Non
         with contextlib.suppress(OSError), open(job.result_path, "w", encoding="utf-8") as f:
             f.write(text)
     persist_job(job)
+    # 终态事实均为 wake 级：实例空闲时不必等下一次用户输入，空闲泵自动起一轮报告
     if status == "done":
         inject_event(
             "job_done",
             f"【系统事实】后台任务已完成：{job.label}（{job.id}），状态=done，结果见 {job.result_path}",
+            wake=True,
         )
     elif status == "failed":
         inject_event(
             "job_failed",
             f"【系统事实】后台任务失败：{job.label}（{job.id}），error={job.error}",
+            wake=True,
         )
     else:  # killed
-        inject_event("job_killed", f"【系统事实】后台任务已终止：{job.label}（{job.id}）")
+        inject_event("job_killed", f"【系统事实】后台任务已终止：{job.label}（{job.id}）", wake=True)
 
 
 async def _runner(job: Job, coro: Any) -> None:
@@ -284,7 +313,7 @@ def shutdown_all(reason: str = "会话退出") -> None:
             job.error = job.error or f"{reason}时未完成"
             job.finished_at = time.time()
             persist_job(job)
-            inject_event("job_killed", f"【系统事实】后台任务已终止：{job.label}（{job.id}）")
+            inject_event("job_killed", f"【系统事实】后台任务已终止：{job.label}（{job.id}）", wake=True)
 
 
 def load_file_job(job_id: str) -> dict[str, Any] | None:

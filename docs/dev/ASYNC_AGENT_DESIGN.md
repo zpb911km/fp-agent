@@ -49,13 +49,13 @@ async def execute(params) -> str   # 缺 io → 返回错误串（不 raise）
 - **deferred 语义（ACP）**：`io.ask_deferred = True` 的通道，ask() 展示问题即返回空 →
   工具返回 `{"status":"deferred","note":"…下一条消息即为其回答"}`，不注入不回执。
   旧 ACP 返回 `"q"` 把系统占位当用户回答注入（伪造人类发言）已修复。
-- 注入消息格式带 in_reply_to：`【用户回答 <ask_id>】<原文>`（消息只有 role/content，
-  无 metadata 槽位 → 关联 id 随文本携带；收据 JSON 含 ask_id/prompt/reply）。
+- 注入消息为**裸文本**（人类话语不打标头 —— 身份协议见引擎.md「注入消息
+  身份协议」）；ask_id 不随文本携带，由收据 JSON（ask_id/prompt/reply）对账。
 
 流程：
 1. 调用 `await asyncio.wait_for(io.ask(...), timeout)`（四前端原语已备，轮次自然挂起，无状态机；超时 → `{"status":"timeout"}` 不挂死）。
 2. 回答到达 → **两条**写入对话：
-   - `{"role":"user","content":"【用户回答 <ask_id>】<原文>"}`（环顶注入队列，惰性 drain）
+   - `{"role":"user","content":"<原文>"}`（`human=True` 裸文本，环顶注入队列，惰性 drain）
    - 工具返回 `{"status":"answered","ask_id":…,"reply_file":"/path/<ask_id>.json"}`（分离：完整原文落临时文件，tool result 只给收据）
 3. **防滥问纪律写进工具 docstring**：只问阻塞级决策；必须给推荐默认值；话题级问题仍走结束轮次。
 4. 缺 io（worker/无头）：返回 `{"status":"unavailable","error":"no_io"}`，不 raise。
@@ -72,11 +72,18 @@ JOB_DIR = Path(tempfile.gettempdir()) / "fp_jobs"
 
 - `start_job(label, coro) -> job_id`：内部创建 asyncio 任务，**完成回调只写文件+入队**（不阻塞）。
 - **任务来源**：本轮用"**await 令牌完成**"最小挂点：agent 提供 `FRAMEWORK_JOB_TOKENS: dict[token] -> Future`（给未来 shell background 移交用）。jobs/wait_job 服务 ready 的 token，测试用 mock future 注入。
-- drain：agent 环顶 `drain_ready()` → 消息形如
-  `{"role":"system"...}` 或带前缀 user 消息：`【系统事实】后台任务 <id> 已完成，结果见 <path>（状态：done）`。
+- drain：agent 环顶 `drain_ready()` → 非人类项内容带 `⁂[job_done]` 身份标头
+  （半角中括号，引擎.md「注入消息身份协议」）+ 正文 `【系统事实】后台任务 <id>
+  已完成，结果见 <path>（状态：done）`，以 user 角色落盘。
   **drain 只入队，注入在环顶串行执行**（无锁竞态）。
 - **僵尸清理**：session 结束/进程退出时，running job → 标 killed（本轮不做跨进程 reattach）。
 - 完成注入内容是**框架写的系统事实 → 带标记注入**，不落 tool result。
+- **终态注入 = wake 级**（后续接线，与 core 空闲泵对齐）：`_finalize` / `shutdown_all` /
+  `kill_job` 兜底注入 `job_done` / `job_failed` / `job_killed` 时带 `wake=True` ——
+  实例**空闲**且任务跑完 → core 空闲泵（portal 内部协程，0.25s）自动起一轮报告，
+  不必等下一次用户输入；**忙碌**则保留到本轮环顶 drain（人类优先，不打断）。
+  本文 §0 的「轮次内闭环」不变——wake 只补「无人输入时任务完成」这一拍。
+  `user_reply` 仍为普通级（ask 轮内阻塞等待，本轮 drain 必取走）。
 
 ## 4. shell 危险确认门（ask_user 的杀手应用）
 
