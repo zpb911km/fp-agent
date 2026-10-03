@@ -73,6 +73,11 @@ def _session_path(sid: str) -> str:
     return os.path.join(SESSIONS_DIR, f"{sid}.jsonl")
 
 
+def session_file_path(sid: str) -> str:
+    """公开：sid → 会话 .jsonl 文件路径（api.ctl.sessions.path 的底层）"""
+    return _session_path(sid)
+
+
 def _read_meta_from_file(path: str) -> dict[str, Any] | None:
     """读取会话文件第一行中的 meta 信息。"""
     if not os.path.exists(path):

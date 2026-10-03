@@ -36,8 +36,23 @@ from typing import Any, cast
 # ── 存储布局 ────────────────────────────────────────────
 JOB_DIR = os.path.join(tempfile.gettempdir(), "fp_jobs")
 
+
 # 环顶待注入队列（完成回调/ask 回答只入队；agent 环顶串行 drain —— 无锁竞态）
-pending_inject: deque[dict[str, str]] = deque()
+@dataclass
+class InjectItem:
+    """一条待注入消息。
+
+    ``wake=True`` 表示这是一条"唤醒级"事件：若实例当前空闲，应主动起一轮
+    消费它（而非等下次用户输入）——见 ``Agent.process_wakeup`` / ``portal.run.wake``。
+    忙碌时只入队，等当前轮结束后的空闲泵取走（人类优先，不打断）。
+    """
+
+    kind: str
+    content: str
+    wake: bool = False
+
+
+pending_inject: deque[InjectItem] = deque()
 
 # ask 单 flight 锁（防止并行工具同时挂起等人）
 ask_lock = asyncio.Lock()
@@ -95,18 +110,29 @@ def persist_job(job: Job) -> None:
         )
 
 
-def inject_event(kind: str, content: str) -> None:
-    """把一条待注入消息入队（环顶 drain 前不进对话 —— 串行化保证无竞态）"""
-    pending_inject.append({"kind": kind, "content": content})
+def inject_event(kind: str, content: str, *, wake: bool = False) -> None:
+    """把一条待注入消息入队（环顶 drain 前不进对话 —— 串行化保证无竞态）。
+
+    Args:
+        wake: True = 唤醒级事件。若实例空闲，应主动起一轮消费它
+              （见 ``Agent.process_wakeup`` / ``portal.run.wake``）；
+              忙碌则只入队，等当前轮结束后的空闲泵取走（人类优先，不打断）。
+    """
+    pending_inject.append(InjectItem(kind, content, wake))
+
+
+def has_pending_wake() -> bool:
+    """是否有未消费的唤醒级事件（供空闲泵判断是否该起一轮）。"""
+    return any(item.wake for item in pending_inject)
 
 
 def drain_ready() -> list[dict[str, str]]:
     """agent 环顶调用：取走全部待注入消息（每条恰好一次）。
 
     Returns:
-        [{"kind": "job_done"|"job_killed"|"job_failed"|"user_reply", "content": str}, ...]
+        [{"kind": "job_done"|"job_killed"|"job_failed"|"user_reply"|…, "content": str}, ...]
     """
-    out = list(pending_inject)
+    out = [{"kind": item.kind, "content": item.content} for item in pending_inject]
     pending_inject.clear()
     return out
 

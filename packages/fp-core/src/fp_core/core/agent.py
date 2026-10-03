@@ -16,7 +16,6 @@ import os
 import time
 import types
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, cast
 
@@ -78,22 +77,10 @@ def _drain_background_injects() -> list[dict[str, str]]:
         return []
 
 
-@dataclass
-class Message:
-    """消息对象"""
-
-    role: str = "user"
-    content: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict[str, Any])
-
-
-@dataclass
-class Response:
-    """响应对象"""
-
-    content: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict[str, Any])
-    error: str | None = None
+# Message/Response 定义已下沉至 core/messages.py（轻量模块，供 api 层稳定导出）；
+# 此处 re-export 保持 `from fp_core.core.agent import Message, Response` 兼容。
+from fp_core.core.messages import Message as Message  # noqa: E402,F401  (历史路径再导出)
+from fp_core.core.messages import Response  # noqa: E402
 
 
 class Agent:
@@ -250,6 +237,9 @@ class Agent:
         self._interrupted = False
         self._processing = False
         self._cancelled_by_user = False
+        # 整轮是否在进行中（覆盖工具执行期；_processing 仅覆盖 LLM 调用期）。
+        # 空闲泵据此判断"能否唤醒"——必须是覆盖整轮的可靠忙碌信号。
+        self._run_active = False
 
         # 初始化锁（防竞态）
         self._init_lock = asyncio.Lock()
@@ -289,13 +279,28 @@ class Agent:
         return self._processing
 
     @property
+    def is_run_active(self) -> bool:
+        """是否有一轮对话正在进行（process/continue/wakeup 全程）。
+
+        与 ``is_processing`` 的区别：后者只覆盖 LLM 调用期，工具执行期间为 False；
+        本属性覆盖整轮（含工具执行），是空闲泵判断"能否唤醒"的可靠依据。
+        """
+        return self._run_active
+
+    @property
     def cancelled_by_user(self) -> bool:
         """是否被用户主动取消"""
         return self._cancelled_by_user
 
     def reset_cancelled(self):
-        """重置用户取消标记"""
+        """复位全部打断标记（用户取消 + 中断 + 处理中）
+
+        前端在取消路径的清理点调用（原 acp 直触 _interrupted/_processing 私有
+        字段、webui 调 reset_cancelled —— 统一收编于此，保证下次 prompt 正常）。
+        """
         self._cancelled_by_user = False
+        self._interrupted = False
+        self._processing = False
 
     @property
     def model(self) -> str:
@@ -667,29 +672,33 @@ class Agent:
           如果在 _process_inner 内部创建子 Task，需手动传播 context，
           见 _current_io 定义处的说明。
         """
-        await self.ensure_initialized()
-
-        if not user_input.strip():
-            await self.lifecycle.emit(
-                LifecycleHook.ON_EMPTY,
-                content=user_input,
-                messages=self._conv.messages,
-            )
-            return Response(content="")
-
-        # 使用 contextvars 设置 IO 通道（不修改实例变量，防并发竞态）
-        # io=None → fallback 到 self._default_io，保证 get_current_io() 始终返回有效值
-        token = _current_io.set(io or self._default_io)
-        _current_io_ref = _current_io  # 锁住旧引用：防止热重载后 _current_io 指向新 contextvar
-        _state_ref = current_state  # 锁旧引用：同上，防热重载后指向新 contextvar
-        _state_token = _state_ref.set(self.state)
+        self._run_active = True
         try:
-            return await self._process_inner(user_input)
+            await self.ensure_initialized()
+
+            if not user_input.strip():
+                await self.lifecycle.emit(
+                    LifecycleHook.ON_EMPTY,
+                    content=user_input,
+                    messages=self._conv.messages,
+                )
+                return Response(content="")
+
+            # 使用 contextvars 设置 IO 通道（不修改实例变量，防并发竞态）
+            # io=None → fallback 到 self._default_io，保证 get_current_io() 始终返回有效值
+            token = _current_io.set(io or self._default_io)
+            _current_io_ref = _current_io  # 锁住旧引用：防止热重载后 _current_io 指向新 contextvar
+            _state_ref = current_state  # 锁旧引用：同上，防热重载后指向新 contextvar
+            _state_token = _state_ref.set(self.state)
+            try:
+                return await self._process_inner(user_input)
+            finally:
+                _current_io_ref.reset(token)
+                _state_ref.reset(_state_token)
+                # #49/#50 contextvar 已复位（正常返回与异常路径均走此 finally）
+                await self.lifecycle.emit(LifecycleHook.ON_CONTEXT_RESTORE, entry="process")
         finally:
-            _current_io_ref.reset(token)
-            _state_ref.reset(_state_token)
-            # #49/#50 contextvar 已复位（正常返回与异常路径均走此 finally）
-            await self.lifecycle.emit(LifecycleHook.ON_CONTEXT_RESTORE, entry="process")
+            self._run_active = False
 
     async def continue_conversation(self, io: IOChannel | None = None) -> Response:
         """续接模式入口：会话尾部已含未应答的 assistant(tool_calls)/tool 消息时，
@@ -699,19 +708,48 @@ class Agent:
         各入口在启动时消费 handoff 后调用本方法，渲染返回的 Response，
         然后将 state._pending_continue 置回 None。
         """
-        await self.ensure_initialized()
-
-        token = _current_io.set(io or self._default_io)
-        _current_io_ref = _current_io  # 锁住旧引用：防止热重载后 _current_io 指向新 contextvar
-        _state_ref = current_state  # 锁旧引用：同上，防热重载后指向新 contextvar
-        _state_token = _state_ref.set(self.state)
+        self._run_active = True
         try:
-            return await self._process_inner("", continuation=True)
+            await self.ensure_initialized()
+
+            token = _current_io.set(io or self._default_io)
+            _current_io_ref = _current_io  # 锁住旧引用：防止热重载后 _current_io 指向新 contextvar
+            _state_ref = current_state  # 锁旧引用：同上，防热重载后指向新 contextvar
+            _state_token = _state_ref.set(self.state)
+            try:
+                return await self._process_inner("", continuation=True)
+            finally:
+                _current_io_ref.reset(token)
+                _state_ref.reset(_state_token)
+                # #49/#50 同 process：contextvar 复位后观察（异常路径同样触发）
+                await self.lifecycle.emit(LifecycleHook.ON_CONTEXT_RESTORE, entry="continue")
         finally:
-            _current_io_ref.reset(token)
-            _state_ref.reset(_state_token)
-            # #49/#50 同 process：contextvar 复位后观察（异常路径同样触发）
-            await self.lifecycle.emit(LifecycleHook.ON_CONTEXT_RESTORE, entry="continue")
+            self._run_active = False
+
+    async def process_wakeup(self, io: IOChannel | None = None) -> Response:
+        """唤醒轮入口：不追加用户输入，直接进循环消费环顶注入（如邻居铃声）。
+
+        形状同 ``continue_conversation``（``continuation=True``：跳过命令检查/
+        消息过滤/用户消息追加），但语义独立——供空闲泵在实例空闲且有 ``wake``
+        注入时调用（见 ``portal.run.wake``）。环顶 drain 会把唤醒消息以 user 角色
+        落入对话，模型据此自行决定如何响应。
+        """
+        self._run_active = True
+        try:
+            await self.ensure_initialized()
+
+            token = _current_io.set(io or self._default_io)
+            _current_io_ref = _current_io  # 锁住旧引用：防止热重载后 _current_io 指向新 contextvar
+            _state_ref = current_state  # 锁旧引用：同上，防热重载后指向新 contextvar
+            _state_token = _state_ref.set(self.state)
+            try:
+                return await self._process_inner("", continuation=True)
+            finally:
+                _current_io_ref.reset(token)
+                _state_ref.reset(_state_token)
+                await self.lifecycle.emit(LifecycleHook.ON_CONTEXT_RESTORE, entry="wakeup")
+        finally:
+            self._run_active = False
 
     async def _process_inner(self, user_input: str, continuation: bool = False) -> Response:
         """处理用户输入的核心逻辑
@@ -1246,9 +1284,15 @@ class Agent:
 
             # 插件可通过 system_prompt_append 追加内容到 system prompt
             # （统一交给 helper：归一化 str/list、过滤空白段、空行拼接）
-            from fp_core.prompts import apply_system_prompt_append
+            from fp_core.prompts import apply_system_prompt_append, normalize_prompt_append
 
-            apply_system_prompt_append(self._conv, ctx.data.get("system_prompt_append"))
+            raw_append = ctx.data.get("system_prompt_append")
+            apply_system_prompt_append(self._conv, raw_append)
+            # 缓存归一化后的注入段：会话重建（rebuild_system_prompt）时重放，
+            # 保证插件注入跨 /clear /new /resume 与 api 会话操作不丢失。
+            _st = getattr(self, "state", None)
+            if _st is not None:  # 兼容测试桩（object.__new__ 跳过 __init__）
+                _st.prompt_appends = normalize_prompt_append(raw_append)
             await self.lifecycle.emit(LifecycleHook.ON_INITIALIZED, first_time=True)
 
     async def shutdown(self) -> None:

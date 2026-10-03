@@ -94,16 +94,26 @@ class State:
     def rebuild_system_prompt(self):
         """重建 system prompt 并应用到当前会话
 
-        命令层（clear, resume 等）需要重置上下文时调用此方法，
+        命令层（clear, resume 等）与 api 会话操作需要重置上下文时调用此方法，
         无需知道 PromptBuilder 的存在。
+
+        重建后**重放**插件注入（prompt_appends，见 ensure_initialized 捕获），
+        保证插件 system_prompt_append 跨会话重建不丢失（原 webui 独有补丁归核）。
         """
         from fp_core.core.prompt_builder import PromptBuilder
+        from fp_core.prompts import apply_system_prompt_append
 
         prompt = PromptBuilder().build_system_prompt()
         self.conversation.set_system_prompt(prompt)
+        if self.prompt_appends:
+            apply_system_prompt_append(self.conversation, self.prompt_appends)
 
     # ── Agent 回引（由 Agent.__init__ 设置，供命令访问 Agent 实例） ──
     agent: "Agent | None" = field(repr=False, default=None)
+
+    # ── 插件注入缓存（Agent.ensure_initialized 在 ON_INIT 后写入；
+    #    rebuild_system_prompt 重放，保证跨会话重建不丢失。见 prompts.apply_system_prompt_append） ──
+    prompt_appends: list[str] = field(repr=False, default_factory=list[str])
 
     # ── reload 完成提示（core.handoff 消费 kind=command 的 handoff 后置位；
     #    各入口在控制点显示该行并置 None。契约见 core/handoff.py） ──

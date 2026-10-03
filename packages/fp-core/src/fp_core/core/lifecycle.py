@@ -11,7 +11,7 @@
   （modified_* = 修改后的值，blocked/cancelled/handled = 守卫位）。
 """
 
-import asyncio
+import inspect
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -373,7 +373,7 @@ class LifecycleManager:
 
             try:
                 start = time.time()
-                if asyncio.iscoroutinefunction(func):  # pyright: ignore[reportDeprecated]
+                if inspect.iscoroutinefunction(func):
                     result = await func(context, **context.data)
                 else:
                     result = func(context, **context.data)
@@ -438,7 +438,7 @@ def hook(hook_enum: LifecycleHook, priority: int = 100) -> Callable[[F], F]:
         def sync_wrapper(context: HookContext, **kwargs: Any) -> Any:
             return func(context, **kwargs)
 
-        if asyncio.iscoroutinefunction(func):  # pyright: ignore[reportDeprecated]
+        if inspect.iscoroutinefunction(func):
             return cast(F, async_wrapper)
         return cast(F, sync_wrapper)
 

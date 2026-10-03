@@ -32,6 +32,18 @@ def load_agent_prompt() -> str:
 你现在的系统提示词没有正常加载,你需要在回答中提醒用户"""
 
 
+def normalize_prompt_append(append_text: "str | list[str] | None") -> list[str]:
+    """归一化 system_prompt_append 段（str → 单元素列表；过滤空白）
+
+    供 apply_system_prompt_append（初始注入）与 State.prompt_appends
+    （会话重建时重放）共用同一套归一化规则。
+    """
+    if not append_text:
+        return []
+    parts = [append_text] if isinstance(append_text, str) else list(append_text)
+    return [p.strip() for p in parts if p and p.strip()]
+
+
 def apply_system_prompt_append(conv: "ConversationState", append_text: "str | list[str] | None") -> None:
     """把插件在 ON_INIT 写入的 system_prompt_append 一次性追加到 system prompt。
 
@@ -42,10 +54,7 @@ def apply_system_prompt_append(conv: "ConversationState", append_text: "str | li
 
     非空段用空行拼接，整体仅在初始化时追加一次，不逐轮改写。
     """
-    if not append_text:
-        return
-    parts = [append_text] if isinstance(append_text, str) else list(append_text)
-    parts = [p.strip() for p in parts if p and p.strip()]
+    parts = normalize_prompt_append(append_text)
     if not parts:
         return
     conv.set_system_prompt(conv.system_prompt + "\n\n" + "\n\n".join(parts))

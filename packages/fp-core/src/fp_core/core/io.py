@@ -29,6 +29,8 @@ import asyncio
 import uuid
 from typing import Any
 
+from fp_core.core.events import EventBus
+
 
 class IOChannel:
     """
@@ -122,6 +124,15 @@ class IOChannel:
         """
         raise NotImplementedError
 
+    def reply(self, text: str, ask_id: str | None = None) -> bool:
+        """带内 ask 应答注入（portal.run.reply 的底层协议）
+
+        Returns:
+            True = 已唤醒某个 pending ask；False = 无 pending ask/无应答通道
+            （调用方按普通消息处理）。
+        """
+        return False
+
 
 class WebSocketIO(IOChannel):
     """
@@ -136,10 +147,10 @@ class WebSocketIO(IOChannel):
 
     frontend = "webui"
 
-    def __init__(self, event_bus: Any):
-        # event_bus: EventBus 类型定义在 fp-webui 包（fp_webui/main.py），
-        # fp-core 不应依赖 fp-webui（分层方向错误），故用 Any 兜底。
-        self._event_bus: Any = event_bus
+    def __init__(self, event_bus: EventBus):
+        # EventBus 已下沉至 core（fp_core.core.events），此处为强类型引用；
+        # 历史上 EventBus 定义在 fp-webui 导致分层倒挂，曾以 Any 兜底。
+        self._event_bus = event_bus
         # ask_id → Future（v2：多 ask 对账 + 重连快照；旧单 future 已废）
         self._pending_replies: dict[str, asyncio.Future[str]] = {}
         # 当前等待中的 ask 元数据（供 snapshot 跨连接恢复）
@@ -167,6 +178,10 @@ class WebSocketIO(IOChannel):
                 fut.set_result(text)
                 return True
         return False
+
+    def reply(self, text: str, ask_id: str | None = None) -> bool:
+        """协议级应答入口（= feed_reply；portal.run.reply 经此转发）"""
+        return self.feed_reply(text, ask_id)
 
     def pending_ask_snapshot(self) -> dict[str, Any] | None:
         """供 session_runtime.snapshot：等待中的 ask 元数据（跨连接恢复组件）"""
