@@ -2,9 +2,8 @@
 
 任务 = 一张有向图(节点=状态, 边=结果语义), 是长任务的脊柱。
 
-被两个插件共享(遵守「插件 → 库, 而非插件 → 插件」铁律):
-- `plugins/task_system`        任务图的工具与生命周期注入
-- `plugins/agent_orchestrator` 编排时把 worker delta 落到任务图
+被插件共享(遵守「插件 → 库, 而非插件 → 插件」铁律):
+- `plugins/task_system`  任务图的工具与生命周期注入
 
 模块:
 - models  Node/Edge/TaskMap + 枚举

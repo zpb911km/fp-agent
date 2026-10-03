@@ -1,5 +1,6 @@
 """pytest fixtures — 隔离文件 I/O，避免污染真实配置"""
 
+import os
 import tempfile
 from collections.abc import Generator
 from unittest.mock import patch
@@ -97,19 +98,11 @@ def _isolate_data_dir(tmp_path) -> Generator[None, None, None]:
     {DATA}/{fetched,public,private}/...。若测试构造真实 ToolRegistry/Agent，
     用户安装的 private 插件会污染断言（例如被删除/迁移的旧插件）。
     把 config._FP_DATA_DIR 指向 tmp，可让 user_dirs() 全部落到临时目录。
-
-    同时 patch 已固化在模块级的 runs.RUNS_ROOT（编排器产物目录）。
     """
     import fp_core.config as cfg
 
     tmp = str(tmp_path / "fp_data")
     patches = [patch.object(cfg, "_FP_DATA_DIR", tmp)]
-    try:
-        from fp_core.plugins.agent_orchestrator.fp_multiagent import runs as runs_mod
-
-        patches.append(patch.object(runs_mod, "RUNS_ROOT", str(tmp_path / "fp_data" / "runs")))
-    except Exception:  # noqa: BLE001 — 包缺失时跳过
-        pass
 
     for p in patches:
         p.start()
@@ -130,3 +123,10 @@ def temp_sessions_dir() -> Generator[str, None, None]:
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         yield tmpdir
+
+
+@pytest.fixture(autouse=True)
+def _disable_zeta_network():
+    """Zeta 插件默认不启用网络面——防测试污染 ~/.local/share/fp/peers 与 .fp/ 实例锁。"""
+    with patch.dict(os.environ, {"FP_ZETA_DISABLE": "1"}):
+        yield

@@ -5,7 +5,7 @@
 - ON_BEFORE_LLM_CALL: 每次 LLM 调用前附加 [task] 提醒
 
 定位: 任务 = 一张有向图(节点=状态, 边=结果语义)。它是长任务的**脊柱**:
-目标、计划、进度、协作锁都活在这张图里。`agent_dispatch` 是执行其节点的**手**。
+目标、计划、进度、协作锁都活在这张图里。
 """
 
 from __future__ import annotations
@@ -40,9 +40,6 @@ TASK_SYSTEM_DESCRIPTION = """【任务系统 · 任务图(taskmap)】
   引入副作用(如"修驱动后蓝牙挂了")就新建一个 side_effect 节点, 修好再汇回主链。
 - 边语义: complete(完美)/exhausted(N 次失败)/side_effect(副作用)/blocked/partial/requires_decompose(需拆图)。
 - 提醒 `[task]` 格式: `▶#id 标题 进行:<节点> · 待办:<n> · ❓<n>`;`⏸` 表示已交付待批准(停手汇报)。
-
-**与 agent_dispatch 的分工**: task 是**脊柱/契约**(目标、计划、进度、协作图),
-agent_dispatch 是**执行其某个节点的手**。
 
 状态机: active(进行中) → delivered(已交付待批准, 必须停手等用户) → completed(用户批准);
 用户推翻 → superseded(旧任务作废, 另建承接)。
