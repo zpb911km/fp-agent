@@ -1,6 +1,6 @@
 """wait_job/kill_job 测试 — pull 精确等待（不 sleep 轮询）
 
-契约：ASYNC_AGENT_DESIGN.md §5/§7
+契约：docs/dev/ASYNC_AGENT_DESIGN.md §5/§7
 - 完成 → done + result_file
 - 超时 → still_running + elapsed（任务继续活着）
 - kill 后 wait → killed/already_dead

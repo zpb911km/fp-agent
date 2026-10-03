@@ -1,6 +1,6 @@
 """ask_user 测试 — 权威注入原则 + 单 flight + 降级路径 + 结构化契约 v2
 
-契约：ASYNC_AGENT_DESIGN.md §2/§7
+契约：docs/dev/ASYNC_AGENT_DESIGN.md §2/§7
 - 缺 io → unavailable 降级（不挂死，I1）
 - 有 io → 回答以【用户回答 …】入 pending 队列（user 角色，环顶注入 — I2）
   + tool result 只回执 reply_file（收据，不含人类话语）

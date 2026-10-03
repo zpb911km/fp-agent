@@ -1,6 +1,6 @@
 """后台任务基础设施 — pull 式主动 agent 的内核侧实现（L1）。
 
-设计文档：仓库根 ASYNC_AGENT_DESIGN.md（唯一权威依据）。
+设计文档：docs/dev/ASYNC_AGENT_DESIGN.md（唯一权威依据）。
 
 分层说明：本模块是 L1 内核（四层依赖模型禁止 L1 静态 import L2 扩展），
 因此 jobs 服务、环顶注入队列、危险命令确认门、退出清算等**共享基础设施**

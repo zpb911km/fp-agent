@@ -53,14 +53,14 @@ E: 正常 bash（成功/非零退出）不回归 ·
 3. **human_confirm 而非直接 ask_user**：确认门用 `human_confirm()`（返回
    True/False/None 三态），None→回落，保证 headless/worker 行为零回归。
 4. **FRAMEWORK_JOB_TOKENS 挂点**：未实现（本轮无消费者；bash 移交直接走
-   `start_job`）。`/jobs` `/kill` 斜杠命令未做——`list_jobs`/`kill_job` 工具
+   `start_job`）。斜杠命令 `jobs` / `kill` 未做——`list_jobs`/`kill_job` 工具
    已覆盖 LLM 侧，人类侧可读 `$TMPDIR/fp_jobs/`，状态条属前端工作后续做。
-5. **设计文档同步**：`ASYNC_AGENT_DESIGN.md` §9 权限边界按实际写路径已履行；
+5. **设计文档同步**：`docs/dev/ASYNC_AGENT_DESIGN.md` §9 权限边界按实际写路径已履行；
    §0 仓库布局为修正后版本（初版路径全错，worker 空转的诱因之一）。
 
 ## 遗留（非本轮承诺）
 
 - 注入消息的 ACP 下行推送（ACP 无 out-of-band 通道，现状等下轮上下文）
-- WebUI 状态条 / `/jobs` 斜杠命令
+- WebUI 状态条 / `jobs` 斜杠命令
 - ask 纪律的系统提示词强化段（现仅在工具 docstring）
 - worker 派发基建的启动卡死（独立问题，已存反思）

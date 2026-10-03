@@ -1,6 +1,6 @@
 """jobs 服务测试 — start_job/drain/落盘/僵尸清理/退出清算
 
-契约：ASYNC_AGENT_DESIGN.md §3/§7
+契约：docs/dev/ASYNC_AGENT_DESIGN.md §3/§7
 - 完成回调只入队 + 落盘；drain 恰好一次（环顶串行注入的基础）
 - 状态独立落盘 JOB_DIR（重启可查）
 - shutdown_all：running → killed（I1：清算独立于 LLM）

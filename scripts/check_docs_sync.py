@@ -71,11 +71,11 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
         ["docs/dev/插件系统.md"],
         ["docs/guide/插件系统.md", "docs/self/扩展插件.md", "README.md"],
     ),
-    # 异步主动范式交付物（设计/验收随实现走）
+    # 异步主动范式交付物（设计/验收随实现走；位于 docs/dev/，亦被 docs/* 视为文档）
     (
-        "ASYNC_AGENT_DESIGN.md",
+        "docs/dev/ASYNC_AGENT_DESIGN.md",
         ["docs/dev/架构设计.md"],
-        ["ACCEPTANCE_REPORT.md"],
+        ["docs/dev/ACCEPTANCE_REPORT.md"],
     ),
     # 核心引擎：按模块精准映射
     ("packages/fp-core/src/fp_core/core/llm_client.py", ["docs/dev/LLM通信.md"], []),
@@ -159,7 +159,7 @@ DOC_LINKS: list[tuple[str, list[str]]] = [
 
 # 文档文件本身（变更它们不算「代码变更」）
 # fnmatch 的 `*` 跨 `/`，`docs/*` 一条即覆盖 docs 全树（含子目录）
-_DOC_PATTERNS = ("README.md", "docs/*", "ASYNC_AGENT_DESIGN.md", "ACCEPTANCE_REPORT.md")
+_DOC_PATTERNS = ("README.md", "docs/*")
 
 # 结构性变更状态（内容修改 M 之外都算）
 _STRUCTURAL_STATUSES = {"A", "D", "C", "T", "R"}

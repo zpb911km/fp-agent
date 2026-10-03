@@ -39,6 +39,8 @@
 | | [dev/自我修改.md](dev/自我修改.md) | 自修改流程、测试、回滚 |
 | | [dev/测试.md](dev/测试.md) | 测试体系、会话隔离、防漂移门禁 |
 | | [dev/文件命名约定.md](dev/文件命名约定.md) | 「文件即开关」通用规则（Plugin/Skill/Command/Tool 共用） |
+| | [dev/ASYNC_AGENT_DESIGN.md](dev/ASYNC_AGENT_DESIGN.md) | 异步主动范式设计（#143 唯一权威依据）：ask_user / 后台任务 / 权威注入原则 |
+| | [dev/ACCEPTANCE_REPORT.md](dev/ACCEPTANCE_REPORT.md) | 异步主动范式验收报告（#143 交付物：门禁、端到端链、5 项偏差） |
 | 🔌 **ACP 协议** | [acp/README.md](acp/README.md) | ACP 协议索引 |
 | | [acp/使用指南.md](acp/使用指南.md) | IDE 集成指南 |
 | | [acp/00-OVERVIEW.md](acp/00-OVERVIEW.md) ~ [07-IMPLEMENTATION.md](acp/07-IMPLEMENTATION.md) | 协议规范全集 |
@@ -88,15 +90,17 @@ docs/
 │   ├── 中断机制.md               Ctrl+C 处理
 │   ├── 自我修改.md               自修改流程
 │   ├── 测试.md                   测试体系、隔离、防漂移
-│   └── 文件命名约定.md            文件即开关（四类扩展共用）
+│   ├── 文件命名约定.md            文件即开关（四类扩展共用）
+│   ├── ASYNC_AGENT_DESIGN.md    异步主动范式设计（#143 权威依据）
+│   └── ACCEPTANCE_REPORT.md     异步主动范式验收报告（#143 交付物）
 │
 ├── acp/                       ← 🔌 ACP 协议规范
 │   ├── README.md                协议索引
 │   ├── 使用指南.md               IDE 集成指南
 │   ├── 00-OVERVIEW.md ~ 07-IMPLEMENTATION.md
 │
-├── CHANGELOG.md                ← 版本历史（符号链接自根目录）
-└── CONTRIBUTING.md             ← 贡献指南（符号链接自根目录）
+├── CHANGELOG.md                ← 版本历史
+└── CONTRIBUTING.md             ← 贡献指南
 ```
 
 > **注**：`prompts/agent.md` 是系统提示词模板，由运行时加载。
@@ -106,4 +110,4 @@ docs/
 ## 🔗 外部引用
 
 - 根目录 `README.md` 中的文档链接指向本目录下各文件
-- 根目录 `CHANGELOG.md` 和 `CONTRIBUTING.md` 已替换为符号链接指向本目录
+- 本目录是文档的**唯一实体**：`CHANGELOG.md` / `CONTRIBUTING.md` / 设计验收交付物均直接存放于此，根目录不再保留同名文件或符号链接

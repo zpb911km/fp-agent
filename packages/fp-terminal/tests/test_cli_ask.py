@@ -1,6 +1,6 @@
 """CLI ask 结构化契约 v2 — 问题块渲染后的输入解析
 
-契约：ASYNC_AGENT_DESIGN.md §2（展示层负责解析，返回的已是最终文本）
+契约：docs/dev/ASYNC_AGENT_DESIGN.md §2（展示层负责解析，返回的已是最终文本）
 - 空回车 → 采纳 suggest（无 suggest → 空 = 未回答）
 - 编号（1..N）→ 选项原文
 - 其他 → 自由文本原样

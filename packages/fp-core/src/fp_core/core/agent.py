@@ -905,7 +905,7 @@ class Agent:
                 raise
 
             # ── 后台任务完成/ask_user 回答 的惰性注入（环顶串行 drain — 无锁竞态） ──
-            # 设计见 ASYNC_AGENT_DESIGN.md §3/§6：完成回调只入 pending 队列，
+            # 设计见 docs/dev/ASYNC_AGENT_DESIGN.md §3/§6：完成回调只入 pending 队列，
             # 注入统一发生在环顶（无并发轮次），带来源标记（【系统事实】/【用户回答】），
             # 以 user 角色落盘 → shortcircuit degenerate 不会删除（不变量 I2/I3）。
             for _inject_msg in _drain_background_injects():

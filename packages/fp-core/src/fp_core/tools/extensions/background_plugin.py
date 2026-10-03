@@ -1,6 +1,6 @@
 """Background 插件 — 面向 LLM 的工具壳（ask_user + wait_job/kill_job/list_jobs）
 
-设计文档：仓库根 ASYNC_AGENT_DESIGN.md（唯一权威依据）。
+设计文档：docs/dev/ASYNC_AGENT_DESIGN.md（唯一权威依据）。
 
 分层（四层依赖模型 check_dep_layers）：本文件是 L2 扩展单元，只含工具声明与
 执行壳；共享基础设施（jobs 服务、环顶注入队列、危险命令确认门、退出清算）
