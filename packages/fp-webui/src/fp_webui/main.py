@@ -29,7 +29,6 @@ import secrets
 import socket
 import sys
 import time
-from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from typing import Any, cast
@@ -49,117 +48,13 @@ except ImportError as e:
     print("  → 或:     pip install .[webui]")
     sys.exit(1)
 
-# ── Agent 核心导入 ──────────────────────────────────────
-# 注意：运行时创建 Agent 实例应使用本地 re-import（确保 reload 后拿到最新类）。
-# 这里的顶层 import 仅用于类型标注。
-from fp_core.core.agent import Agent
-from fp_core.core.io import RestIO, WebSocketIO
-from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
+# ── 唯一接口组导入（协议 §5：前端只许 fp_core.api + 纯工具模块） ──
+from fp_core.api import ExitReason, RestIO, WebSocketIO, portal
 from fp_core.logger import get_logger
-from fp_core.plugins.base.plugin import Plugin
 
-# ════════════════════════════════════════════════════════════
-# 1. EventBus — 异步发布/订阅
-# ════════════════════════════════════════════════════════════
-
-
-class EventBus:
-    """
-    异步事件总线，用于 Agent 生命周期事件 → WebSocket 的桥梁。
-
-    支持多个订阅者（多个 WebSocket 连接），自动清理断开连接。
-
-    背压保护：
-      队列（maxsize=1024）满时不丢弃订阅者，而是丢弃最旧事件，
-      保证订阅者始终能拿到最新事件，且不会失去连接。
-
-    断连续传（L2）：
-      所有事件带全局递增 seq，并写入环形缓冲（deque maxlen）。
-      重连的连接用 (run_id, last_seq) 协商重放；缓冲溢出（gap）则降级
-      由前端 REST 全量拉取会话历史。
-    """
-
-    def __init__(self, buffer_size: int = 2000):
-        self._subscribers: dict[str, asyncio.Queue[dict[str, Any]]] = {}
-        self._next_id = 0
-        # 本次进程的运行标识：服务端重启后 seq 空间重置，
-        # 前端凭 run_id 变化丢弃旧 last_seq，避免序号错位导致事件被误过滤。
-        self.run_id = secrets.token_hex(4)
-        self._seq = 0
-        self._buffer: deque[dict[str, Any]] = deque(maxlen=buffer_size)
-
-    @property
-    def current_seq(self) -> int:
-        """最新事件序号（0 = 尚无事件）"""
-        return self._seq
-
-    def events_since(self, last_seq: int) -> list[dict[str, Any]] | None:
-        """取回序号 > last_seq 的缓冲事件；缓冲溢出（gap）返回 None。
-
-        前端应据此降级为 REST 全量重拉（resync）。
-        """
-        if last_seq >= self._seq:
-            return []
-        if not self._buffer:
-            # 有事件但缓冲为空 → 必然是被清空/溢出，按 gap 处理
-            return None
-        oldest = self._buffer[0]["seq"]
-        if last_seq + 1 < oldest:
-            return None  # gap：last_seq 之后的部分事件已被挤出缓冲
-        return [e for e in self._buffer if e["seq"] > last_seq]
-
-    def subscribe(self) -> tuple[str, asyncio.Queue[dict[str, Any]]]:
-        """订阅事件流，返回 (subscriber_id, queue)"""
-        sub_id = f"sub_{self._next_id}"
-        self._next_id += 1
-        q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1024)
-        self._subscribers[sub_id] = q
-        return sub_id, q
-
-    def unsubscribe(self, sub_id: str) -> None:
-        """取消订阅"""
-        self._subscribers.pop(sub_id, None)
-
-    async def publish(self, event: dict[str, Any]) -> None:
-        """向所有订阅者推送事件
-
-        背压策略：队列满时丢弃最旧事件（get_nowait），而非丢弃订阅者。
-        确保订阅者不会因消费慢而被静默移除。
-        """
-        # 先编号入缓冲，再分发（同一同步块内完成，保证 seq 与入队顺序一致）
-        self._seq += 1
-        event = {**event, "seq": self._seq}
-        self._buffer.append(event)
-
-        dead_subs: list[str] = []
-        for sub_id, q in self._subscribers.items():
-            try:
-                q.put_nowait(event)
-            except asyncio.QueueFull:
-                try:
-                    q.get_nowait()  # 丢弃最旧事件
-                    q.put_nowait(event)  # 重试放入最新事件
-                    get_logger().warning(f"[EventBus] ⚠️ 订阅者 {sub_id} 队列满，已丢弃最旧事件")
-                except (asyncio.QueueEmpty, asyncio.QueueFull):
-                    dead_subs.append(sub_id)  # 保护性断开
-        for sub_id in dead_subs:
-            self._subscribers.pop(sub_id, None)
-            get_logger().warning(f"[EventBus] ⚠️ 订阅者 {sub_id} 因队列异常已被断开")
-
-    @property
-    def subscriber_count(self) -> int:
-        return len(self._subscribers)
-
-    async def shutdown(self) -> None:
-        """关闭所有订阅者"""
-        dead_subs = list(self._subscribers.keys())
-        for sub_id in dead_subs:
-            self._subscribers.pop(sub_id, None)
-
-
-# 全局事件总线实例
-event_bus = EventBus()
-
+# EventBus 类已下沉至 core（fp_core.api.EventBus），webui 直接用 portal.events
+# （transport 层的 seq/run_id 断连续传语义原样保留）。
+event_bus = portal.events
 
 # ════════════════════════════════════════════════════════════
 # 1a. SessionRuntime — 会话级运行时（与 WS 连接解耦）
@@ -194,10 +89,8 @@ class SessionRuntime:
         return self.active_task
 
     def feed_reply(self, text: str, ask_id: str | None = None) -> bool:
-        """把用户回复注入当前等待 ask 的 IO（跨连接可用；ask_id 精确对账）"""
-        if self.current_io is None:
-            return False
-        return self.current_io.feed_reply(text, ask_id)
+        """把用户回复注入当前等待 ask 的 IO（协议面：经 portal.run.reply 转发）"""
+        return portal.run.reply(text, ask_id)
 
     def cancel_active(self) -> bool:
         """取消当前处理任务；返回是否找到了可取消的任务"""
@@ -275,223 +168,24 @@ _WEBUI_TOKEN: str = _load_or_create_token()
 
 
 # ════════════════════════════════════════════════════════════
-# 2. WebUIPlugin — 生命周期桥接
-# ════════════════════════════════════════════════════════════
-
-
-class WebUIPlugin(Plugin):
-    """
-    WebUI 桥接插件
-
-    监听 Agent 的关键生命周期钩子，将中间状态（思考、工具调用、错误等）
-    通过 EventBus 实时推送到前端。
-
-    不修改 Agent 核心代码，以插件形式运行时自动激活。
-    """
-
-    name = "webui_bridge"
-    version = "1.0.0"
-
-    def on_register(self, lifecycle: LifecycleManager) -> None:
-        """注册所有需要监听的生命周期钩子"""
-        # 捕获 ON_INIT 时各插件写入的 system_prompt_append 段。
-        # priority=500 保证排在注入插件（prompt_extender=60、task_system=60 等）之后执行，
-        # 读到全量；供 _reapply_prompt_append 在会话重建（reset）后重放。
-        self._prompt_append_cache: list[str] = []
-        lifecycle.register(
-            LifecycleHook.ON_INIT,
-            self._on_init_capture_prompt_append,
-            priority=500,
-            name="webui_capture_prompt_append",
-        )
-        lifecycle.register(
-            LifecycleHook.ON_BEFORE_LLM_CALL,
-            self._on_before_llm,
-            priority=5,
-            name="webui_before_llm",
-        )
-        lifecycle.register(
-            LifecycleHook.ON_AFTER_LLM_CALL,
-            self._on_after_llm,
-            priority=5,
-            name="webui_after_llm",
-        )
-        lifecycle.register(
-            LifecycleHook.ON_TOOL_SELECT,
-            self._on_tool_select,
-            priority=5,
-            name="webui_tool_select",
-        )
-        lifecycle.register(
-            LifecycleHook.ON_TOOL_CALL,
-            self._on_tool_call,
-            priority=5,
-            name="webui_tool_call",
-        )
-        lifecycle.register(
-            LifecycleHook.ON_TOOL_RESULT,
-            self._on_tool_result,
-            priority=5,
-            name="webui_tool_result",
-        )
-        lifecycle.register(
-            LifecycleHook.ON_ERROR,
-            self._on_error,
-            priority=5,
-            name="webui_error",
-        )
-        # 注意：不监听 ON_BEFORE_RESPONSE — 前端统一从 done.final_content 获取最终回复
-        # 避免与 WebSocketIO·say() / process_and_notify 重复推送
-        lifecycle.register(
-            LifecycleHook.ON_SHUTDOWN,
-            self._on_shutdown,
-            priority=5,
-            name="webui_shutdown",
-        )
-
-    async def _on_init_capture_prompt_append(self, ctx: HookContext, **kwargs: Any) -> None:
-        """ON_INIT 最后执行：缓存所有插件写入的 system_prompt_append 段。
-
-        Agent.ensure_initialized() 会把该字段 apply 到 conversation.system_prompt；
-        但 WebUI 的会话重建路径（新建/reload/恢复）会用 PromptBuilder 重建
-        system prompt 覆盖注入。此处先捕获全量段，供 _reapply_prompt_append
-        在 reset 后重放，保证插件注入跨会话重建不丢失。
-        """
-        raw = ctx.data.get("system_prompt_append")
-        if isinstance(raw, str):
-            self._prompt_append_cache = [raw]
-        elif isinstance(raw, list):
-            self._prompt_append_cache = [s for s in raw if s and str(s).strip()]
-        else:
-            self._prompt_append_cache = []
-
-    async def _emit(self, event_type: str, **data: Any) -> None:
-        """向 EventBus 发布事件"""
-        await event_bus.publish({"type": event_type, "ts": time.time(), **data})
-
-    async def _on_before_llm(self, ctx: HookContext, **kwargs: Any) -> None:
-        """LLM 调用开始 → 前端显示"思考中"状态"""
-        await self._emit("llm_start")
-
-    async def _on_after_llm(self, ctx: HookContext, **kwargs: Any) -> None:
-        """LLM 调用完成 → 通知前端 LLM 状态
-
-        注意：LLM 可能同时返回文本内容和工具调用（如"我来查一下..." + tool_calls）。
-        文本内容通过 llm_end.content 推送，前端在其已存在的分支中消费。
-        最终的 done.final_content 只包含最后一条纯文本回复，不包含中间输出。
-        """
-        content = kwargs.get("content", "")
-        await self._emit(
-            "llm_end",
-            content=content,
-            has_tool_calls=kwargs.get("has_tool_calls", False),
-            tool_names=kwargs.get("tool_names", []),
-        )
-
-    async def _on_tool_select(self, ctx: HookContext, **kwargs: Any) -> None:
-        """工具选择 → 前端显示即将调用的工具列表"""
-        tools = kwargs.get("tools", [])
-        await self._emit("tool_select", tools=tools)
-
-    async def _on_tool_call(self, ctx: HookContext, **kwargs: Any) -> None:
-        """工具调用开始 → 前端显示工具名称和参数"""
-        await self._emit(
-            "tool_call",
-            name=kwargs.get("tool_name", ""),
-            args=kwargs.get("tool_args", ""),
-            tool_call_id=kwargs.get("tool_call_id", ""),
-        )
-
-    async def _on_tool_result(self, ctx: HookContext, **kwargs: Any) -> None:
-        """工具调用完成 → 前端显示结果摘要"""
-        result = kwargs.get("result", "")
-        await self._emit(
-            "tool_result",
-            name=kwargs.get("tool_name", ""),
-            result=(result[:200] + "...") if len(result) > 200 else result,
-            tool_call_id=kwargs.get("tool_call_id", ""),
-        )
-
-    async def _on_error(self, ctx: HookContext, **kwargs: Any) -> None:
-        """错误发生 → 前端显示错误信息"""
-        await self._emit("error", error=str(kwargs.get("error", "")))
-
-    async def _on_shutdown(self, ctx: HookContext, **kwargs: Any) -> None:
-        """Agent 关闭 → 前端显示关闭通知"""
-        await self._emit("shutdown")
-
-    def on_unregister(self) -> None:
-        """卸载插件时清理资源"""
-        # WebUIPlugin 是桥接插件，随 Agent 生命周期自动管理，
-        # EventBus 由 WebUI 服务器全局管理，此处无需额外清理
-        pass
-
-
-# ════════════════════════════════════════════════════════════
-# 2b. system prompt 重建 helper（会话管理专用）
-# ════════════════════════════════════════════════════════════
-
-
-def _reapply_prompt_append(agent: Agent) -> None:
-    """会话重建路径的消息组装完成后，重放插件注入到 system prompt 的段。
-
-    背景：Agent.ensure_initialized() 会把 ON_INIT 的 system_prompt_append
-    apply 到 conversation.system_prompt；但 WebUI 的新建会话路径
-    会用 PromptBuilder().build_system_prompt() reset，覆盖掉插件注入内容。
-    本函数在这些路径的消息组装完成后调用，从 WebUIPlugin 的捕获缓存重放注入段。
-
-    调用约定（防重复）：
-    - 仅在「system prompt 已被 PromptBuilder 重建/被 replace_all 冲掉」后调用，
-      此时 system prompt 不含注入段，重放是安全的；
-    - switch/clear 等保留 conversation.system_prompt 的路径不要调用。
-    """
-    conv = agent.state.conversation
-
-    # 兜底：_replace_agent 新建分支的 replace_all(saved) 会把 system 消息整体
-    # 冲掉（saved 来自 load_context，不含 system）→ 先恢复 PromptBuilder 基础。
-    if not conv.system_prompt:
-        from fp_core.core.prompt_builder import PromptBuilder
-
-        conv.set_system_prompt(PromptBuilder().build_system_prompt())
-
-    plugin = agent.plugins.get(WebUIPlugin.name)
-    cache = getattr(plugin, "_prompt_append_cache", None) if plugin else None
-    if not cache:
-        return
-
-    from fp_core.prompts import apply_system_prompt_append
-
-    apply_system_prompt_append(conv, list(cache))
-
-
-# ════════════════════════════════════════════════════════════
 # 3. FastAPI 应用
 # ════════════════════════════════════════════════════════════
 
-# ── 全局 Agent 实例 ──────────────────────────────────────
-_agent: Agent | None = None
 _agent_lock = asyncio.Lock()
 
 
-async def get_agent() -> Agent:
-    """获取或创建全局 Agent 实例（延迟初始化）
+async def ensure_agent() -> None:
+    """确保实例已开启（延迟初始化，双检锁）
 
-    每次创建前需本地 re-import Agent 类，确保 reload 后用的是新版。
+    实例生命周期归 portal.ctl；webui 不再持有 Agent 引用。
     """
-    global _agent
-    if _agent is None:
-        async with _agent_lock:
-            if _agent is None:
-                # 本地 import：即使 reload 后模块缓存已更新，这里取到的总是最新类
-                from fp_core.core.agent import Agent as _AgentClass
-
-                _agent = _AgentClass(enable_log=False, resume=os.environ.get("FP_RELOAD_SID") or None)
-                # 注册 WebUI 桥接插件
-                webui_plugin = WebUIPlugin()
-                _agent.plugins.register(webui_plugin)
-                await _agent.ensure_initialized()
-                get_logger().info(f"[WebUI] Agent 已初始化 (model={_agent.model})")
-    return _agent
+    if portal.is_open:
+        return
+    async with _agent_lock:
+        if portal.is_open:
+            return
+        await portal.ctl.open(enable_log=False, resume=os.environ.get("FP_RELOAD_SID") or None)
+        get_logger().info(f"[WebUI] 实例已初始化 (model={portal.run.status.model})")
 
 
 async def _run_reload_continuation() -> None:
@@ -504,21 +198,18 @@ async def _run_reload_continuation() -> None:
     if not os.environ.get("FP_RELOAD_HANDOFF"):
         return
     try:
-        agent = await get_agent()
-        from fp_core.core.handoff import consume_reload_handoff
-
-        _cont = consume_reload_handoff(agent)
-        notice = agent.state._reload_notice
-        if notice:
-            agent.state._reload_notice = None  # pyright: ignore[reportPrivateUsage] 设计内跨类协议（handoff 契约）
-            get_logger().info(f"[WebUI] {notice}")
+        await ensure_agent()
+        _directive = portal.ctl.take_reload()
+        if _directive.notice:
+            get_logger().info(f"[WebUI] {_directive.notice}")
             # 复用既有 reload_done 事件（前端 app.js 已渲染"重载完成"状态行）
+            _st = portal.run.status
             await event_bus.publish({
                 "type": "reload_done",
-                "session_id": agent.session.session_id,
-                "model": agent.model,
+                "session_id": _st.session_id,
+                "model": _st.model,
             })
-        if not _cont:
+        if not _directive.should_continue:
             return
     except Exception as e:
         get_logger().error(f"[WebUI] reload handoff 消费失败，跳过续接: {e}")
@@ -531,12 +222,13 @@ async def _run_reload_continuation() -> None:
 
     async def _run() -> None:
         try:
-            response = await agent.continue_conversation(io=ws_io)
-            all_msgs = agent.state.conversation.messages
+            response = await portal.run.continue_(io=ws_io)
+            _st = portal.run.status
+            all_msgs = portal.run.transcript
             non_sys_count = sum(1 for m in all_msgs if m.get("role") != "system")
             await event_bus.publish({
                 "type": "done",
-                "session_id": agent.session.session_id,
+                "session_id": _st.session_id,
                 "final_content": response.content,
                 "non_system_count": non_sys_count,
             })
@@ -549,7 +241,6 @@ async def _run_reload_continuation() -> None:
             ws_io.is_running = False
             if session_runtime.current_io is ws_io:
                 session_runtime.release()
-            agent.state._pending_continue = None  # pyright: ignore[reportPrivateUsage] 设计内跨类协议
 
     session_runtime.start(ws_io, _run())
     get_logger().info("[WebUI] 🔄 reload 续接任务已启动")
@@ -574,9 +265,7 @@ async def lifespan(app: FastAPI):
     get_logger().info("[WebUI] 🛑 正在关闭...")
     # 服务端决定终止 → 这是 WS 断连之外唯一合法的取消时机
     await session_runtime.shutdown()
-    global _agent
-    if _agent is not None:
-        await _agent.shutdown()
+    await portal.ctl.close()  # FINAL：保存+摘要+静默收尾（幂等，未开启时 no-op）
     await event_bus.shutdown()
     get_logger().info("[WebUI] ✅ 已关闭")
 
@@ -698,11 +387,12 @@ async def auth_login(request: Request, body: dict[str, Any]) -> dict[str, Any]:
 @app.get("/api/health")
 async def health_check() -> dict[str, Any]:
     """健康检查端点"""
-    agent = await get_agent()
+    await ensure_agent()
+    _st = portal.run.status
     return {
         "status": "ok",
-        "agent": agent.model,
-        "session": agent.session.session_id,
+        "agent": _st.model,
+        "session": _st.session_id,
         "subscribers": event_bus.subscriber_count,
         "processing": session_runtime.is_running,
         "run_id": event_bus.run_id,
@@ -724,24 +414,25 @@ async def send_message(body: dict[str, Any]) -> dict[str, Any]:
     if not message:
         raise HTTPException(status_code=400, detail="消息不能为空")
 
-    agent = await get_agent()
+    await ensure_agent()
 
     # 发送消息时启动一个独立的后台任务来处理
     # 前端通过 WebSocket 接收实时更新
     # 使用 RestIO 避免交互式命令（如 /back 无参数）阻塞
-    response = await agent.process(message, io=RestIO())
+    response = await portal.run.send(message, io=RestIO())
 
     return {
         "response": response.content,
-        "session_id": agent.session.session_id,
+        "session_id": portal.run.status.session_id,
     }
 
 
 @app.get("/api/sessions")
 async def list_sessions() -> dict[str, Any]:
     """列出所有历史会话"""
-    agent = await get_agent()
-    sessions = agent.session.list_sessions()
+    await ensure_agent()
+    sessions = portal.ctl.sessions.list()
+    current_sid = portal.run.status.session_id
 
     result: list[dict[str, Any]] = []
     for sid, info in sorted(sessions.items(), key=lambda x: x[1].get("created", ""), reverse=True):
@@ -750,7 +441,7 @@ async def list_sessions() -> dict[str, Any]:
             "message_count": info.get("message_count", 0),
             "created": info.get("created", ""),
             "summary": info.get("summary", ""),
-            "is_current": sid == agent.session.session_id,
+            "is_current": sid == current_sid,
         })
 
     return {"sessions": result}
@@ -759,42 +450,36 @@ async def list_sessions() -> dict[str, Any]:
 @app.get("/api/commands")
 async def list_commands():
     """返回快捷命令列表（从 fp-core 命令注册表动态获取，自动适配新增命令）"""
-    from fp_core.commands import get_all_commands
-
-    cmds = get_all_commands()
+    cmds = portal.run.commands
     return {"commands": [{"name": f"/{name}", "desc": desc} for name, desc in cmds.items()]}
 
 
 # ════════════════════════════════════════════════════════════
-# 4a. Agent 替换核心逻辑（新建 / 重载共享）
+# 4a. 实例替换核心逻辑（新建 / 重载共享）
 # ════════════════════════════════════════════════════════════
 
 
 async def _replace_agent() -> dict[str, Any]:
     """
-    替换全局 Agent 实例的核心逻辑（/api/agent/new 专用）。
+    替换全局实例的核心逻辑（/api/agent/new 专用）。
 
     进程级代码热重启已统一到命令面 `/reload`（fp_core.core.handoff：
     落盘 → execve 原启动命令重启）——本函数只负责"内存状态清空、
-    新建 Agent"，不再做同进程 importlib 原地重载。
+    新建实例"，不再做同进程 importlib 原地重载。
 
     安全保证：
-      - 如果 Agent 正在处理请求，返回 409 拒绝
-      - 替换期间 _agent 被设为 None，get_agent() 自动创建新实例
-      - 活跃的 WebSocket 连接保有旧 agent 对象引用，仍可继续工作
+      - 如果实例正在处理请求，返回 409 拒绝
+      - 替换期间 portal.is_open 为 False，ensure_agent() 自动创建新实例
+      - 活跃的 WebSocket 连接经 portal.run.* 自动指向新实例
     """
-    global _agent
-
-    if _agent is not None and _agent.is_processing:
+    if portal.is_open and portal.run.status.is_processing:
         raise HTTPException(status_code=409, detail="Agent 正在处理请求，请稍后重试")
 
     async with _agent_lock:
-        # ── 保存旧会话并 shutdown 旧 Agent ──
-        if _agent is not None:
-            _agent.state.session.save_context(_agent.state.conversation.to_serializable())
+        # ── 落盘旧会话并关闭旧实例（RECYCLE：保存+摘要，静默） ──
+        if portal.is_open:
             with suppress(Exception):
-                await _agent.shutdown()
-            _agent = None
+                await portal.ctl.close(reason=ExitReason.RECYCLE)
 
         # ── 通知前端准备重连 ──
         await event_bus.publish({
@@ -802,51 +487,39 @@ async def _replace_agent() -> dict[str, Any]:
             "message": "🔄 Agent 正在新建，连接即将断开",
         })
 
-        # ── 重新导入 Agent 类 ──
-        from fp_core.core.agent import Agent as NewAgent
-
-        # ── 创建新 Agent ──
+        # ── 创建新实例 ──
         try:
-            _agent = NewAgent(enable_log=False)
-            _agent.plugins.register(WebUIPlugin())
-            await _agent.ensure_initialized()
+            await portal.ctl.open(enable_log=False)
         except Exception as e:
-            get_logger().error(f"[WebUI] ❌ 新 Agent 创建失败: {e}")
-            _agent = None
+            get_logger().error(f"[WebUI] ❌ 新实例创建失败: {e}")
             raise HTTPException(status_code=500, detail=f"新 Agent 创建失败: {e}") from e
 
         # ── 会话管理：新建会话 ──
         # （恢复旧会话分支已随命令面统一删除：会话恢复语义在
         #   fp_core.core.handoff 的 execve 热重启里，由 resume=FP_RELOAD_SID 完成）
-        from fp_core.core.prompt_builder import PromptBuilder
-
         try:
-            prompt = PromptBuilder().build_system_prompt()
-            _agent.state.conversation.reset(prompt)
-            saved = _agent.state.session.load_context(prompt)
-            if len(saved) > 1:
-                _agent.state.conversation.replace_all(saved)
-            _reapply_prompt_append(_agent)
-            new_sid = _agent.state.session.session_id
-            get_logger().info(f"[WebUI] 🆕 已使用新会话: {new_sid}")
+            info = portal.ctl.sessions.new()
+            get_logger().info(f"[WebUI] 🆕 已使用新会话: {info.session_id}")
         except Exception as e:
             get_logger().error(f"[WebUI] ❌ 新会话初始化失败: {e}")
             raise HTTPException(status_code=500, detail=f"新会话初始化失败: {e}") from e
 
-        get_logger().info(f"[WebUI] 🆕 Agent 新建完成 (model={_agent.model}, session={_agent.session.session_id})")
+        _st = portal.run.status
+        get_logger().info(f"[WebUI] 🆕 实例新建完成 (model={_st.model}, session={_st.session_id})")
 
         # ── 稍等片刻，让前端收到 reload 事件后再推送 done ──
         await asyncio.sleep(0.3)
         await event_bus.publish({
             "type": "reload_done",
-            "session_id": _agent.session.session_id,
-            "model": _agent.model,
+            "session_id": _st.session_id,
+            "model": _st.model,
         })
 
+    _st = portal.run.status
     return {
         "status": "ok",
-        "session_id": _agent.session.session_id,
-        "model": _agent.model,
+        "session_id": _st.session_id,
+        "model": _st.model,
     }
 
 
@@ -863,41 +536,21 @@ async def new_agent():
 @app.post("/api/sessions")
 async def create_new_session():
     """创建新会话并切换到它"""
-    agent = await get_agent()
-
-    old_sid = agent.session.session_id
-
-    # 保存当前会话上下文 + 摘要（save_and_summarize 统一入口：最后一条用户消息前 20 字符，零 LLM 调用）
-    summary = agent.state.session.save_and_summarize(agent.state.conversation.to_serializable(), old_sid)
-    if not summary:
-        agent.session.update_meta(old_sid, summary="empty_session")
-
-    # 创建新会话（自动切换到新会话）
-    new_sid = agent.session.create_session()
-
-    # 重建 agent 上下文（加载 system prompt 到新会话）
-    from fp_core.core.prompt_builder import PromptBuilder
-
-    prompt = PromptBuilder().build_system_prompt()
-    agent.state.conversation.reset(prompt)
-    saved = agent.state.session.load_context(prompt)
-    if len(saved) > 1:
-        agent.state.conversation.replace_all(saved)
-    _reapply_prompt_append(agent)
-
-    return {"session_id": new_sid, "status": "created"}
+    await ensure_agent()
+    info = portal.ctl.sessions.new()
+    return {"session_id": info.session_id, "status": "created"}
 
 
 @app.delete("/api/sessions/{session_id}")
 async def delete_session_endpoint(session_id: str):
     """删除指定会话（不能是当前会话）"""
-    agent = await get_agent()
+    await ensure_agent()
 
     # 检查是不是当前会话
-    if session_id == agent.session.session_id:
+    if session_id == portal.run.status.session_id:
         raise HTTPException(status_code=400, detail="不能删除当前正在使用的会话")
 
-    if not agent.session.delete_session(session_id):
+    if not portal.ctl.sessions.delete(session_id):
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在或删除失败")
 
     return {"status": "deleted", "session_id": session_id}
@@ -915,9 +568,7 @@ async def get_session_messages(session_id: str) -> dict[str, Any]:
       2. compact 产生的摘要 system 消息
       3. repair_tool_ordering 转化的孤儿 tool 消息
     """
-    import fp_core.core.session as _session_mod
-
-    path = _session_mod._session_path(session_id)  # type: ignore[reportPrivateUsage]
+    path = portal.ctl.sessions.path(session_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
 
@@ -999,9 +650,7 @@ async def search_session_messages(session_id: str, body: dict[str, Any]) -> dict
       - line_number 可用于文件定位
       - 匹配方式：简单子串匹配（默认）或正则表达式
     """
-    import fp_core.core.session as _session_mod
-
-    path = _session_mod._session_path(session_id)  # type: ignore[reportPrivateUsage]
+    path = portal.ctl.sessions.path(session_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
 
@@ -1088,28 +737,12 @@ async def search_session_messages(session_id: str, body: dict[str, Any]) -> dict
 @app.post("/api/sessions/{session_id}/switch")
 async def switch_session_endpoint(session_id: str):
     """切换到指定会话"""
-    agent = await get_agent()
-
-    old_sid = agent.session.session_id
-
-    # 保存当前会话 + 摘要（save_and_summarize 统一入口：最后一条用户消息前 20 字符，零 LLM 调用）
-    summary = agent.state.session.save_and_summarize(agent.state.conversation.to_serializable(), old_sid)
-    if not summary:
-        agent.session.update_meta(old_sid, summary="empty_session")
-
-    if not agent.session.switch_session(session_id):
+    await ensure_agent()
+    info = portal.ctl.sessions.load(session_id)
+    if info is None:
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
-
-    # 加载目标会话的消息到内存上下文
-    _prompt = agent.state.conversation.system_prompt
-    _saved = agent.session.load_context(_prompt)
-    if _saved:
-        agent.state.conversation.set_messages(_prompt, _saved)
-
-    # 摘要已在切换前由 save_and_summarize 同步生成（非 LLM，最后一条用户消息前 20 字符）
-
     return {
-        "session_id": session_id,
+        "session_id": info.session_id,
         "status": "switched",
     }
 
@@ -1117,10 +750,8 @@ async def switch_session_endpoint(session_id: str):
 @app.post("/api/sessions/clear")
 async def clear_current_session():
     """清空当前会话"""
-    agent = await get_agent()
-    agent.session.clear_session_file()
-    _prompt = agent.state.conversation.system_prompt
-    agent.state.conversation.reset(_prompt)
+    await ensure_agent()
+    portal.ctl.sessions.clear()
     return {"status": "cleared"}
 
 
@@ -1183,9 +814,8 @@ async def websocket_chat(
     client_ip = websocket.client.host if websocket.client else "unknown"
     get_logger().info(f"[WebUI] WS 连接: {client_ip} → /ws/chat（已认证）")
 
-    # 首次获取 Agent 引用（connected 快照需要 session_id；
-    # 主循环每次消息前仍会重取以检测热替换）
-    agent = await get_agent()
+    # 确保实例已开启（connected 快照需要 session_id）
+    await ensure_agent()
 
     # ── 断连续传协商（L2）──
     # 「快照重放区间」与「订阅」必须落在同一个同步块内：publish 只在 await 点
@@ -1216,7 +846,7 @@ async def websocket_chat(
             "sub_id": sub_id,
             "run_id": event_bus.run_id,
             "seq": event_bus.current_seq,
-            "session_id": agent.session.session_id,
+            "session_id": portal.run.status.session_id,
             "replay": will_replay,
             "resync": resync,
             **session_runtime.snapshot(),
@@ -1255,15 +885,8 @@ async def websocket_chat(
             activity["ts"] = time.monotonic()
             data = json.loads(raw)
 
-            # ── 检测 Agent 是否已被重载（热替换）──
-            # 如果 get_agent() 返回了不同的对象，说明发生了 reload/new_agent
-            # 旧 WS 连接透明切换到新 Agent 引用，避免断开重连导致消息丢失。
-            # push_events 任务已通过 EventBus 收到 reload/reload_done 事件，
-            # 前端此时已显示"已重载"状态，无需再发额外通知。
-            current_agent = await get_agent()
-            if current_agent is not agent:
-                get_logger().info("[WebUI] ↻ 旧 WS 透明切换到新 Agent（reload 后无缝续传）")
-                agent = current_agent
+            # 实例热替换由 portal 内部消化：run.* 永远指向当前实例，
+            # 旧 WS 连接无需切换引用（reload/new_agent 后无缝续传）。
 
             if data.get("type") == "message":
                 content = data.get("content", "").strip()
@@ -1288,26 +911,26 @@ async def websocket_chat(
                 ws_io = WebSocketIO(event_bus)
                 ws_io.is_running = True
 
-                async def process_and_notify(msg: str, io: WebSocketIO, agent: Agent = agent):
+                async def process_and_notify(msg: str, io: WebSocketIO):
                     """处理消息并通过 EventBus 推送结果"""
                     try:
-                        response = await agent.process(msg, io=io)
+                        response = await portal.run.send(msg, io=io)
                         # 检查是否被用户主动中断（工具执行中 task.cancel()）
-                        # agent._cancelled_by_user 在 agent._process_inner 的
-                        # except 块中被设为 True，process() 返回后检查此标记。
+                        # 打断标记在 core _process_inner 的 except 块中置位，
+                        # send() 返回后经 status.cancelled 观测。
                         # 用这种方式而非重新抛出 CancelledError，是为了不破坏
                         # CLI 模式——CLI 的 except CancelledError: break 会退出程序。
-                        if agent.cancelled_by_user:
-                            agent.reset_cancelled()
+                        if portal.run.status.cancelled:
+                            portal.run.reset_cancelled()
                             await event_bus.publish({"type": "cancelled"})
                         else:
                             # 从后端获取权威的非 system 消息计数，传递给前端
                             # 前端据此校准 liveMsgIndex，消除前端自增计数器漂移
-                            all_msgs = agent.state.conversation.messages
+                            all_msgs = portal.run.transcript
                             non_sys_count = sum(1 for m in all_msgs if m.get("role") != "system")
                             await event_bus.publish({
                                 "type": "done",
-                                "session_id": agent.session.session_id,
+                                "session_id": portal.run.status.session_id,
                                 "final_content": response.content,
                                 "non_system_count": non_sys_count,
                             })
@@ -1452,9 +1075,9 @@ _UVICORN_LOG_CONFIG: dict[str, Any] = {
 def main():
     """启动 WebUI 服务器"""
     # ── 捕获原始启动命令（reload 激活核心 execve 重启用，新入口契约第 0 步）──
-    from fp_core.core.handoff import capture_launch_command
+    from fp_core.api import portal as _portal
 
-    capture_launch_command()
+    _portal.ctl.bootstrap()
 
     parser = argparse.ArgumentParser(description="FP WebUI")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")

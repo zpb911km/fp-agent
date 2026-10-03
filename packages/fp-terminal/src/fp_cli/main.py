@@ -16,6 +16,7 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.key_binding import KeyPressEvent
 
 from fp_core import config
+from fp_core.api import portal
 from fp_core.logger import Logger, set_logger
 
 from . import display
@@ -35,9 +36,6 @@ class _TerminalLogger(Logger):
 
 
 set_logger(_TerminalLogger())
-
-# ── 信号处理器可访问的当前 agent 实例（跨线程安全） ──
-_current_agent = None
 
 
 class SlashCompleter(PtCompleter):
@@ -60,9 +58,7 @@ class SlashCompleter(PtCompleter):
 
         # 1. 命令名（带 / 前缀）
         try:
-            from fp_core.commands import get_all_commands
-
-            for cmd_name, desc in get_all_commands().items():
+            for cmd_name, desc in portal.run.commands.items():
                 word = f"/{cmd_name}"
                 words.add(word)
                 if desc:
@@ -185,12 +181,12 @@ def _raw_sigint_handler(signum: int, frame: FrameType | None):
     except (RuntimeError, ValueError):
         pass
 
-    # 方式 2（跨平台回退）：通知 agent 实例
+    # 方式 2（跨平台回退）：通知实例
     # Windows 上 Ctrl+C 在独立线程运行，asyncio.all_tasks().cancel()
-    # 可能不立即生效，agent.cancel() 设置实例级中断标记作为安全网，
+    # 可能不立即生效，portal.run.cancel() 设置实例级中断标记作为安全网，
     # _check_interrupted() 会在下一个循环检查点检测到它。
-    if _current_agent is not None:
-        _current_agent.cancel()
+    if portal.is_open:
+        portal.run.cancel()
 
 
 def _raw_sigterm_handler(signum: int, frame: FrameType | None):
@@ -203,8 +199,8 @@ def _raw_sigterm_handler(signum: int, frame: FrameType | None):
     软中断让 process 在 _check_interrupted() 检查点优雅退出，
     finally → shutdown 可完整执行。
     """
-    if _current_agent is not None:
-        _current_agent.cancel()
+    if portal.is_open:
+        portal.run.cancel()
 
 
 async def main():
@@ -227,10 +223,8 @@ async def main():
     if not config.check_llm_config():
         return
 
-    from fp_core.core.agent import Agent
-
     # 角色注入（多智能体编排器）：FP_SUBAGENT_ROLE 传 JSON。
-    # Agent 以 getattr 盲取 role 属性（duck-typed），故用 SimpleNamespace 还原即可，
+    # 实例以 getattr 盲取 role 属性（duck-typed），故用 SimpleNamespace 还原即可，
     # 无需引入核心 AgentRole 类依赖。
     _role: Any = None
     _role_json = os.environ.get("FP_SUBAGENT_ROLE")
@@ -245,7 +239,7 @@ async def main():
 
     # subagent 子进程：使用父进程预生成的会话 ID（父进程据此兜底补写 meta）
     _sub_sid = os.environ.get("FP_SUBAGENT_SID") or None
-    agent = Agent(
+    await portal.ctl.open(
         resume=args.resume or os.environ.get("FP_RELOAD_SID") or None,
         session_id=_sub_sid,
         io=CLIIO(),
@@ -259,11 +253,7 @@ async def main():
         _sub_meta: dict[str, Any] = {"source": "subagent"}
         if _parent_sid:
             _sub_meta["parent_sid"] = _parent_sid
-        agent.session.update_meta(**_sub_meta)
-
-    # ── 挂接到模块变量，供信号处理器跨线程访问 ──────────
-    global _current_agent
-    _current_agent = agent
+        portal.ctl.sessions.update_meta(**_sub_meta)
 
     # ── 安装 SIGINT 处理器 ────────────────────────────────
     #
@@ -280,44 +270,39 @@ async def main():
     signal.signal(signal.SIGTERM, _raw_sigterm_handler)
 
     if not os.environ.get("FP_SUBAGENT_QUIET"):
-        display.print_logo(model=agent.model, resume=args.resume)
+        display.print_logo(model=portal.run.status.model, resume=args.resume)
 
     try:
         # ── reload handoff 续接：新实例注入 tool 返回并自动继续对话 ──
-        # 契约见 fp_core.core.handoff。续接取代本轮 -m 消息处理
-        # （那条消息已在旧实例中执行并触发了 reload，不可重放）。
-        _reloaded = False
-        if os.environ.get("FP_RELOAD_HANDOFF"):
-            from fp_core.core.handoff import consume_reload_handoff
-
-            _reloaded = consume_reload_handoff(agent)
-            if agent.state._reload_notice:
-                display.divider()
-                display.info(agent.state._reload_notice)
-                agent.state._reload_notice = None  # pyright: ignore[reportPrivateUsage] 设计内跨类协议（handoff 契约）
-            if _reloaded:
-                display.divider()
-                display.info("🔄 reload 续接：已恢复会话，继续上一轮对话…")
-                print()
-                resp = await agent.continue_conversation()
-                agent.state._pending_continue = None  # pyright: ignore[reportPrivateUsage] 设计内跨类协议
-                if os.environ.get("FP_SUBAGENT_SILENT") and resp.content:
-                    print(resp.content, end="")
+        # 机制契约见 fp_core.core.handoff；前端侧只消费 ReloadDirective。
+        # 续接取代本轮 -m 消息处理（那条消息已在旧实例中执行并触发了 reload，不可重放）。
+        _directive = portal.ctl.take_reload()
+        if _directive.notice:
+            display.divider()
+            display.info(_directive.notice)
+        _reloaded = _directive.should_continue
+        if _reloaded:
+            display.divider()
+            display.info("🔄 reload 续接：已恢复会话，继续上一轮对话…")
+            print()
+            resp = await portal.run.continue_()
+            if os.environ.get("FP_SUBAGENT_SILENT") and resp.content:
+                print(resp.content, end="")
 
         if args.message and not _reloaded:
             if os.environ.get("FP_SUBAGENT_SILENT"):
-                response = await agent.process(args.message)
+                response = await portal.run.send(args.message)
                 print(response.content, end="")
             else:
                 print(f"> {args.message}")
-                response = await agent.process(args.message)
+                response = await portal.run.send(args.message)
                 print(f"\nAgent: {response.content}")
         elif not args.message:
             # 无 -m：进入 REPL（reload 续接完成后同样回到这里等输入）
             inp = InputHandler()
 
             if args.resume:
-                display.hint(f"💡 续会话: {agent.session.session_id}，输入 /help 查看命令")
+                display.hint(f"💡 续会话: {portal.run.status.session_id}，输入 /help 查看命令")
             else:
                 display.hint("💡 输入 /help 查看命令，/resume 可回到历史会话")
             print()
@@ -343,7 +328,7 @@ async def main():
                     line_open = False
 
                     try:
-                        response = await agent.process(user_input)
+                        response = await portal.run.send(user_input)
 
                         # 命令输出：由 response.content 单一通路传递，不再由命令内部 display
                         # 此处用 rich Markdown 渲染（terminal 唯一消费点）
@@ -363,9 +348,9 @@ async def main():
             except KeyboardInterrupt:
                 print()
     finally:
-        # 保证 shutdown 一定执行：subagent 子进程无论何种退出路径
+        # 保证关闭一定执行：subagent 子进程无论何种退出路径
         # 都能走到 save_and_summarize（生成摘要 + 保存上下文）
-        await agent.shutdown()
+        await portal.ctl.close()
 
 
 if __name__ == "__main__":

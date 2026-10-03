@@ -9,7 +9,7 @@ from typing import Any, Protocol, cast
 
 from fp_cli import display as _display_mod
 from fp_cli.display import LLMStreamer
-from fp_core.core.io import IOChannel
+from fp_core.api import IOChannel
 
 
 class _StreamerToolProto(Protocol):

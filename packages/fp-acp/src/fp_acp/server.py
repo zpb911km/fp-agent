@@ -33,14 +33,9 @@ import re
 import sys
 import traceback
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
-from fp_core.core.io import IOChannel
-from fp_core.core.lifecycle import LifecycleHook
-
-if TYPE_CHECKING:
-    from fp_core.core.agent import Agent
-    from fp_core.core.lifecycle import HookContext
+from fp_core.api import ExitReason, HookContext, IOChannel, LifecycleHook, portal
 
 # ═══════════════════════════════════════════════════════════
 # ACP v1 常量
@@ -179,25 +174,15 @@ class ACPServer:
                           Follow Agent: 文件操作时通知 IDE 打开对应文件
     """
 
-    def __init__(self, agent_instance: Agent | None = None):
+    def __init__(self) -> None:
         """
-        Args:
-            agent_instance: 可选，注入已存在的 Agent 实例。
-                            为 None 时自动创建新实例。
+        实例生命周期归 portal.ctl（本类不再持有 Agent 引用）；
+        open 在 start() 中调用（构造需 await ensure_initialized）。
         """
         os.environ.setdefault("FP_SUBAGENT_QUIET", "1")
 
         # ── 保存真正的 stdout 引用（JSON-RPC 通道） ──
         self._stdout = sys.stdout
-
-        # ── 创建 Agent（print/display 重定向到 stderr） ──
-        if agent_instance is not None:
-            self._agent: Agent = agent_instance
-        else:
-            from fp_core.core.agent import Agent
-
-            with contextlib.redirect_stdout(sys.stderr):
-                self._agent = Agent(enable_log=False, resume=os.environ.get("FP_RELOAD_SID") or None)
 
         self._session_id: str | None = None
 
@@ -216,8 +201,7 @@ class ACPServer:
         # ── 并发 prompt 防护 ──
         self._processing_prompt = False
 
-        # ── "Follow Agent" 跟踪注册 ──
-        self._register_follow_hooks()
+        # "Follow Agent" 钩子注册在 start()（须在 portal.ctl.open 之后）
 
     # ═══════════════════════════════════════════════════════
     # 工具追踪状态管理
@@ -244,10 +228,8 @@ class ACPServer:
     def _register_follow_hooks(self):
         """注册生命周期钩子，在工具调用时通知 IDE 关注文件"""
 
-        mgr = self._agent.lifecycle
-
         # ── 工具调用前：提取文件路径，通知 IDE 打开 ──
-        mgr.register(
+        portal.ctl.hooks.register(
             LifecycleHook.ON_TOOL_CALL,
             self._on_tool_call,
             name="acp_follow_tool_call",
@@ -255,7 +237,7 @@ class ACPServer:
         )
 
         # ── 工具完成后：通知 IDE 工具已完成 ──
-        mgr.register(
+        portal.ctl.hooks.register(
             LifecycleHook.ON_TOOL_RESULT,
             self._on_tool_result,
             name="acp_follow_tool_result",
@@ -640,13 +622,9 @@ class ACPServer:
         """
         if not os.environ.get("FP_RELOAD_HANDOFF"):
             return
-        from fp_core.core.handoff import consume_reload_handoff
-
-        _cont = consume_reload_handoff(self._agent)
-        notice = self._agent.state._reload_notice
-        if notice:
-            self._agent.state._reload_notice = None  # pyright: ignore[reportPrivateUsage] 设计内跨类协议（handoff 契约）
-            self._log(notice)
+        _directive = portal.ctl.take_reload()
+        if _directive.notice:
+            self._log(_directive.notice)
 
         pending_raw = os.environ.pop("FP_ACP_PENDING_REQ", None)
         pending_req: Any = None
@@ -656,7 +634,7 @@ class ACPServer:
             except (ValueError, TypeError):
                 pending_req = None
 
-        if not _cont:
+        if not _directive.should_continue:
             # 命令面：无续接轮，只为挂起请求补发 result 防客户端悬等
             if pending_req is not None:
                 self._send_result(pending_req, {"stopReason": "end_turn"})
@@ -668,7 +646,7 @@ class ACPServer:
         acp_io = ACPIO(send_chunk=lambda text: self._send_message_notification(text, session_id=sid))
         self._log("🔄 reload 续接：恢复会话并继续上一轮对话…")
         try:
-            self._current_task = asyncio.create_task(self._agent.continue_conversation(io=acp_io))
+            self._current_task = asyncio.create_task(portal.run.continue_(io=acp_io))
             response = await self._current_task
             buf = acp_io.flush_text()
             reply_text = response.content or ""
@@ -683,21 +661,23 @@ class ACPServer:
         finally:
             self._current_task = None
             self._processing_prompt = False
-            self._agent.state._pending_continue = None  # pyright: ignore[reportPrivateUsage] 设计内跨类协议
 
     async def start(self) -> None:
         """启动 ACP 服务器，从 stdin 读取 JSON-RPC 消息"""
-        await self._agent.ensure_initialized()
-        self._session_id = self._agent.session.session_id
+        # 实例创建（print/display 重定向到 stderr，stdout 是 JSON-RPC 通道）
+        with contextlib.redirect_stdout(sys.stderr):
+            await portal.ctl.open(enable_log=False, resume=os.environ.get("FP_RELOAD_SID") or None)
+        self._register_follow_hooks()
+        self._session_id = portal.run.status.session_id
 
         # ── reload handoff：在进入消息循环前完成上一轮对话的续接 ──
         await self._reload_continue()
 
         self._log(f"✅  ACP Server 启动 (session={self._session_id})")
-        self._log(f"   模型: {self._agent.state.model_name}")
+        self._log(f"   模型: {portal.run.status.model}")
 
         # ── 设置异步 stdin 读取器 ──
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         reader = asyncio.StreamReader()
         protocol = asyncio.StreamReaderProtocol(reader)
         await loop.connect_read_pipe(lambda: protocol, sys.stdin)
@@ -809,7 +789,7 @@ class ACPServer:
         """处理通知（无 id 的请求）"""
         if method == "session/cancel":
             self._log("⏹️  收到取消通知，正在中断 agent...")
-            self._agent.cancel()
+            portal.run.cancel()
             # 主动取消当前正在执行的 prompt task，让 agent 立即停止
             # 而不是等到下一个中断检查点（可能在 LLM 调用或工具执行中，会等很久）
             if self._current_task is not None and not self._current_task.done():
@@ -869,21 +849,13 @@ class ACPServer:
 
         参考: https://agentclientprotocol.com/protocol/v1/session-setup
         """
-        self._agent.state.session.save_context(self._agent.state.conversation.messages)
-        new_sid = self._agent.session.create_session()
-        from fp_core.core.prompt_builder import PromptBuilder
-
-        prompt = PromptBuilder().build_system_prompt()
-        self._agent.state.conversation.reset(prompt)
-        saved = self._agent.state.session.load_context(prompt)
-        if len(saved) > 1:
-            self._agent.state.conversation.replace_all(saved)
-        self._session_id = new_sid
-        self._log(f"创建新会话: {new_sid}")
+        info = portal.ctl.sessions.new()
+        self._session_id = info.session_id
+        self._log(f"创建新会话: {info.session_id}")
 
         # 注意：命令注册通知在 _dispatch 中响应之后发送，
         # 以确保 IDE 先拿到 sessionId 再处理命令列表。
-        return {"sessionId": new_sid}
+        return {"sessionId": info.session_id}
 
     async def _handle_session_load(self, params: dict[str, Any]) -> dict[str, Any]:
         """
@@ -896,31 +868,19 @@ class ACPServer:
         # ACP v1 使用 camelCase
         session_id = params.get("sessionId") or params.get("session_id", "")
         if not session_id:
-            return {"sessionId": self._agent.session.session_id}
+            return {"sessionId": portal.run.status.session_id}
 
-        self._agent.state.session.save_context(self._agent.state.conversation.messages)
-        if self._agent.session.switch_session(session_id):
-            self._session_id = session_id
-            self._log(f"恢复会话: {session_id}")
-            prompt = self._agent.state.conversation.system_prompt
-            saved = self._agent.session.load_context(prompt)
-            if len(saved) > 1:
-                self._agent.state.conversation.replace_all(saved)
-
+        info = portal.ctl.sessions.load(session_id)
+        if info is not None:
+            self._session_id = info.session_id
+            self._log(f"恢复会话: {info.session_id}")
             # 注意：命令注册通知在 _dispatch 中响应之后发送
-            return {"sessionId": session_id}
-        else:
-            self._log(f"会话不存在: {session_id}，自动创建新会话")
-            new_sid = self._agent.session.create_session()
-            from fp_core.core.prompt_builder import PromptBuilder
+            return {"sessionId": info.session_id}
 
-            prompt = PromptBuilder().build_system_prompt()
-            self._agent.state.conversation.reset(prompt)
-            saved = self._agent.state.session.load_context(prompt)
-            if len(saved) > 1:
-                self._agent.state.conversation.replace_all(saved)
-            self._session_id = new_sid
-            return {"sessionId": new_sid}
+        self._log(f"会话不存在: {session_id}，自动创建新会话")
+        new_sid = portal.ctl.sessions.new().session_id
+        self._session_id = new_sid
+        return {"sessionId": new_sid}
 
     async def _handle_session_list(self, params: dict[str, Any]) -> dict[str, Any]:
         """
@@ -928,8 +888,8 @@ class ACPServer:
 
         参考: https://agentclientprotocol.com/protocol/v1/session-list
         """
-        all_sessions = self._agent.session.list_sessions()
-        current_sid = self._agent.session.session_id
+        all_sessions = portal.ctl.sessions.list()
+        current_sid = portal.run.status.session_id
 
         sessions_list: list[dict[str, Any]] = []
         for sid, meta in sorted(
@@ -993,14 +953,13 @@ class ACPServer:
             acp_io = ACPIO(send_chunk=lambda text: self._send_message_notification(text, session_id=sid))
 
             self._log(f"发送给 Agent: {user_prompt[:120]}")
-            self._current_task = asyncio.create_task(self._agent.process(user_prompt, io=acp_io))
+            self._current_task = asyncio.create_task(portal.run.send(user_prompt, io=acp_io))
             try:
                 response = await self._current_task
             except asyncio.CancelledError:
                 self._log("⏹️  Agent 处理已被用户取消")
                 # 清理中断标记，确保下次 prompt 正常工作
-                self._agent._interrupted = False  # type: ignore[reportPrivateUsage]
-                self._agent._processing = False  # type: ignore[reportPrivateUsage]
+                portal.run.reset_cancelled()
                 # 取消后仍然 flush 缓冲区，确保用户看到已生成的内容
                 buf = acp_io.flush_text()
                 if buf.strip():
@@ -1045,9 +1004,7 @@ class ACPServer:
         命令名不带 '/' 前缀（ACP v1 约定），IDE 端会自行添加。
         """
         try:
-            from fp_core.commands import get_all_commands
-
-            cmds = get_all_commands()
+            cmds = portal.run.commands
             # 过滤掉毁灭性命令（exit/exit!/quit 等会 raise SystemExit 的命令）
             cmds = {k: v for k, v in cmds.items() if k not in _DESTRUCTIVE_COMMANDS}
             # ACP v1 协议中命令名不带 '/' 前缀
@@ -1154,9 +1111,7 @@ class ACPServer:
         确保 IDE 先拿到 sessionId 再处理命令列表。
         """
         try:
-            from fp_core.commands import get_all_commands
-
-            cmds = get_all_commands()
+            cmds = portal.run.commands
             # 过滤掉毁灭性命令（exit/exit!/quit 等会 raise SystemExit 的命令）
             cmds = {k: v for k, v in cmds.items() if k not in _DESTRUCTIVE_COMMANDS}
             # ACP v1 规范: name 字段不包含 '/' 前缀
@@ -1219,13 +1174,12 @@ class ACPServer:
         )
 
     async def _shutdown_agent(self) -> None:
-        """安全关闭 Agent"""
+        """安全关闭实例（DISCARD：不留痕，删除当前会话）"""
         try:
-            self._agent.state.nuclear_exit = True
             with contextlib.redirect_stdout(sys.stderr):
-                await self._agent.shutdown()
+                await portal.ctl.close(reason=ExitReason.DISCARD)
         except Exception as e:
-            self._log(f"关闭 Agent 时出错: {e}")
+            self._log(f"关闭实例时出错: {e}")
 
     # ═══════════════════════════════════════════════════════
     # JSON-RPC 通信（写真正的 stdout）
@@ -1276,9 +1230,7 @@ class ACPServer:
 def main() -> None:
     """启动 ACP Server 的入口函数"""
     # ── 捕获原始启动命令（reload 激活核心 execve 重启用，新入口契约第 0 步）──
-    from fp_core.core.handoff import capture_launch_command
-
-    capture_launch_command()
+    portal.ctl.bootstrap()
 
     server = ACPServer()
     try:

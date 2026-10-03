@@ -9,9 +9,9 @@ import sys
 def main():
     # ── 捕获原始启动命令（reload 激活核心 execve 重启用，新入口契约第 0 步）──
     # 必须在任何 argv 改写/前置路由之前调用；契约见 fp_core.core.handoff。
-    from fp_core.core.handoff import capture_launch_command
+    from fp_core.api import portal
 
-    capture_launch_command()
+    portal.ctl.bootstrap()
 
     # ── 子命令前置路由：fp ext / fp docs 在顶层 argparse 之前识别 ──
     # 若在 parse_known_args 之后才识别，`fp ext -h` 的 -h 会被顶层解析劫持，
