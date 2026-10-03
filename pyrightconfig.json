@@ -1,6 +1,6 @@
 {
   "typeCheckingMode": "strict",
-  "pythonVersion": "3.12",
+  "pythonVersion": "3.14",
   "include": [
     "packages/fp-core/src",
     "packages/fp/src",
