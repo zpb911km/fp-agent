@@ -3,6 +3,7 @@
 """
 
 import asyncio
+import contextlib
 import os
 import signal
 import sys
@@ -203,6 +204,58 @@ def _raw_sigterm_handler(signum: int, frame: FrameType | None):
         portal.run.cancel()
 
 
+async def _send_single(message: str) -> None:
+    """单次消息：发一条并回显（-m 与 --headless 组合共用通路）"""
+    if os.environ.get("FP_SUBAGENT_SILENT"):
+        response = await portal.run.send(message)
+        print(response.content, end="")
+    else:
+        print(f"> {message}")
+        response = await portal.run.send(message)
+        print(f"\nAgent: {response.content}")
+
+
+async def _resident_loop() -> None:
+    """无头驻留循环（--headless）：不渲染提示符，直到 SIGINT/SIGTERM 才退出。
+
+    与 REPL 的关键差异：REPL 在 `input()` 拿到 EOF（后台/管道、无 pty 启动）
+    时 break → 实例当场死亡、zeta 名片失效。驻留模式把「没有输入」视为常态，
+    stdin 是否可读、是否已 EOF 都不影响存活——这正是 screen/pty 包裹的替代品。
+
+    信号语义：
+    - SIGINT 沿用 main() 装的全局 handler（cancel 全部任务）→ 本协程收到
+      CancelledError 后吞掉，交给 main() 的 finally → ctl.close() 优雅收尾
+      （与 REPL 里 Ctrl+C 的路径一致）。
+    - SIGTERM 全局 handler 只设 agent 中断标记、不 cancel 任务，本循环收不到，
+      故在此覆盖为「软中断 + 唤醒 stop」：软中断让进行中的 run 在检查点停下，
+      stop 让循环退出，同样落到 finally 收尾。
+    """
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _on_term() -> None:
+        if portal.is_open:
+            portal.run.cancel()
+        stop.set()
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _on_term)
+    except (NotImplementedError, RuntimeError):  # 无信号队列的平台回退
+
+        def _on_term_signal(signum: int, frame: FrameType | None) -> None:
+            del signum, frame
+            _on_term()
+
+        signal.signal(signal.SIGTERM, _on_term_signal)
+
+    display.info(
+        f"🖥  无头驻留中（session={portal.run.status.session_id}），邻居铃声/注入事件照常处理，Ctrl+C 或 SIGTERM 退出"
+    )
+    # SIGINT 全局 handler 取消任务 → 视为退出请求，静默交给 finally 收尾
+    with contextlib.suppress(asyncio.CancelledError):
+        await stop.wait()
+
+
 async def main():
     """主入口"""
     import argparse
@@ -213,8 +266,23 @@ async def main():
         "-r", "--resume", nargs="?", const="auto", default=None, metavar="SESSION_ID", help="恢复历史会话"
     )
     parser.add_argument("--init", action="store_true", help="初始化配置文件")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="无头驻留模式：跳过交互提示与 logo，常驻直到 SIGINT/SIGTERM（可与 -r 组合）",
+    )
 
     args = parser.parse_args()
+
+    if args.headless:
+        # 驻留日志必须实时可见：stdout 重定向到文件时是块缓冲，
+        # 攒到退出才落盘——而驻留模式恰恰到收到信号才退出，等于永远看不到。
+        # 走 getattr：TextIO 协议没有 reconfigure（StringIO 等实现也没有），
+        # 直接调用在 strict 下既过不了类型检查，运行时也未必存在。
+        for _stream in (sys.stdout, sys.stderr):
+            _reconf = getattr(_stream, "reconfigure", None)
+            if callable(_reconf):
+                _reconf(line_buffering=True)
 
     if args.init:
         config.init_config()
@@ -269,7 +337,8 @@ async def main():
     # 使用专用软中断 handler（不 cancel task，否则 finally 里的 await 会中断）。
     signal.signal(signal.SIGTERM, _raw_sigterm_handler)
 
-    if not os.environ.get("FP_SUBAGENT_QUIET"):
+    # headless 无交互语境，logo 只会污染驻留日志
+    if not os.environ.get("FP_SUBAGENT_QUIET") and not args.headless:
         display.print_logo(model=portal.run.status.model, resume=args.resume)
 
     try:
@@ -290,13 +359,11 @@ async def main():
                 print(resp.content, end="")
 
         if args.message and not _reloaded:
-            if os.environ.get("FP_SUBAGENT_SILENT"):
-                response = await portal.run.send(args.message)
-                print(response.content, end="")
-            else:
-                print(f"> {args.message}")
-                response = await portal.run.send(args.message)
-                print(f"\nAgent: {response.content}")
+            await _send_single(args.message)
+
+        if args.headless:
+            # 无头驻留：无论有无 -m，都常驻等事件（而非像 REPL 那样读到 EOF 就退）
+            await _resident_loop()
         elif not args.message:
             # 无 -m：进入 REPL（reload 续接完成后同样回到这里等输入）
             inp = InputHandler()

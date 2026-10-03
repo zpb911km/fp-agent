@@ -23,6 +23,7 @@ python3 cli.py
 | `-r` | `--resume` | 恢复最新会话。不加参数值则自动恢复最新的历史会话 |
 | `-r <SID>` | `--resume <SID>` | 恢复指定 ID 的会话 |
 | `--init` | — | 初始化配置文件。生成默认 `~/.config/fp/config.json` 后退出 |
+| `--headless` | — | 无头驻留模式。跳过 logo 与交互提示，启动即常驻，直到 `Ctrl+C`/`SIGTERM`；无 pty、stdin EOF 都不会导致退出。可与 `-r` 组合 |
 
 ---
 
@@ -71,6 +72,21 @@ python3 cli.py --init
 ```
 
 在项目根目录生成默认 `~/.config/fp/config.json`。
+
+### 6. 无头驻留模式
+
+```bash
+# 常驻（后台/管道/服务管理器拉起均可，无需 pty）
+python3 cli.py --headless
+
+# 常驻并恢复指定会话
+python3 cli.py --headless -r session_abc123
+```
+
+不进入交互循环，启动即常驻：邻居铃声、注入事件照常处理，`Ctrl+C` 或 `SIGTERM` 才退出（退出走正常收尾：保存会话、统计面板）。
+与交互模式的关键差异——交互模式在 stdin 读到 EOF（后台无 pty 启动）时会直接退出，驻留模式把「没有输入」视为常态，因此不再需要 `screen`/`tmux` 包一层。
+
+输出重定向到文件时自动切换为行缓冲，日志实时可见。
 
 ---
 
