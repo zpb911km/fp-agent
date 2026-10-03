@@ -103,7 +103,7 @@ pkill -f cli.py
 1. 检查文件结构
 
 ```bash
-head -1 data/sessions/s_260610_153022123456.jsonl | python3 -m json.tool
+head -1 ~/.local/share/fp/sessions/s_260610_153022123456.jsonl | python3 -m json.tool
 ```
 
 2. 如果第 1 行（meta 行）JSON 格式错误，手动编辑修复
@@ -112,7 +112,7 @@ head -1 data/sessions/s_260610_153022123456.jsonl | python3 -m json.tool
 
 ```bash
 # 统计实际消息行数
-wc -l data/sessions/s_260610_153022123456.jsonl
+wc -l ~/.local/share/fp/sessions/s_260610_153022123456.jsonl
 ```
 
 **最小修复示例**：如果只有 meta 行被损坏，可以直接用以下格式替换第 1 行：
@@ -172,22 +172,21 @@ pip install --upgrade prompt_toolkit
 |------|------|------|
 | 会话记录 | `~/.local/share/fp/sessions/` | 所有历史对话 |
 | 长期记忆 | `~/.local/share/fp/private/memory/`（另 public/fetched 来源） | 跨会话持久化记忆 |
-| 任务状态 | `~/.local/share/fp/tasks.json` | 任务管理系统状态 |
+| 任务状态 | `./.fp/tasks.json` | 任务管理系统状态（项目内，任务图 taskmap） |
 
 **一键备份**
 
 ```bash
 backup_dir="backup_$(date +%Y%m%d_%H%M%S)"
-mkdir -p "$backup_dir/data"
-cp -r data/sessions "$backup_dir/data/"
-cp -r data/memory "$backup_dir/data/"
-cp data/tasks.json "$backup_dir/data/"
+mkdir -p "$backup_dir"
+cp -r ~/.local/share/fp "$backup_dir/fp"          # 会话 + 长期记忆（三来源）
+cp ./.fp/tasks.json "$backup_dir/tasks.json"      # 任务状态（项目本地，需在项目根目录执行）
 echo "备份完成：$backup_dir"
 ```
 
 **迁移到新环境**
 
-将备份目录中的 `data/` 复制到新环境的根目录即可。
+将备份中的 `fp/` 复制到新环境的 `~/.local/share/`，`tasks.json` 复制到项目根目录的 `.fp/` 下即可。
 
 ---
 
