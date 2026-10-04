@@ -44,7 +44,7 @@ class LifecycleHook(Enum):
     ON_BEFORE_COMMAND = auto()  # #5 命令开始执行 — data: name, arg；blocked 可阻断
     ON_COMMAND = auto()  # #6 命令输出返回 — data: name, arg, output, handled, latency_ms（journal 必需）
     ON_COMMAND_BLOCKED = auto()  # #6b 命令被守卫阻断（post 出口）— data: name, arg, block_reason, messages
-    ON_FALLTHROUGH = auto()  # #7 slash 未处理降级为消息 — data: content
+    ON_FALLTHROUGH = auto()  # #7 slash 显式让渡降级为消息（仅 execute 返回 (False, "")）— data: content
     ON_MSG_ENTER = auto()  # #8 非命令进入消息处理 — data: content, messages
     ON_MESSAGE_BLOCKED = auto()  # #9 消息被插件拦截（早退不落盘）— data: content, block_reason, source
     ON_MESSAGE_FILTER = auto()  # #10 用户消息过滤/修改 — 可修改内容/阻止进入

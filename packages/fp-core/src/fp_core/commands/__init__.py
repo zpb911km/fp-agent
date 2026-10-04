@@ -123,15 +123,32 @@ def get_all_commands() -> dict[str, str]:
     return result
 
 
+def _unknown_command_message(name: str) -> str:
+    """未知命令名 → 给用户的报错文本（含近似匹配提示）"""
+    import difflib
+
+    if not name:
+        return "❌ 空命令。输入 /help 查看可用命令。"
+    close = difflib.get_close_matches(name, list(_commands), n=3, cutoff=0.6)
+    hint = "，是否想输入 " + "、".join("/" + c for c in close) + "？" if close else "。"
+    return f"❌ 未知命令: /{name}{hint}输入 /help 查看可用命令。"
+
+
 async def execute(state: object, cmd_name: str, arg: str) -> tuple[bool, str]:
     """执行命令，返回 (是否已处理, 输出文本)。
 
     命令的 execute 接收 State 参数（而非 Agent），直接操作核心状态。
     兼容旧版只返回 bool 的命令（自动补为 ("", False/True)）。
+
+    返回值三态（调用方据此分流，见 Agent._process_inner）：
+      - (True,  out)  ：命令已执行，out 为回显内容
+      - (False, out)  ：命令名无法解析 / 命令执行失败，out 为**给用户的报错**
+                        —— 调用方必须原样返回，不得降级为普通消息
+      - (False, "")   ：命令主动让渡（未消费该输入），调用方才会走降级通路
     """
     mod = get_command(cmd_name)
     if mod is None:
-        return (False, "")
+        return (False, _unknown_command_message(cmd_name))
 
     # 执行命令（自动适配同步/异步）
     result: Any

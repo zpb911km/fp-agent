@@ -211,7 +211,8 @@ async def test_on_before_command_blocked(make_agent):
 
 
 @pytest.mark.asyncio
-async def test_unhandled_slash_falls_through_to_message(make_agent):
+async def test_unknown_slash_reports_error(make_agent):
+    """未知斜杠命令 → 报错返回，**不**降级为普通消息发给 LLM"""
     agent, rec = make_agent(
         LifecycleHook.ON_BEFORE_COMMAND,
         LifecycleHook.ON_COMMAND,
@@ -220,24 +221,72 @@ async def test_unhandled_slash_falls_through_to_message(make_agent):
         LifecycleHook.ON_CTX_APPEND,
     )
     resp = await agent.process("/no_such_cmd_ever")
-    assert resp.content == "ok"  # 降级为消息 → LLM mock 回复
 
+    assert resp.content.startswith("❌ 未知命令: /no_such_cmd_ever")
+    assert resp.metadata.get("from_command") is True
+    assert resp.metadata.get("command_error") is True
+
+    # 命令链止于 ON_COMMAND：无降级、不入库（LLM 根本看不到这行）
+    assert rec.names() == ["ON_BEFORE_COMMAND", "ON_COMMAND"]
+    assert rec.of(LifecycleHook.ON_COMMAND)[0]["data"]["handled"] is False
+    assert "未知命令" in rec.of(LifecycleHook.ON_COMMAND)[0]["data"]["output"]
+    assert not rec.of(LifecycleHook.ON_FALLTHROUGH)
+    assert not rec.of(LifecycleHook.ON_MSG_ENTER)
+    assert not rec.of(LifecycleHook.ON_CTX_APPEND)
+
+
+@pytest.mark.asyncio
+async def test_command_failure_does_not_fall_through(make_agent):
+    """命令已识别但返回 (False, 报错) → 原样回显报错，不降级、不入库"""
+    agent, rec = make_agent(LifecycleHook.ON_COMMAND, LifecycleHook.ON_FALLTHROUGH, LifecycleHook.ON_CTX_APPEND)
+
+    async def execute(state: Any, arg: str) -> tuple[bool, str]:
+        return (False, "💥 命令执行失败: 参数不合法")
+
+    mod = SimpleNamespace(name="dynfail", description="always fails", execute=execute)
+    cmd_mod.register_command("dynfail", mod)
+    try:
+        resp = await agent.process("/dynfail oops")
+    finally:
+        cmd_mod.unregister_command("dynfail")
+
+    assert resp.content == "💥 命令执行失败: 参数不合法"
+    assert resp.metadata.get("command_error") is True
+    assert not rec.of(LifecycleHook.ON_FALLTHROUGH)
+    assert not rec.of(LifecycleHook.ON_CTX_APPEND)
+
+
+@pytest.mark.asyncio
+async def test_explicit_yield_still_falls_through(make_agent):
+    """命令显式让渡（返回 (False, "")）→ 保留降级为消息的通路（#7）"""
+    agent, rec = make_agent(
+        LifecycleHook.ON_COMMAND,
+        LifecycleHook.ON_FALLTHROUGH,
+        LifecycleHook.ON_MSG_ENTER,
+        LifecycleHook.ON_CTX_APPEND,
+    )
+
+    async def execute(state: Any, arg: str) -> tuple[bool, str]:
+        return (False, "")
+
+    mod = SimpleNamespace(name="dynyield", description="yields", execute=execute)
+    cmd_mod.register_command("dynyield", mod)
+    try:
+        resp = await agent.process("/dynyield passthrough")
+    finally:
+        cmd_mod.unregister_command("dynyield")
+
+    assert resp.content == "ok"  # 降级为消息 → LLM mock 回复
     assert rec.names() == [
-        "ON_BEFORE_COMMAND",
         "ON_COMMAND",
         "ON_FALLTHROUGH",
         "ON_CTX_APPEND",  # op=user（降级入库）
-        "ON_CTX_APPEND",  # op=assistant（块3：LLM 回复入库）
+        "ON_CTX_APPEND",  # op=assistant（LLM 回复入库）
     ]
-    assert rec.of(LifecycleHook.ON_COMMAND)[0]["data"]["handled"] is False
-    # fallthrough 路径不发 ON_MSG_ENTER（#7 与 #8 是两条互斥边）
     assert not rec.of(LifecycleHook.ON_MSG_ENTER)
-    # 降级后仍入库
     ca = rec.of(LifecycleHook.ON_CTX_APPEND)[0]["data"]
     assert ca["op"] == "user"
-    assert ca["message"]["content"] == "/no_such_cmd_ever"
-    # 块3 #27：assistant 入库后也有观察点
-    assert rec.of(LifecycleHook.ON_CTX_APPEND)[1]["data"]["op"] == "assistant"
+    assert ca["message"]["content"] == "/dynyield passthrough"
 
 
 # ═══════════════════════════════════════════════════════════════

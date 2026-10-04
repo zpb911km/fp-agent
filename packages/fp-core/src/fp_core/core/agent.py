@@ -645,7 +645,13 @@ class Agent:
         return {f"/{name}": desc for name, desc in cmds.items()}
 
     async def handle_command(self, cmd_line: str) -> tuple[bool, str]:
-        """处理斜杠命令"""
+        """处理斜杠命令
+
+        返回三态（契约见 fp_core.commands.execute）：
+          (True,  out)  命令成功，out 为回显
+          (False, out)  未知命令名 / 命令执行失败，out 为给用户的报错
+          (False, "")   非命令输入（不以 "/" 开头）
+        """
         if not cmd_line.strip().startswith("/"):
             return (False, "")
 
@@ -815,7 +821,16 @@ class Agent:
                     # 不再额外 emit ON_BEFORE_RESPONSE（前端从 done.final_content 消费）
                     return Response(content=output, metadata={"from_command": True})
 
-                # ── #7 slash 未处理降级为消息 ──
+                if output:
+                    # ── 命令未成功但**有话要说**：未知命令名 / 命令执行失败 ──
+                    # 报错直接回给用户，绝不把 "/xxx ..." 当普通消息喂给 LLM
+                    # （否则模型收到半截斜杠指令，既跑不到命令也答非所问）
+                    return Response(
+                        content=output,
+                        metadata={"from_command": True, "command_error": True},
+                    )
+
+                # ── #7 命令显式让渡（execute 返回 (False, "")）才降级为消息 ──
                 await self.lifecycle.emit(
                     LifecycleHook.ON_FALLTHROUGH,
                     content=user_input,
