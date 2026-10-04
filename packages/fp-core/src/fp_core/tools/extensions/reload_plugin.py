@@ -108,7 +108,9 @@ async def execute(params: dict[str, Any]) -> str:
         return "❌ 口令已过期（15 分钟）。重新调用 reload（不带参数）获取新口令。"
 
     st = get_current_state()
-    if st is None or st.conversation is None or st.session is None:
+    # conversation/session 是 State 必填字段（构造点恒传实参），类型系统已保证非 None；
+    # 只有 st 本身可能为 None（contextvar 未绑定）。
+    if st is None:
         return "❌ 未取到活体 State（contextvar 导线未绑定——仅主实例处理链内可用），无法 reload。"
 
     result_text = (

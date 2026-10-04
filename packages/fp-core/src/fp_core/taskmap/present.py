@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import time
 
-from .models import NodeKind, NodeStatus, TaskMap
+from .models import Edge, NodeKind, NodeStatus, TaskMap
 from .render import MAP_LABELS
 
 __all__ = ["to_mermaid", "to_tree", "to_markdown"]
@@ -216,7 +216,7 @@ def to_tree(m: TaskMap, *, now: float | None = None) -> str:
         lines.append(f"目标: {m.goal}")
     lines.append("")
 
-    out: dict[str, list] = {}
+    out: dict[str, list[Edge]] = {}
     for e in m.edges:
         if e.src in m.nodes and e.dst in m.nodes:
             out.setdefault(e.src, []).append(e)
@@ -230,7 +230,7 @@ def to_tree(m: TaskMap, *, now: float | None = None) -> str:
             desc = desc[:47] + "…"
         return f"{icon} {nid}{kind} {desc}"
 
-    def edge_tag(e) -> str:
+    def edge_tag(e: Edge) -> str:
         return f"  [{e.semantic}{(' · ' + e.label) if e.label else ''}]"
 
     seen: set[str] = set()

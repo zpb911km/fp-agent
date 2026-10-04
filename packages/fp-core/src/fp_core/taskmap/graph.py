@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Any
+from typing import Any, cast
 
 from .models import Edge, Node, NodeKind, NodeStatus, TaskMap
 
@@ -24,7 +24,7 @@ class GraphOpError(ValueError):
     """op 非法(校验失败)"""
 
 
-def apply_ops(m: TaskMap, ops: list[dict[str, Any]], by: str = "agent") -> list[str]:
+def apply_ops(m: TaskMap, ops: Any, by: str = "agent") -> list[str]:
     """校验并应用一批图 op。
 
     原子语义: 先在 `copy.deepcopy(m)` 上逐条校验+模拟, 全部通过才写回原对象;
@@ -36,15 +36,19 @@ def apply_ops(m: TaskMap, ops: list[dict[str, Any]], by: str = "agent") -> list[
     Raises:
         GraphOpError: ops 为空/非列表, 或任一 op 非法。
     """
+    # ops 来自 LLM 生成的 JSON(不可信), 故签名用 Any、入口做 isinstance 校验,
+    # 通过后 cast 切断 Unknown 级联(strict 模式)。
     if not isinstance(ops, list) or not ops:
         raise GraphOpError("ops 不能为空(需为非空数组)")
+    ops_list = cast(list[Any], ops)
 
     staged = copy.deepcopy(m)
     summary: list[str] = []
 
-    for i, op in enumerate(ops):
-        if not isinstance(op, dict):
+    for i, op_raw in enumerate(ops_list):
+        if not isinstance(op_raw, dict):
             raise GraphOpError(f"op#{i} 不是对象")
+        op = cast(dict[str, Any], op_raw)
         kind = op.get("op")
         if kind not in VALID_OPS:
             raise GraphOpError(f"op#{i} 未知操作: {kind!r}(可选 {sorted(VALID_OPS)})")
@@ -94,9 +98,10 @@ def apply_ops(m: TaskMap, ops: list[dict[str, Any]], by: str = "agent") -> list[
             node = staged.nodes.get(nid)
             if node is None:
                 raise GraphOpError(f"op#{i} set_evidence 节点不存在: {nid!r}")
-            ev = op.get("evidence")
-            if not isinstance(ev, list):
+            ev_raw: Any = op.get("evidence")
+            if not isinstance(ev_raw, list):
                 raise GraphOpError(f"op#{i} set_evidence 的 evidence 必须是数组")
+            ev = cast(list[Any], ev_raw)
             node.evidence.extend(str(e) for e in ev)
             node.log("evidence+", by=by)
             summary.append(f"节点 {nid} +证据×{len(ev)}")

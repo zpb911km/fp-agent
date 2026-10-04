@@ -8,7 +8,7 @@ Memory Save 插件 v2 — 保存长期记忆（异步版本）
 import asyncio
 import os
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from fp_core import config
 
@@ -107,7 +107,7 @@ async def execute(params: dict[str, Any]) -> str:
 
         try:
             fm = yaml.safe_load("\n".join(lines[1:end]))
-            return fm if isinstance(fm, dict) else {}
+            return cast(dict[str, Any], fm) if isinstance(fm, dict) else {}
         except Exception:
             return {}
 

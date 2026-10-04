@@ -17,7 +17,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 #: 单文件 JSON 的 schema 版本(旧 {tasks:[...]} 视为 v1, 惰性迁移)。
 SCHEMA_VERSION = 2
@@ -114,8 +114,8 @@ class Node:
     dispatch_id: str | None = None
     lease_until: float | None = None
     # 证据绑定: 把「宣称达成」钉到「凭据」(路径/命令输出/结果引用)
-    evidence: list[str] = field(default_factory=list)
-    history: list[dict[str, Any]] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list[str])
+    history: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
 
     def log(self, action: str, by: str = "agent", note: str = "") -> None:
         self.history.append({"ts": _now(), "by": by, "action": action, "note": note})
@@ -135,6 +135,7 @@ class Node:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Node:
+        evidence_raw: Any = data.get("evidence") or []
         return cls(
             id=str(data["id"]),
             desc=str(data.get("desc", "")),
@@ -143,7 +144,7 @@ class Node:
             owner=data.get("owner"),
             dispatch_id=data.get("dispatch_id"),
             lease_until=data.get("lease_until"),
-            evidence=[str(e) for e in (data.get("evidence") or [])],
+            evidence=[str(e) for e in evidence_raw],
             history=list(data.get("history") or []),
         )
 
@@ -159,7 +160,7 @@ class Edge:
     dst: str
     semantic: str
     label: str = ""
-    history: list[dict[str, Any]] = field(default_factory=list)
+    history: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
 
     def log(self, action: str, by: str = "agent", note: str = "") -> None:
         self.history.append({"ts": _now(), "by": by, "action": action, "note": note})
@@ -216,10 +217,10 @@ class TaskMap:
     title: str
     goal: str = ""
     status: MapStatus = MapStatus.ACTIVE
-    nodes: dict[str, Node] = field(default_factory=dict)
-    edges: list[Edge] = field(default_factory=list)
-    questions: list[dict[str, Any]] = field(default_factory=list)
-    refs: dict[str, Any] = field(default_factory=dict)
+    nodes: dict[str, Node] = field(default_factory=dict[str, Node])
+    edges: list[Edge] = field(default_factory=list[Edge])
+    questions: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+    refs: dict[str, Any] = field(default_factory=dict[str, Any])
     created: float = field(default_factory=_now)
     updated: float = field(default_factory=_now)
     #: 节点 id 单调计数器(新节点 = n<next_nid>)。只增, 保证 id 稳定不复用。
@@ -287,22 +288,24 @@ class TaskMap:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TaskMap:
-        raw_nodes = data.get("nodes") or {}
+        raw_nodes: Any = data.get("nodes") or {}
         nodes: dict[str, Node] = {}
         if isinstance(raw_nodes, dict):
-            for nid, nd in raw_nodes.items():
+            raw_map = cast(dict[str, Any], raw_nodes)
+            for nid, nd in raw_map.items():
                 nodes[str(nid)] = Node.from_dict(nd)
         nn = data.get("next_nid")
         if nn is None:
             nums = [int(nid[1:]) for nid in nodes if nid.startswith("n") and nid[1:].isdigit()]
             nn = (max(nums) + 1) if nums else len(nodes)
+        edges_raw: Any = data.get("edges") or []
         return cls(
             id=int(data["id"]),
             title=str(data.get("title", "")),
             goal=str(data.get("goal", "")),
             status=MapStatus(data.get("status", MapStatus.ACTIVE.value)),
             nodes=nodes,
-            edges=[Edge.from_dict(e) for e in (data.get("edges") or [])],
+            edges=[Edge.from_dict(e) for e in edges_raw],
             questions=list(data.get("questions") or []),
             refs=dict(data.get("refs") or {}),
             created=float(data.get("created", _now())),

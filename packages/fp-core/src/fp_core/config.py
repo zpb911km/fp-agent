@@ -164,35 +164,40 @@ def normalize_providers(raw: Any) -> dict[str, dict[str, Any]]:
     """
     if not isinstance(raw, dict):
         return {}
+    # isinstance 把 Any 收窄成 dict[Unknown, Unknown]，后续 .items()/.get() 会级联
+    # Unknown —— 立刻 cast 回 dict[str, Any] 切断（strict 模式下注解不足以切断）。
+    table = cast(dict[str, Any], raw)
     out: dict[str, dict[str, Any]] = {}
-    for pname, pval in raw.items():
+    for pname, pval in table.items():
         if not isinstance(pval, dict):
             continue
+        pobj = cast(dict[str, Any], pval)
         name = str(pname)
         if "/" in name:  # 斜杠是 ACTIVE_LLM 的分隔符，provider 名不得含斜杠
             continue
-        models_raw = pval.get("models")
+        models_raw = pobj.get("models")
         if isinstance(models_raw, dict) and models_raw:
             models: dict[str, dict[str, Any]] = {}
-            for mname, mval in models_raw.items():
+            mraw = cast(dict[str, Any], models_raw)
+            for mname, mval in mraw.items():
                 mkey = str(mname)
                 if "/" in mkey:
                     continue
-                models[mkey] = dict(mval) if isinstance(mval, dict) else {}
+                models[mkey] = cast(dict[str, Any], mval) if isinstance(mval, dict) else {}
             if not models:
                 continue
-            p = {k: v for k, v in pval.items() if k != "models"}
+            p = {k: v for k, v in pobj.items() if k != "models"}
         else:
             # ── 旧格式：model → models.{model} ──
-            legacy_model = pval.get("model")
+            legacy_model = pobj.get("model")
             if not isinstance(legacy_model, str) or not legacy_model.strip():
                 continue
             mkey = legacy_model.strip()
             if "/" in mkey:
                 continue
-            legacy_diff = {k: v for k, v in pval.items() if k in _LLM_MODEL_KEYS}
-            p = {k: v for k, v in pval.items() if k != "model" and k not in _LLM_MODEL_KEYS}
-            models = {mkey: dict(legacy_diff) if legacy_diff else {}}
+            legacy_diff = {k: v for k, v in pobj.items() if k in _LLM_MODEL_KEYS}
+            p = {k: v for k, v in pobj.items() if k != "model" and k not in _LLM_MODEL_KEYS}
+            models = {mkey: legacy_diff}
         out[name] = {**p, "models": models}
     return out
 
@@ -240,7 +245,7 @@ def _merge_extra_body(*bodies: Any) -> dict[str, Any]:
     merged: dict[str, Any] = {}
     for b in bodies:
         if isinstance(b, dict):
-            merged.update(b)
+            merged.update(cast(dict[str, Any], b))
     return merged
 
 
@@ -405,32 +410,36 @@ def set_active_llm_state(
 # LLM 配置
 # ═══════════════════════════════════════════════════════════════
 
-LLM_API_KEY: str = _value("LLM_API_KEY", "")
-LLM_API_BASE_URL: str = _value("LLM_API_BASE_URL", "https://api.deepseek.com/v1")
-LLM_MODEL: str = _value("LLM_MODEL", "deepseek-v4-flash")
-LLM_TEMPERATURE: float = _value("TEMPERATURE", 0.8)
-LLM_MAX_TOKENS: int = _value("MAX_TOKENS", 32768)
-LLM_TIMEOUT: int = _value("TIMEOUT", 300)
-LLM_RETRY_COUNT: int = _value("RETRY_COUNT", 3)
-
 # ── 两级结构：解析激活 & 回填 LLM_* 常量 ────────────────────────
 # 有 LLM_PROVIDERS 表时，顶层三键仅是兼容镜像，真源 = ACTIVE_LLM 引用
 # （或从顶层三键推导出的 "provider/model"）。模块加载时解析一次，把激活项的
 # 完整参数回填到 LLM_* 常量 —— agent.py 等既读常量者零改动即获正确激活。
-_resolved_active = resolve_active_llm()
-if _resolved_active is not None:
-    LLM_ACTIVE_ID: str = f"{_resolved_active['provider']}/{_resolved_active['model']}"
-    LLM_EXTRA_BODY: dict[str, Any] = dict(_resolved_active["extra_body"])
-    LLM_API_KEY = _resolved_active["api_key"]
-    LLM_API_BASE_URL = _resolved_active["base_url"]
-    LLM_MODEL = _resolved_active["model"]
-    LLM_TEMPERATURE = float(_resolved_active["temperature"])
-    LLM_MAX_TOKENS = int(_resolved_active["max_tokens"])
-    LLM_TIMEOUT = int(_resolved_active["timeout"])
-    LLM_RETRY_COUNT = int(_resolved_active["retry_count"])
-else:
-    LLM_ACTIVE_ID = ""
-    LLM_EXTRA_BODY = {"enable_thinking": False}
+# 注意：模块级大写名只允许赋值一次（pyright reportConstantRedefinition），
+# 故此处用「_resolved_active 三元」一次性定值，而非先赋默认值再在分支里回填。
+_resolved_active: dict[str, Any] | None = resolve_active_llm()
+LLM_ACTIVE_ID: str = (
+    f"{_resolved_active['provider']}/{_resolved_active['model']}" if _resolved_active is not None else ""
+)
+LLM_EXTRA_BODY: dict[str, Any] = (
+    dict(_resolved_active["extra_body"]) if _resolved_active is not None else {"enable_thinking": False}
+)
+LLM_API_KEY: str = _resolved_active["api_key"] if _resolved_active is not None else _value("LLM_API_KEY", "")
+LLM_API_BASE_URL: str = (
+    _resolved_active["base_url"]
+    if _resolved_active is not None
+    else _value("LLM_API_BASE_URL", "https://api.deepseek.com/v1")
+)
+LLM_MODEL: str = _resolved_active["model"] if _resolved_active is not None else _value("LLM_MODEL", "deepseek-v4-flash")
+LLM_TEMPERATURE: float = (
+    float(_resolved_active["temperature"]) if _resolved_active is not None else _value("TEMPERATURE", 0.8)
+)
+LLM_MAX_TOKENS: int = (
+    int(_resolved_active["max_tokens"]) if _resolved_active is not None else _value("MAX_TOKENS", 32768)
+)
+LLM_TIMEOUT: int = int(_resolved_active["timeout"]) if _resolved_active is not None else _value("TIMEOUT", 300)
+LLM_RETRY_COUNT: int = (
+    int(_resolved_active["retry_count"]) if _resolved_active is not None else _value("RETRY_COUNT", 3)
+)
 
 
 # ═══════════════════════════════════════════════════════════════

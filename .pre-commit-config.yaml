@@ -22,6 +22,20 @@ repos:
         types: [python]
         require_serial: true
 
+      # 类型门禁：pyright strict（pyrightconfig.json，typeCheckingMode=strict）。
+      # 全仓类型债已于 2026-08-28 清零（2840→0），此后因无钩子守护，
+      # 9 月新增代码静默累积回 115 错——此钩子即为防复发。
+      # 手动触发: pyright
+      # 显式放行: 无（0 错是硬约束，修类型而不是绕钩子）
+      - id: pyright
+        name: pyright strict
+        entry: pyright
+        language: system
+        types: [python]
+        require_serial: true
+        pass_filenames: false
+        files: ^(packages/[^/]+/src/)
+
       # 文档同步门禁：改了代码而相关文档没同步 → 提醒并阻断提交。
       # 逻辑在 scripts/check_docs_sync.py（基于 git 变更流判定，非文本比对）。
       # 手动主动触发: python scripts/check_docs_sync.py --since HEAD~N

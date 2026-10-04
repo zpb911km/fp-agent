@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
+from typing import Any, cast
 
 from .graph import GraphOpError, apply_ops
 from .models import NodeKind, NodeStatus, TaskMap
@@ -97,7 +97,7 @@ def extract_delta(stdout: str) -> tuple[dict[str, Any] | None, str]:
         return None, f"delta JSON 解析失败: {e}"
     if not isinstance(parsed, dict):
         return None, "delta 顶层不是对象"
-    return parsed, ""
+    return cast(dict[str, Any], parsed), ""
 
 
 def _resolve(name: str, lid_map: dict[str, str], existing: set[str]) -> str | None:
@@ -144,7 +144,7 @@ def _goal_reachable(m: TaskMap) -> bool:
 
 def apply_delta(
     m: TaskMap,
-    delta: dict[str, Any],
+    delta: Any,
     *,
     worker: str = "",
     dispatch_id: str = "",
@@ -154,14 +154,18 @@ def apply_delta(
     原子性: propose 走 `graph.apply_ops`(整批原子); 节点状态/证据在 propose 通过后才落。
     幂等: 若给出 dispatch_id, 必须等于节点当前 dispatch_id(否则视为陈旧/非本 attempt)。
 
+    `delta` 来自 worker stdout 的 JSON(不可信), 故签名用 Any 并在入口做 isinstance
+    校验(本函数 8 条校验的第一道), 通过后 cast 成 dict[str, Any] 切断 Unknown 级联。
+
     Returns:
         (ok, message, warnings)。ok=False 时图不变。
     """
     warnings: list[str] = []
     if not isinstance(delta, dict):
         return False, "delta 不是对象", warnings
+    d = cast(dict[str, Any], delta)
 
-    nid = str(delta.get("node", "")).strip()
+    nid = str(d.get("node", "")).strip()
     node = m.nodes.get(nid)
     if node is None:
         return False, f"节点不存在: {nid!r}", warnings
@@ -172,18 +176,21 @@ def apply_delta(
     if worker and node.owner and node.owner != worker:
         return False, f"非本 worker 持有(节点 {nid} owner={node.owner!r})", warnings
 
-    status = str(delta.get("status", "")).strip()
+    status = str(d.get("status", "")).strip()
     if status and status not in _VALID_STATUS:
         return False, f"非法 status: {status!r}(可选 {sorted(_VALID_STATUS)})", warnings
 
     # ── propose → ops ──
-    propose = delta.get("propose") or {}
-    if not isinstance(propose, dict):
+    propose_raw: Any = d.get("propose") or {}
+    if not isinstance(propose_raw, dict):
         return False, "propose 必须是对象", warnings
-    pnodes = propose.get("nodes") or []
-    pedges = propose.get("edges") or []
-    if not isinstance(pnodes, list) or not isinstance(pedges, list):
+    propose = cast(dict[str, Any], propose_raw)
+    pnodes_raw: Any = propose.get("nodes") or []
+    pedges_raw: Any = propose.get("edges") or []
+    if not isinstance(pnodes_raw, list) or not isinstance(pedges_raw, list):
         return False, "propose.nodes/edges 必须是数组", warnings
+    pnodes = cast(list[Any], pnodes_raw)
+    pedges = cast(list[Any], pedges_raw)
 
     existing = set(m.nodes)
     allowed = {nid}  # 校验 6: 只能碰自己节点 + 本次新建
@@ -191,9 +198,10 @@ def apply_delta(
     base = m.next_nid
     ops: list[dict[str, Any]] = []
 
-    for i, pn in enumerate(pnodes):
-        if not isinstance(pn, dict):
+    for i, pn_raw in enumerate(pnodes):
+        if not isinstance(pn_raw, dict):
             return False, f"propose.nodes[{i}] 不是对象", warnings
+        pn = cast(dict[str, Any], pn_raw)
         lid = str(pn.get("lid", f"x{i}")).strip() or f"x{i}"
         desc = str(pn.get("desc", "")).strip()
         if not desc:
@@ -212,9 +220,10 @@ def apply_delta(
         allowed.add(gid)
         ops.append({"op": "add_node", "desc": desc, "kind": kind})
 
-    for i, pe in enumerate(pedges):
-        if not isinstance(pe, dict):
+    for i, pe_raw in enumerate(pedges):
+        if not isinstance(pe_raw, dict):
             return False, f"propose.edges[{i}] 不是对象", warnings
+        pe = cast(dict[str, Any], pe_raw)
         src = _resolve(str(pe.get("from", "")).strip(), lid_map, existing)
         dst = _resolve(str(pe.get("to", "")).strip(), lid_map, existing)
         if src is None or dst is None:
@@ -228,7 +237,7 @@ def apply_delta(
         ops.append({"op": "add_edge", "from": src, "to": dst, "semantic": sem, "label": str(pe.get("label", ""))})
 
     # 校验 2: outcome 必须是已有出边语义或本次新建
-    outcome = str(delta.get("outcome", "")).strip()
+    outcome = str(d.get("outcome", "")).strip()
     if status == "done" and not outcome:
         return False, "status=done 时 outcome 必填", warnings
     if outcome:
@@ -252,11 +261,13 @@ def apply_delta(
         node.log(f"status={status}", by=by)
     if outcome:
         node.log(f"outcome={outcome}", by=by)
-    for ev in delta.get("evidence") or []:
+    evidence_raw: Any = d.get("evidence") or []
+    for ev in evidence_raw:
         node.evidence.append(str(ev))
-    if delta.get("evidence"):
+    if d.get("evidence"):
         node.log("evidence+", by=by)
-    for q in delta.get("questions") or []:
+    questions_raw: Any = d.get("questions") or []
+    for q in questions_raw:
         m.questions.append({"q": str(q), "resolved": False, "ts": time.time(), "by": by})
 
     # 释放锁
@@ -271,6 +282,6 @@ def apply_delta(
     if not _goal_reachable(m):
         warnings.append("⚠ 目标节点不可达(可能是跑偏信号)")
 
-    sid = delta.get("suggest_next")
+    sid = d.get("suggest_next")
     tail = f"; 建议下一步 {sid}" if sid else ""
     return True, f"已应用节点 {nid} 的回报(新增 {len(ops)} 项){tail}", warnings

@@ -91,8 +91,8 @@ async def perform_exec_reload(state: State, *, kind: str, tool_result_text: str 
     """
     conv = state.conversation
     session = state.session
-    if conv is None or session is None:
-        return "❌ 无活体会话，无法 reload。"
+    # 注：conversation/session 是 State 必填字段（dataclass 无默认值，构造点恒传实参），
+    # 类型系统已保证非 None，故不再做运行时判空（strict 模式下该判断恒假）。
 
     # ── 前置检查：启动命令快照 ──
     # 快照缺失（入口早于捕获机制启动的存量实例）→ 从 /proc/self 精确重建：
@@ -101,7 +101,7 @@ async def perform_exec_reload(state: State, *, kind: str, tool_result_text: str 
     launch_argv: list[str]
     if launch_raw:
         try:
-            launch = json.loads(launch_raw)
+            launch: dict[str, Any] = json.loads(launch_raw)
             launch_argv = list(launch["argv"])
         except (ValueError, KeyError, TypeError):
             return "❌ FP_LAUNCH_JSON 损坏，无法重启。"
@@ -148,7 +148,7 @@ async def perform_exec_reload(state: State, *, kind: str, tool_result_text: str 
                 tid = tc.get("id")
                 if not tid or tid in answered:
                     continue
-                fn = tc.get("function") or {}
+                fn: dict[str, Any] = tc.get("function") or {}
                 if fn.get("name") == "reload":
                     _msg = conv.add_tool_message(tid, tool_result_text)
                 else:

@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, cast
 
 from fp_core.taskmap.graph import GraphOpError, apply_ops
 from fp_core.taskmap.models import TERMINAL_MAP_STATUSES, MapStatus
@@ -197,7 +197,7 @@ async def handle_update(params: dict[str, Any]) -> str:
 
     refs = params.get("refs")
     if isinstance(refs, dict) and refs:
-        m.refs.update(refs)
+        m.refs.update(cast(dict[str, Any], refs))
         changed.append("refs")
 
     if not changed:

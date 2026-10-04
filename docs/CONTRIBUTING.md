@@ -258,6 +258,16 @@ echo "你是谁" | fp                   # 测试系统提示词
   确认（尤其新增测试文件时，文件清单表需同步）。WebUI 前端静态资源
   （`static/*.js|css`）关联 [guide/WebUI手册.md](guide/WebUI手册.md)，
   根 `pyproject.toml`（工具链配置）同样关联测试文档。
+- **类型门禁（pyright strict）**：pre-commit 钩子 `pyright` 以
+  [pyrightconfig.json](../pyrightconfig.json)（`typeCheckingMode: strict`、
+  Python 3.14）做**全仓**判定（`pass_filenames: false`，不按本次文件切片），
+  任何 error 即**拒绝提交**——与 ruff 同级，**无放行口**（修类型而不是绕钩子）。
+  手动触发：`pyright`。全仓类型债已于 2026-08-28 清零（2840→0），此后一度
+  因缺钩子守护累积回 115 错，故本钩子是**防复发**的硬约束。
+  strict 下的典型修法：`isinstance(x, dict)` 会把 `Any` 收窄成
+  `dict[Unknown, Unknown]` 并级联出一批 Unknown，必须紧跟
+  `cast(dict[str, Any], x)` 切断（单纯加变量注解无效）；`field(default_factory=list)`
+  需补泛型实参（`list[str]` / `dict[str, Node]`）；模块级大写常量只允许赋值一次。
 - **依赖层级守卫（方向防混乱）**：pre-commit 钩子 `dep-layers` 由
   `scripts/check_dep_layers.py` 执行，AST 全量扫描 `packages/*/src` 与
   `scripts/` 的静态 import，按四层模型（L0–L4，见
