@@ -28,6 +28,7 @@ class TestValidateValue:
         """必填项为纯空格 → 返回错误"""
         errors = config._validate_value("LLM_API_KEY", "   ")
         assert len(errors) == 1
+        assert "必填项未设置" in errors[0]
 
     def test_required_ok(self):
         """必填项正常填充 → 无错误"""
@@ -104,7 +105,7 @@ class TestGetDefaultConfig:
         import json
 
         cfg = config.get_default_config()
-        json.dumps(cfg)  # 不应抛出异常
+        assert json.loads(json.dumps(cfg)) == cfg
 
 
 class TestValueFunction:

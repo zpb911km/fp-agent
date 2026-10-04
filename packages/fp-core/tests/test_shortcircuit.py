@@ -2,6 +2,8 @@
 
 from collections.abc import Coroutine
 
+import pytest
+
 from fp_core.plugins.shortcircuit.core import (
     Message,
     degenerate,
@@ -537,8 +539,10 @@ class _FakeState:
 
 
 class TestExecuteCommand:
-    def test_command_can_crop_current_block(self):
-        """命令层无硬性约束：/sc #N -c 可以 crop 当前块（不强制退化）"""
+    @pytest.mark.parametrize("arg", ["#2 -c", ""], ids=["explicit_-c", "default_no_modifier"])
+    def test_command_crop_current_block(self, arg):
+        """命令层无硬性约束：`/sc #2 -c` 与默认（无修饰）都能 crop 当前块（不强制退化）——
+        两种入参走同一命令语义，断言逐字相同，参数化合并"""
         st = _FakeState([
             _msg("user", "任务A"),
             _msg("assistant", "A完成"),
@@ -547,7 +551,7 @@ class TestExecuteCommand:
             _msg("tool", "B结果"),
             _msg("assistant", "B完成"),
         ])
-        ok, text = run_cmd(st, "#2 -c")
+        ok, text = run_cmd(st, arg)
         assert ok
         assert "已处理" in text
         msgs = st.conversation._msgs
@@ -577,25 +581,6 @@ class TestExecuteCommand:
         assert len(msgs) == 2
         assert msgs[0]["content"] == "任务A"
         assert msgs[1]["content"] == "C总结"
-
-    def test_command_default_crop_on_current(self):
-        """命令层无硬性约束：默认（无修饰）crop 最近可压缩块——即使它是当前块"""
-        st = _FakeState([
-            _msg("user", "任务A"),
-            _msg("assistant", "A完成"),
-            _msg("user", "任务B"),
-            _msg("assistant", "B开始", tool_calls=_tc("b")),
-            _msg("tool", "B结果"),
-            _msg("assistant", "B完成"),
-        ])
-        ok, text = run_cmd(st, "")
-        assert ok
-        assert "已处理" in text
-        msgs = st.conversation._msgs
-        assert len(msgs) == 4
-        assert msgs[2]["content"] == "任务B"
-        assert msgs[3]["content"] == "B完成"
-        assert not any(m["role"] == "tool" for m in msgs)
 
     def test_command_explicit_degenerate_current(self):
         """命令层显式 -d 处理当前块：正常退化（本就允许）"""

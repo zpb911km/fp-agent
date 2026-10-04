@@ -122,7 +122,9 @@ def test_registry_single_mode_rejects_second(tmp_path: Path):
 def test_registry_release_frees_name(tmp_path: Path):
     reg = disc.InstanceRegistry(tmp_path, "proj-aaaa1111")
     reg.acquire(sid="s_a")
+    assert reg.read() is not None  # 占用事实
     reg.release()
+    assert reg.read() is None  # 释放 = 登记文件删除（本进程 pid 存活，残留即失败）
     disc.InstanceRegistry(tmp_path, "proj-aaaa1111").acquire(sid="s_a")  # 释放后可再占
 
 

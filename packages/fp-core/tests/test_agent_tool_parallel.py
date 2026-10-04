@@ -10,7 +10,6 @@ Agent 工具并行执行测试
 """
 
 import asyncio
-import contextlib
 import os
 import time
 
@@ -510,12 +509,15 @@ class TestParallelInterrupt:
 
         async def run():
             cancel_task = asyncio.create_task(delayed_cancel())
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await agent.process("test cancel")  # _check_interrupted 引发 CancelledError→预期行为
+            except asyncio.CancelledError:
+                pass  # 预期路径：中断生效
+            else:
+                raise AssertionError("cancel() 未中断 process：CancelledError 未抛出")
             await cancel_task
 
         await run()
-        # 正常结束，不崩溃即通过
 
 
 # ═══════════════════════════════════════════════════════════════

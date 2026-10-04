@@ -68,8 +68,11 @@ def test_unregister_protects_file_commands():
 def test_unregister_unknown_is_noop():
     snap = _snapshot()
     try:
+        before = _snapshot()
         unregister_command("no_such_cmd_zzz")  # 不应抛异常
         unregister_command("dyn")  # 从未注册，也应 no-op
+        # noop 判据：命令表与动态登记簿均未被改动
+        assert _snapshot() == before
     finally:
         _restore(snap)
 

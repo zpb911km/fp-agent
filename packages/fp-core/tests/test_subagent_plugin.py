@@ -12,12 +12,20 @@
 import asyncio
 import json
 import os
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import fp_core.tools.extensions.subagent_plugin as subagent
 from fp_core.core.session import _generate_sid
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fp_is_subagent(monkeypatch):
+    """隔离外部 FP_IS_SUBAGENT：被测递归守卫直读环境变量，
+    否则在子 agent 会话（FP_IS_SUBAGENT=1）里跑会整文件失败"""
+    monkeypatch.delenv("FP_IS_SUBAGENT", raising=False)
 
 
 class _FakeProc:
@@ -31,6 +39,14 @@ class _FakeProc:
         self.kill = MagicMock()
         self.wait = AsyncMock()
         self.communicate = AsyncMock(return_value=(self._stdout, self._stderr))
+
+
+async def _timeout_wait_for(aw: Any, *args: Any, **kwargs: Any) -> Any:
+    """模拟 wait_for 超时：先关闭传入协程（否则 AsyncMock 协程泄漏
+    "never awaited" 警告），再抛 TimeoutError 走生产码的超时分支。"""
+    if asyncio.iscoroutine(aw):
+        aw.close()
+    raise TimeoutError
 
 
 # ═══════════════════════════════════════════════════════════
@@ -58,51 +74,28 @@ class TestParamValidation:
         assert "cwd 目录不存在" in result["result"]
 
     @pytest.mark.asyncio
-    async def test_timeout_bounds(self, tmp_path):
-        """timeout 显式值下限 10 秒、无上限；缺省 = 无限时长"""
-        captured = {}
+    async def test_timeout_clamped_via_wait_for(self, tmp_path):
+        """验证传给 wait_for 的 timeout：下限 10 秒、无上限、缺省 None（无限）"""
+        timeouts: list[float | None] = []
 
-        async def fake_create_subprocess_exec(*args, **kwargs):
-            captured["timeout_arg"] = None
-            return _FakeProc(stdout=b"done")
+        # 用真 async 函数替代 AsyncMock：mock 不会 await 传入的
+        # proc.communicate() 协程，会泄漏 "never awaited" 警告
+        async def fake_wait_for(aw: Any, *, timeout: float | None = None, **_kw: Any) -> Any:
+            timeouts.append(timeout)
+            return await aw
 
         with (
-            patch.object(asyncio, "create_subprocess_exec", fake_create_subprocess_exec),
-            patch("fp_core.core.session._generate_sid", return_value=_generate_sid()),
+            patch("asyncio.wait_for", fake_wait_for),
+            patch.object(asyncio, "create_subprocess_exec", return_value=_FakeProc(stdout=b"ok")),
+            patch("fp_core.core.session._generate_sid", return_value="s_test"),
             patch("fp_core.core.session.get_current_session_id", return_value=""),
             patch("fp_core.tools.extensions.subagent_plugin._finalize_subagent_session"),
         ):
             await subagent.execute({"task": "t", "cwd": str(tmp_path), "timeout": 1})
             await subagent.execute({"task": "t", "cwd": str(tmp_path), "timeout": 5000})
+            await subagent.execute({"task": "t", "cwd": str(tmp_path)})
 
-        # 无法直接断言 wait_for 的参数；至少不抛错即可
-        # 通过 patch wait_for 精确验证：
-        pass
-
-    @pytest.mark.asyncio
-    async def test_timeout_clamped_via_wait_for(self, tmp_path):
-        """验证传给 wait_for 的 timeout：下限 10 秒、无上限、缺省 None（无限）"""
-        with patch("asyncio.wait_for", new_callable=AsyncMock) as mock_wait:
-            mock_wait.return_value = (b"ok", b"")
-            with (
-                patch.object(asyncio, "create_subprocess_exec", return_value=_FakeProc(stdout=b"ok")),
-                patch("fp_core.core.session._generate_sid", return_value="s_test"),
-                patch("fp_core.core.session.get_current_session_id", return_value=""),
-                patch("fp_core.tools.extensions.subagent_plugin._finalize_subagent_session"),
-            ):
-                await subagent.execute({"task": "t", "cwd": str(tmp_path), "timeout": 1})
-                assert mock_wait.await_args is not None
-                first_timeout = mock_wait.await_args.kwargs.get("timeout")
-                await subagent.execute({"task": "t", "cwd": str(tmp_path), "timeout": 5000})
-                assert mock_wait.await_args is not None
-                second_timeout = mock_wait.await_args.kwargs.get("timeout")
-                await subagent.execute({"task": "t", "cwd": str(tmp_path)})
-                assert mock_wait.await_args is not None
-                default_timeout = mock_wait.await_args.kwargs.get("timeout")
-
-        assert first_timeout == 10
-        assert second_timeout == 5000
-        assert default_timeout is None
+        assert timeouts == [10, 5000, None]
 
     @pytest.mark.asyncio
     async def test_recursion_guard(self, tmp_path):
@@ -182,7 +175,7 @@ class TestExecutePaths:
 
         with (
             patch.object(asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)),
-            patch("asyncio.wait_for", new_callable=AsyncMock, side_effect=asyncio.TimeoutError),
+            patch("asyncio.wait_for", _timeout_wait_for),
             patch("fp_core.core.session._generate_sid", return_value="s_sub"),
             patch("fp_core.core.session.get_current_session_id", return_value=""),
             patch("fp_core.tools.extensions.subagent_plugin._finalize_subagent_session") as mock_finalize,
@@ -202,7 +195,7 @@ class TestExecutePaths:
 
         with (
             patch.object(asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)),
-            patch("asyncio.wait_for", new_callable=AsyncMock, side_effect=asyncio.TimeoutError),
+            patch("asyncio.wait_for", _timeout_wait_for),
             patch("fp_core.core.session._generate_sid", return_value="s_sub"),
             patch("fp_core.core.session.get_current_session_id", return_value=""),
             patch("fp_core.tools.extensions.subagent_plugin._finalize_subagent_session"),

@@ -263,6 +263,14 @@ def start_job(label: str, coro: Any, job_id: str | None = None) -> Job:
     job_registry[jid] = job
     persist_job(job)
     job.task = asyncio.get_running_loop().create_task(_runner(job, coro))
+
+    def _close_unstarted_coro(_t: "asyncio.Task[Any]") -> None:
+        # task 若在首步前被 cancel（如 start_job 后立刻 shutdown_all），
+        # _runner 没机会 await 内层协程 → 兜底关闭，防 "never awaited" 警告
+        if asyncio.iscoroutine(coro):
+            coro.close()
+
+    job.task.add_done_callback(_close_unstarted_coro)
     return job
 
 

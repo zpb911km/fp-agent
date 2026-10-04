@@ -38,6 +38,14 @@ def clean_registry():
     _file_registry.clear()
 
 
+async def _timeout_wait_for(aw, *args, **kwargs):
+    """模拟 wait_for 超时：先关闭传入协程（AsyncMock 协程不消费会泄漏
+    "never awaited" 警告），再抛 TimeoutError 走生产码超时分支。"""
+    if asyncio.iscoroutine(aw):
+        aw.close()
+    raise TimeoutError
+
+
 # ═══════════════════════════════════════════════════════════
 # 哈希
 # ═══════════════════════════════════════════════════════════
@@ -337,7 +345,7 @@ class TestBash:
     async def test_timeout_kills_process(self):
         """显式 on_timeout="kill" → killpg 击杀进程组 + 返回超时错误"""
         with (
-            patch("fp_core.tools.core.asyncio.wait_for", new_callable=AsyncMock, side_effect=asyncio.TimeoutError),
+            patch("fp_core.tools.core.asyncio.wait_for", _timeout_wait_for),
             patch("fp_core.tools.core._kill_process_group") as mock_kill,
             patch("fp_core.tools.core.asyncio.create_subprocess_exec") as mock_create,
         ):
@@ -356,7 +364,7 @@ class TestBash:
         import json
 
         with (
-            patch("fp_core.tools.core.asyncio.wait_for", new_callable=AsyncMock, side_effect=asyncio.TimeoutError),
+            patch("fp_core.tools.core.asyncio.wait_for", _timeout_wait_for),
             patch("fp_core.tools.core._kill_process_group") as mock_kill,
             patch("fp_core.tools.core.asyncio.create_subprocess_exec") as mock_create,
             patch("fp_core.core.jobs.start_job") as mock_start,

@@ -65,13 +65,8 @@ def test_append_empty_list_noop():
 def test_append_filters_blank_parts():
     c = _conv()
     apply_system_prompt_append(c, ["  段落 A  ", "", "  ", "段落 B"])
+    # 同时覆盖 strip 边缘空白：「  段落 A  」→「段落 A」（原独立 strip_edges 用例已并入）
     assert c.system_prompt == f"{BASE_PROMPT}\n\n段落 A\n\n段落 B"
-
-
-def test_append_strip_edges():
-    c = _conv()
-    apply_system_prompt_append(c, ["  段落 A  "])
-    assert c.system_prompt == f"{BASE_PROMPT}\n\n段落 A"
 
 
 # ═══════════════════════════════════════════════════════════════

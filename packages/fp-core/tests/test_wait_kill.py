@@ -62,18 +62,21 @@ async def test_wait_after_kill():
 async def test_kill_unknown_job():
     res = json.loads(await bp._kill_job({"job_id": "nonexistent"}))
     assert res["status"] == "error"
+    assert "不存在" in res["error"]
 
 
 @pytest.mark.asyncio
 async def test_wait_unknown_job():
     res = json.loads(await bp._wait_job({"job_id": "nonexistent"}))
     assert res["status"] == "error"
+    assert "不存在" in res["error"]
 
 
 @pytest.mark.asyncio
 async def test_wait_missing_job_id():
     res = json.loads(await bp._wait_job({}))
     assert res["status"] == "error"
+    assert "job_id 必填" in res["error"]
 
 
 @pytest.mark.asyncio
