@@ -261,6 +261,107 @@ class TestActiveResolution:
         assert config.resolve_active_llm() is None
 
 
+class TestFpModelOverride:
+    """FP_MODEL（fp --model）进程级覆盖：优先 ACTIVE_LLM，未命中不猜。"""
+
+    _PROVIDERS = {
+        "deepseek": {
+            "api_key": "sk-ds",
+            "base_url": "https://api.deepseek.com/v1",
+            "models": {"deepseek-v4-flash": {}, "reasoner": {"temperature": 0.1}},
+        },
+        "aliyun": {
+            "api_key": "sk-qw",
+            "base_url": "https://dashscope.aliyuncs.com/v1",
+            "models": {"qwen-max": {}},
+        },
+    }
+
+    def setup_method(self):
+        _reset(ACTIVE_LLM="deepseek/deepseek-v4-flash", LLM_PROVIDERS=dict(self._PROVIDERS))
+        config._fp_model_miss = ""
+
+    def teardown_method(self):
+        import os
+
+        os.environ.pop("FP_MODEL", None)
+        config._fp_model_miss = ""
+
+    def test_exact_provider_model_wins_over_active(self, monkeypatch):
+        """provider/model 精确式 → 压过 ACTIVE_LLM"""
+        monkeypatch.setenv("FP_MODEL", "aliyun/qwen-max")
+        r = config.resolve_active_llm()
+        assert r is not None
+        assert (r["provider"], r["model"]) == ("aliyun", "qwen-max")
+        assert config._fp_model_miss == ""
+
+    def test_bare_model_unique_match(self, monkeypatch):
+        """裸模型名全表唯一命中 → 采用"""
+        monkeypatch.setenv("FP_MODEL", "qwen-max")
+        r = config.resolve_active_llm()
+        assert r is not None
+        assert (r["provider"], r["model"]) == ("aliyun", "qwen-max")
+        assert config._fp_model_miss == ""
+
+    def test_bare_model_prefers_active_provider(self, monkeypatch):
+        """裸模型名多 provider 歧义但激活 provider 命中 → 用激活 provider"""
+        _reset(
+            ACTIVE_LLM="deepseek/gpt-4o",
+            LLM_PROVIDERS={
+                "deepseek": {"api_key": "a", "base_url": "https://api.deepseek.com/v1", "models": {"gpt-4o": {}}},
+                "openai": {"api_key": "b", "base_url": "https://openai.example.com/v1", "models": {"gpt-4o": {}}},
+            },
+        )
+        monkeypatch.setenv("FP_MODEL", "gpt-4o")
+        r = config.resolve_active_llm()
+        assert r is not None
+        assert r["provider"] == "deepseek"
+        assert config._fp_model_miss == ""
+
+    def test_miss_falls_back_to_active_and_flags(self, monkeypatch):
+        """查无此模型 → 回退 ACTIVE_LLM，且留下告警暂存（不猜）"""
+        monkeypatch.setenv("FP_MODEL", "nope/ghost-model")
+        r = config.resolve_active_llm()
+        assert r is not None
+        assert (r["provider"], r["model"]) == ("deepseek", "deepseek-v4-flash")
+        assert config._fp_model_miss == "nope/ghost-model"
+
+    def test_ambiguous_bare_name_falls_back(self, monkeypatch):
+        """裸名跨 provider 歧义且激活未命中 → 回退 + 告警暂存"""
+        _reset(
+            ACTIVE_LLM="deepseek/deepseek-v4-flash",
+            LLM_PROVIDERS={
+                "deepseek": {
+                    "api_key": "a",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "models": {"deepseek-v4-flash": {}},
+                },
+                "openai": {"api_key": "b", "base_url": "https://openai.example.com/v1", "models": {"m": {}}},
+                "aliyun": {"api_key": "c", "base_url": "https://dashscope.aliyuncs.com/v1", "models": {"m": {}}},
+            },
+        )
+        monkeypatch.setenv("FP_MODEL", "m")
+        r = config.resolve_active_llm()
+        assert r is not None
+        assert (r["provider"], r["model"]) == ("deepseek", "deepseek-v4-flash")
+        assert config._fp_model_miss == "m"
+
+    def test_no_providers_table_returns_none(self, monkeypatch):
+        """旧扁平配置（无表）→ _resolve_fp_model 无从解析，返回 None
+        （此时由模块级 LLM_MODEL 常量走 FP_MODEL 兜底取值）"""
+        monkeypatch.setenv("FP_MODEL", "deepseek/ghost-1b")
+        assert config._resolve_fp_model("deepseek/ghost-1b", {}) is None
+        assert config._resolve_fp_model("ghost-1b", {}) is None
+
+    def test_check_llm_config_consumes_miss_warning(self, monkeypatch, caplog):
+        """告警暂存被 check_llm_config 消费后清空（一次性）"""
+        monkeypatch.setenv("FP_MODEL", "nope/ghost")
+        config.resolve_active_llm()
+        assert config._fp_model_miss == "nope/ghost"
+        config.check_llm_config()
+        assert config._fp_model_miss == ""
+
+
 class TestActiveStateSync:
     def test_set_active_llm_state_updates_module(self):
         """热切换后模块内存态同步：常量与 _json_cfg 均更新"""

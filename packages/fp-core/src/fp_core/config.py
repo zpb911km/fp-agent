@@ -337,15 +337,47 @@ def resolve_llm_params(provider: str, model: str) -> dict[str, Any] | None:
     }
 
 
+def _resolve_fp_model(spec: str, providers: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """把 FP_MODEL（fp --model 传入）解析为完整 LLM 参数；未命中 → None。
+
+    支持 "provider/model" 精确形式与裸模型名。裸名的消歧次序：
+    ① 当前激活 provider 命中 → 用之；② 全表唯一命中 → 用之；
+    ③ 查无 / 多义 → None（由调用方回退配置激活项并告警，绝不猜）。
+    """
+    if "/" in spec:
+        pair = _split_active(spec)
+        return resolve_llm_params(*pair) if pair else None
+    active = _split_active(str(_value(ACTIVE_LLM_KEY, "") or ""))
+    if active is not None and spec in providers.get(active[0], {}).get("models", {}):
+        return resolve_llm_params(active[0], spec)
+    hits = [p for p, pd in providers.items() if spec in pd.get("models", {})]
+    if len(hits) == 1:
+        return resolve_llm_params(hits[0], spec)
+    return None
+
+
+# FP_MODEL 命中失败的暂存（config 模块加载早于 Logger 注入，延迟到
+# check_llm_config 统一告警）。空串 = 无未决告警。
+_fp_model_miss: str = ""
+
+
 def resolve_active_llm() -> dict[str, Any] | None:
     """解析当前激活 LLM 的完整参数。
 
-    优先 ACTIVE_LLM 键（"provider/model"）；缺失/失效时退化为顶层三键推导
-    （兼容旧配置，不写盘）。无 providers 表 → None（调用方走顶层直连逻辑）。
+    优先级（高→低）：FP_MODEL（fp --model，进程级覆盖）→ ACTIVE_LLM 键
+    （"provider/model"）→ 顶层三键推导（兼容旧配置，不写盘）。
+    无 providers 表 → None（调用方走顶层直连逻辑）。
     """
+    global _fp_model_miss
     providers = get_llm_providers()
     if not providers:
         return None
+    fp_spec = os.environ.get("FP_MODEL", "").strip()
+    if fp_spec:
+        resolved = _resolve_fp_model(fp_spec, providers)
+        if resolved is not None:
+            return resolved
+        _fp_model_miss = fp_spec
     active = _value(ACTIVE_LLM_KEY, "")
     if active:
         pair = _split_active(str(active))
@@ -429,7 +461,14 @@ LLM_API_BASE_URL: str = (
     if _resolved_active is not None
     else _value("LLM_API_BASE_URL", "https://api.deepseek.com/v1")
 )
-LLM_MODEL: str = _resolved_active["model"] if _resolved_active is not None else _value("LLM_MODEL", "deepseek-v4-flash")
+# 旧版扁平配置（无 LLM_PROVIDERS 表）时 resolve_active_llm 返回 None，
+# 此处仍让 FP_MODEL 覆盖模型名（provider 前缀在无表场景无意义，取 / 后段）。
+_fp_model_legacy = os.environ.get("FP_MODEL", "").strip()
+LLM_MODEL: str = (
+    _resolved_active["model"]
+    if _resolved_active is not None
+    else (_fp_model_legacy.rsplit("/", 1)[-1] or _value("LLM_MODEL", "deepseek-v4-flash"))
+)
 LLM_TEMPERATURE: float = (
     float(_resolved_active["temperature"]) if _resolved_active is not None else _value("TEMPERATURE", 0.8)
 )
@@ -538,6 +577,16 @@ def check_llm_config() -> bool:
     global _validation_issues
     if _validation_issues:
         log.warning(f"配置文件中存在 {len(_validation_issues)} 个配置问题（通过 check_llm_config() 可知详情）")
+
+    # fp --model 未命中 LLM_PROVIDERS 表 → 已回退配置激活项，这里如实告警
+    global _fp_model_miss
+    if _fp_model_miss:
+        log.warning(
+            f"--model {_fp_model_miss} 未在 LLM_PROVIDERS 表中命中（查无此模型，或裸模型名跨 provider 歧义），"
+            f"已回退到配置激活项 {LLM_ACTIVE_ID or '(顶层三键直连)'}；"
+            "请改用 provider/model 精确指定"
+        )
+        _fp_model_miss = ""
 
     # LLM_PROVIDERS 表存在但激活解析失败 → 顶层三键兜底（提示，不阻断）
     if _json_cfg.get(LLM_PROVIDERS_KEY) and not LLM_ACTIVE_ID:

@@ -8,7 +8,7 @@ FP 的主交互方式是通过命令行界面（CLI）。本文档涵盖基本�
 
 ```bash
 # 进入交互模式
-python3 cli.py
+fp
 ```
 
 交互模式下，终端显示提示符 `(Agent) > `，用户可直接输入文本消息与 AI 对话，或以 `/` 开头的斜杠命令控制系统行为。
@@ -16,6 +16,20 @@ python3 cli.py
 ---
 
 ## 命令行参数
+
+`fp` 的参数分三层，完整清单可用 `fp -h` 查看：
+
+**① 顶层参数**（由 `fp` 入口消费，决定分发行为）
+
+| 参数 | 说明 |
+|------|------|
+| `--mode {cli,webui,acp}` | 启动模式，默认 `cli`。短写 `-m` 仅当取值为三个模式名时等价 |
+| `--model <spec>` | 覆盖本次激活模型：`provider/model` 精确形式，或 `LLM_PROVIDERS` 表内裸模型名（激活 provider 优先、全表唯一命中次之；查无/歧义则回退配置激活项并告警） |
+| `--session <SID>` | 恢复指定会话，等价于 CLI 的 `-r <SID>`；webui/acp 模式同样生效 |
+| `--docs` | 查看离线文档（等价 `fp docs`） |
+| `--version` / `--update` | 显示版本号 / 检查并自动更新所有 fp 组件 |
+
+**② 透传给 CLI 模式的参数**（顶层原样转发，由 `fp_cli` 解析）
 
 | 参数 | 完整形式 | 说明 |
 |------|---------|------|
@@ -25,6 +39,17 @@ python3 cli.py
 | `--init` | — | 初始化配置文件。生成默认 `~/.config/fp/config.json` 后退出 |
 | `--headless` | — | 无头驻留模式。跳过 logo 与交互提示，启动即常驻，直到 `Ctrl+C`/`SIGTERM`；无 pty、stdin EOF 都不会导致退出。可与 `-r` 组合 |
 
+> **`-m` 的双义规则**：取值是 `cli|webui|acp` 之一 → 视为 `--mode`（选启动模式）；
+> 其他取值 → 视为 `--message`（单次消息）。例如 `fp -m webui` 启动 Web 界面，
+> `fp -m "你好"` 发送单条消息。
+
+**③ 子命令**（在顶层解析前路由，参数互不干扰）
+
+| 子命令 | 说明 |
+|--------|------|
+| `fp docs [路径\|--list\|--path\|--open]` | 离线文档查看，详见 `fp docs` |
+| `fp ext <子命令>` | 扩展资产分发（fetch/install/review/list/…），详见 `fp ext -h` |
+
 ---
 
 ## 示例
@@ -32,7 +57,7 @@ python3 cli.py
 ### 1. 交互模式
 
 ```bash
-python3 cli.py
+fp
 ```
 
 进入交互界面，显示启动 Logo 和提示信息，用户可连续输入消息。
@@ -40,7 +65,7 @@ python3 cli.py
 ### 2. 单次消息模式
 
 ```bash
-python3 cli.py -m "你好"
+fp -m "你好"
 ```
 
 发送消息后自动退出，适合脚本调用或快速测试。
@@ -48,13 +73,13 @@ python3 cli.py -m "你好"
 ### 3. 恢复最新会话
 
 ```bash
-python3 cli.py -r
+fp -r
 ```
 
 或完整形式：
 
 ```bash
-python3 cli.py --resume
+fp --resume
 ```
 
 自动加载最近一次保存的会话上下文，继续之前的对话。
@@ -62,13 +87,15 @@ python3 cli.py --resume
 ### 4. 恢复指定会话
 
 ```bash
-python3 cli.py -r session_abc123
+fp -r session_abc123
+# 或等价的顶层写法
+fp --session session_abc123
 ```
 
 ### 5. 初始化配置文件
 
 ```bash
-python3 cli.py --init
+fp --init
 ```
 
 在项目根目录生成默认 `~/.config/fp/config.json`。
@@ -77,10 +104,10 @@ python3 cli.py --init
 
 ```bash
 # 常驻（后台/管道/服务管理器拉起均可，无需 pty）
-python3 cli.py --headless
+fp --headless
 
 # 常驻并恢复指定会话
-python3 cli.py --headless -r session_abc123
+fp --headless -r session_abc123
 ```
 
 不进入交互循环，启动即常驻：邻居铃声、注入事件照常处理，`Ctrl+C` 或 `SIGTERM` 才退出（退出走正常收尾：保存会话、统计面板）。
