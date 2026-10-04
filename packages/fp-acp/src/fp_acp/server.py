@@ -47,6 +47,13 @@ ACP_PROTOCOL_VERSION = 1
 # IDE 环境中误触会导致 ACP 会话直接断开。
 _DESTRUCTIVE_COMMANDS = {"exit", "exit!", "quit"}
 
+# ── 客户端能力（clientCapabilities）的跨 exec 载体 ──
+# reload 是 execve 重启进程（内存态全丢），而 Zed 的 stdio 连接保持不变、
+# 不会重发 initialize —— 新实例无从得知上一连接协商的能力。故在 initialize 时
+# 把原始 capabilities 存入此环境变量（随 execve 继承），新实例启动即恢复。
+# 载体模式与 FP_ACP_PENDING_REQ 同路（见 fp_core.core.handoff 模块 docstring）。
+_CLIENT_CAPS_ENV = "FP_ACP_CLIENT_CAPS"
+
 
 # ═══════════════════════════════════════════════════════════
 # ACPIO — ACP 专用的 IO 通道
@@ -272,6 +279,9 @@ class ACPServer:
 
         # ── 客户端能力（initialize 时协商）：决定 ask_user 是否走带内 elicit ──
         self._client_elicitation: dict[str, bool] = {"form": False, "url": False}
+        # reload 后 Zed 不重发 initialize（stdio 连接不变、进程 exec 重启），
+        # 由环境变量恢复上一连接协商的能力（initialize 时写入，见 _apply…）。
+        self._restore_client_capabilities()
 
         # "Follow Agent" 钩子注册在 start()（须在 portal.ctl.open 之后）
 
@@ -883,6 +893,35 @@ class ACPServer:
     # ACP v1 方法处理器
     # ═══════════════════════════════════════════════════════
 
+    def _apply_client_capabilities(self, caps: dict[str, Any]) -> None:
+        """解析并记录客户端能力（initialize 协商与 reload 恢复共用的唯一解析点）。
+
+        规范：``elicitation.form``/``url`` 各自「显式存在且非 null」才算声明；
+        缺失/null = 不支持。
+        """
+        elicit = caps.get("elicitation")
+        elicit_d = cast("dict[str, Any]", elicit) if isinstance(elicit, dict) else {}
+        self._client_elicitation = {
+            "form": elicit_d.get("form") is not None,
+            "url": elicit_d.get("url") is not None,
+        }
+
+    def _restore_client_capabilities(self) -> None:
+        """reload 后从环境变量恢复连接级客户端能力（新实例收不到 initialize）。
+
+        仅在环境变量存在（= 本进程由 reload 从上一实例 exec 而来）时生效；
+        全新连接不会有该变量，能力仍由 initialize 正常协商。损坏则保持默认。
+        """
+        raw = os.environ.get(_CLIENT_CAPS_ENV)
+        if not raw:
+            return
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return
+        if isinstance(parsed, dict):
+            self._apply_client_capabilities(cast("dict[str, Any]", parsed))
+
     async def _handle_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
         """
         ACP v1 协议握手。
@@ -892,16 +931,13 @@ class ACPServer:
         client_info = params.get("clientInfo", {})
         self._log(f"客户端连接: {client_info.get('name', '?')} v{client_info.get('version', '?')}")
 
-        # ── 记录客户端 elicitation 能力（标准能力协商，非任何客户端特化）──
-        # 规范：form/url 各自「显式存在且非 null」才算声明；缺失/null = 不支持。
+        # ── 记录客户端能力（标准能力协商，非任何客户端特化）──
         caps = params.get("clientCapabilities")
         caps_d = cast("dict[str, Any]", caps) if isinstance(caps, dict) else {}
-        elicit = caps_d.get("elicitation")
-        elicit_d = cast("dict[str, Any]", elicit) if isinstance(elicit, dict) else {}
-        self._client_elicitation = {
-            "form": elicit_d.get("form") is not None,
-            "url": elicit_d.get("url") is not None,
-        }
+        self._apply_client_capabilities(caps_d)
+        # 跨 exec 持久化：reload 后本进程被 execve 替换、Zed 不重发 initialize，
+        # 新实例只能靠此环境变量恢复能力（载体模式同 FP_ACP_PENDING_REQ）。
+        os.environ[_CLIENT_CAPS_ENV] = json.dumps(caps_d, ensure_ascii=False)
         self._log(f"客户端 elicitation: form={self._client_elicitation['form']} url={self._client_elicitation['url']}")
 
         return {

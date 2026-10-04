@@ -9,6 +9,10 @@
 
 - **ACP 端对接标准 elicitation — ask_user 带内交互**（`packages/fp-acp/src/fp_acp/server.py`）: `initialize` 读取 `clientCapabilities.elicitation`（`form`/`url` 各自显式声明才算支持）；声明 `form` 时 `ACPIO.ask()` 走标准 `elicitation/create`（form mode —— `options`→`enum`、`suggest`→`default`），`accept` 带内回填 `content.answer`、`decline`/`cancel` 返回空串不伪造作答；未声明或请求失败则**优雅回退**既有 deferred 文本展示。新增 ACPServer 的 agent→client 请求-响应通道（`_send_request`/`_resolve_pending`/`_elicit_form`）。全程标准能力协商，无任何客户端特化。文档：`docs/acp/README.md`；测试：`packages/fp-acp/tests/test_elicitation.py`。
 
+### Fixed
+
+- **ACP reload 后 elicitation 能力不再丢失**（`packages/fp-acp/src/fp_acp/server.py`）: reload 是 `execve` 重启进程、客户端 stdio 连接不变且**不重发 `initialize`**，此前新实例能力回退默认 → `ask_user` 静默退回 deferred。现将 `initialize` 协商的 `clientCapabilities` 写入环境变量 `FP_ACP_CLIENT_CAPS`（随 exec 继承，载体模式同 `FP_ACP_PENDING_REQ`），新实例构造时恢复，带内 elicit 跨 reload 存活。
+
 ## [0.1.14] — 2026-09-28
 
 ### Added

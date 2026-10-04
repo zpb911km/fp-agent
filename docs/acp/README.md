@@ -56,3 +56,13 @@ ACP 实例经 `reload` 热重启后自动恢复会话，并按 handoff 的 `kind
   并显示一行完成提示，同样为挂起请求补发 result（否则客户端悬等）。
 
 两种 kind 客户端都无需重发请求。
+
+**连接级能力跨 exec 保留**：reload 是 `execve` 重启进程（内存态全丢），而客户端的
+stdio 连接保持不变、**不会重发 `initialize`** —— 故 `initialize` 协商的
+`clientCapabilities` 会写入环境变量 `FP_ACP_CLIENT_CAPS` 随 exec 继承，新实例
+构造时即恢复。这样 `ask_user` 的**带内 elicit 不会因 reload 静默失效**（否则能力
+回退为默认 `form=False`，只剩 deferred 文本路径）。载体模式同 `FP_ACP_PENDING_REQ`。
+
+> 注：能力只在被协商过之后才可继承——若某新实例自始至终未收到 `initialize`
+> （如客户端刚重连即被 exec），环境变量尚不存在，此时只能退回 deferred，直到
+> 客户端下一次 `initialize`。

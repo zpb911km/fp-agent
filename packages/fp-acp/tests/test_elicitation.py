@@ -10,10 +10,18 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 
 import pytest
 
-from fp_acp.server import ACPIO, ACPServer, _build_form_schema
+from fp_acp.server import _CLIENT_CAPS_ENV, ACPIO, ACPServer, _build_form_schema
+
+
+@pytest.fixture(autouse=True)
+def _isolate_client_caps_env(monkeypatch):
+    """隔离连接级能力环境变量：_handle_initialize 会写它，避免跨用例串味。"""
+    monkeypatch.delenv(_CLIENT_CAPS_ENV, raising=False)
+
 
 # ── form schema 映射 ──────────────────────────────────
 
@@ -194,3 +202,40 @@ async def test_elicit_form_error_response_raises():
 async def test_response_without_pending_is_noop():
     srv = ACPServer()
     srv._resolve_pending({"jsonrpc": "2.0", "id": 999, "result": {}})  # 不抛
+
+
+# ── 连接级能力的跨 exec 持久化（reload） ────────────────
+# reload = execve 重启进程、stdio 连接不变、客户端不重发 initialize。
+# 能力写入环境变量随 exec 继承，新实例构造时恢复。
+
+
+@pytest.mark.asyncio
+async def test_initialize_persists_caps_to_env():
+    caps = {"elicitation": {"form": {}, "url": {}}, "fs": {"readTextFile": True}}
+    await ACPServer()._handle_initialize({"clientCapabilities": caps})
+    assert json.loads(os.environ[_CLIENT_CAPS_ENV]) == caps
+
+
+@pytest.mark.asyncio
+async def test_reload_roundtrip_restores_elicitation(monkeypatch):
+    """模拟 reload：旧实例 initialize 写入环境变量 → 新实例构造即恢复能力。"""
+    old = ACPServer()
+    await old._handle_initialize({"clientCapabilities": {"elicitation": {"form": {}, "url": {}}}})
+    restored = ACPServer()  # exec 后的新进程：收不到 initialize，只能靠环境变量
+    assert restored._client_elicitation == {"form": True, "url": True}
+    assert restored._make_acp_io("s")._elicit is not None  # 恢复真的生效（走带内 elicit）
+
+
+def test_no_env_keeps_default(monkeypatch):
+    monkeypatch.delenv(_CLIENT_CAPS_ENV, raising=False)
+    assert ACPServer()._client_elicitation == {"form": False, "url": False}
+
+
+def test_corrupt_env_keeps_default(monkeypatch):
+    monkeypatch.setenv(_CLIENT_CAPS_ENV, "{not json")
+    assert ACPServer()._client_elicitation == {"form": False, "url": False}
+
+
+def test_non_dict_env_keeps_default(monkeypatch):
+    monkeypatch.setenv(_CLIENT_CAPS_ENV, json.dumps([1, 2]))
+    assert ACPServer()._client_elicitation == {"form": False, "url": False}
