@@ -9,9 +9,23 @@ ACP 的完整文档（安装、接口定义、调用示例、使用场景）位�
 
 👉 **[packages/fp-acp/README.md](../../packages/fp-acp/README.md)**
 
-## ❓ 交互问答（ask_user → deferred）
+## ❓ 交互问答（ask_user → elicit / deferred）
 
-ACP 无带内回复通道，`ACPIO.ask_deferred = True`：
+ACP 的 `ask_user` 按**客户端能力协商**分两条路径（实现：`packages/fp-acp/src/fp_acp/server.py`）：
+
+### ① 带内 elicit（客户端声明 `elicitation.form`）
+`initialize` 时记录 `clientCapabilities.elicitation`（`form`/`url` **各自显式存在且非 null** 才算支持）。
+声明了 `form` 时，`ACPIO.ask()` 发标准 **`elicitation/create`（form mode）** 带内请求并等响应：
+
+- `prompt` → `message`；`options` → schema 字段 `answer` 的 `enum`（天然渲染为选项）；
+  `suggest` 命中 `enum` 时 → `default`（预填/高亮）；
+- 响应三态：`accept` → 回填 `content.answer`（带内回流，`ask_deferred=False`）；
+  `decline`/`cancel` → 返回空串（用户显式拒绝/关闭，**不伪造作答**）；
+- 规范硬约束：Agent **MUST NOT** 请求客户端未声明的 mode、**MUST NOT** 假设成功 →
+  请求/协议异常时**优雅回退**到 ②。
+
+### ② deferred 回退（未声明 `elicitation.form`，或 elicit 失败）
+`ACPIO.ask_deferred = True`：
 
 - `ask_user` 工具调用时，问题（含 `options` 编号列表与 `suggest` 推荐值）被
   推送为一条 `agent_message_chunk` 展示在 IDE 会话中，`ask()` **立即返回空串**；
@@ -21,6 +35,7 @@ ACP 无带内回复通道，`ACPIO.ask_deferred = True`：
 
 > 旧实现 `ask()` 返回 `"q"`，会被当成用户回答注入上下文 —— 伪造人类发言，
 > 已修复（测试：`test_ask_user.py::test_ask_deferred_no_injection`）。
+> elicit 路径测试：`packages/fp-acp/tests/test_elicitation.py`。
 
 ## 🔗 快速链接
 

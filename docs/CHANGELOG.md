@@ -3,6 +3,12 @@
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/) 和 [Keep a Changelog](https://keepachangelog.com/) 规范。
 
 
+## [Unreleased]
+
+### Added
+
+- **ACP 端对接标准 elicitation — ask_user 带内交互**（`packages/fp-acp/src/fp_acp/server.py`）: `initialize` 读取 `clientCapabilities.elicitation`（`form`/`url` 各自显式声明才算支持）；声明 `form` 时 `ACPIO.ask()` 走标准 `elicitation/create`（form mode —— `options`→`enum`、`suggest`→`default`），`accept` 带内回填 `content.answer`、`decline`/`cancel` 返回空串不伪造作答；未声明或请求失败则**优雅回退**既有 deferred 文本展示。新增 ACPServer 的 agent→client 请求-响应通道（`_send_request`/`_resolve_pending`/`_elicit_form`）。全程标准能力协商，无任何客户端特化。文档：`docs/acp/README.md`；测试：`packages/fp-acp/tests/test_elicitation.py`。
+
 ## [0.1.14] — 2026-09-28
 
 ### Added

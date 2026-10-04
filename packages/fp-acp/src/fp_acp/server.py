@@ -53,6 +53,27 @@ _DESTRUCTIVE_COMMANDS = {"exit", "exit!", "quit"}
 # ═══════════════════════════════════════════════════════════
 
 
+def _build_form_schema(options: list[str], suggest: str) -> dict[str, Any]:
+    """把 ask 的 options/suggest 映射为 elicitation form mode 的受限 JSON Schema。
+
+    form schema 只支持扁平对象 + 原始类型/enum（规范 §Form mode）：
+      - 有 options → 单字段 ``answer``(type=string, enum=[...])，天然渲染为选项；
+      - suggest 命中 options → 作 default（预填/高亮）；否则仅在自由输入时作 default。
+    """
+    answer: dict[str, Any] = {"type": "string", "title": "回答"}
+    if options:
+        answer["enum"] = list(options)
+        if suggest and suggest in options:
+            answer["default"] = suggest
+    elif suggest:
+        answer["default"] = suggest
+    return {
+        "type": "object",
+        "properties": {"answer": answer},
+        "required": ["answer"],
+    }
+
+
 class ACPIO(IOChannel):
     """
     ACP IO 通道 — 带流式推送的缓冲输出。
@@ -62,7 +83,9 @@ class ACPIO(IOChannel):
       - 每累积约 300 字符或显式调用 partial_flush() 时，
         通过 send_chunk 回调推送一条 agent_message_chunk
       - process() 结束后调用 flush_text() 获取剩余文本
-      - ask() 将问题推送为 chunk 展示后返回空（deferred，回答走下一轮）
+      - ask()：客户端在 initialize 声明 elicitation.form 时，走标准
+        ``elicitation/create`` 带内提问（accept→回答回流）；否则回退为
+        「推送一条展示消息后返回空」（deferred，回答走下一轮）
 
     为何需要流式？
       长时间运行的 Agent 任务（如代码生成、多步工具调用）中，
@@ -71,22 +94,34 @@ class ACPIO(IOChannel):
 
     frontend = "acp"
 
-    # ACP 无带内回复通道 → deferred 语义：问题展示给用户后立即返回空，
-    # 用户的下一条消息（新轮次）即其回答。禁止伪造回答（旧实现返回 "q"）。
+    # 默认 True（无带内通道）；构造时若注入 elicit 回调 → 实例级置 False。
+    # deferred 语义：问题展示给用户后立即返回空，用户下一条消息（新轮次）即其回答。
+    # 禁止伪造回答（旧实现返回 "q"）。
     ask_deferred = True
 
     _STREAM_THRESHOLD = 300
 
-    def __init__(self, send_chunk: Callable[[str], None] | None = None):
+    def __init__(
+        self,
+        send_chunk: Callable[[str], None] | None = None,
+        elicit: Callable[[str, list[str], str], Awaitable[dict[str, Any]]] | None = None,
+    ):
         """
         Args:
             send_chunk: 可选的回调函数，接收 (text: str)，
                         在缓冲达到阈值时自动推送 agent_message_chunk。
                         同步调用，直接写入 stdout。
+            elicit: 可选：ACP 标准 ``elicitation/create`` 的带内提问回调
+                    （入参 prompt/options/suggest，返回 elicitation 响应 result）。
+                    存在时 ask() 走带内 elicit（accept→回答带内回流），
+                    ask_deferred 置 False；缺省或请求失败则回退 deferred 文本推送。
         """
         self._buffer: list[str] = []
         self._send_chunk: Callable[[str], None] | None = send_chunk
+        self._elicit = elicit
         self._char_count = 0
+        # 有带内 elicit 通道 → 回答带内回流，非 deferred；否则维持 deferred。
+        self.ask_deferred = elicit is None
 
     def _accumulate(self, text: str):
         """写入缓冲区，超过阈值时自动推送流式块"""
@@ -114,18 +149,8 @@ class ACPIO(IOChannel):
         self._char_count = 0
         return merged
 
-    async def ask(
-        self,
-        prompt: str,
-        *,
-        options: list[str] | None = None,
-        suggest: str = "",
-        ask_id: str | None = None,
-    ) -> str:
-        """ACP 无带内回复通道：把问题推送为 agent_message_chunk 展示给用户，
-        立即返回空串（ask_deferred → 编排层走 deferred 分支，不注入不回执）。
-        旧实现返回 "q" 会被当成用户回答注入 — 伪造人类发言，已修复。
-        """
+    def _emit_deferred(self, prompt: str, options: list[str] | None, suggest: str) -> None:
+        """无带内通道（或 elicit 失败）时的回退：把问题推送为一条展示消息。"""
         lines = [f"❓ {prompt}"]
         for i, opt in enumerate(options or [], 1):
             lines.append(f"   {i}. {opt}")
@@ -134,6 +159,46 @@ class ACPIO(IOChannel):
         lines.append("（请在 IDE 对话框中直接回复此问题）")
         self._accumulate("\n".join(lines))
         self._partial_flush()
+
+    async def ask(
+        self,
+        prompt: str,
+        *,
+        options: list[str] | None = None,
+        suggest: str = "",
+        ask_id: str | None = None,
+    ) -> str:
+        """向用户提问（结构化契约 v2）。
+
+        两条路径：
+          ① 带内 elicit（客户端在 initialize 声明 elicitation.form）：
+             发标准 ``elicitation/create``（form mode）并等带内响应 ——
+             ``accept`` → 返回 content.answer 文本；``decline``/``cancel``
+             → 用户显式拒绝/关闭 → 返回空串（如实告知 LLM，不伪造作答）。
+             规范：Agent MUST NOT 假设成功 → 请求/协议异常时**优雅回退** deferred。
+          ② 无带内通道 → 既有 deferred：问题推送展示、返回空串，
+             回答作为用户的下一条消息在新轮次到达。
+        旧实现无条件返回 "q" 会被当成用户回答注入（伪造人类发言），已废弃。
+        """
+        if self._elicit is not None:
+            try:
+                result = await self._elicit(prompt, list(options or []), suggest)
+            except Exception:  # noqa: BLE001 — 规范：不假设成功，回退展示
+                self._emit_deferred(prompt, options, suggest)
+                self.ask_deferred = True
+                return ""
+            action = str(result.get("action") or "")
+            if action == "accept":
+                content = result.get("content")
+                val = cast("dict[str, Any]", content).get("answer") if isinstance(content, dict) else None
+                self.ask_deferred = False
+                return "" if val is None else str(val).strip()
+            # decline / cancel（或未知 action）：用户拒绝或关闭，不注入作答
+            self.ask_deferred = False
+            return ""
+        # 无 elicit → deferred 路径
+        self._emit_deferred(prompt, options, suggest)
+        self.ask_deferred = True
         return ""
 
     def say(self, text: str):
@@ -200,6 +265,13 @@ class ACPServer:
 
         # ── 并发 prompt 防护 ──
         self._processing_prompt = False
+
+        # ── agent→client 请求（elicitation 等）：JSON-RPC id → 等待响应 Future ──
+        self._pending_requests: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        self._req_counter = 0
+
+        # ── 客户端能力（initialize 时协商）：决定 ask_user 是否走带内 elicit ──
+        self._client_elicitation: dict[str, bool] = {"form": False, "url": False}
 
         # "Follow Agent" 钩子注册在 start()（须在 portal.ctl.open 之后）
 
@@ -643,7 +715,7 @@ class ACPServer:
 
         sid = self._session_id
         self._processing_prompt = True
-        acp_io = ACPIO(send_chunk=lambda text: self._send_message_notification(text, session_id=sid))
+        acp_io = self._make_acp_io(sid)
         self._log("🔄 reload 续接：恢复会话并继续上一轮对话…")
         try:
             self._current_task = asyncio.create_task(portal.run.continue_(io=acp_io))
@@ -730,6 +802,11 @@ class ACPServer:
 
     async def _dispatch(self, request: dict[str, Any]) -> None:
         """分发 JSON-RPC 请求到对应的处理器"""
+        # ── 响应（有 id、无 method）：agent→client 请求（如 elicitation）的回执 ──
+        if "method" not in request and "id" in request:
+            self._resolve_pending(request)
+            return
+
         method = request.get("method", "")
         req_id = request.get("id")
         params = request.get("params", {})
@@ -814,6 +891,18 @@ class ACPServer:
         """
         client_info = params.get("clientInfo", {})
         self._log(f"客户端连接: {client_info.get('name', '?')} v{client_info.get('version', '?')}")
+
+        # ── 记录客户端 elicitation 能力（标准能力协商，非任何客户端特化）──
+        # 规范：form/url 各自「显式存在且非 null」才算声明；缺失/null = 不支持。
+        caps = params.get("clientCapabilities")
+        caps_d = cast("dict[str, Any]", caps) if isinstance(caps, dict) else {}
+        elicit = caps_d.get("elicitation")
+        elicit_d = cast("dict[str, Any]", elicit) if isinstance(elicit, dict) else {}
+        self._client_elicitation = {
+            "form": elicit_d.get("form") is not None,
+            "url": elicit_d.get("url") is not None,
+        }
+        self._log(f"客户端 elicitation: form={self._client_elicitation['form']} url={self._client_elicitation['url']}")
 
         return {
             "protocolVersion": ACP_PROTOCOL_VERSION,
@@ -949,8 +1038,9 @@ class ACPServer:
             # ── 调用 Agent 核心 ──
             # 使用 ACPIO 缓冲输出，并在累积到阈值时自动推送 agent_message_chunk
             #
-            # 注意：send_chunk 回调捕获了 sid 快照，避免 race
-            acp_io = ACPIO(send_chunk=lambda text: self._send_message_notification(text, session_id=sid))
+            # 注意：send_chunk 回调捕获了 sid 快照，避免 race；
+            # 客户端声明 elicitation.form 时同时注入带内 elicit。
+            acp_io = self._make_acp_io(sid)
 
             self._log(f"发送给 Agent: {user_prompt[:120]}")
             self._current_task = asyncio.create_task(portal.run.send(user_prompt, io=acp_io))
@@ -1173,6 +1263,20 @@ class ACPServer:
             },
         )
 
+    def _make_acp_io(self, sid: str | None) -> ACPIO:
+        """构造 per-prompt ACPIO；客户端声明 elicitation.form 时注入带内 elicit 回调。"""
+
+        def send(text: str) -> None:
+            self._send_message_notification(text, session_id=sid)
+
+        if not self._client_elicitation.get("form"):
+            return ACPIO(send_chunk=send)
+
+        async def _elicit(prompt: str, options: list[str], suggest: str) -> dict[str, Any]:
+            return await self._elicit_form(sid, prompt, options, suggest)
+
+        return ACPIO(send_chunk=send, elicit=_elicit)
+
     async def _shutdown_agent(self) -> None:
         """安全关闭实例（DISCARD：不留痕，删除当前会话）"""
         try:
@@ -1215,6 +1319,58 @@ class ACPServer:
         )
         self._stdout.write(msg + "\n")
         self._stdout.flush()
+
+    # ── agent→client 请求（elicitation 等）──
+
+    def _send_request(self, method: str, params: dict[str, Any]) -> tuple[int, asyncio.Future[dict[str, Any]]]:
+        """发一条 JSON-RPC 请求给客户端（agent→client），返回 (id, 等待响应的 Future)。"""
+        self._req_counter += 1
+        rid = self._req_counter
+        fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._pending_requests[rid] = fut
+        msg = json.dumps(
+            {"jsonrpc": "2.0", "id": rid, "method": method, "params": params},
+            ensure_ascii=False,
+        )
+        self._stdout.write(msg + "\n")
+        self._stdout.flush()
+        return rid, fut
+
+    def _resolve_pending(self, response: dict[str, Any]) -> None:
+        """收到 agent→client 请求的响应：唤醒对应 Future（result 或 error）。"""
+        rid = response.get("id")
+        fut = self._pending_requests.pop(rid, None) if isinstance(rid, int) else None
+        if fut is None or fut.done():
+            return
+        if "error" in response:
+            fut.set_exception(RuntimeError(f"client error: {response.get('error')}"))
+        else:
+            result = response.get("result")
+            fut.set_result(cast("dict[str, Any]", result) if isinstance(result, dict) else {})
+
+    async def _elicit_form(
+        self, session_id: str | None, prompt: str, options: list[str], suggest: str
+    ) -> dict[str, Any]:
+        """向客户端发起标准 elicitation/create（form mode），等待带内响应。
+
+        返回响应 result（形如 {"action": "accept"/"decline"/"cancel", "content": {...}}）；
+        异常/拒绝的语义处理由调用方（ACPIO.ask）负责回退。全程标准协议，无客户端特化。
+        """
+        schema = _build_form_schema(options, suggest)
+        rid, fut = self._send_request(
+            "elicitation/create",
+            {
+                "sessionId": session_id or self._session_id,
+                "mode": "form",
+                "message": prompt,
+                "requestedSchema": schema,
+            },
+        )
+        try:
+            return await fut
+        finally:
+            # 超时/取消时清理未决（响应已到则 _resolve_pending 已 pop）
+            self._pending_requests.pop(rid, None)
 
     @staticmethod
     def _log(msg: str) -> None:
