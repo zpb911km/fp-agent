@@ -8,10 +8,12 @@
 ### Added
 
 - **ACP 端对接标准 elicitation — ask_user 带内交互**（`packages/fp-acp/src/fp_acp/server.py`）: `initialize` 读取 `clientCapabilities.elicitation`（`form`/`url` 各自显式声明才算支持）；声明 `form` 时 `ACPIO.ask()` 走标准 `elicitation/create`（form mode —— `options`→`enum`、`suggest`→`default`），`accept` 带内回填 `content.answer`、`decline`/`cancel` 返回空串不伪造作答；未声明或请求失败则**优雅回退**既有 deferred 文本展示。新增 ACPServer 的 agent→client 请求-响应通道（`_send_request`/`_resolve_pending`/`_elicit_form`）。全程标准能力协商，无任何客户端特化。文档：`docs/acp/README.md`；测试：`packages/fp-acp/tests/test_elicitation.py`。
+- **`/resume prune` 空会话清理**（`packages/fp-core/src/fp_core/commands/resume.py`, `core/session.py`）: 新增 `SessionManager.prune_empty_sessions()` + `session_trash_dir()`，三条判据（首行是可解析 meta / 正文**没有任何消息行** / 非当前会话）全中才把文件**移动**到 `{DATA}/sessions/.trash/`（不删除，摘要随文件保留、可搬回；`.trash` 不匹配会话文件名模式，扫不进列表）。判据只认「有没有真实消息」，`message_count` 不作数、读不出来即跳过。存量 936 → 803 个会话文件（803 个全部含消息行），133 个 0 长度占位入 trash。
 
 ### Fixed
 
 - **ACP reload 后 elicitation 能力不再丢失**（`packages/fp-acp/src/fp_acp/server.py`）: reload 是 `execve` 重启进程、客户端 stdio 连接不变且**不重发 `initialize`**，此前新实例能力回退默认 → `ask_user` 静默退回 deferred。现将 `initialize` 协商的 `clientCapabilities` 写入环境变量 `FP_ACP_CLIENT_CAPS`（随 exec 继承，载体模式同 `FP_ACP_PENDING_REQ`），新实例构造时恢复，带内 elicit 跨 reload 存活。
+- **会话列表两大污染根治：0 长度占位会话 + 摘要缺失只能显示 sid**（`packages/fp-core/src/fp_core/core/session.py` 与 `session_ops`/`agent`/`portal`/`subagent_plugin`/`fp_cli`/`app.js` 调用点）: 根因①**可见性是拿占位文件换的**——`/new` `/clear` 的 `clear_session_file`、空会话退出的 `save_and_summarize → update_meta`、`token_usage` 与 subagent `source` 标记都会给尚不存在的文件凭空写一行 meta；根因②**摘要只在切换/退出时生成**——进程被杀或会话未切换过，`summary` 恒空，前端兜底就把 sid 当标题。三层修复：**预防**（空落盘 no-op、`clear_session_file` 无文件即 no-op、`update_meta(create=False)` 标记类写入只改内存、subagent 只收尾已落盘子会话、`save_context`/`save_message` 落盘 user 消息即刷新摘要=随写随更、`save_and_summarize` 不再用空结果抹掉旧摘要）；**展示**（`list_sessions()` 成为唯一展示口径：合并当前会话内存 meta、隐藏全部 0 长度会话、缺失摘要按文件最后一条 user 消息现场回填并写回而不动 `updated`，仍无则给 `(空白会话)`/`(无摘要)` 标签，WebUI 兜底同步改）；**续接**（`_find_latest_session` 优先非空会话，`fp -r` / `/resume latest` 不再落到空占位）。文档同步 10 篇；测试 `test_session.py` 新增 `TestZeroLengthSessionHygiene`（799 passed · pyright strict 0 错）。
 
 ## [0.1.14] — 2026-09-28
 

@@ -33,12 +33,14 @@ class SessionInfo:
 
 
 def _save_current(state: State) -> str:
-    """落盘当前会话（save_and_summarize 统一入口；空会话回填 empty_session 摘要）"""
+    """落盘当前会话（save_and_summarize 统一入口）
+
+    空会话摘要回填（`empty_session`）已下沉进 save_and_summarize，且只在
+    **文件已在盘上**时才写——这里不再额外调 `update_meta`：此前的兜底回填
+    会给一个从未落盘的空会话凭空造出 0 长度会话文件。
+    """
     old_sid = state.session_id
-    summary = state.session.save_and_summarize(state.conversation.to_serializable(), old_sid)
-    if not summary:
-        state.session.update_meta(old_sid, summary="empty_session")
-    return summary
+    return state.session.save_and_summarize(state.conversation.to_serializable(), old_sid)
 
 
 def fork_new(state: State) -> SessionInfo:
@@ -51,7 +53,9 @@ def fork_new(state: State) -> SessionInfo:
     new_sid = state.session.create_session()
     state.rebuild_system_prompt()
     state.conversation.reset(state.conversation.system_prompt)
-    state.session.clear_session_file()  # 惰性 sid → 写 meta-only 占位，保证 list 可见
+    # 惰性 sid：新会话先不落盘（clear_session_file 对不存在的文件是 no-op），
+    # 列表可见性由 list_sessions() 合并在内存 meta 保证——不再靠占位文件
+    state.session.clear_session_file()
     return SessionInfo(session_id=new_sid, previous_sid=old_sid, summary=summary)
 
 

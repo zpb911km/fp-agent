@@ -332,9 +332,13 @@ class SessionCtl:
         """删除指定会话文件"""
         return self._portal._require().state.session.delete_session(sid)
 
-    def update_meta(self, sid: str | None = None, **kwargs: Any) -> None:
-        """更新会话 meta（sid 缺省 = 当前会话）"""
-        self._portal._require().state.session.update_meta(sid, **kwargs)
+    def update_meta(self, sid: str | None = None, *, create: bool = True, **kwargs: Any) -> None:
+        """更新会话 meta（sid 缺省 = 当前会话）
+
+        `create=False` → 文件不存在时只改内存 meta、不落盘：标记类写入
+        （subagent source、token_usage）不该给空会话凭空造 0 长度会话文件。
+        """
+        self._portal._require().state.session.update_meta(sid, create=create, **kwargs)
 
     def path(self, sid: str) -> str:
         """会话文件路径（供前端只读文件端点；文件不存在也返回路径）"""

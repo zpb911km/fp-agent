@@ -321,7 +321,9 @@ async def main():
         _sub_meta: dict[str, Any] = {"source": "subagent"}
         if _parent_sid:
             _sub_meta["parent_sid"] = _parent_sid
-        portal.ctl.sessions.update_meta(**_sub_meta)
+        # create=False：只标记内存 meta，随首条消息一起落盘；
+        # 没产出内容的子会话不该留下 0 长度会话文件
+        portal.ctl.sessions.update_meta(create=False, **_sub_meta)
 
     # ── 安装 SIGINT 处理器 ────────────────────────────────
     #

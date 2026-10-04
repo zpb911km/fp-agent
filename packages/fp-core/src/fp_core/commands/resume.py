@@ -1,4 +1,4 @@
-"""resume 命令 — 切换/删除历史会话（非交互式）
+"""resume 命令 — 切换/删除/清理历史会话（非交互式）
 
 直接操作 state.session + state.conversation，不再经过 Agent 中转。
 
@@ -7,6 +7,7 @@
   /resume latest            切换到最新会话
   /resume <sid|序号>        切换（支持 sid 或 list 中的序号）
   /resume delete <sid|序号> 删除指定会话
+  /resume prune             清理 0 长度会话文件（移到 .trash/，不真删）
 """
 
 import re
@@ -17,8 +18,9 @@ from fp_core.core.state import State
 name = "resume"
 aliases: list[str] = []
 description = (
-    "切换/删除历史会话。支持 sid 和 list 序号。"
-    "用法: /resume [list], /resume latest, /resume <sid|序号>, /resume delete <sid|序号>"
+    "切换/删除/清理历史会话。支持 sid 和 list 序号。"
+    "用法: /resume [list], /resume latest, /resume <sid|序号>, "
+    "/resume delete <sid|序号>, /resume prune"
 )
 
 
@@ -89,6 +91,24 @@ async def execute(state: State, arg: str) -> tuple[bool, str]:
 
     if arg == "delete":
         return (True, "❌ 请指定要删除的会话。查看帮助: `/help resume`")
+
+    # ── /resume prune：清理 0 长度会话文件 ──────────────────────
+    if arg in ("prune", "clean"):
+        from fp_core.core.session import session_trash_dir
+
+        moved = state.session.prune_empty_sessions()
+        trash = session_trash_dir()
+        if not moved:
+            return (True, "✅ 没有可清理的空会话（正文没有任何消息行的会话文件）")
+        lines = [
+            f"🧹 已清理 {len(moved)} 个空会话（正文没有任何消息行）",
+            f"   文件移动到 `{trash}`，未删除，需要可手工搬回：",
+        ]
+        for sid in moved[:20]:
+            lines.append(f"   - `{sid}`")
+        if len(moved) > 20:
+            lines.append(f"   … 另有 {len(moved) - 20} 个")
+        return (True, "\n".join(lines))
 
     # ── /resume list ───────────────────────────────────────────
     if arg == "list":

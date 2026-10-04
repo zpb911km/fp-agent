@@ -59,8 +59,15 @@ def _finalize_subagent_session(sid: str, parent_sid: str, fallback_summary: str 
     - 子进程正常退出：main.py 已写入 source，此处补 parent_sid
     - 子进程超时/崩溃：save_and_summarize 未执行，此处兜底补摘要
       （摘要取自子会话文件最后一条 user 消息；文件为空时用任务文本兜底）
+
+    **只收尾已落盘的子会话**：子会话文件不存在 = 子 agent 从未产出任何
+    消息（启动即失败/空转），此时补写 meta 只会造出一个 0 长度会话文件，
+    对会话列表纯属噪声——直接跳过，不创建文件。
     """
-    from fp_core.core.session import update_session_meta
+    from fp_core.core.session import _session_path, update_session_meta  # pyright: ignore[reportPrivateUsage]
+
+    if not os.path.exists(_session_path(sid)):
+        return
 
     try:
         summary = _derive_summary_from_file(sid)

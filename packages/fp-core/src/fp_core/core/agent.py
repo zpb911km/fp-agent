@@ -341,10 +341,11 @@ class Agent:
             messages = self._conv.to_serializable()
             summary = self.session.save_and_summarize(messages)
 
-            # 保存 token 消耗到会话 meta
+            # 保存 token 消耗到会话 meta（create=False：会话没落盘就不凭空
+            # 造 0 长度会话文件，token_usage 只附着在真实存在的会话上）
             token_data = self._token_tracker.to_dict()
             if token_data.get("total", {}).get("call_count", 0) > 0:
-                self.session.update_meta(token_usage=token_data)
+                self.session.update_meta(token_usage=token_data, create=False)
 
         # 触发 shutdown 回调（终端用于渲染退出面板）
         if self._shutdown_callback and not getattr(self.state, "silent_shutdown", False):
@@ -361,7 +362,7 @@ class Agent:
                 pass
 
             self._shutdown_callback(
-                summary=summary,
+                summary=summary or session.EMPTY_SESSION_LABEL,  # 空会话不留空"总结:"行
                 file=f"{self.session.session_id}.jsonl",
                 model=self.model,
                 msg_count=msg_count,

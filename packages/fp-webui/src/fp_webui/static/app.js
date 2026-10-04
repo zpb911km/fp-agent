@@ -569,9 +569,10 @@ function loadSessionsList() {
       var html = '';
       sessions.forEach(function(s) {
         var isCurrent = s.is_current;
-        var summary = s.summary || s.id.slice(0, 16) + '...';
         var created = s.created || '—';
         var msgCount = s.message_count || 0;
+        // 后端 list() 已保证 summary 可展示；此处仅兜底——不再用 sid 冒充标题
+        var summary = s.summary || (msgCount ? '（无摘要）' : '（空白会话）');
         html +=
           '<div class="session-item' + (isCurrent ? ' current' : '') + '" onclick="switchSession(\'' + s.id + '\')">' +
             '<div class="session-item-info">' +
