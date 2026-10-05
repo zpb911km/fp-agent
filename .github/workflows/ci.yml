@@ -91,7 +91,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # 测试依赖仅登记在 dev 文档（docs/dev/测试.md），不进各包 pyproject
-          pip install pytest httpx pyyaml prompt-toolkit rich wcwidth fastapi uvicorn websockets
+          pip install pytest pytest-asyncio httpx pyyaml prompt-toolkit rich wcwidth fastapi uvicorn websockets
 
       - name: 🧪 全量 pytest
         run: python -m pytest -q
