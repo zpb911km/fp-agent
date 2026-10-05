@@ -7,6 +7,13 @@ from unittest.mock import patch
 
 import pytest
 
+# ── LLM key 兜底（必须先于下方 fp_core.config 的 import）────────────
+# config 把 LLM_API_KEY 焊成模块级常量，取值 JSON > env > ""，在 import 那刻
+# 定格。全新机器（CI runner）无 ~/.config/fp/config.json，若此处不设 env，
+# 常量恒为 "" → Agent 构造 check_llm_config() 拒绝 → 70 个用例连环挂。
+# 单包跑（rootdir=packages/fp-core）加载不到仓库根 conftest，故在此再兜一层。
+os.environ.setdefault("LLM_API_KEY", "sk-test-key-for-pytest")
+
 # ── config 模块级 LLM_* 常量的"出厂快照" ──────────────────────────
 # conftest 在测试 import 前加载，此刻 config 未被任何 set_active_llm_state()
 # 污染，可作为还原基准。_MISSING 标记出厂时未定义的常量（LLM_EXTRA_BODY
