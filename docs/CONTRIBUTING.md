@@ -59,15 +59,19 @@ cd fp-agent
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 3. 安装依赖
-pip install -e ".[dev]"
+# 3. 安装（五包 editable + 测试依赖；测试依赖只登记在 dev 文档，不进 pyproject）
+for d in fp-core fp-terminal fp-webui fp-acp fp; do
+  pip install -e "./packages/$d" --no-build-isolation
+done
+pip install pytest
 
-# 4. 配置 API Key
-cp config.json config.json.bak
-# 编辑 config.json，将 LLM_API_KEY 替换为你的密钥
+# 4. 配置 API Key（生成 ~/.config/fp/config.json 后退出）
+fp --init
+# 编辑 ~/.config/fp/config.json，将 LLM_API_KEY 替换为你的密钥
+# （或直接 export LLM_API_KEY=sk-...，优先级见 docs/guide/快速开始.md）
 
 # 5. 验证安装
-python -c "import agent; print(agent.__version__)"
+fp --version
 ```
 
 ## 代码风格
@@ -75,7 +79,7 @@ python -c "import agent; print(agent.__version__)"
 ### Python
 
 - **缩进**: 4 空格（禁止 Tab）
-- **行宽**: 100 字符
+- **行宽**: 120 字符（与根 pyproject 的 `ruff.line-length` 一致）
 - **引号**: 双引号
 - **类型注解**: 所有函数参数和返回值必须标注类型
 - **命名约定**:
@@ -175,8 +179,8 @@ Closes #42
 
 **环境信息**
 - OS: Ubuntu 22.04
-- Python: 3.12.0
-- Agent 版本: 0.1.14
+- Python: 3.14
+- Agent 版本: 0.2.0
 ```
 
 ### 功能请求
@@ -197,11 +201,13 @@ Closes #42
 ### 全量测试（pytest）
 
 ```bash
-python -m pytest packages/fp-core/tests -q
+python -m pytest -q                              # 仓库根全量（根 pyproject 已登记各包 pythonpath，自洽）
+python -m pytest packages/fp-core/tests -q       # 仅核心包
 ```
 
-当前 **44 个测试文件 / 689 个用例**（687 通过 + 2 跳过，跳过项为需
+当前 **48 个测试文件 / 801 个用例**（799 通过 + 2 跳过，跳过项为需
 `FP_BENCHMARK=1` 的性能基准与需 `ZETA_A2A_E2E_URL` 的真实端到端）。
+测试依赖的安装清单见 [dev/测试.md](dev/测试.md) 的「准备」小节；
 测试体系详见 [dev/测试.md](dev/测试.md)。
 
 > **会话隔离**：`tests/conftest.py` 通过 autouse fixture 把 `SESSIONS_DIR`
@@ -211,7 +217,7 @@ python -m pytest packages/fp-core/tests -q
 
 ```bash
 # 检查单个文件
-python3 -c "import ast; ast.parse(open('core/agent.py').read()); print('OK')"
+python3 -c "import ast; ast.parse(open('packages/fp-core/src/fp_core/core/agent.py').read()); print('OK')"
 
 # 检查所有 Python 文件
 find . -name "*.py" -type f -exec python3 -c "
@@ -223,12 +229,6 @@ for f in sys.argv[1:]:
     except SyntaxError as e:
         print(f'❌ {f}: {e}')
 " {} +
-```
-
-### 运行集成测试
-
-```bash
-python3 test_interrupt.py
 ```
 
 ### 手动测试

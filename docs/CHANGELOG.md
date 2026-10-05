@@ -3,17 +3,41 @@
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/) 和 [Keep a Changelog](https://keepachangelog.com/) 规范。
 
 
-## [Unreleased]
+## [0.2.0] — 2026-10-05
 
 ### Added
 
-- **ACP 端对接标准 elicitation — ask_user 带内交互**（`packages/fp-acp/src/fp_acp/server.py`）: `initialize` 读取 `clientCapabilities.elicitation`（`form`/`url` 各自显式声明才算支持）；声明 `form` 时 `ACPIO.ask()` 走标准 `elicitation/create`（form mode —— `options`→`enum`、`suggest`→`default`），`accept` 带内回填 `content.answer`、`decline`/`cancel` 返回空串不伪造作答；未声明或请求失败则**优雅回退**既有 deferred 文本展示。新增 ACPServer 的 agent→client 请求-响应通道（`_send_request`/`_resolve_pending`/`_elicit_form`）。全程标准能力协商，无任何客户端特化。文档：`docs/acp/README.md`；测试：`packages/fp-acp/tests/test_elicitation.py`。
+- **唯一接口组（Portal 门面）**（d0870b1, 3f1dca9）: fp-core 新增 `fp_core.api` 单一入口——`events`/`messages`/`session_ops` 原语 + `Portal` 门面，收拢此前散落的内部接口；三前端（fp-terminal / fp-webui / fp-acp）与顶层 `fp` 全部改为经 `fp_core.api` 接入，`test_api_surface.py` 强制导入白名单（唯一接口组协议 §5）。**注意：这是 0.2.0 中版本提升的动因**——消费方依赖下界随之统一为 `fp-core>=0.2.0`（`fp_core.api` 在 0.1.x 不存在）。
+- **异步主动范式 — ask_user / background / wait_job**（604717e, 1cc6128）: 分层合规的主动交互与后台任务三件套；ask 结构化契约 v2 覆盖编排 / IO / 三前端全链路。
+- **bash 超时默认自动转后台**（736fd9b, 6fc555a）: 超时返回 `job_id` 而非杀掉进程；框架层全工具后台化——`background` 参数 + 10s 超时自动转后台；`list_jobs` 硬性筛选策略，跨会话终态任务不再返回（300ffcc）。
+- **注入消息身份协议 `⁂[kind]`**（749fa2f）: 消息分块标注身份，短路（shortcircuit）只认裸文本 user 切块。
+- **`fp --headless` 无头驻留模式**（371fda6）: 跳过 logo 与提示符常驻至 SIGINT/SIGTERM，非 TTY 下 stdin EOF 不再导致进程退出（后台裸跑/zeta 名片场景不再依赖 screen/tmux）。
+- **Zeta 邻居协议插件**（ce128b0, e588b4d）: 名片发现 / 契约协商（hash+schema 双锁）/ A2A codec / 降级模式，配套四份协议文档。
+- **ACP 端对接标准 elicitation — ask_user 带内交互**（a4193e9, `packages/fp-acp/src/fp_acp/server.py`）: `initialize` 读取 `clientCapabilities.elicitation`（`form`/`url` 各自显式声明才算支持）；声明 `form` 时 `ACPIO.ask()` 走标准 `elicitation/create`（form mode —— `options`→`enum`、`suggest`→`default`），`accept` 带内回填 `content.answer`、`decline`/`cancel` 返回空串不伪造作答；未声明或请求失败则**优雅回退**既有 deferred 文本展示。新增 ACPServer 的 agent→client 请求-响应通道（`_send_request`/`_resolve_pending`/`_elicit_form`）。全程标准能力协商，无任何客户端特化。文档：`docs/acp/README.md`；测试：`packages/fp-acp/tests/test_elicitation.py`。
 - **`/resume prune` 空会话清理**（`packages/fp-core/src/fp_core/commands/resume.py`, `core/session.py`）: 新增 `SessionManager.prune_empty_sessions()` + `session_trash_dir()`，三条判据（首行是可解析 meta / 正文**没有任何消息行** / 非当前会话）全中才把文件**移动**到 `{DATA}/sessions/.trash/`（不删除，摘要随文件保留、可搬回；`.trash` 不匹配会话文件名模式，扫不进列表）。判据只认「有没有真实消息」，`message_count` 不作数、读不出来即跳过。存量 936 → 803 个会话文件（803 个全部含消息行），133 个 0 长度占位入 trash。
+- **fp `-h` 全面更新**（99b480e）: 补齐子命令 / 透传参数 / 示例，修通三个死参数。
+- **四层依赖模型落文档 + 检查器 + pre-commit 门禁**（a46512b）: `scripts/check_dep_layers.py` 全量 AST 校验依赖方向（L0 基座 / L1 核心内核 / L2 核心外围 / L3 主仓库 / L4 用户资产），ERROR 拒绝提交。
+- **pyright strict 门禁**（e8defd5）: 全仓类型债 115→0，pre-commit 钩子防复发（与 ruff 同级、无放行口）。
+
+### Changed
+
+- **重构（breaking）: 唯一接口组收口**（d0870b1, 3f1dca9）— 详见 Added 首条；下游包依赖下界统一 `fp-core>=0.2.0`，`fp` 的 extras（`fp-webui`/`fp-acp`）同步 `>=0.2.0`。
+- **依赖声明补全**: fp-webui 补声明 `websockets>=13.0`（uvicorn 的 WS 握手运行时需要，此前靠环境里碰巧装着）；五包 classifiers 补 `Python :: 3.13/3.14`（`requires-python` 本就 `>=3.11` 无上限）；测试依赖不进 pyproject，登记于 `docs/dev/测试.md`「准备」小节。
+- **CI 扩矩阵**（.github/workflows/ci.yml）: quality/新增 test 任务矩阵 `3.11–3.14`，与 classifiers 声明一致（声明的支持面有绿灯背书）；test 任务跑全量 pytest，build 依赖 `[quality, test]`。
+- **裁撤 agent_orchestrator 插件 — 编排层隐退**（0323da6）。
+- **pyright 目标 Python 版本 3.12 → 3.14**（260e211）。
+- **删除遗留死常量 `TASKS_FILE`**（1a9c7b2）；**移除 9 处本机绝对路径、修正贡献指南克隆 URL**（7c2a41b）。
+- **文档结构整理**: 设计/验收交付物迁入 `docs/dev/`（61765a5）、任务文件路径据实对齐 `./.fp/tasks.json`（3cc29a8）、清理四处漂移（79bbe51）、同步 Portal 重构补 6 份滞后文档（9715c6d）、贡献指南滞后修正（死安装命令 `pip install -e ".[dev]"`、`import agent` 验证、`core/agent.py` 路径、不存在的 `test_interrupt.py`、测试计数、行宽 100→120）。
 
 ### Fixed
 
-- **ACP reload 后 elicitation 能力不再丢失**（`packages/fp-acp/src/fp_acp/server.py`）: reload 是 `execve` 重启进程、客户端 stdio 连接不变且**不重发 `initialize`**，此前新实例能力回退默认 → `ask_user` 静默退回 deferred。现将 `initialize` 协商的 `clientCapabilities` 写入环境变量 `FP_ACP_CLIENT_CAPS`（随 exec 继承，载体模式同 `FP_ACP_PENDING_REQ`），新实例构造时恢复，带内 elicit 跨 reload 存活。
-- **会话列表两大污染根治：0 长度占位会话 + 摘要缺失只能显示 sid**（`packages/fp-core/src/fp_core/core/session.py` 与 `session_ops`/`agent`/`portal`/`subagent_plugin`/`fp_cli`/`app.js` 调用点）: 根因①**可见性是拿占位文件换的**——`/new` `/clear` 的 `clear_session_file`、空会话退出的 `save_and_summarize → update_meta`、`token_usage` 与 subagent `source` 标记都会给尚不存在的文件凭空写一行 meta；根因②**摘要只在切换/退出时生成**——进程被杀或会话未切换过，`summary` 恒空，前端兜底就把 sid 当标题。三层修复：**预防**（空落盘 no-op、`clear_session_file` 无文件即 no-op、`update_meta(create=False)` 标记类写入只改内存、subagent 只收尾已落盘子会话、`save_context`/`save_message` 落盘 user 消息即刷新摘要=随写随更、`save_and_summarize` 不再用空结果抹掉旧摘要）；**展示**（`list_sessions()` 成为唯一展示口径：合并当前会话内存 meta、隐藏全部 0 长度会话、缺失摘要按文件最后一条 user 消息现场回填并写回而不动 `updated`，仍无则给 `(空白会话)`/`(无摘要)` 标签，WebUI 兜底同步改）；**续接**（`_find_latest_session` 优先非空会话，`fp -r` / `/resume latest` 不再落到空占位）。文档同步 10 篇；测试 `test_session.py` 新增 `TestZeroLengthSessionHygiene`（799 passed · pyright strict 0 错）。
+- **ACP reload 后 elicitation 能力不再丢失**（7579beb, `packages/fp-acp/src/fp_acp/server.py`）: reload 是 `execve` 重启进程、客户端 stdio 连接不变且**不重发 `initialize`**，此前新实例能力回退默认 → `ask_user` 静默退回 deferred。现将 `initialize` 协商的 `clientCapabilities` 写入环境变量 `FP_ACP_CLIENT_CAPS`（随 exec 继承，载体模式同 `FP_ACP_PENDING_REQ`），新实例构造时恢复，带内 elicit 跨 reload 存活。
+- **会话列表两大污染根治：0 长度占位会话 + 摘要缺失只能显示 sid**（29b60db, `packages/fp-core/src/fp_core/core/session.py` 与 `session_ops`/`agent`/`portal`/`subagent_plugin`/`fp_cli`/`app.js` 调用点）: 根因①**可见性是拿占位文件换的**——`/new` `/clear` 的 `clear_session_file`、空会话退出的 `save_and_summarize → update_meta`、`token_usage` 与 subagent `source` 标记都会给尚不存在的文件凭空写一行 meta；根因②**摘要只在切换/退出时生成**——进程被杀或会话未切换过，`summary` 恒空，前端兜底就把 sid 当标题。三层修复：**预防**（空落盘 no-op、`clear_session_file` 无文件即 no-op、`update_meta(create=False)` 标记类写入只改内存、subagent 只收尾已落盘子会话、`save_context`/`save_message` 落盘 user 消息即刷新摘要=随写随更、`save_and_summarize` 不再用空结果抹掉旧摘要）；**展示**（`list_sessions()` 成为唯一展示口径：合并当前会话内存 meta、隐藏全部 0 长度会话、缺失摘要按文件最后一条 user 消息现场回填并写回而不动 `updated`，仍无则给 `(空白会话)`/`(无摘要)` 标签，WebUI 兜底同步改）；**续接**（`_find_latest_session` 优先非空会话，`fp -r` / `/resume latest` 不再落到空占位）。文档同步 10 篇；测试 `test_session.py` 新增 `TestZeroLengthSessionHygiene`（799 passed · pyright strict 0 错）。
+- **未知斜杠命令报错返回，不再降级喂给 LLM**（03a3186）。
+- **ask 问题块显示时序 — 工具行不再挤占回答区**（fbec2b9）。
+- **PluginRegistry.scan 清理残留时保留本代模块**（3d8d8c5）。
+- **测试协程泄漏修复 + 噪声测试移除 + 陈旧文档刷新**（b5d2410）。
+- **会话切换/新建摘要去 LLM 化等 0.1.14 后续修复**（详见各提交）。
 
 ## [0.1.14] — 2026-09-28
 
@@ -415,6 +439,7 @@
 
 | 版本 | 日期 | 摘要 |
 |------|------|------|
+| 0.2.0 | 2026-10-05 | 唯一接口组 Portal 收口（中版本提升）+ 异步主动范式 ask/background/wait_job + Zeta 邻居协议 + ACP elicitation + 依赖声明与 CI 矩阵补齐 |
 | 0.1.14 | 2026-09-28 | 生命周期埋点 49 钩子全链路落点 + reload 统一 execve 激活 + 任务图重构与 /task 控制台 + 宪章守卫 |
 | 0.1.13 | 2026-09-08 | LLM 供应点两级结构 + 思考模式统一控制 + shortcircuit 退化模式 + 任务状态机扩展 + bash 副作用检查 + 全项目类型债清零 |
 | 0.1.12 | 2026-08-04 | fp ext 扩展分发系统 + 文档同步门禁 + 测试覆盖提升 + 多项修复 |

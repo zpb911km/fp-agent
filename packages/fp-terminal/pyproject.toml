@@ -16,12 +16,14 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: OS Independent",
     "Environment :: Console",
 ]
 
 dependencies = [
-    "fp-core>=0.1.0",
+    "fp-core>=0.2.0",
     "prompt-toolkit>=3.0.40",
     "rich>=14.0.0",
     "wcwidth>=0.2.0",

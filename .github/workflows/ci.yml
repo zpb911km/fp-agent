@@ -3,11 +3,14 @@
 # 每次 push / PR 自动运行：
 #   1. ruff lint + format 检查
 #   2. Python 语法检查（AST 解析）
-#   3. 版本一致性检查（所有子包使用统一版本管理）
-#   4. 全部 5 个子包构建验证
+#   3. 全量 pytest（矩阵覆盖 classifiers 声明的全部 Python 版本）
+#   4. 版本一致性检查（所有子包使用统一版本管理）
+#   5. 全部 5 个子包构建验证
 #
 # 设计目标：防止 AI 自修改引入语法错误或破坏构建，
 #           为后续分支管理（main/dev/feature）提供基础保障。
+#           Python 版本矩阵与各包 classifiers（3.11–3.14）保持一致——
+#           classifiers 声明的支持面必须有绿灯背书，加格即加矩阵。
 
 name: CI
 
@@ -23,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -66,9 +69,36 @@ jobs:
               print('✅ 全部通过')
           " {} +
 
+  test:
+    name: 全量测试
+    needs: quality
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # setuptools-scm 需要完整历史推算包版本
+
+      - name: 安装 Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          # 测试依赖仅登记在 dev 文档（docs/dev/测试.md），不进各包 pyproject
+          pip install pytest httpx pyyaml prompt-toolkit rich wcwidth fastapi uvicorn websockets
+
+      - name: 🧪 全量 pytest
+        run: python -m pytest -q
+
   build:
     name: 子包构建验证
-    needs: quality
+    needs: [quality, test]
     runs-on: ubuntu-latest
     strategy:
       matrix:

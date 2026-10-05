@@ -16,15 +16,18 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: OS Independent",
     "Environment :: Web Environment",
     "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
 ]
 
 dependencies = [
-    "fp-core>=0.1.0",
+    "fp-core>=0.2.0",
     "fastapi>=0.122.0",
     "uvicorn>=0.38.0",
+    "websockets>=13.0",
 ]
 
 [project.scripts]
