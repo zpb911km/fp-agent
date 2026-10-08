@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import sys
@@ -472,7 +473,8 @@ async def _replace_agent() -> dict[str, Any]:
       - 替换期间 portal.is_open 为 False，ensure_agent() 自动创建新实例
       - 活跃的 WebSocket 连接经 portal.run.* 自动指向新实例
     """
-    if portal.is_open and portal.run.status.is_processing:
+    # is_run_active 覆盖工具执行期；is_processing 只覆盖 LLM 调用期，会漏拒
+    if portal.is_open and portal.run.status.is_run_active:
         raise HTTPException(status_code=409, detail="Agent 正在处理请求，请稍后重试")
 
     async with _agent_lock:
@@ -987,6 +989,26 @@ if os.path.isdir(_static_dir):
 
 # ── 主页 ──────────────────────────────────────────────────
 
+_T_RE = re.compile(r'([A-Za-z0-9_./-]+\.(?:css|js|png|svg|ico))\?_t=([^"\'\s>&]*)')
+
+
+def _stamp_cache(html: str) -> str:
+    """把静态引用的 ?_t= 缓存戳改写为对应文件的 mtime（改动即失效）。
+
+    取代人肉 bump index.html 里的版本号——浏览器缓存永远按最新 mtime 失效，
+    谁改了 ui.js/app.js/style.css 都自动生效，无需记得同步版本串。
+    """
+
+    def _sub(m: re.Match[str]) -> str:
+        fname = m.group(1).split("/")[-1]
+        path = os.path.join(_static_dir, fname)
+        try:
+            return f"{m.group(1)}?_t={int(os.path.getmtime(path))}"
+        except OSError:
+            return m.group(0)
+
+    return _T_RE.sub(_sub, html)
+
 
 @app.get("/")
 async def index():
@@ -994,7 +1016,7 @@ async def index():
     index_path = os.path.join(_static_dir, "index.html")
     if os.path.exists(index_path):
         with open(index_path, encoding="utf-8") as f:
-            return HTMLResponse(f.read())
+            return HTMLResponse(_stamp_cache(f.read()), headers={"Cache-Control": "no-cache"})
     # 如果前端文件不存在，返回说明页面
     return HTMLResponse("""
     <!DOCTYPE html>

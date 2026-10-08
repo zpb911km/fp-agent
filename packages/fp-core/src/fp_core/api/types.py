@@ -59,6 +59,9 @@ class InstanceStatus:
     session_id: str
     is_processing: bool
     cancelled: bool
+    # 整轮忙碌（覆盖工具执行期）；忙碌门卫（reload/recycle）必须用它，
+    # is_processing 仅覆盖 LLM 调用期（历史字段，保留供前端状态灯等展示用途）
+    is_run_active: bool = False
 
 
 # 事件形状：{"type": str, "seq": int, "ts": float, **payload} —— 目录见 core.events.EVENT_TYPES

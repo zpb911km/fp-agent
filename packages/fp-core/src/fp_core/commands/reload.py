@@ -37,8 +37,8 @@ async def execute(state: State, arg: str) -> tuple[bool, str]:
         except RuntimeError as e:
             return (True, f"❌ 模块重载失败: {e}")
 
-    # ── 检查是否正在处理 ──
-    if state.agent is not None and state.agent.is_processing:
+    # ── 检查是否整轮进行中（含工具执行期；is_processing 只覆盖 LLM 调用期，会误放行） ──
+    if state.agent is not None and state.agent.is_run_active:
         return (True, "❌ Agent 正在处理请求，请稍后重试")
 
     from fp_core.core.handoff import perform_exec_reload

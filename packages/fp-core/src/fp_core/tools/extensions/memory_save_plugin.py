@@ -6,6 +6,7 @@ Memory Save 插件 v2 — 保存长期记忆（异步版本）
 """
 
 import asyncio
+import contextlib
 import os
 from datetime import datetime
 from typing import Any, cast
@@ -115,17 +116,27 @@ async def execute(params: dict[str, Any]) -> str:
         old = _read_old_meta()
         created = old.get("created") if isinstance(old.get("created"), str) and old["created"].strip() else date
         os.makedirs(memory_dir, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("---\n")
-            f.write(f"name: {safe_name}\n")
-            f.write(f"description: {description}\n")
-            f.write(f"type: {category}\n")
-            f.write(f"created: {created}\n")
-            f.write(f"updated: {date}\n")
-            if hint:
-                f.write(f"hint: {hint}\n")
-            f.write("---\n\n")
-            f.write(content + "\n")
+        # 原子写（temp + os.replace，同目录保证同文件系统）：
+        # 同 cwd 多实例共写 .fp/memory 时，读者永远只见完整文件，不会读到半写截断。
+        # 跨实例 last-writer-wins（frontmatter 竞争）仍在，一写者原则见 memory 注记。
+        tmp_path = f"{path}.{os.getpid()}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write("---\n")
+                f.write(f"name: {safe_name}\n")
+                f.write(f"description: {description}\n")
+                f.write(f"type: {category}\n")
+                f.write(f"created: {created}\n")
+                f.write(f"updated: {date}\n")
+                if hint:
+                    f.write(f"hint: {hint}\n")
+                f.write("---\n\n")
+                f.write(content + "\n")
+            os.replace(tmp_path, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            raise
 
     await loop.run_in_executor(None, _write)
 

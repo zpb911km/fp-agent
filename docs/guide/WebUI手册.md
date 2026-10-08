@@ -557,7 +557,7 @@ ws://host:port/ws/chat?token=your_token
 
 | 场景 | 行为 |
 |------|------|
-| Agent 正在处理请求 | 命令面返回 `409 Conflict`，稍后重试 |
+| Agent 正在处理请求 | 命令面返回 `409 Conflict`，稍后重试（判据为整轮忙碌 `is_run_active`，工具执行期同样拒绝） |
 | 会话文件未能落盘 | 拒绝重启并回滚，当前实例无损 |
 | exec 失败 | 全量回滚（内存快照+磁盘+删 handoff），当前实例继续运行 |
 | WebSocket 连接活跃 | 进程替换时断开，前端凭 `run_id` 重连/`resync` 续传（见 6.5） |
@@ -596,6 +596,10 @@ core 内置 `reload` 工具为两段式：先调用获得隔离测试告示与�
     ├── background.svg     # 背景图
     └── favicon.png        # 网站图标
 ```
+
+> 缓存失效：服务 index 时 `_stamp_cache()` 自动把 `?_t=` 改写为对应静态文件 mtime，
+> 并下发 `Cache-Control: no-cache` —— 改 ui.js/app.js/style.css 即自动生效，
+> **无需**人肉同步 index.html 里的版本串（2026-10-08 起）。
 
 ### 10.2 启动开发模式
 

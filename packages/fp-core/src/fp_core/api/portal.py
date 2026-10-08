@@ -134,6 +134,7 @@ class RunPlane:
             session_id=agent.session.session_id,
             is_processing=agent.is_processing,
             cancelled=agent.cancelled_by_user,
+            is_run_active=agent.is_run_active,
         )
 
     @property
