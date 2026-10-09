@@ -205,7 +205,7 @@ python -m pytest -q                              # 仓库根全量（根 pyproje
 python -m pytest packages/fp-core/tests -q       # 仅核心包
 ```
 
-当前 **48 个测试文件 / 801 个用例**（799 通过 + 2 跳过，跳过项为需
+当前 **53 个测试文件 / 863 个用例**（861 通过 + 2 跳过，跳过项为需
 `FP_BENCHMARK=1` 的性能基准与需 `ZETA_A2A_E2E_URL` 的真实端到端）。
 测试依赖的安装清单见 [dev/测试.md](dev/测试.md) 的「准备」小节；
 测试体系详见 [dev/测试.md](dev/测试.md)。

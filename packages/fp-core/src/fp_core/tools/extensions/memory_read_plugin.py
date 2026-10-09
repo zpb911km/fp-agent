@@ -1,24 +1,23 @@
 """
-Memory Read 插件 v2 — 读取/搜索长期记忆（异步版本）
+Memory Read 插件 v3 — 树导航读取（设计：/tmp/fp_memory_tree_design_20261009.md）
 
-四种入口：
-  ① memory_read()                          → 顶层索引（两棵树 + 使用引导）
-  ② memory_read(name="subagent")           → 精确读取一条（本地优先）
-  ③ memory_read(path="~/skill")            → 浏览分类
-  ④ memory_read(query="子代理")            → 全文搜索
+五种入口（逃生梯的机械载体）：
+  ① memory_read()                    → level-0 根索引（类别完整 + 热键，会话内冻结的注入源）
+  ② memory_read(name=...)            → 精确读取（本地优先）+ 访问计数（热键数据源）
+  ③ memory_read(path="~/skill")      → level-1 下钻（_node.md 子条目一行摘要 + 逃生舱提示）
+  ④ memory_read(query=...)           → FTS5 bm25 排序检索（同义词组 OR）；短词/miss → AND 子串兜底
+  ⑤ memory_read(all=true)            → 逃生梯第 3 档：全量一行摘要扫描（≈旧全量索引，一次工具调用）
 
-两棵根树：
-  ~/  全局（~/.local/share/fp/memory/）
-  ./  本地（$CWD/.fp/memory/）
+铁律：query miss 后必须 all=true 才准报告「没有」（索引尾部写死此规则）。
 """
 
 import asyncio
 import os
 import re
 from datetime import datetime
-from typing import Any, cast
+from typing import Any
 
-from fp_core import config
+from fp_core import config, memory_index, memory_tree
 
 # 记忆新鲜度阈值：updated 距今超过该天数时，精确读取会附加过期提醒
 STALE_DAYS = 30
@@ -29,7 +28,11 @@ PLUGIN_DEFINITION = {
     "type": "function",
     "function": {
         "name": "memory_read",
-        "description": "读取已保存的长期记忆（跨会话）。空查询时列出全部，否则按关键词搜索。",
+        "description": (
+            "读取已保存的长期记忆（跨会话）。用法：空参=根索引；name=精确读取；"
+            "path=按类别下钻；query=排序搜索；all=true=全量扫描。"
+            "铁律：query 无结果后必须 all=true 扫描过，才准报告「没有这条记忆」。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -39,99 +42,54 @@ PLUGIN_DEFINITION = {
                 },
                 "path": {
                     "type": "string",
-                    "description": "浏览分类，如'~/skill'或'./project'。path 以 ~/ 或 ./ 开头表示根。",
+                    "description": "下钻浏览类别，如'~/skill'或'./project'。以 ~/ 或 ./ 开头表示根。",
                 },
                 "query": {
                     "type": "string",
-                    "description": "全文搜索（空格分隔，AND 匹配），搜索 name/description/type/content",
+                    "description": "排序搜索（空格=同义词组 OR，bm25 排名）；短查询自动退化子串匹配。",
+                },
+                "all": {
+                    "type": "boolean",
+                    "description": "true=全量一行摘要扫描（逃生舱最后一档：query miss 后的强制穷尽检查）。",
                 },
             },
-            "description": "四种用法：①空参→索引 ②name='foo'→精确 ③path='~/skill'→浏览 ④query='关键词'→搜索",
+            "description": "五种用法：①空参→根索引 ②name→精确 ③path→下钻 ④query→搜索 ⑤all=true→全量扫描",
         },
     },
 }
 
 
 def _parse_frontmatter(content: str) -> dict[str, Any]:
-    """解析 YAML frontmatter（第一对 --- 之间）。
-
-    优先用 yaml.safe_load（正确解析多行/引号/特殊字符），
-    失败时降级为行扫描（兼容含有二进制字符的旧文件）。
-    """
-    import yaml
-
-    lines = content.split("\n")
-    if not lines or lines[0].strip() != "---":
-        return {}
-    end = 1
-    while end < len(lines) and lines[end].strip() != "---":
-        end += 1
-    if end >= len(lines):
-        return {}
-    fm_text = "\n".join(lines[1:end])
-    try:
-        fm = yaml.safe_load(fm_text)
-        if isinstance(fm, dict):
-            return cast(dict[str, Any], fm)
-    except Exception:
-        pass
-    # 降级：行扫描
-    result: dict[str, Any] = {}
-    for line in fm_text.split("\n"):
-        if line.startswith("name:"):
-            result["name"] = line.split(":", 1)[1].strip()
-        elif line.startswith("type:"):
-            result["type"] = line.split(":", 1)[1].strip()
-        elif line.startswith("description:"):
-            result["description"] = line.split(":", 1)[1].strip()
-    return result
+    """解析 YAML frontmatter（第一对 --- 之间），yaml 失败降级行扫描。"""
+    return memory_tree.parse_frontmatter(content)
 
 
 def _list_memories(memory_dir: str, root_label: str = ".") -> list[dict[str, str]]:
-    """列出目录下所有记忆的元信息"""
-    if not os.path.isdir(memory_dir):
-        return []
-
+    """列出记忆元信息（兼容布局：category/ 子目录 + 遗留扁平文件）"""
     memories: list[dict[str, str]] = []
-    for fname in sorted(os.listdir(memory_dir)):
-        if not fname.endswith(".md"):
-            continue
-        fpath = os.path.join(memory_dir, fname)
-        name = os.path.splitext(fname)[0]
-
+    for leaf in memory_tree.leaves_in_dir(memory_dir):
         try:
-            with open(fpath, encoding="utf-8") as f:
+            with open(leaf["path"], encoding="utf-8") as f:
                 content = f.read()
         except Exception:
             continue
-
         fm = _parse_frontmatter(content)
-        mem_type: str = fm.get("type", "unknown")
-        description: str = fm.get("description", "")
-        created: str = fm.get("created", "")
-        updated: str = fm.get("updated", "") or created
-        hint: str = fm.get("hint", "")
-
         memories.append({
-            "name": name,
-            "type": mem_type,
-            "description": description,
-            "created": created,
-            "updated": updated,
-            "hint": hint,
-            "path": fpath,
+            "name": leaf["name"],
+            "type": str(fm.get("type") or leaf["category"]),
+            "description": str(fm.get("description") or ""),
+            "created": str(fm.get("created") or ""),
+            "updated": str(fm.get("updated") or "") or str(fm.get("created") or ""),
+            "hint": str(fm.get("hint") or ""),
+            "path": leaf["path"],
             "content": content,
             "root": root_label,
         })
-
     return memories
 
 
 def _list_global_memories() -> list[dict[str, str]]:
-    """合并三来源全局记忆（fetched → public → private，同名 private 胜出）。
-
-    全局来源的 root 统一标为 "~"；项目内本地记忆保持 "."。
-    """
+    """合并三来源全局记忆（fetched → public → private，同名 private 胜出）。"""
     from fp_core.config import user_dirs
 
     merged: dict[str, dict[str, str]] = {}
@@ -153,17 +111,17 @@ def _parse_memory_body(content: str) -> str:
     return "\n".join(lines[body_start:]).strip()
 
 
-def _categorize(memories: list[dict[str, str]], root_label: str) -> dict[str, list[dict[str, str]]]:
-    """按 type（分类）分组记忆"""
-    groups: dict[str, list[dict[str, str]]] = {}
-    for m in memories:
-        t = m["type"] or "uncategorized"
-        groups.setdefault(t, []).append(m)
-    return groups
+def _score_units(query: str) -> list[str]:
+    """打分档查询单元：ASCII 词（≥2 字符）+ CJK 连续段的 bigram（单字段丢弃防噪声）。"""
+    units: list[str] = [w for w in re.findall(r"[a-z0-9_\-]{2,}", query.lower())]
+    for run in re.findall(r"[\u4e00-\u9fff]+", query):
+        if len(run) >= 2:
+            units.extend(run[i : i + 2] for i in range(len(run) - 1))
+    return units
 
 
 def _entry_label(m: dict[str, str]) -> str:
-    """索引行条目：name 或 name→hint（hint 为短硬事实，截断至 40 字符）"""
+    """索引行条目：name 或 name→hint（hint 截断至 40 字符）"""
     hint = m.get("hint") or ""
     if hint:
         h = hint if len(hint) <= 40 else hint[:40] + "…"
@@ -183,80 +141,64 @@ def _stale_note(updated: str) -> str:
     return ""
 
 
-def _build_tree_index(global_memories: list[dict[str, str]], local_memories: list[dict[str, str]]) -> str:
-    """构建顶层树状索引"""
-    lines = ["## 我的长期记忆索引", ""]
+_ESCAPE_FOOTER = (
+    "├─ 未找到？升级路径：① memory_read(path='~/<类>') 浏览候选类 → "
+    "② memory_read(query=换词/同义词) 跨类搜索 → "
+    "③ memory_read(all=true) 全量扫描。全量扫描后仍无，才可报告「没有」。"
+)
 
-    # 全局
-    global_groups = _categorize(global_memories, "~")
-    global_count = len(global_memories)
-    lines.append(f"~/（全局，{global_count}条）")
-    for cat in sorted(global_groups):
-        names = ", ".join(_entry_label(m) for m in global_groups[cat])
-        lines.append(f"  {cat}:    {names}")
-    lines.append("")
 
-    # 本地
-    local_groups = _categorize(local_memories, ".")
-    local_count = len(local_memories)
-    if local_count > 0:
-        lines.append(f"./（本地 📍 .fp/memory，{local_count}条）")
-        for cat in sorted(local_groups):
-            names = ", ".join(_entry_label(m) for m in local_groups[cat])
-            lines.append(f"  {cat}:    {names}")
+def _build_full_scan(global_memories: list[dict[str, str]], local_memories: list[dict[str, str]]) -> str:
+    """逃生梯第 3 档：全部叶子的一行摘要（≈旧全量索引，但按需一次调用、不进前缀）"""
+    total = len(global_memories) + len(local_memories)
+    lines = [f"📋 全量记忆扫描（共 {total} 条，一行摘要）", ""]
+    for m in global_memories:
+        lines.append(f"~/{m['type']}/{_entry_label(m)} — {m['description']}")
+    for m in local_memories:
+        lines.append(f"./{m['type']}/{_entry_label(m)} — {m['description']}")
+    if total == 0:
+        lines.append("（记忆库为空）")
+    else:
         lines.append("")
-
-    # 使用引导
-    lines.append("━ 用法 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append('精确读取:   memory_read(name="<记忆名>")       ← 从上方列表中直接使用')
-    lines.append('搜索:       memory_read(query="<关键词>")')
-    lines.append('浏览分类:   memory_read(path="~/<分类>")       ← 或 memory_read(path="./<分类>")')
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-    return "\n".join(lines)
-
-
-def _build_category_browse(category: str, memories: list[dict[str, str]], root_label: str) -> str:
-    """浏览某个分类下的所有记忆"""
-    lines = [f"📂 {root_label}/{category}/（共 {len(memories)} 条）", ""]
-    for m in memories:
-        suffix = f"（🕒 {m['updated']}）" if m.get("updated") else ""
-        lines.append(f"{_entry_label(m):30s} — {m['description']}{suffix}")
+        lines.append("└─ 找到目标 → memory_read(name=...) 读正文；仍没有 → 该记忆可能不存在，用 memory_save 保存")
     return "\n".join(lines)
 
 
 async def execute(params: dict[str, Any]) -> str:
-    """
-    读取记忆（异步）
-
-    Args:
-        params: 可选键 name / path / query
-
-    Returns:
-        格式化结果
-    """
-    name: str = params.get("name", "").strip()
-    path: str = params.get("path", "").strip()
-    query: str = params.get("query", "").strip()
+    """读取记忆（异步）"""
+    name: str = str(params.get("name") or "").strip()
+    path: str = str(params.get("path") or "").strip()
+    query: str = str(params.get("query") or "").strip()
+    all_scan: bool = bool(params.get("all"))
 
     loop = asyncio.get_running_loop()
-
-    # 读取两棵树的记忆（全局 = 三来源合并，本地 = 项目内 .fp/memory）
-    global_memories = await loop.run_in_executor(None, _list_global_memories)
-
     local_dir = os.path.join(os.getcwd(), config.MEMORY_DIR_LOCAL)
-    local_memories = await loop.run_in_executor(None, _list_memories, local_dir)
 
-    # ── 入口①：空参 → 顶层索引 ──
+    # ── 入口⑤：all=true — 全量扫描（先于其它判断，与 name/path/query 可并存时优先级最低）──
+    if all_scan and not any([name, path, query]):
+        global_memories = await loop.run_in_executor(None, _list_global_memories)
+        local_memories = await loop.run_in_executor(None, _list_memories, local_dir)
+        return _build_full_scan(global_memories, local_memories)
+
+    # ── 入口①：空参 → level-0 根索引（派生缓存，确保新鲜后读盘——手改优先）──
     if not any([name, path, query]):
-        return _build_tree_index(global_memories, local_memories)
 
-    # ── 入口②：memory_read(name="subagent") — 精确读取一条 ──
+        def _read_both() -> str:
+            parts = [p for p in (memory_tree.read_index("~"), memory_tree.read_index(".")) if p]
+            return "\n".join(parts)
+
+        index = await loop.run_in_executor(None, _read_both)
+        if index:
+            return index
+        return "（记忆库为空：全局与本地均无记忆）"
+
+    # ── 入口②：memory_read(name="foo") — 精确读取 ──
     if name:
+        global_memories = await loop.run_in_executor(None, _list_global_memories)
+        local_memories = await loop.run_in_executor(None, _list_memories, local_dir)
         results = [m for m in global_memories + local_memories if m["name"] == name]
 
         if not results:
-            # 尝试 fuzzy 提示
             hints = [m["name"] for m in global_memories + local_memories]
             close = [h for h in hints if name.lower() in h.lower() or h.lower() in name.lower()]
             msg = f"未找到名为「{name}」的记忆"
@@ -264,8 +206,9 @@ async def execute(params: dict[str, Any]) -> str:
                 msg += f'，相似名称：{", ".join(close[:5])}（使用 memory_read(name="...") 精确读取）'
             return msg
 
-        # 同名冲突时：本地优先（本地排在 global+local 的后面，所以用最后一条）
+        # 同名冲突：本地排后 → 本地胜
         selected = results[-1]
+        await loop.run_in_executor(None, memory_tree.bump_access, selected["root"], selected["name"])
         body = _parse_memory_body(selected["content"])
         root_tag = "~" if selected["root"] == "~" else "📍 ./"
         header = f"[{root_tag}/{selected['type']}] {selected['name']} — {selected['description']}"
@@ -279,60 +222,93 @@ async def execute(params: dict[str, Any]) -> str:
         lines.append(body)
         return "\n".join(lines)
 
-    # ── 入口③：memory_read(path="~/skill") — 浏览分类 ──
+    # ── 入口③：memory_read(path="~/skill") — level-1 下钻 ──
     if path:
-        # 解析 path 语法
         path_match = re.match(r"^(~|\.)/(.+)$", path)
         if not path_match:
             return "path 格式错误。示例：memory_read(path='~/skill') 或 memory_read(path='./project')"
 
         root_char = path_match.group(1)
         category = path_match.group(2).strip().lower()
+        root_label = "~" if root_char == "~" else "."
 
-        if root_char == "~":
-            pool = global_memories
-            root_label = "~"
-        else:
-            pool = local_memories
-            root_label = "."
+        def _read_level1() -> tuple[str, list[str]]:
+            node = memory_tree.read_node(root_label, category)
+            avail = sorted(c for c in memory_tree.categories(root_label) if not c.startswith("_"))
+            return node, avail
 
-        filtered = [m for m in pool if m["type"].lower() == category]
-
-        if not filtered:
-            available = sorted({m["type"] for m in pool})
+        node, available = await loop.run_in_executor(None, _read_level1)
+        if not node:
             msg = f"📂 {root_label}/{category}/ — 该分类下无记忆"
             if available:
                 msg += f'\n可选分类：{"、".join(available)}（使用 memory_read(path="{root_label}/<分类>") 浏览）'
+            else:
+                msg += "\n（记忆库为空）"
             return msg
+        return node
 
-        return _build_category_browse(category, filtered, root_label)
-
-    # ── 入口④：memory_read(query="子代理") — 全文搜索 ──
+    # ── 入口④：memory_read(query="...") — FTS5 排序 + AND 子串兜底（双轨，裁决 Q3）──
     if query:
-        keywords = [kw.lower() for kw in query.split()]
+        global_memories = await loop.run_in_executor(None, _list_global_memories)
+        local_memories = await loop.run_in_executor(None, _list_memories, local_dir)
         all_memories = global_memories + local_memories
 
-        def matches(m: dict[str, str]) -> bool:
-            search_space = (
-                m["name"].lower()
-                + " "
-                + m["description"].lower()
-                + " "
-                + m["type"].lower()
-                + " "
-                + _parse_memory_body(m["content"]).lower()
-            )
-            return all(kw in search_space for kw in keywords)
+        fts_results = await loop.run_in_executor(None, memory_index.search, query)
 
-        results = [m for m in all_memories if matches(m)]
+        if fts_results:
+            results = fts_results
+        else:
+            # AND 子串兜底（短词 trigram 失效 / FTS miss 的保守路径——保持旧语义）
+            keywords = [kw.lower() for kw in query.split()]
+
+            def matches(m: dict[str, str]) -> bool:
+                search_space = (
+                    m["name"].lower()
+                    + " "
+                    + m["description"].lower()
+                    + " "
+                    + m["type"].lower()
+                    + " "
+                    + _parse_memory_body(m["content"]).lower()
+                )
+                return all(kw in search_space for kw in keywords)
+
+            results = [m for m in all_memories if matches(m)]
 
         if not results:
-            return f"📋 搜索「{query}」无匹配"
+            # ── 打分档（词云评审裁决：CJK 自然语言查询无空格分词时，FTS 短语与 AND
+            #    子串双双失效。以 query 的 bigram/ASCII 词为单位做命中计数排序，
+            #    score≥1 即入候选——ranked score（非概率），零词重叠则仍 miss）──
+            units = _score_units(query)
 
-        lines = [f"📋 搜索「{query}」（共 {len(results)} 条）", ""]
+            def _scored(m: dict[str, str]) -> int:
+                hay = (
+                    m["name"].lower()
+                    + " "
+                    + m["description"].lower()
+                    + " "
+                    + m["type"].lower()
+                    + " "
+                    + _parse_memory_body(m["content"]).lower()
+                )
+                return sum(1 for u in units if u in hay)
+
+            scored = sorted(
+                ((_scored(m), m) for m in all_memories),
+                key=lambda t: t[0],
+                reverse=True,
+            )
+            results = [m for s, m in scored if s > 0][:8]
+
+        if not results:
+            return f"📋 搜索「{query}」无匹配（词法零命中——这是已知天花板，非静默失败）\n{_ESCAPE_FOOTER}"
+
+        lines = [f"📋 搜索「{query}」（共 {len(results)} 条，打分排序）", ""]
         for m in results:
             root_tag = "~" if m["root"] == "~" else "./"
             lines.append(f"{root_tag}{m['type']}/{m['name']} — {m['description']}")
+        lines.append("")
+        lines.append("└─ 点名读取 → memory_read(name=...)；结果不全 → memory_read(all=true) 全量扫描")
         return "\n".join(lines)
 
     return "⚠️ 参数异常（不应到达此处）"

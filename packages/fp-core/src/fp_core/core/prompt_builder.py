@@ -7,7 +7,6 @@ PromptBuilder — 系统提示词构建器
 - 不直接操作 Agent 或 ConversationState
 """
 
-import os
 from typing import cast
 
 
@@ -71,76 +70,14 @@ class PromptBuilder:
         return result
 
     def _build_memory_index(self) -> str:
-        """扫描记忆目录树（三来源全局 + 项目内本地），返回分类分组的索引（用于 system prompt）"""
-        from fp_core import config
-        from fp_core.config import user_dirs
+        """level-0 根索引注入（设计：/tmp/fp_memory_tree_design_20261009.md）
 
-        local_dir = os.path.join(os.getcwd(), config.MEMORY_DIR_LOCAL)
+        - 会话构建时确保派生缓存新鲜（生成/刷新 _index.md）并读盘——用户手改的 _index.md 优先
+        - 注入预算：类别完整 + 热键，O(1) 不随记忆数增长（vs 旧方案全量叶子名 O(n)）
+        - 会话内冻结：本方法只在 build_system_prompt / rebuild_system_prompt 调用，
+          会话中途的分裂/合并/热键变化下个会话才生效（保 prefix cache）
+        """
+        from fp_core import memory_tree
 
-        def _scan_dir(memory_dir: str) -> list[dict[str, str]]:
-            if not os.path.isdir(memory_dir):
-                return []
-            results: list[dict[str, str]] = []
-            for fname in sorted(os.listdir(memory_dir)):
-                if not fname.endswith(".md"):
-                    continue
-                fpath = os.path.join(memory_dir, fname)
-                try:
-                    with open(fpath, encoding="utf-8") as f:
-                        content = f.read()
-                except Exception:
-                    continue
-                fm = PromptBuilder._parse_frontmatter(content)
-                mem_name = fm.get("name", "")
-                mem_type = fm.get("type", "")
-                if mem_name:
-                    results.append({"name": mem_name, "type": mem_type or "uncategorized"})
-            return results
-
-        # 三来源全局记忆（fetched → public → private，同名 private 胜出）
-        global_by_name: dict[str, dict[str, str]] = {}
-        for d in user_dirs("memory"):
-            for m in _scan_dir(d):
-                global_by_name[m["name"]] = m  # 后加载（更高优先级）覆盖
-        global_memories = list(global_by_name.values())
-        local_memories = _scan_dir(local_dir)
-
-        total = len(global_memories) + len(local_memories)
-        if total == 0:
-            return ""
-
-        def _group(memories: list[dict[str, str]]) -> dict[str, list[str]]:
-            groups: dict[str, list[str]] = {}
-            for m in memories:
-                groups.setdefault(m["type"], []).append(m["name"])
-            return groups
-
-        lines = ["## 我的长期记忆索引"]
-        lines.append(f"共 {total} 条（进入新会话后自动加载，需要详情时使用 memory_read 查询）")
-        lines.append("")
-
-        # 全局
-        global_groups = _group(global_memories)
-        lines.append(f"~/（全局，{len(global_memories)}条）")
-        for cat in sorted(global_groups):
-            names = ", ".join(global_groups[cat])
-            lines.append(f"  {cat}:    {names}")
-        lines.append("")
-
-        # 本地
-        local_groups = _group(local_memories)
-        if local_memories:
-            lines.append(f"./（本地 📍 .fp/memory，{len(local_memories)}条）")
-            for cat in sorted(local_groups):
-                names = ", ".join(local_groups[cat])
-                lines.append(f"  {cat}:    {names}")
-            lines.append("")
-
-        # 使用引导
-        lines.append("━ 用法 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        lines.append('精确读取:   memory_read(name="<记忆名>")       ← 从上方列表中直接使用')
-        lines.append('搜索:       memory_read(query="<关键词>")')
-        lines.append('浏览分类:   memory_read(path="~/<分类>")       ← 或 memory_read(path="./<分类>")')
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-        return "\n".join(lines)
+        parts = [p for p in (memory_tree.read_index("~"), memory_tree.read_index(".")) if p]
+        return "\n".join(parts)

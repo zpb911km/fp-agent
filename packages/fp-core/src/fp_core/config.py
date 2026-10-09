@@ -508,6 +508,12 @@ BASH_PATH: str = _value("BASH_PATH", "")
 
 _FP_DATA_DIR = get_data_dir()
 
+
+def data_dir() -> str:
+    """当前用户数据目录（运行期读取模块变量——测试 monkeypatch _FP_DATA_DIR 后保持一致）。"""
+    return _FP_DATA_DIR
+
+
 SESSIONS_DIR = os.path.join(_FP_DATA_DIR, "sessions")
 MEMORY_DIR = os.path.join(_FP_DATA_DIR, "memory")  # 遗留：资产记忆已迁移至三来源，仅保留向后兼容
 MEMORY_DIR_LOCAL = os.path.join(".fp", "memory")
