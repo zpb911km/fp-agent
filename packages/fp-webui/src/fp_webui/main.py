@@ -798,6 +798,8 @@ async def websocket_chat(
       {"type": "info", "content": "..."}          ← IO 通道输出
       {"type": "hint", "content": "..."}
       {"type": "error", "error": "..."}
+      {"type": "queued", "content": "..."}       ← 运行中 submit 入队回执（前端渲染 ⏳ 气泡）
+      {"type": "queue_error", "error": "..."}    ← 排队被拒（如运行中斜杠），不动 processing 态
       {"type": "item", "content": "..."}
       {"type": "done", "session_id": "...", "final_content": "..."}
 
@@ -901,12 +903,18 @@ async def websocket_chat(
                 if session_runtime.feed_reply(content):
                     continue
 
-                # ── 如果处理任务还在运行（非 ask 状态），拒绝 ──
+                # ── 运行中：不拒绝，走 submit 入队（环顶穿插，同 CLI 协议）──
                 if session_runtime.is_running:
-                    await websocket.send_json({
-                        "type": "error",
-                        "error": "正在处理中，请等待当前操作完成",
-                    })
+                    result = await portal.run.submit(content)
+                    if result == "queued":
+                        await websocket.send_json({"type": "queued", "content": content})
+                    else:
+                        _err = {
+                            "rejected_command": "运行中斜杠命令已禁用，轮次结束后再执行",
+                            "rejected_empty": "消息不能为空",
+                            "not_open": "实例未开启",
+                        }.get(result, f"入队失败：{result}")
+                        await websocket.send_json({"type": "queue_error", "error": _err})
                     continue
 
                 # ── 正常处理：创建新 IO 通道并启动处理任务 ──

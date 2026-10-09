@@ -268,5 +268,69 @@ class TestMultilinePrompt(unittest.TestCase):
         self.assertIn("__text__:", out)
 
 
+class TestInputLayout(unittest.TestCase):
+    """#157 视觉契约（设计：glm-5.3）：
+    - 输入框高度随内容自动增长，max 6 行封顶
+    - 发送钮无文字（↑）、宽 3、高度跟随输入框（100% 对齐）
+    - 输入行只保留上下边框、无背景
+    """
+
+    def _scenario(self, n_enters: int) -> dict[str, object]:
+        from fp_core.api import portal as real_portal
+
+        fake = _FakePortal(busy=False)
+
+        async def _run() -> dict[str, object]:
+            io = TUIIO()
+            app = FPApp(io)
+            io.attach(app)
+            with (
+                patch.object(type(real_portal), "is_open", property(lambda self: True)),
+                patch.object(real_portal, "run", fake, create=True),
+            ):
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    prompt = app.query_one("#prompt", PromptInput)
+                    prompt.focus()
+                    for _ in range(n_enters):
+                        await pilot.press("enter")
+                    await pilot.pause(0.1)
+                    btn = app.query_one("#send_btn")
+                    row = app.query_one("#prompt_row")
+                    # Textual 8.x：size=内容区，region 含边框（真实渲染高度看 region）
+                    return {
+                        "prompt_h": prompt.region.height,
+                        "btn_h": btn.region.height,
+                        "btn_w": btn.region.width,
+                        "btn_label": btn.label,
+                        "row_h": row.region.height,
+                        "row_border_top": str(row.styles.border_top),
+                        "row_border_left": str(row.styles.border_left),
+                        "row_bg": str(row.styles.background),
+                    }
+
+        return asyncio.run(_run())  # type: ignore[no-any-return]
+
+    def test_single_line_layout(self) -> None:
+        s = self._scenario(0)
+        self.assertEqual(s["prompt_h"], 1)  # 1 行内容 → 1 格
+        self.assertEqual(s["btn_h"], 1)  # 100% 跟随，与输入框齐平
+        self.assertEqual(s["btn_w"], 3)  # 图标钮窄宽
+        self.assertEqual(s["btn_label"], "↑")  # 无文字，只图标
+        # 上下边框 = 容器行高 1 + 两条边
+        self.assertEqual(s["row_h"], 3)
+
+    def test_grows_to_max_6(self) -> None:
+        s = self._scenario(10)  # 10 次换行 → 被 max-height 截断
+        self.assertEqual(s["prompt_h"], 6)
+        self.assertEqual(s["btn_h"], 6)  # 按钮随行高同步拉伸
+
+    def test_row_borders_top_bottom_only(self) -> None:
+        s = self._scenario(0)
+        # 上下为 tall 细线（色 = $surface），左右 bordertype 为空 = 无边框
+        self.assertIn("tall", str(s["row_border_top"]))
+        self.assertTrue(str(s["row_border_left"]).startswith("('',"), s["row_border_left"])
+
+
 if __name__ == "__main__":
     unittest.main()

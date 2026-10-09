@@ -1322,6 +1322,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   box-shadow: var(--shadow-brutal-sm) !important;
 }
 
+/* 运行中排队消息的 ⏳ 标记（#158） */
+.queued-flag {
+  margin-left: 0.6em;
+  font-size: 0.85em;
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
 /* ═══════════════════════════════════════════════════════════════
    命令面板 v2
    ═══════════════════════════════════════════════════════════════ */

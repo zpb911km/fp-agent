@@ -337,6 +337,16 @@ function handleEvent(data) {
       addToolResult(data.name, data.result, false, data.tool_call_id);
       break;
 
+    case 'queued':
+      // 运行中排队回执：渲染用户气泡 + ⏳ 已排队标记（done 时清除）
+      addQueuedMessage(data.content);
+      break;
+
+    case 'queue_error':
+      // 排队被拒（如运行中斜杠）：只提示，不动 processing 状态
+      showError(data.error);
+      break;
+
     case 'error':
       removeThinking();
       showError(data.error);
@@ -458,13 +468,22 @@ messagesEl.addEventListener('click', function(e) {
 function sendMessage() {
   closeCmdPalette();
   var text = inputEl.value.trim();
-  if (!text || processing || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
 
   // ask 答复通道：等待问答时，自由输入同样携带 ask_id 对账
   if (_pendingAsk) {
     inputEl.value = '';
     autoResize(inputEl);
     replyAsk(text);
+    return;
+  }
+
+  // 运行中排队：输入框不禁用（#158），后端 submit() 入队、
+  // 环顶穿插消费；回执 'queued' 渲染气泡 + ⏳ 标记，斜杠被拒回 'error'
+  if (processing) {
+    inputEl.value = '';
+    autoResize(inputEl);
+    try { ws.send(JSON.stringify({ type: 'message', content: text })); } catch (e) { showError('发送失败'); }
     return;
   }
 

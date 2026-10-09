@@ -473,24 +473,33 @@ class FPApp(App[None]):
     #prompt_row {
         dock: bottom;
         height: auto;
-        background: $panel;
-        border-top: solid $accent;
-        padding: 0 1;
+        padding: 0;
+        background: $background;
+        border-top: tall $surface;
+        border-bottom: tall $surface;
     }
     #prompt {
         width: 1fr;
-        height: 4;
-        max-height: 8;
-        background: $panel;
+        height: auto;
+        max-height: 6;
+        overflow-y: auto;
+        border: none;
+        padding: 0 1;
+        background: $background;
         color: $text;
     }
     #send_btn {
-        width: 10;
-        height: 3;
-        margin: 1 0 1 1;
-        background: $accent;
+        width: 3;
+        min-width: 3;
+        height: 100%;
+        border: none;
+        padding: 0;
+        background: $background;
         color: $text;
+        content-align: center middle;
     }
+    #send_btn:hover { color: $accent; text-style: bold; }
+    #send_btn:focus { color: $accent; background: $accent 15%; }
     #ask_box, #stats_box {
         width: 80%; max-width: 100; height: auto;
         max-height: 90%;
@@ -550,10 +559,10 @@ class FPApp(App[None]):
         yield Static(id="hint")
         with Horizontal(id="prompt_row"):
             yield PromptInput(
-                placeholder="输入消息…（Enter 换行 · Shift+Enter 发送 · Tab 补全斜杠命令）",
+                placeholder="消息…（Enter 换行 · Shift+Enter 发送）",
                 id="prompt",
             )
-            yield Button("发送", id="send_btn", variant="primary")
+            yield Button("↑", id="send_btn")
 
     async def on_mount(self) -> None:
         self.mounted = True
@@ -730,11 +739,7 @@ class FPApp(App[None]):
             t.append(f" · {self._status_note}", style="yellow")
         bar.update(t)
         prompt = self.query_one("#prompt", PromptInput)
-        prompt.placeholder = (
-            "运行中 — 输入将作为补充排队注入（斜杠命令已禁用）"
-            if busy
-            else "输入消息… Shift+Enter 发送 · Enter 换行 · Tab 补全斜杠命令"
-        )
+        prompt.placeholder = "运行中 · 输入将排队注入（斜杠禁用）" if busy else "消息…（Enter 换行 · Shift+Enter 发送）"
 
     # ── 输入路由 ─────────────────────────────────────────────
 

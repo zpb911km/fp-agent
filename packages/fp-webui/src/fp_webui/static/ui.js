@@ -221,6 +221,23 @@ function addUserMessage(content) {
   updateStatusBar();
 
   scrollToBottom();
+  return msg;
+}
+
+/** 运行中排队消息：普通用户气泡 + ⏳ 已排队标记（done 时统一清除） */
+function addQueuedMessage(content) {
+  var msg = addUserMessage(content);
+  if (msg) {
+    var flag = document.createElement('span');
+    flag.className = 'queued-flag';
+    flag.textContent = ' ⏳ 已排队';
+    var body = msg.querySelector('.msg-content');
+    if (body) body.appendChild(flag);
+  }
+}
+
+function clearQueuedFlags() {
+  document.querySelectorAll('.queued-flag').forEach(function (el) { el.remove(); });
 }
 
 function addAssistantMessage(content) {
@@ -455,7 +472,8 @@ function showError(msg) {
 
 function setProcessing(state) {
   processing = state;
-  inputEl.disabled = state;
+  // 运行中输入框保持可用（#158 排队发送），仅在结束时清除 ⏳ 标记
+  if (!state) { clearQueuedFlags(); }
 
   if (state) {
     // 处理中 → 按钮变为中断按钮 ⏹️
