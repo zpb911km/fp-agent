@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from fp_cli.tui import TUIIO, AskModal, FPApp
+from fp_cli.tui import TUIIO, AskModal, FPApp, PromptInput
 
 
 class _FakeStatus:
@@ -75,12 +75,9 @@ class _FakePortal:
 
 async def _submit_text(app: FPApp, text: str) -> None:
     """直接驱动提交 handler（绕过键盘注入的时序不确定性）。"""
-    from textual.widgets import Input
-
-    prompt = app.query_one("#prompt", Input)
-    prompt.value = text
-    # 构造 Submitted 事件走同一 handler
-    await app._on_submit(Input.Submitted(prompt, text))  # noqa: SLF001
+    prompt = app.query_one("#prompt", PromptInput)
+    prompt.text = text
+    await app._handle_input(text)  # noqa: SLF001 — 与 Shift+Enter/发送钮同一入口
 
 
 class TestSubmitRouting(unittest.TestCase):
@@ -214,6 +211,61 @@ class TestStreamingRender(unittest.TestCase):
         baseline, after = asyncio.run(_scenario())
         # think 段 + content 段各固化为一个子件（finalize 不新增）
         self.assertGreaterEqual(after - baseline, 2)
+
+
+class TestMultilinePrompt(unittest.TestCase):
+    """输入区升级契约：Enter 换行 / Shift+Enter 提交 / 发送钮提交 / 空文忽略"""
+
+    def _scenario(self, *, press: str | None = None, click: bool = False, initial: str = "") -> list[str]:
+        from fp_core.api import portal as real_portal
+
+        fake = _FakePortal(busy=False)
+
+        async def _run() -> list[str]:
+            io = TUIIO()
+            app = FPApp(io)
+            io.attach(app)
+            with (
+                patch.object(type(real_portal), "is_open", property(lambda self: True)),
+                patch.object(real_portal, "run", fake, create=True),
+            ):
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    prompt = app.query_one("#prompt", PromptInput)
+                    prompt.focus()
+                    if initial:
+                        prompt.text = initial
+                    if press is not None:
+                        await pilot.press(*press.split())
+                    if click:
+                        await pilot.click("#send_btn")
+                    await pilot.pause(0.1)
+                    # 返回残留文本（提交会清空）+ 焦点归属
+                    focused = app.focused.id if app.focused is not None else None
+                    return fake.sent + fake.submitted + ["__text__:" + prompt.text, f"__focus__:{focused}"]
+
+        return asyncio.run(_run())  # type: ignore[no-any-return]
+
+    def test_enter_inserts_newline(self) -> None:
+        out = self._scenario(press="enter", initial="第一行")
+        self.assertIn("__text__:\n第一行", out)  # 换行而非提交
+        self.assertNotIn("第一行", [x for x in out if not x.startswith("__text__")])
+
+    def test_shift_enter_sends(self) -> None:
+        out = self._scenario(press="shift+enter", initial="你好")
+        self.assertIn("你好", out)
+        self.assertIn("__text__:", out)  # 提交后清空
+
+    def test_send_button_sends(self) -> None:
+        out = self._scenario(click=True, initial="点我发送")
+        self.assertIn("点我发送", out)
+        self.assertIn("__focus__:prompt", out)  # 点击后焦点夺回输入框
+
+    def test_empty_shift_enter_ignored(self) -> None:
+        out = self._scenario(press="shift+enter")
+        real = [x for x in out if not x.startswith("__")]
+        self.assertEqual(real, [])
+        self.assertIn("__text__:", out)
 
 
 if __name__ == "__main__":

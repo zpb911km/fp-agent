@@ -3,7 +3,7 @@
 降级链（``main._tui_available`` 决策）：
     L0 TUI（本模块） → L1 经典 print REPL（裸 input，无补全） → L2 headless/-m/管道
 
-渲染模型：VerticalScroll 消息流 + 常驻 Input（状态条/补全提示条）。
+渲染模型：VerticalScroll 消息流 + 常驻输入区（多行 PromptInput + 发送按钮，状态条/补全提示条）。
     - 已固化内容 = 追加的 Static/Markdown 子件（顺序天然正确，历史即日志）
     - 流式中内容 = 单个 live 子件，token 节流（call_later 合批）update，
       段末固化（live 引用置空，子件保留可见以迎接下一段）
@@ -28,18 +28,18 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import Counter
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, VerticalScroll
+from textual.containers import Container, Horizontal, VerticalScroll
 from textual.geometry import Offset
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.widget import Widget
-from textual.widgets import Input, Markdown, OptionList, Static
+from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
 
 from fp_core.api import IOChannel, portal
 from fp_core.logger import Logger
@@ -417,6 +417,33 @@ class FPDefaultScreen(Screen[None]):
         return widget, offset
 
 
+class PromptInput(TextArea):
+    """多行输入框：Enter 换行（TextArea 原生），Shift+Enter 发送（App 优先级绑定）。
+
+    ↑↓ 语义按内容分流（确定性，不依赖按键冒泡）：
+    - 有正文 → 光标移动（多行编辑）；
+    - 空正文 → 历史回填（沿袭单行 Input 时代的 ↑↓ 行为）。
+    """
+
+    BINDINGS = [
+        Binding("up", "prompt_up", show=False),
+        Binding("down", "prompt_down", show=False),
+    ]
+
+    def action_prompt_up(self) -> None:
+        if self.text.strip():
+            self.action_cursor_up()
+        else:
+            # self.app 的返回类型带 Unknown（textual Widget.app 泛型），strict 下单点豁免
+            cast("FPApp", self.app).action_hist_prev()  # pyright: ignore[reportUnknownMemberType]
+
+    def action_prompt_down(self) -> None:
+        if self.text.strip():
+            self.action_cursor_down()
+        else:
+            cast("FPApp", self.app).action_hist_next()  # pyright: ignore[reportUnknownMemberType]
+
+
 # ══════════════════════════════════════════════════════════════
 # FPApp — 主界面
 # ══════════════════════════════════════════════════════════════
@@ -443,7 +470,27 @@ class FPApp(App[None]):
         padding: 0 1; display: none;
     }
     #hint.visible { display: block; }
-    #prompt { dock: bottom; border-top: solid $accent; }
+    #prompt_row {
+        dock: bottom;
+        height: auto;
+        background: $panel;
+        border-top: solid $accent;
+        padding: 0 1;
+    }
+    #prompt {
+        width: 1fr;
+        height: 4;
+        max-height: 8;
+        background: $panel;
+        color: $text;
+    }
+    #send_btn {
+        width: 10;
+        height: 3;
+        margin: 1 0 1 1;
+        background: $accent;
+        color: $text;
+    }
     #ask_box, #stats_box {
         width: 80%; max-width: 100; height: auto;
         max-height: 90%;
@@ -460,9 +507,8 @@ class FPApp(App[None]):
         Binding("ctrl+c", "interrupt", "打断/退出", priority=True),
         Binding("ctrl+q", "app_quit", "退出", priority=True),
         Binding("ctrl+g", "stats", "统计"),
+        Binding("shift+enter", "submit_prompt", show=False, priority=True),
         Binding("tab", "tab_complete", show=False, priority=True),
-        Binding("up", "hist_prev", show=False),
-        Binding("down", "hist_next", show=False),
     ]
 
     def __init__(
@@ -502,7 +548,12 @@ class FPApp(App[None]):
         with VerticalScroll(id="chat"):
             yield Static("", id="chat_anchor")
         yield Static(id="hint")
-        yield Input(placeholder="输入消息…", id="prompt")
+        with Horizontal(id="prompt_row"):
+            yield PromptInput(
+                placeholder="输入消息…（Enter 换行 · Shift+Enter 发送 · Tab 补全斜杠命令）",
+                id="prompt",
+            )
+            yield Button("发送", id="send_btn", variant="primary")
 
     async def on_mount(self) -> None:
         self.mounted = True
@@ -520,7 +571,7 @@ class FPApp(App[None]):
         # 状态刷新（覆盖泵起轮的忙碌态——它们不经本应用）
         self.set_interval(0.4, self._refresh_status)
         self._refresh_status()
-        self.query_one("#prompt", Input).focus()
+        self.query_one("#prompt", PromptInput).focus()
 
     async def _continue_round(self) -> None:
         if self._directive is not None and self._directive.notice:
@@ -549,7 +600,10 @@ class FPApp(App[None]):
             self._line(f"💡 续会话: {sid}，输入 /help 查看命令", "cyan")
         else:
             self._line("💡 输入 /help 查看命令，/resume 可回到历史会话", "cyan")
-        self._line("⌨ Ctrl+C 打断/退出 · Ctrl+G 统计 · 运行中输入将排队注入", "dim")
+        self._line(
+            "⌨ Enter 换行 · Shift+Enter/发送钮 提交 · Ctrl+C 打断/退出 · Ctrl+G 统计 · 运行中输入排队注入",
+            "dim",
+        )
 
     # ── 消息流渲染 ───────────────────────────────────────────
 
@@ -675,17 +729,31 @@ class FPApp(App[None]):
         if self._status_note:
             t.append(f" · {self._status_note}", style="yellow")
         bar.update(t)
-        prompt = self.query_one("#prompt", Input)
+        prompt = self.query_one("#prompt", PromptInput)
         prompt.placeholder = (
-            "运行中 — 输入将作为补充排队注入（斜杠命令已禁用）" if busy else "输入消息… Tab 补全斜杠命令"
+            "运行中 — 输入将作为补充排队注入（斜杠命令已禁用）"
+            if busy
+            else "输入消息… Shift+Enter 发送 · Enter 换行 · Tab 补全斜杠命令"
         )
 
     # ── 输入路由 ─────────────────────────────────────────────
 
-    @on(Input.Submitted, "#prompt")
-    async def _on_submit(self, event: Input.Submitted) -> None:
-        text = event.value
-        event.input.clear()
+    def action_submit_prompt(self) -> None:
+        """Shift+Enter / 发送按钮 → 取文提交（modal 打开时不抢）。"""
+        if isinstance(self.screen, ModalScreen):
+            return
+        prompt = self.query_one("#prompt", PromptInput)
+        text = prompt.text
+        prompt.clear()
+        self.run_worker(self._handle_input(text))
+
+    @on(Button.Pressed, "#send_btn")
+    def _on_send_click(self, event: Button.Pressed) -> None:
+        # 点击会把焦点移到按钮——夺回输入焦点，保证后续键入不丢失
+        self.query_one("#prompt", PromptInput).focus()
+        self.action_submit_prompt()
+
+    async def _handle_input(self, text: str) -> None:
         action = route_input(text, self._is_busy())
         if action == "ignore":
             return
@@ -740,10 +808,10 @@ class FPApp(App[None]):
 
     # ── 斜杠补全提示（n7） ───────────────────────────────────
 
-    @on(Input.Changed, "#prompt")
-    def _on_change(self, event: Input.Changed) -> None:
+    @on(TextArea.Changed, "#prompt")
+    def _on_change(self, event: TextArea.Changed) -> None:
         hint = self.query_one("#hint", Static)
-        value = event.value
+        value = event.text_area.text
         if not value.startswith("/"):
             self._hint_matches = []
             hint.remove_class("visible")
@@ -766,10 +834,10 @@ class FPApp(App[None]):
     def action_tab_complete(self) -> None:
         if not self._hint_matches:
             return
-        prompt = self.query_one("#prompt", Input)
+        prompt = self.query_one("#prompt", PromptInput)
         word = self._hint_matches[0][0]
-        prompt.value = word + " "
-        prompt.cursor_position = len(word) + 1
+        prompt.text = word + " "
+        prompt.move_cursor((0, len(word) + 1))
 
     # ── 输入历史（↑↓） ──────────────────────────────────────
 
@@ -777,12 +845,11 @@ class FPApp(App[None]):
         if not self._hist:
             return
         self._hist_idx = max(0, min(len(self._hist), self._hist_idx + delta))
-        prompt = self.query_one("#prompt", Input)
-        if self._hist_idx >= len(self._hist):
-            prompt.value = ""
-        else:
-            prompt.value = self._hist[self._hist_idx]
-        prompt.cursor_position = len(prompt.value)
+        prompt = self.query_one("#prompt", PromptInput)
+        value = "" if self._hist_idx >= len(self._hist) else self._hist[self._hist_idx]
+        prompt.text = value
+        if value:
+            prompt.move_cursor((value.count("\n"), len(value.rsplit("\n", 1)[-1])))
 
     def action_hist_prev(self) -> None:
         self._move_history(-1)
@@ -846,6 +913,7 @@ async def run_tui(
 
 __all__ = [
     "FPApp",
+    "PromptInput",
     "TUIIO",
     "TUILogger",
     "route_input",
