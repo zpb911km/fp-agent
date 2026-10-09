@@ -177,5 +177,86 @@ class TestPilotSmoke(unittest.TestCase):
         asyncio.run(_run())
 
 
+class TestDetachedHitRace(unittest.TestCase):
+    """上游 #6643 竞态回归 — Markdown.update 摘块窗口内 MouseDown 不得崩溃。
+
+    机制（官方复现 #6643）：update 不 await → 旧块已 detach 但 compositor
+    命中图仍指向它 → _forward_event 取 parent=None → 'region' AttributeError。
+    修复：FPDefaultScreen.get_widget_and_offset_at 将 detached 命中降为 miss
+    （等价上游 PR #6645，上游合并发布后本测试应继续通过、修复可退场）。
+    """
+
+    def test_race_window_treated_as_miss(self) -> None:
+        import asyncio
+
+        from textual.app import App, ComposeResult
+        from textual.containers import VerticalScroll
+        from textual.events import MouseDown, MouseUp
+        from textual.widgets import Markdown
+
+        from fp_cli.tui import FPDefaultScreen
+
+        class _RaceApp(App[None]):
+            """最小载体：默认屏 = FPDefaultScreen + 单个 Markdown。"""
+
+            def get_default_screen(self):  # noqa: ANN201 — 对齐 textual 签名
+                return FPDefaultScreen(id="_default")
+
+            def compose(self) -> ComposeResult:
+                yield VerticalScroll(Markdown("# Before\n\nClick target paragraph.", id="document"))
+
+        async def _run() -> None:
+            app = _RaceApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                doc = app.query_one("#document", Markdown)
+                old = doc.query("MarkdownParagraph").first()
+                x, y = old.region.x + 1, old.region.y
+                # 更新不 await：制造摘块换块窗口
+                doc.update("\n\n".join(f"replacement {i}" for i in range(200)))
+                # 竞态窗口内命中必须是 miss（不得返回 detached 块）
+                for step in range(100_000):
+                    await asyncio.sleep(0)
+                    if old.parent is None:
+                        hit, _ = app.screen.get_widget_and_offset_at(x, y)
+                        self.assertIsNone(
+                            hit,
+                            f"detached 块仍被命中 (step={step})：修复未生效",
+                        )
+                        break
+                else:
+                    self.skipTest("竞态窗口未捕获（事件循环调度差异）")
+                # 窗口内投递点击：修复前此处崩溃
+                app.screen.post_message(
+                    MouseDown(
+                        None,
+                        x=x,
+                        y=y,
+                        button=1,
+                        delta_x=0,
+                        delta_y=0,
+                        shift=False,
+                        meta=False,
+                        ctrl=False,
+                    )
+                )
+                app.screen.post_message(
+                    MouseUp(
+                        None,
+                        x=x,
+                        y=y,
+                        button=1,
+                        delta_x=0,
+                        delta_y=0,
+                        shift=False,
+                        meta=False,
+                        ctrl=False,
+                    )
+                )
+                await pilot.pause()
+
+        asyncio.run(_run())
+
+
 if __name__ == "__main__":
     unittest.main()

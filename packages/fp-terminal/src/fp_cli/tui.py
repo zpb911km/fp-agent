@@ -35,8 +35,10 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
+from textual.geometry import Offset
 from textual.message import Message
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
+from textual.widget import Widget
 from textual.widgets import Input, Markdown, OptionList, Static
 
 from fp_core.api import IOChannel, portal
@@ -393,6 +395,33 @@ def build_stats_body() -> Text:
 # ══════════════════════════════════════════════════════════════
 
 
+# ══════════════════════════════════════════════════════════════
+# FPDefaultScreen — 上游 #6643 竞态的本地等价修复（PR #6645）
+# ══════════════════════════════════════════════════════════════
+
+
+class FPDefaultScreen(Screen[None]):
+    """默认屏：已 detach 的命中视为 miss。
+
+    ``Markdown.update()`` 会摘换旧块，而 compositor 命中图可能仍指向
+    旧块；``Screen._forward_event`` 拿到 ``parent is None`` 的块会崩
+    （``AttributeError: 'NoneType' has no attribute 'region'``，上游
+    Textualize/textual#6643）。等价修法见上游 PR #6645（尚未合并）：
+    ``not widget.is_attached`` → miss。上游发布修复版本后本类可退场。
+    """
+
+    def get_widget_and_offset_at(self, x: int, y: int) -> tuple[Widget | None, Offset | None]:
+        widget, offset = super().get_widget_and_offset_at(x, y)
+        if widget is not None and not widget.is_attached:
+            return None, None
+        return widget, offset
+
+
+# ══════════════════════════════════════════════════════════════
+# FPApp — 主界面
+# ══════════════════════════════════════════════════════════════
+
+
 class FPApp(App[None]):
     """FP 终端主界面。
 
@@ -461,6 +490,10 @@ class FPApp(App[None]):
         self._hist: list[str] = []
         self._hist_idx = 0
         self._hint_matches: list[tuple[str, str]] = []
+
+    def get_default_screen(self) -> Screen[None]:
+        """默认屏换用带 #6643 竞态修复的 FPDefaultScreen。"""
+        return FPDefaultScreen(id="_default")
 
     # ── 组装 ─────────────────────────────────────────────────
 
