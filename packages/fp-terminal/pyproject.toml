@@ -24,7 +24,7 @@ classifiers = [
 
 dependencies = [
     "fp-core>=0.2.0",
-    "prompt-toolkit>=3.0.40",
+    "textual>=8.0.0",
     "rich>=14.0.0",
     "wcwidth>=0.2.0",
 ]

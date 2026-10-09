@@ -147,17 +147,14 @@ ls -lh /path/to/fp-agent/config.json
 
 **A：** 检查以下几点：
 
-1. **命令前缀**：Tab 补全仅在输入以 `/` 开头的命令时触发。普通对话内容不会有补全
-2. **依赖安装**：确认已安装 `prompt_toolkit`
+1. **命令前缀**：补全仅在输入以 `/` 开头的命令时触发。普通对话内容不会有补全
+2. **交互模式**：补全是 TUI（L0）功能。若启动提示已降级 L1 经典 REPL
+   （`FP_NO_TUI`/非 TTY/`TERM=dumb`/textual 未安装，判定见 `docs/dev/显示层.md`）
+   则无补全——先排查降级原因
+3. **依赖安装**：确认已安装 `textual`（TUI 运行时依赖）
 
 ```bash
-pip install prompt_toolkit
-```
-
-3. **版本兼容**：要求 prompt_toolkit >= 3.0.0
-
-```bash
-pip install --upgrade prompt_toolkit
+pip install textual
 ```
 
 如果以上都正常，尝试重启程序。

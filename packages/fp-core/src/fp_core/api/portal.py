@@ -171,6 +171,45 @@ class RunPlane:
             return None
         return await agent.process_wakeup(io=io)
 
+    # ── 人类话语入队（数据面第二入口，与 send 并存不替代） ──────
+
+    async def submit(self, text: str, io: IOChannel | None = None) -> str:
+        """把人类话语入队（运行中穿插 / 空闲立即消费）——非阻塞。
+
+        与 ``send`` 的分工（数据面单写者，控制面另有旁路，协议 §2）：
+            - 空闲且走完整交互 → ``send``（完整钩子链：ON_INPUT/命令/过滤）
+            - 运行中补充输入 → ``submit``（入队，环顶 drain 以 user 角色
+              **同轮穿插**；若恰逢轮末则主动唤醒立即起轮消费）
+            - 斜杠命令永不入队（运行中禁用——会话状态竞态）；空闲时走 ``send``
+
+        身份协议（引擎.md「注入消息身份协议」）：``human=True`` → 裸文本不打
+        ``⁂[kind]`` 标头，shortcircuit 视为真正的人类轮次；注入路径沿用
+        ask_user 先例——不经 ON_INPUT/命令/过滤钩子，环顶 drain 落盘时发
+        ON_CTX_APPEND(op=user)。空闲时由 submit 主动起的消费轮同此形状。
+
+        超时语义：无。入队即返回 ``"queued"``，消费时机 = 下一环顶（忙碌）
+        或毫秒级唤醒轮（空闲，0.25s 泵 tick 降为兜底）。
+
+        Returns:
+            ``"queued"``           已入队（消费路径见上）
+            ``"rejected_command"`` 斜杠命令不入队（运行中禁用/空闲应走 send）
+            ``"rejected_empty"``   空文本
+            ``"not_open"``         实例未开启
+        """
+        if not self._portal.is_open:
+            return "not_open"
+        if io is not None:
+            self._portal._active_io = io
+        if not text.strip():
+            return "rejected_empty"
+        if text.strip().startswith("/"):
+            return "rejected_command"
+        from fp_core.core.jobs import inject_event
+
+        inject_event("user_input", text, wake=True, human=True)
+        self._portal._kick_wake()
+        return "queued"
+
 
 # ══════════════════════════════════════════════════════════════
 # 控制实例操作（ctl 域）
@@ -419,6 +458,8 @@ class Portal:
         # 空闲泵：实例空闲且有 wake 级注入时自动起一轮（见 run.wake）
         self._wake_pump_task: asyncio.Task[None] | None = None
         self._wake_pump_interval: float = 0.25
+        # 主动唤醒任务（run.submit 入队后立即触发，不等泵 tick）；持有引用防 GC
+        self._wake_kick_task: asyncio.Task[None] | None = None
 
     # ── 状态 ──────────────────────────────────────────────────
 
@@ -447,6 +488,28 @@ class Portal:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+    def _kick_wake(self) -> None:
+        """主动唤醒（run.submit 入队后调用）——不等 0.25s 泵 tick。
+
+        幂等：已有在飞的 kick 则复用；wake() 自身忙碌/无待处理返回 None，
+        故空闲时立即消费、忙碌时零成本让位（人类优先不变）。
+        泵 tick 仍保留为兜底（kick 异常丢失/纯 sleep 间隙的事件）。
+        """
+        if self._wake_kick_task is not None and not self._wake_kick_task.done():
+            return
+
+        async def _kick() -> None:
+            from fp_core.logger import get_logger
+
+            try:
+                await self.run.wake()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — kick 不得因单次失败而死
+                get_logger().warning(f"[wake-kick] 主动唤醒失败（忽略，泵兜底重试）: {e}")
+
+        self._wake_kick_task = asyncio.create_task(_kick())
 
     async def _wake_pump(self) -> None:
         """空闲泵循环：周期检查待唤醒注入，空闲即消费（人类优先：忙碌跳过）。"""
