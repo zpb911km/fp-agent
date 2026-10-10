@@ -37,8 +37,10 @@ async def execute(state: State, arg: str) -> tuple[bool, str]:
         except RuntimeError as e:
             return (True, f"❌ 模块重载失败: {e}")
 
-    # ── 检查是否整轮进行中（含工具执行期；is_processing 只覆盖 LLM 调用期，会误放行） ──
-    if state.agent is not None and state.agent.is_run_active:
+    # ── 门卫：仅当**别的**整轮（LLM/工具轮）进行中才拒绝 ──
+    # 不能判 is_run_active：命令本身走 process() → 该轮同样置位 _run_active
+    # （空闲泵据此让位），判它等于把自己这一轮算进去 → 空闲时也永远拒绝。
+    if state.agent is not None and state.agent.is_chat_round_active:
         return (True, "❌ Agent 正在处理请求，请稍后重试")
 
     from fp_core.core.handoff import perform_exec_reload

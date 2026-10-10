@@ -240,6 +240,10 @@ class Agent:
         # 整轮是否在进行中（覆盖工具执行期；_processing 仅覆盖 LLM 调用期）。
         # 空闲泵据此判断"能否唤醒"——必须是覆盖整轮的可靠忙碌信号。
         self._run_active = False
+        # 非命令轮在途计数：命令轮（斜杠命令也走 process → 同样置位 _run_active，
+        # 让空闲泵让位）与真正喂给 LLM 的轮次分开计数。门卫类检查（如 /reload）
+        # 要问的是"有没有**别的**轮在跑"，判 _run_active 会把自身那轮也算进去 → 永远拒绝。
+        self._chat_rounds = 0
 
         # 初始化锁（防竞态）
         self._init_lock = asyncio.Lock()
@@ -286,6 +290,17 @@ class Agent:
         本属性覆盖整轮（含工具执行），是空闲泵判断"能否唤醒"的可靠依据。
         """
         return self._run_active
+
+    @property
+    def is_chat_round_active(self) -> bool:
+        """是否有**非命令轮**（真正进 LLM 循环的轮次，含工具执行）在途。
+
+        与 ``is_run_active`` 的区别：后者把命令轮也算在内（命令执行期间
+        ``_run_active`` 同样为 True，空闲泵据此让位）。命令内部的门卫
+        （如 ``/reload``）必须问"有没有**别的**轮在跑"——判 ``is_run_active``
+        会把自己这一轮也算进去，导致空闲时也永远拒绝。
+        """
+        return self._chat_rounds > 0
 
     @property
     def cancelled_by_user(self) -> bool:
@@ -679,7 +694,12 @@ class Agent:
           如果在 _process_inner 内部创建子 Task，需手动传播 context，
           见 _current_io 定义处的说明。
         """
+        # 命令轮（/xxx 输入）不计入非命令轮计数——命令自己就是靠 _run_active
+        # 挡住空闲泵的，门卫要判的是"有没有别的轮"（见 is_chat_round_active）
+        is_command_round = user_input.strip().startswith("/")
         self._run_active = True
+        if not is_command_round:
+            self._chat_rounds += 1
         try:
             await self.ensure_initialized()
 
@@ -706,6 +726,8 @@ class Agent:
                 await self.lifecycle.emit(LifecycleHook.ON_CONTEXT_RESTORE, entry="process")
         finally:
             self._run_active = False
+            if not is_command_round:
+                self._chat_rounds -= 1
 
     async def continue_conversation(self, io: IOChannel | None = None) -> Response:
         """续接模式入口：会话尾部已含未应答的 assistant(tool_calls)/tool 消息时，
@@ -716,6 +738,7 @@ class Agent:
         然后将 state._pending_continue 置回 None。
         """
         self._run_active = True
+        self._chat_rounds += 1  # 续接轮必进 LLM 循环，属非命令轮
         try:
             await self.ensure_initialized()
 
@@ -732,6 +755,7 @@ class Agent:
                 await self.lifecycle.emit(LifecycleHook.ON_CONTEXT_RESTORE, entry="continue")
         finally:
             self._run_active = False
+            self._chat_rounds -= 1
 
     async def process_wakeup(self, io: IOChannel | None = None) -> Response:
         """唤醒轮入口：不追加用户输入，直接进循环消费环顶注入（如邻居铃声）。
@@ -742,6 +766,7 @@ class Agent:
         落入对话，模型据此自行决定如何响应。
         """
         self._run_active = True
+        self._chat_rounds += 1  # 唤醒轮消费注入后进 LLM 循环，属非命令轮
         try:
             await self.ensure_initialized()
 
@@ -757,6 +782,7 @@ class Agent:
                 await self.lifecycle.emit(LifecycleHook.ON_CONTEXT_RESTORE, entry="wakeup")
         finally:
             self._run_active = False
+            self._chat_rounds -= 1
 
     async def _process_inner(self, user_input: str, continuation: bool = False) -> Response:
         """处理用户输入的核心逻辑
