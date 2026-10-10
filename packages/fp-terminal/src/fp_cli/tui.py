@@ -420,9 +420,11 @@ class FPDefaultScreen(Screen[None]):
 class PromptInput(TextArea):
     """多行输入框：Enter 换行（TextArea 原生），Shift+Enter 发送（App 优先级绑定）。
 
-    ↑↓ 语义按内容分流（确定性，不依赖按键冒泡）：
-    - 有正文 → 光标移动（多行编辑）；
-    - 空正文 → 历史回填（沿袭单行 Input 时代的 ↑↓ 行为）。
+    ↑↓ 语义按光标位置分流（确定性，不依赖按键冒泡）：
+    - 光标未到边界（↑ 非首行 / ↓ 非末行）→ 光标移动（多行编辑）；
+    - ↑ 到首行再按 → 上一条历史，光标落在其**最后一行**（接着 ↑ 可继续上溯）；
+    - ↓ 到末行再按 → 下一条历史，光标落在其**第一行**（接着 ↓ 可继续前行）。
+    空正文即单行，↑↓ 直接分流到历史，沿袭单行 Input 时代的行为。
     """
 
     BINDINGS = [
@@ -431,14 +433,14 @@ class PromptInput(TextArea):
     ]
 
     def action_prompt_up(self) -> None:
-        if self.text.strip():
+        if self.cursor_location[0] > 0:
             self.action_cursor_up()
         else:
             # self.app 的返回类型带 Unknown（textual Widget.app 泛型），strict 下单点豁免
             cast("FPApp", self.app).action_hist_prev()  # pyright: ignore[reportUnknownMemberType]
 
     def action_prompt_down(self) -> None:
-        if self.text.strip():
+        if self.cursor_location[0] < self.document.line_count - 1:
             self.action_cursor_down()
         else:
             cast("FPApp", self.app).action_hist_next()  # pyright: ignore[reportUnknownMemberType]
@@ -860,7 +862,12 @@ class FPApp(App[None]):
         value = "" if self._hist_idx >= len(self._hist) else self._hist[self._hist_idx]
         prompt.text = value
         if value:
-            prompt.move_cursor((value.count("\n"), len(value.rsplit("\n", 1)[-1])))
+            if delta < 0:
+                # 回溯：落在最后一行，↑ 可逐行上溯到首行后继续翻更早的历史
+                prompt.move_cursor((value.count("\n"), len(value.rsplit("\n", 1)[-1])))
+            else:
+                # 前行：落在第一行，↓ 可逐行下行到末行后继续翻更晚的历史
+                prompt.move_cursor((0, 0))
 
     def action_hist_prev(self) -> None:
         self._move_history(-1)

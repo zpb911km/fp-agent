@@ -258,5 +258,78 @@ class TestDetachedHitRace(unittest.TestCase):
         asyncio.run(_run())
 
 
+class TestPromptHistoryByLine(unittest.TestCase):
+    """↑↓ 按光标位置分流的历史导航（多行输入框语义）。
+
+    - ↑ 到首行再按 → 上一条历史，光标落其最后一行；
+    - ↓ 到末行再按 → 下一条历史，光标落其第一行；
+    - 光标在中间行时 ↑↓ 只移动光标，不翻历史。
+    """
+
+    def test_up_down_cross_line_boundary(self) -> None:
+        import asyncio
+
+        from fp_cli.tui import FPApp, PromptInput
+
+        async def _run() -> None:
+            io = TUIIO()
+            app = FPApp(io)
+            io.attach(app)
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._hist = ["a1\na2\na3", "b1\nb2\nb3"]  # noqa: SLF001
+                app._hist_idx = len(app._hist)  # noqa: SLF001
+                prompt = app.query_one("#prompt", PromptInput)
+                prompt.focus()
+
+                # 空正文：↑ 直接进历史，落在最新条目的最后一行
+                prompt.action_prompt_up()
+                await pilot.pause()  # 冲刷 TextArea.Changed（防止积压到退出时派发）
+                self.assertEqual(prompt.text, "b1\nb2\nb3")
+                self.assertEqual(prompt.cursor_location, (2, 2))
+
+                # 条目内逐行上溯
+                prompt.action_prompt_up()
+                self.assertEqual(prompt.cursor_location, (1, 2))
+                self.assertEqual(prompt.text, "b1\nb2\nb3")
+                prompt.action_prompt_up()
+                self.assertEqual(prompt.cursor_location, (0, 2))
+                self.assertEqual(prompt.text, "b1\nb2\nb3")
+
+                # 首行再按 ↑ → 更早一条，落其最后一行
+                prompt.action_prompt_up()
+                self.assertEqual(prompt.text, "a1\na2\na3")
+                self.assertEqual(prompt.cursor_location, (2, 2))
+
+                # 末行再按 ↓ → 回到较新一条，落其第一行
+                prompt.action_prompt_down()
+                self.assertEqual(prompt.text, "b1\nb2\nb3")
+                self.assertEqual(prompt.cursor_location, (0, 0))
+
+                # 条目内逐行下行
+                prompt.action_prompt_down()
+                self.assertEqual(prompt.cursor_location, (1, 0))
+                prompt.action_prompt_down()
+                self.assertEqual(prompt.cursor_location, (2, 0))
+
+                # 末行再按 ↓ → 回到草稿（空）
+                prompt.action_prompt_down()
+                self.assertEqual(prompt.text, "")
+                self.assertEqual(app._hist_idx, len(app._hist))  # noqa: SLF001
+
+                # 中间行 ↑↓ 只移动光标，不翻历史
+                prompt.text = "x\ny\nz"
+                prompt.move_cursor((1, 0))
+                prompt.action_prompt_up()
+                self.assertEqual(prompt.cursor_location, (0, 0))
+                self.assertEqual(prompt.text, "x\ny\nz")
+                prompt.action_prompt_down()
+                self.assertEqual(prompt.cursor_location, (1, 0))
+                self.assertEqual(prompt.text, "x\ny\nz")
+                await pilot.pause()  # 全部 Changed 派发完毕，退出时不再有悬挂消息
+
+        asyncio.run(_run())
+
+
 if __name__ == "__main__":
     unittest.main()
