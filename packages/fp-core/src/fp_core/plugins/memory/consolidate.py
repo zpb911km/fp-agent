@@ -29,7 +29,9 @@ import time
 from datetime import date, datetime
 from typing import Any, cast
 
-from fp_core import config, memory_tree
+from fp_core import config
+
+from . import tree as memory_tree
 
 # ── 阈值（可配置入口：直接改模块常量；golden set 实测后再调） ──
 SPLIT_THRESHOLD = 20  # 节点子项 > 此值 → split 建议

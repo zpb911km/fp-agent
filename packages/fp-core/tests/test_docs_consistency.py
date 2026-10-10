@@ -74,7 +74,7 @@ def _extension_tool_count() -> int:
 
 
 def _plugin_registered_tool_count() -> int:
-    """生命周期插件在 ON_INIT 动态注册的工具数（task_system + shortcircuit）"""
+    """生命周期插件在 ON_INIT 动态注册的工具数（task_system + shortcircuit + memory）"""
     total = 0
     # task_system：tools.py 中 function.name
     ts = (SRC / "plugins" / "task_system" / "tools.py").read_text(encoding="utf-8")
@@ -83,6 +83,11 @@ def _plugin_registered_tool_count() -> int:
     # 否则 on_unregister 中的成对清理会被误计为注册）
     sc = (SRC / "plugins" / "shortcircuit" / "plugin.py").read_text(encoding="utf-8")
     total += len(re.findall(r'(?<!un)register_tool\(\s*"([^"]+)"', sc))
+    # memory：插件在 _register_tools 中注册 memory_read/memory_save（原 extensions 文件
+    # 已收编进 plugins/memory/，经 read/save 的 PLUGIN_DEFINITION 计数）
+    for mod in ("read.py", "save.py"):
+        src = (SRC / "plugins" / "memory" / mod).read_text(encoding="utf-8")
+        total += len(re.findall(r'"name"\s*:\s*"(memory_[a-z]+)"', src))
     return total
 
 

@@ -83,10 +83,10 @@ python scripts/check_dep_layers.py -v         # 含加载器回环等 INFO
 
 | 扩展 | 加载器源码（读它，接口以它为准） | 现有范例（抄它） | 对应文档 |
 |------|------|------|------|
-| 工具 | `fp_core/tools/__init__.py` → `ToolRegistry._load_from_dir()` | 内置 `fp_core/tools/extensions/`（memory_read、subagent、python…） | [扩展工具.md](扩展工具.md) |
+| 工具 | `fp_core/tools/__init__.py` → `ToolRegistry._load_from_dir()` | 内置 `fp_core/tools/extensions/`（subagent、python、reload、web_fetch、background…） | [扩展工具.md](扩展工具.md) |
 | 命令 | `fp_core/commands/__init__.py` → `_discover_commands()` | 内置 `fp_core/commands/`（reload.py、session.py、history.py…） | [扩展命令.md](扩展命令.md) |
-| 插件 | `fp_core/plugins/base/plugin.py` → `PluginRegistry.scan()` | 内置 `fp_core/plugins/`（shortcircuit/、task_system/ 目录插件） | [扩展插件.md](扩展插件.md) |
-| 记忆 | 工具 `memory_save` / `memory_read`（`fp_core/tools/extensions/memory_*_plugin.py`） | 三来源 `{DATA}/{fetched,public,private}/memory/` + 项目内 `.fp/memory/` | [技能与记忆.md](技能与记忆.md) |
+| 插件 | `fp_core/plugins/base/plugin.py` → `PluginRegistry.scan()` | 内置 `fp_core/plugins/`（shortcircuit/、task_system/、memory/ 目录插件） | [扩展插件.md](扩展插件.md) |
+| 记忆 | 工具 `memory_save` / `memory_read`（`fp_core/plugins/memory/` 插件 ON_INIT 注册） | 三来源 `{DATA}/{fetched,public,private}/memory/` + 项目内 `.fp/memory/` | [技能与记忆.md](技能与记忆.md) |
 
 **用户数据目录（`{DATA}`）定位：**
 ```bash

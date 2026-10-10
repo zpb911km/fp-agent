@@ -12,7 +12,10 @@ import os
 from datetime import datetime
 from typing import Any, cast
 
-from fp_core import config, memory_index, memory_tree
+from fp_core import config
+
+from . import index as memory_index
+from . import tree as memory_tree
 
 # ── 插件定义（OpenAI function calling schema） ──────────────────────
 

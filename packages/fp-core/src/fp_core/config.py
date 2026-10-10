@@ -44,7 +44,6 @@ _CONFIG_SCHEMA: dict[str, tuple[type, Any, Any, bool, str]] = {
     "RETRY_COUNT": (int, 0, 10, False, "失败重试次数"),
     "MAX_ITERATIONS": (int, 1, 500, False, "最大迭代轮次"),
     "MAX_CONTEXT_TOKENS": (int, 256, 131072, False, "上下文窗口 token 数"),
-    "MEMORY_MAX_HISTORY": (int, 0, 10_000, False, "记忆保留历史条数"),
 }
 
 
@@ -487,7 +486,6 @@ LLM_RETRY_COUNT: int = (
 
 MAX_ITERATIONS: int = _value("MAX_ITERATIONS", 50)
 MAX_CONTEXT_TOKENS: int = _value("MAX_CONTEXT_TOKENS", 8000)
-MEMORY_MAX_HISTORY: int = _value("MEMORY_MAX_HISTORY", 100)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -515,7 +513,6 @@ def data_dir() -> str:
 
 
 SESSIONS_DIR = os.path.join(_FP_DATA_DIR, "sessions")
-MEMORY_DIR = os.path.join(_FP_DATA_DIR, "memory")  # 遗留：资产记忆已迁移至三来源，仅保留向后兼容
 MEMORY_DIR_LOCAL = os.path.join(".fp", "memory")
 # 终端输入历史（运行时状态，不属于资产，独立于三来源目录）
 INPUT_HISTORY_FILE = os.path.join(_FP_DATA_DIR, "terminal", "_input_history")
@@ -616,7 +613,6 @@ def get_default_config() -> dict[str, Any]:
         "RETRY_COUNT": 3,
         "MAX_ITERATIONS": 50,
         "MAX_CONTEXT_TOKENS": 8000,
-        "MEMORY_MAX_HISTORY": 100,
         "BASH_PATH": "",
     }
 

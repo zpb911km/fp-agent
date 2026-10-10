@@ -18,7 +18,9 @@ import sqlite3
 import tempfile
 from typing import Any
 
-from fp_core import config, memory_tree
+from fp_core import config
+
+from . import tree as memory_tree
 
 # FTS5 trigram 对 <3 字符查询静默失效的边界（设计文档实测结论）
 _MIN_TERM_LEN = 3

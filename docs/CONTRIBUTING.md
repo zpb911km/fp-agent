@@ -98,6 +98,13 @@ fp --version
 └── 测试（可选）   — 单元测试或集成测试
 ```
 
+`scripts/` 为仓库维护工具（L3 层，非 FP 本体），现有：
+`check_docs_sync.py`（文档同步门禁）、`check_dep_layers.py`（依赖层级）、
+`check_charter.py`（宪章哈希）、`bump_docs.py`、
+`migrate_memory_tree.py`（记忆树迁移/回滚，实现见
+[guide/记忆系统](guide/记忆系统.md)）。新增脚本时同步此清单，
+并跑 `check_docs_sync.py --audit` 确认被 `DOC_RULES` 覆盖。
+
 ### Commit 规范
 
 使用 [Conventional Commits](https://www.conventionalcommits.org/) 格式：

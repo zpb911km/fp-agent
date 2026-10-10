@@ -13,9 +13,10 @@ from datetime import datetime
 
 import pytest
 
-import fp_core.tools.extensions.memory_read_plugin as mem_read
-import fp_core.tools.extensions.memory_save_plugin as mem_save
-from fp_core import config, memory_tree
+from fp_core import config
+from fp_core.plugins.memory import read as mem_read
+from fp_core.plugins.memory import save as mem_save
+from fp_core.plugins.memory import tree as memory_tree
 
 
 @pytest.fixture
@@ -23,7 +24,6 @@ def memory_env(tmp_path, monkeypatch):
     """隔离记忆目录（三来源模型：private/public/fetched + 项目内）"""
     data_dir = tmp_path / "fpdata"
     monkeypatch.setattr(config, "_FP_DATA_DIR", str(data_dir))
-    monkeypatch.setattr(config, "MEMORY_DIR", str(data_dir / "memory"))  # 兼容保留（旧引用）
     monkeypatch.setattr(config, "MEMORY_DIR_LOCAL", os.path.join(".fp", "memory"))
     # 隔离 cwd：避免读到真实项目的 .fp/memory（默认空，_set_local 可切换）
     monkeypatch.chdir(tmp_path)
@@ -403,7 +403,7 @@ class TestMemoryTree:
 
 class TestMemoryIndex:
     def test_fts_search_ranked(self, memory_env):
-        from fp_core import memory_index
+        from fp_core.plugins.memory import index as memory_index
 
         _write_mem_cat(memory_env["global"], "skill", "cookie_repo", "关于 cookie 的处理", "b")
         _write_mem_cat(memory_env["global"], "reference", "other", "无关的", "b")
@@ -412,13 +412,13 @@ class TestMemoryIndex:
 
     def test_fts_short_term_returns_empty_for_like_fallback(self, memory_env):
         """2 字查询（trigram 静默失效边界）→ FTS 返回 []，由 AND/LIKE 兜底"""
-        from fp_core import memory_index
+        from fp_core.plugins.memory import index as memory_index
 
         _write_mem_cat(memory_env["global"], "project", "resume", "简历工程", "b")
         assert memory_index.search("简历") == []
 
     def test_fts_rebuild_on_change(self, memory_env):
-        from fp_core import memory_index
+        from fp_core.plugins.memory import index as memory_index
 
         _write_mem_cat(memory_env["global"], "skill", "a", "d", "正文x")
         assert [r["name"] for r in memory_index.search("正文x")]

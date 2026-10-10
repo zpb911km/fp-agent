@@ -17,7 +17,10 @@ import re
 from datetime import datetime
 from typing import Any
 
-from fp_core import config, memory_index, memory_tree
+from fp_core import config
+
+from . import index as memory_index
+from . import tree as memory_tree
 
 # 记忆新鲜度阈值：updated 距今超过该天数时，精确读取会附加过期提醒
 STALE_DAYS = 30

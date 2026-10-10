@@ -1,10 +1,10 @@
-"""测试 P4 巩固检测 — memory_consolidate（机检信号 + flock 单写者 + 日门控 + journal/报告）
+"""测试 P4 巩固检测 — memoryidate（机检信号 + flock 单写者 + 日门控 + journal/报告）
 
 设计：/tmp/fp_memory_tree_design_20261009.md §3/§8
 - detect()：split / merge / near_dup / orphan / misfile / forbidden 全信号（零 LLM）
 - run()：日门控（同日只跑一次，force 绕过）、flock 单写者（另一实例持锁则让位）、
   journal jsonl 追加、dated 报告 md 落盘
-- 插件 memory_consol 只接线不测逻辑（ON_INITIALIZED → run，异常不阻塞启动）
+- 插件 memory 只接线不测逻辑（ON_INITIALIZED → run，异常不阻塞启动）
 """
 
 import fcntl
@@ -14,8 +14,9 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
-from fp_core import config, memory_tree
-from fp_core import memory_consolidate as mc
+from fp_core import config
+from fp_core.plugins.memory import consolidate as mc
+from fp_core.plugins.memory import tree as memory_tree
 
 
 @pytest.fixture
@@ -23,15 +24,14 @@ def memory_env(tmp_path, monkeypatch):
     """隔离记忆目录 + 巩固日志路径"""
     data_dir = tmp_path / "fpdata"
     monkeypatch.setattr(config, "_FP_DATA_DIR", str(data_dir))
-    monkeypatch.setattr(config, "MEMORY_DIR", str(data_dir / "memory"))
     monkeypatch.chdir(tmp_path)
 
     jdir = tmp_path / "journal"
     jdir.mkdir()
     monkeypatch.setattr(mc, "JOURNAL_DIR", str(jdir))
-    monkeypatch.setattr(mc, "LOCK_PATH", str(jdir / "memory_consolidate.lock"))
-    monkeypatch.setattr(mc, "GATE_PATH", str(jdir / "memory_consolidate.gate"))
-    monkeypatch.setattr(mc, "JOURNAL_PATH", str(jdir / "memory_consolidate.jsonl"))
+    monkeypatch.setattr(mc, "LOCK_PATH", str(jdir / "memoryidate.lock"))
+    monkeypatch.setattr(mc, "GATE_PATH", str(jdir / "memoryidate.gate"))
+    monkeypatch.setattr(mc, "JOURNAL_PATH", str(jdir / "memoryidate.jsonl"))
 
     return {"global": str(data_dir / "private" / "memory"), "journal": str(jdir)}
 
@@ -154,7 +154,7 @@ def test_run_writes_journal_and_report(memory_env):
 def test_plugin_registered():
     """插件包导出 Plugin 子类（扫描加载的契约）"""
     from fp_core.plugins.base.plugin import Plugin
-    from fp_core.plugins.memory_consol import MemoryConsolPlugin
+    from fp_core.plugins.memory import MemoryPlugin
 
-    assert issubclass(MemoryConsolPlugin, Plugin)
-    assert MemoryConsolPlugin.name == "memory_consol"
+    assert issubclass(MemoryPlugin, Plugin)
+    assert MemoryPlugin.name == "memory"

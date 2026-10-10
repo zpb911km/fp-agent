@@ -29,10 +29,8 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "packages", "fp-core", "src"))
 
-from fp_core import (
-    config,  # noqa: E402
-    memory_tree,  # noqa: E402
-)
+from fp_core import config  # noqa: E402
+from fp_core.plugins.memory import tree as memory_tree  # noqa: E402
 
 
 def _journal_path() -> str:
@@ -116,7 +114,7 @@ def migrate(dry_run: bool) -> int:
         # 重建派生缓存与 FTS 索引（可丢弃缓存，重建即新鲜）
         for label in ("~", "."):
             memory_tree.ensure_root(label)
-        from fp_core import memory_index
+        from fp_core.plugins.memory import index as memory_index
 
         memory_index.ensure(force=True)
 

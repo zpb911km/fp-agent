@@ -16,8 +16,8 @@
 
 import pytest
 
-import fp_core.tools.extensions.memory_read_plugin as mem_read
 from fp_core import config
+from fp_core.plugins.memory import read as mem_read
 
 # ─────────────────────────────────────────────────────────────
 # 合成 fixture（category / 文件名 / 内容全部虚构）

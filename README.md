@@ -82,7 +82,7 @@ fp/                              # 用户入口包
 ├── fp-core/                     # 🔧 核心引擎
 │   ├── core/                    # Agent 主干、LLM 客户端、会话、工具执行器
 │   ├── commands/                # 16 个命令（14 内置文件命令 + 2 插件注入 `/sc`、`/task`；其中 1 个 `!` 特殊命令）
-│   ├── plugins/                 # 生命周期插件系统
+│   ├── plugins/                 # 生命周期插件系统（内置 shortcircuit/ task_system/ memory/）
 │   ├── tools/                   # 工具注册与执行
 │   └── prompts/                 # 系统提示词
 ├── fp-terminal/                 # 🖥️ 终端 REPL
