@@ -164,25 +164,54 @@ function getOrCreateMsgGroup(forcedRhythm) {
 }
 
 // ── 复制消息内容 ──
+// execCommand 降级通道：非安全上下文（http://LAN-IP 访问时
+// navigator.clipboard 为 undefined）与旧浏览器都走这里
+function legacyCopyText(text) {
+  var ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.top = '0';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  try { ta.setSelectionRange(0, text.length); } catch (e) {}
+  var ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+  document.body.removeChild(ta);
+  return ok;
+}
+
 function copyMsgContent(btnEl) {
   var msg = btnEl.closest('.msg');
   if (!msg) return;
   var contentEl = msg.querySelector('.msg-content');
   if (!contentEl) return;
   var text = contentEl.textContent || contentEl.innerText || '';
-  navigator.clipboard.writeText(text).catch(function() {
-    // Fallback for older browsers
-    var ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed'; ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-  });
-  // 反馈动画
-  btnEl.classList.add('copied');
-  setTimeout(function() { btnEl.classList.remove('copied'); }, 1200);
+
+  function feedback(ok) {
+    if (ok) {
+      btnEl.classList.add('copied');
+      setTimeout(function() { btnEl.classList.remove('copied'); }, 1200);
+    } else {
+      // 两条通道都失败：短暂警示，避免"看起来复制成功了"
+      var old = btnEl.textContent;
+      btnEl.textContent = '⚠';
+      setTimeout(function() { btnEl.textContent = old; }, 1200);
+    }
+  }
+
+  // 不能无条件调用 navigator.clipboard.writeText：
+  // 非安全上下步下该 API 为 undefined，会同步抛 TypeError，
+  // 导致 .catch 里的降级逻辑根本挂不上（原 bug）
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      function() { feedback(true); },
+      function() { feedback(legacyCopyText(text)); }
+    );
+  } else {
+    feedback(legacyCopyText(text));
+  }
 }
 
 // ── 点击折叠/展开 tool 消息
@@ -352,6 +381,7 @@ function addToolCall(name, args, tool_call_id) {
         '<span class="msg-author tool">Tool</span>' +
         '<span class="msg-time">#' + idx + '</span>' +
         '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>' +
+        '<button class="copy-btn" title="复制消息内容" aria-label="复制消息内容">📋</button>' +
       '</div>' +
       '<div class="msg-content rendered">' +
         '<div class="tool-msg-toggle">' +
@@ -368,6 +398,9 @@ function addToolCall(name, args, tool_call_id) {
     '</div>';
 
   group.appendChild(msg);
+
+  // 复制按钮事件
+  msg.querySelector('.copy-btn').onclick = function(e) { e.stopPropagation(); copyMsgContent(this); };
 
   // ── 注册到工具卡片映射表 ──
   toolCardMap[tool_call_id] = msg;
