@@ -35,6 +35,7 @@ class _FakePortal:
         self.busy = busy
         self.sent: list[str] = []
         self.submitted: list[str] = []
+        self.cancelled = False
         self._status = _FakeStatus()
 
     @property
@@ -66,7 +67,7 @@ class _FakePortal:
         return "queued"
 
     def cancel(self) -> None:
-        pass
+        self.cancelled = True
 
     @property
     def transcript(self) -> list[dict[str, str]]:
@@ -330,6 +331,126 @@ class TestInputLayout(unittest.TestCase):
         # 上下为 tall 细线（色 = $surface），左右 bordertype 为空 = 无边框
         self.assertIn("tall", str(s["row_border_top"]))
         self.assertTrue(str(s["row_border_left"]).startswith("('',"), s["row_border_left"])
+
+
+class TestCopyAndFallbackKeys(unittest.TestCase):
+    """#159 键位修复契约：
+    - Ctrl+C / Ctrl+Shift+C：选区 → 复制（不退出）；空闲无选区 → 不退出；
+      忙碌无选区 → 打断（旧语义保留）
+    - Ctrl+J：Shift+Enter 的终端兜底（不支持 kitty 键盘协议的终端下
+      Shift+Enter 与 Enter 字节不可区分，LF 全终端可区分）
+    """
+
+    def _run(
+        self,
+        *,
+        press: str,
+        busy: bool = False,
+        select: bool = False,
+        initial: str = "",
+    ) -> dict[str, object]:
+        from fp_core.api import portal as real_portal
+
+        fake = _FakePortal(busy=busy)
+
+        async def _run_app() -> dict[str, object]:
+            io = TUIIO()
+            app = FPApp(io)
+            io.attach(app)
+            exits: list[int] = []
+            app.exit = lambda *a, **k: exits.append(1)  # type: ignore[method-assign]
+            with (
+                patch.object(type(real_portal), "is_open", property(lambda self: True)),
+                patch.object(real_portal, "run", fake, create=True),
+            ):
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    prompt = app.query_one("#prompt", PromptInput)
+                    prompt.focus()
+                    if initial:
+                        prompt.text = initial
+                    if select:
+                        prompt.text = "hello"
+                        prompt.move_cursor((0, 5))
+                        await pilot.press("shift+home")  # 选中整行 hello
+                    await pilot.press(*press.split())
+                    await pilot.pause(0.1)
+                    return {
+                        "clipboard": app.clipboard,
+                        "exits": len(exits),
+                        "cancelled": fake.cancelled,
+                        "sent": list(fake.sent),
+                        "selected": prompt.selected_text,
+                    }
+
+        return asyncio.run(_run_app())  # type: ignore[no-any-return]
+
+    def test_ctrl_c_copies_prompt_selection(self) -> None:
+        s = self._run(press="ctrl+c", select=True)
+        self.assertEqual(s["clipboard"], "hello")
+        self.assertEqual(s["exits"], 0)  # 复制而非退出
+
+    def test_ctrl_shift_c_copies_prompt_selection(self) -> None:
+        s = self._run(press="ctrl+shift+c", select=True)
+        self.assertEqual(s["clipboard"], "hello")
+        self.assertEqual(s["exits"], 0)
+
+    def test_ctrl_c_idle_without_selection_does_not_exit(self) -> None:
+        s = self._run(press="ctrl+c")
+        self.assertEqual(s["exits"], 0)  # 不再裸退出
+        self.assertFalse(s["cancelled"])
+
+    def test_ctrl_c_busy_without_selection_cancels(self) -> None:
+        s = self._run(busy=True, press="ctrl+c")
+        self.assertTrue(s["cancelled"])  # 忙碌打断语义保留
+        self.assertEqual(s["exits"], 0)
+
+    def test_ctrl_j_sends(self) -> None:
+        s = self._run(press="ctrl+j", initial="hi")
+        self.assertEqual(s["sent"], ["hi"])
+
+    def test_shift_enter_still_sends(self) -> None:
+        s = self._run(press="shift+enter", initial="yo")
+        self.assertEqual(s["sent"], ["yo"])
+
+    def test_chat_drag_selection_copy(self) -> None:
+        """聊天区拖选（textual 屏幕级选区）→ Ctrl+C 复制到剪贴板。"""
+        from textual.events import MouseMove
+
+        from fp_core.api import portal as real_portal
+
+        fake = _FakePortal(busy=False)
+
+        async def _run() -> dict[str, str]:
+            io = TUIIO()
+            app = FPApp(io)
+            io.attach(app)
+            with (
+                patch.object(type(real_portal), "is_open", property(lambda self: True)),
+                patch.object(real_portal, "run", fake, create=True),
+            ):
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    block = app.query_one("#chat").children[1]  # head 块（[0] 是空锚点）
+                    reg = app.screen.find_widget(block).region
+                    await pilot.mouse_down(widget=block, offset=(1, 0))
+                    prev = reg.x + 1
+                    for x in range(prev + 2, reg.x + 13, 2):
+                        app.post_message(
+                            MouseMove(None, x, reg.y, x - prev, 0, 1, False, False, False, screen_x=x, screen_y=reg.y)
+                        )
+                        prev = x
+                        await pilot.pause(0.02)
+                    await pilot.mouse_up(widget=block, offset=(11, 0))
+                    await pilot.pause(0.05)
+                    selected = app.screen.get_selected_text()
+                    await pilot.press("ctrl+c")
+                    await pilot.pause(0.05)
+                    return {"selected": selected or "", "clipboard": app.clipboard}
+
+        out = asyncio.run(_run())
+        self.assertTrue(out["selected"])  # 拖选确实选中了聊天文本
+        self.assertEqual(out["clipboard"], out["selected"])
 
 
 if __name__ == "__main__":

@@ -513,10 +513,14 @@ class FPApp(App[None]):
     """
 
     BINDINGS = [
-        Binding("ctrl+c", "interrupt", "打断/退出", priority=True),
+        # ctrl+shift+c：kitty 键盘协议终端下与 ctrl+c 字节不同（99;6u），语义相同
+        Binding("ctrl+c,ctrl+shift+c", "copy_or_interrupt", "复制/打断", priority=True),
         Binding("ctrl+q", "app_quit", "退出", priority=True),
         Binding("ctrl+g", "stats", "统计"),
         Binding("shift+enter", "submit_prompt", show=False, priority=True),
+        # ctrl+j：终端不支持 kitty 协议时 Shift+Enter 无法区分（退化为 CR），
+        # LF(0x0A) 是所有终端都可区分的字节 → 发送兜底键
+        Binding("ctrl+j", "submit_prompt", show=False, priority=True),
         Binding("tab", "tab_complete", show=False, priority=True),
     ]
 
@@ -559,7 +563,7 @@ class FPApp(App[None]):
         yield Static(id="hint")
         with Horizontal(id="prompt_row"):
             yield PromptInput(
-                placeholder="消息…（Enter 换行 · Shift+Enter 发送）",
+                placeholder="消息…（Enter 换行 · Shift+Enter/Ctrl+J 发送）",
                 id="prompt",
             )
             yield Button("↑", id="send_btn")
@@ -610,7 +614,7 @@ class FPApp(App[None]):
         else:
             self._line("💡 输入 /help 查看命令，/resume 可回到历史会话", "cyan")
         self._line(
-            "⌨ Enter 换行 · Shift+Enter/发送钮 提交 · Ctrl+C 打断/退出 · Ctrl+G 统计 · 运行中输入排队注入",
+            "⌨ Enter 换行 · Shift+Enter/Ctrl+J 提交 · 选中后 Ctrl+C 复制 · Ctrl+Q 退出 · Ctrl+G 统计",
             "dim",
         )
 
@@ -739,7 +743,9 @@ class FPApp(App[None]):
             t.append(f" · {self._status_note}", style="yellow")
         bar.update(t)
         prompt = self.query_one("#prompt", PromptInput)
-        prompt.placeholder = "运行中 · 输入将排队注入（斜杠禁用）" if busy else "消息…（Enter 换行 · Shift+Enter 发送）"
+        prompt.placeholder = (
+            "运行中 · 输入将排队注入（斜杠禁用）" if busy else "消息…（Enter 换行 · Shift+Enter/Ctrl+J 发送）"
+        )
 
     # ── 输入路由 ─────────────────────────────────────────────
 
@@ -864,13 +870,32 @@ class FPApp(App[None]):
 
     # ── 动作 ─────────────────────────────────────────────────
 
-    def action_interrupt(self) -> None:
+    def action_copy_or_interrupt(self) -> None:
+        """Ctrl+C / Ctrl+Shift+C 分支：选区复制 → 忙碌打断 → 空闲提示（不退出）。
+
+        旧实现无条件走打断/退出，导致"选中想复制却把 fp 退了"（App 优先级绑定
+        截胡了 TextArea/Screen 的内建 copy 绑定）。退出统一 Ctrl+Q。
+        """
+        # 1) 输入框内建选区（TextArea 鼠标拖选 / Shift+方向键）
+        focused = self.screen.focused
+        if isinstance(focused, TextArea) and (text := focused.selected_text):
+            self.copy_to_clipboard(text)
+            self.notify(f"已复制 {len(text)} 字", timeout=1.5)
+            return
+        # 2) 屏幕级选区（聊天区拖选；Markdown/Static 的 get_selection 从渲染文本抽取）
+        if selected := self.screen.get_selected_text():
+            self.screen.action_copy_text()  # 内部无选区会 SkipAction——上面已判非空
+            self.screen.clear_selection()
+            self.notify(f"已复制 {len(selected)} 字", timeout=1.5)
+            return
+        # 3) 忙碌 + 无选区 → 打断（保留旧语义）
         if self._is_busy() and portal.is_open:
             portal.run.cancel()
             self._line("⏹ 已请求打断", "yellow")
             self._refresh_status()
-        else:
-            self.exit()
+            return
+        # 4) 空闲 + 无选区 → 不退出（防复制误触），提示键位
+        self.notify("未选中文本 · Ctrl+Q 退出 · 运行中 Ctrl+C 打断", timeout=2.0)
 
     def action_app_quit(self) -> None:
         self.exit()
