@@ -263,7 +263,7 @@ echo "你是谁" | fp                   # 测试系统提示词
 - **测试文件同样纳入门禁**：`packages/fp-core/tests/*.py`、`packages/fp/tests/*.py`
   与 `packages/fp-terminal/tests/*.py` 变更会要求 [dev/测试.md](dev/测试.md)
   确认（尤其新增测试文件时，文件清单表需同步）。WebUI 前端静态资源
-  （`static/*.js|css`）关联 [guide/WebUI手册.md](guide/WebUI手册.md)，
+  （`static/*.js|css|html`）关联 [guide/WebUI手册.md](guide/WebUI手册.md)，
   根 `pyproject.toml`（工具链配置）同样关联测试文档。
 - **类型门禁（pyright strict）**：pre-commit 钩子 `pyright` 以
   [pyrightconfig.json](../pyrightconfig.json)（`typeCheckingMode: strict`、

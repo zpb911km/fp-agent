@@ -125,6 +125,7 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
     # WebUI 前端静态资源（ask 卡片等组件行为随 WebUI 手册走）
     ("packages/fp-webui/src/fp_webui/static/*.js", ["docs/guide/WebUI手册.md"], []),
     ("packages/fp-webui/src/fp_webui/static/*.css", ["docs/guide/WebUI手册.md"], []),
+    ("packages/fp-webui/src/fp_webui/static/*.html", ["docs/guide/WebUI手册.md"], []),
     # 开发/脚本工具
     ("scripts/*.py", ["docs/CONTRIBUTING.md"], []),
     # 工程配置
