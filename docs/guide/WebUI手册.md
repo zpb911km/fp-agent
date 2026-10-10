@@ -92,9 +92,13 @@ fp-webui
 ### 3.1 聊天界面
 
 - **发送消息**：在底部输入框输入，按 `Enter` 发送，`Shift+Enter` 换行
+- **消息由事件驱动显示**：所有用户消息（直发、空闲泵注入、排队消费、
+  命令回显）统一经 `user_message` ws 事件渲染，前端不做本地乐观渲染——
+  多设备单端口访问时各端看到同一份消息流，且与历史 REST 视图一致
 - **运行中发送**：处理中输入框保持可用，消息经 `submit()` 排队、在当前轮次环顶
-  穿插消费；气泡带 `⏳ 已排队` 标记，轮次结束（`done`）时清除。运行中输入
-  斜杠命令会被拒（`queue_error` 事件，仅提示、不改变处理状态）
+  穿插消费；`queued` 回执经总线广播，全设备渲染 `⏳ 已排队` 标记气泡，
+  消费落盘时由 `user_message` 事件就地转正；轮次结束（`done`）时清除
+  残留标记。运行中输入斜杠命令会被拒（`queue_error` 事件，仅提示、不改变处理状态）
 - **实时反馈**：Agent 思考时显示动画进度条，工具调用时显示可折叠卡片
 - **回溯按钮**：每条消息右侧的 `↩ 回溯` 按钮，可回到该位置重新对话
 - **复制按钮**：每条消息头部的 `📋` 按钮，复制该消息的纯文本内容，成功后
@@ -115,10 +119,12 @@ fp-webui
 
 当 Agent 调用工具时，前端以**可折叠卡片**形式展示：
 
-- 🔧 显示工具名称和参数
-- ⏳ 运行中状态
+- 🔧 显示工具名称，折叠体内**参数在上、返回在下**同卡排列
+- ⏳ 运行中状态（先显示参数，结果到达后**追加**在参数下方，参数不被覆盖）
 - ✅/❌ 完成状态
-- 点击展开/折叠详情
+- 点击展开/折叠详情——展开即可对照「什么输入带来什么输出」
+- 历史会话的工具卡片同样显示参数（从对应 `assistant.tool_calls` 提取），
+  与实时卡片结构一致
 
 ### 3.4 历史会话
 
@@ -184,9 +190,12 @@ fp-webui
 - 自动清理消费太慢的连接
 - 最大缓冲 256 条事件
 
-#### 4.2 WebUIPlugin（桥接插件）
+#### 4.2 桥接插件（EventBridge + WebUIBridge）
 
-监听 Agent 的**生命周期钩子**，将内部状态实时推送到前端：
+监听 Agent 的**生命周期钩子**，将内部状态实时推送到前端。
+core 内置 `EventBridge` 负责 LLM/工具级事件；WebUI 随
+`portal.ctl.open(plugins=)` 注册 `WebUIBridge`（`fp_webui/bridge.py`）
+负责**消息级**事件：
 
 | 钩子 | 事件 | 前端效果 |
 |------|------|----------|
@@ -198,6 +207,8 @@ fp-webui
 | `ON_ERROR` | `error` | 显示错误信息 |
 | `ON_BEFORE_RESPONSE` | `response` | 显示最终回复 |
 | `ON_SHUTDOWN` | `shutdown` | 显示关闭通知 |
+| `ON_CTX_APPEND`（op=`user`，WebUIBridge） | `user_message` | 渲染用户气泡——直发 / 排队消费 / ask 回答 / 空闲泵注入的统一显示入口 |
+| `ON_COMMAND`（handled 或有输出，WebUIBridge） | `user_message`（`ephemeral`） | 命令输入回显：不落盘、不计回溯索引；显式让渡（fallthrough）不发，由 `ON_CTX_APPEND` 兜底防双渲染 |
 
 #### 4.3 认证中间件
 
@@ -426,6 +437,8 @@ ws://host:port/ws/chat?token=your_token
 | `reload` | `message` | Agent 开始重载 |
 | `reload_done` | `session_id`, `model` | Agent 重载完成 |
 | `ask` | `version`, `ask_id`, `prompt`, `options`, `suggest` | 交互式问答（v2 结构化：`options` 渲染一键选择按钮、`suggest` 渲染推荐徽章；v1 旧前端只有 `prompt`） |
+| `user_message` | `content`, `ephemeral?` | **用户消息显示触发源**：直发与环顶注入（排队消费、ask 回答、空闲泵注入）经 `ON_CTX_APPEND` 广播；命令回显带 `ephemeral: true`（不落盘、不计回溯索引）。前端凭此渲染用户气泡 → 多设备单端口同步、与历史 REST 一致 |
+| `queued` | `content` | 运行中 submit 入队回执——**总线广播**（非直发），全设备渲染 ⏳ 气泡；消费落盘时经 `user_message` 就地转正，不重复渲染 |
 | `info` | `content` | IO 通道信息 |
 | `hint` | `content` | 提示信息 |
 | `item` | `content` | 列表项输出 |
@@ -437,14 +450,15 @@ ws://host:port/ws/chat?token=your_token
      "seq": 42, "session_id": "s_...", "processing": false,
      "pending_ask": null, "replay": false, "resync": false }
 → { "type": "message", "content": "帮我搜一下今天的新闻" }
-← { "type": "llm_start", "seq": 43 }
-← { "type": "tool_select", "tools": ["web_search"], "seq": 44 }
-← { "type": "llm_end", "has_tool_calls": true, "tool_names": ["web_search"], "seq": 45 }
-← { "type": "tool_call", "name": "web_search", "args": "新闻", "seq": 46 }
-← { "type": "tool_result", "name": "web_search", "result": "...", "seq": 47 }
-← { "type": "llm_start", "seq": 48 }
-← { "type": "llm_end", "content": "今天的新闻有以下几条：...", "has_tool_calls": false, "seq": 49 }
-← { "type": "done", "session_id": "session_xxx", "final_content": "...", "seq": 50 }
+← { "type": "user_message", "content": "帮我搜一下今天的新闻", "seq": 43 }
+← { "type": "llm_start", "seq": 44 }
+← { "type": "tool_select", "tools": ["web_search"], "seq": 45 }
+← { "type": "llm_end", "has_tool_calls": true, "tool_names": ["web_search"], "seq": 46 }
+← { "type": "tool_call", "name": "web_search", "args": "新闻", "seq": 47 }
+← { "type": "tool_result", "name": "web_search", "result": "...", "seq": 48 }
+← { "type": "llm_start", "seq": 49 }
+← { "type": "llm_end", "content": "今天的新闻有以下几条：...", "has_tool_calls": false, "seq": 50 }
+← { "type": "done", "session_id": "session_xxx", "final_content": "...", "seq": 51 }
 ```
 
 ### 6.5 断连、重连与事件重放
@@ -490,6 +504,9 @@ ws://host:port/ws/chat?token=your_token
 1. **前端**：打开页面 → 输入 Token → `POST /api/auth` 验证 → 存入 `sessionStorage`
 2. **REST API**：`Authorization: Bearer <token>` 头，中间件拦截（`/api/auth` 和 `/api/health` 白名单）
 3. **WebSocket**：`token` 查询参数，连接时验证
+4. **自动登录**：`sessionStorage` 已有 token 时（刷新/重开页）由 `initApp()`
+   直接进入——`initApp` 统一先 `hideLogin()`，登录遮罩（CSS 默认
+   `display:flex`）不会残留盖页拦截点击
 
 ### 7.3 安全性
 
@@ -648,10 +665,11 @@ uvicorn.run(app, host='0.0.0.0', port=8765, reload=True)
 
 ### 10.6 添加新事件类型
 
-1. 在 `WebUIPlugin` 中添加新的生命周期钩子监听
+1. **消息级**事件在 `bridge.py`（`WebUIBridge`）添加生命周期钩子监听；
+   **LLM/工具级**事件在 core 的 `EventBridge`（core 变更须走 core 流程）
 2. 在 `handleEvent()` 中添加事件处理
 3. 如需前端 UI 元素，添加对应的 DOM 渲染逻辑
-4. 更新本文档的 WebSocket 协议表
+4. 更新本文档的 WebSocket 协议表（§6.3）
 
 ---
 
@@ -688,6 +706,7 @@ ss -tlnp | grep 8765
 | 文件 | 用途 |
 |------|------|
 | `fp_webui/main.py` | WebUI 后端服务器 |
+| `fp_webui/bridge.py` | 消息级桥插件（`user_message` 事件源） |
 | `fp_webui/static/index.html` | 前端单页应用 |
 | `.webui_token` | 自动生成的认证 Token |
 | `fp_core/core/agent.py` | Agent 核心类 |
@@ -696,20 +715,4 @@ ss -tlnp | grep 8765
 
 ---
 
-*文档版本: 1.0 · 最后更新: 2026-06-07*
-新建」或完全重启服务器
-
-### C. 相关文件
-
-| 文件 | 用途 |
-|------|------|
-| `fp_webui/main.py` | WebUI 后端服务器 |
-| `fp_webui/static/index.html` | 前端单页应用 |
-| `.webui_token` | 自动生成的认证 Token |
-| `fp_core/core/agent.py` | Agent 核心类 |
-| `fp_core/core/lifecycle.py` | 生命周期钩子系统 |
-| `fp_core/core/io.py` | `WebSocketIO` 通道类 |
-
----
-
-*文档版本: 1.0 · 最后更新: 2026-06-07*
+*文档版本: 1.0 · 最后更新: 2026-10-10*

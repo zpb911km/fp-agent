@@ -61,8 +61,7 @@ function replyAsk(text) {
   if (!ws || ws.readyState !== WebSocket.OPEN) { showError('未连接'); return; }
   var askId = _pendingAsk ? _pendingAsk.ask_id : '';
   clearAskCard();
-  addUserMessage(text);
-  lastGroupEl = null;
+  // 不本地渲染：回答经 ask_user 环顶注入落盘 → ON_CTX_APPEND → user_message 事件渲染
   setProcessing(true);
   var payload = { type: 'message', content: text };
   if (askId) { payload.ask_id = askId; }
@@ -338,8 +337,18 @@ function handleEvent(data) {
       break;
 
     case 'queued':
-      // 运行中排队回执：渲染用户气泡 + ⏳ 已排队标记（done 时清除）
+      // 运行中排队回执（总线广播）：全设备渲染用户气泡 + ⏳ 已排队标记
       addQueuedMessage(data.content);
+      break;
+
+    case 'user_message':
+      // 一切用户消息的显示触发源：直发 / 空闲泵注入（ask 回答、任务终态、
+      // 邻居消息）/ 排队消费 / 命令回显（ephemeral 不计入回溯索引）。
+      // 不再乐观本地渲染 → 多设备单端口看到同一份消息流，且与历史 REST 一致。
+      if (!consumeQueuedBubble(data.content)) {
+        addUserMessage(data.content, !!data.ephemeral);
+        lastGroupEl = null;
+      }
       break;
 
     case 'queue_error':
@@ -508,8 +517,8 @@ function sendMessage() {
 
   inputEl.value = '';
   autoResize(inputEl);
-  addUserMessage(text);
-  lastGroupEl = null;
+  // 不本地渲染：气泡由后端 user_message 事件驱动（直发经 ON_CTX_APPEND 广播，
+  // 命令经 ON_COMMAND 发 ephemeral）→ 多设备同步、与历史视图一致
   setProcessing(true);
   try { ws.send(JSON.stringify({ type: 'message', content: text })); } catch(e) { showError('发送失败'); setProcessing(false); }
 }
@@ -830,6 +839,10 @@ function toggleHalo() {
 // ── 初始化与登录流程 ──
 
 function initApp() {
+  // 遮罩默认 display:flex（style.css .auth-overlay）：自动登录路径
+  // （DOMContentLoaded → isAuthed → initApp）此前从不隐藏它 → 带 token
+  // 刷新页面后登录遮罩盖满全页、拦截一切点击。启动即应用 = 总是隐藏。
+  hideLogin();
   // 恢复主题偏好
   var saved = localStorage.getItem('webui_theme');
   if (saved === 'light') applyTheme(true);

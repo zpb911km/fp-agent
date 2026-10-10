@@ -843,6 +843,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   color: var(--red);
 }
 
+/* ── 卡片内 参数块 → 结果块 的堆叠分隔（输入在上、输出在下，
+      实时与历史卡片同构，折叠展开即可对照） ── */
+.tool-args-block + .tool-result-block {
+  margin-top: 6px;
+}
+
 /* ── LLM 工具调用记录消息 ── */
 .assistant-toolcall-msg {
   border-left: 3px solid var(--purple) !important;

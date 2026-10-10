@@ -222,9 +222,15 @@ function toggleToolMsg(event) {
   msg.classList.toggle('collapsed');
 }
 
-function addUserMessage(content) {
+/**
+ * 用户消息气泡。
+ * @param {string} content 消息文本
+ * @param {boolean} [ephemeral] true = 命令回显等不落盘消息：
+ *   不计入回溯索引（liveMsgIndex）、不渲染回溯按钮（历史里没有这个位置）
+ */
+function addUserMessage(content, ephemeral) {
   var group = getOrCreateMsgGroup('loose');
-  liveMsgIndex++;
+  if (!ephemeral) { liveMsgIndex++; }
   var idx = liveMsgIndex;
 
   var msg = document.createElement('div');
@@ -235,7 +241,8 @@ function addUserMessage(content) {
       '<div class="msg-header">' +
         '<span class="msg-author user">OPERATOR</span>' +
         '<span class="msg-time">' + formatTime(Date.now()/1000) + '</span>' +
-        '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>' +
+        (ephemeral ? '' :
+          '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>') +
         '<button class="copy-btn" title="复制消息内容" aria-label="复制消息内容">📋</button>' +
       '</div>' +
       '<div class="msg-content">' + escapeHtml(content) + '</div>' +
@@ -253,7 +260,12 @@ function addUserMessage(content) {
   return msg;
 }
 
-/** 运行中排队消息：普通用户气泡 + ⏳ 已排队标记（done 时统一清除） */
+// ── 排队气泡对账（queued 广播入列 → user_message 到达消费转正，FIFO 头匹配）──
+// 消息经 submit 入队后，消费落盘时 ON_CTX_APPEND 会再发 user_message；
+// 各设备凭此表把已渲染的 ⏳ 气泡就地转正，防同一消息渲染两次。
+var _queuedPending = [];
+
+/** 运行中排队消息：普通用户气泡 + ⏳ 已排队标记（消费时转正 / done 时清除） */
 function addQueuedMessage(content) {
   var msg = addUserMessage(content);
   if (msg) {
@@ -262,7 +274,26 @@ function addQueuedMessage(content) {
     flag.textContent = ' ⏳ 已排队';
     var body = msg.querySelector('.msg-content');
     if (body) body.appendChild(flag);
+    _queuedPending.push({ content: content, el: msg });
   }
+  return msg;
+}
+
+/**
+ * user_message 到达时尝试把排队气泡就地转正（摘除 ⏳ 标记、不新建气泡）。
+ * @param {string} content 事件消息文本
+ * @returns {boolean} true = 命中队首排队气泡已转正；false = 应新建气泡
+ */
+function consumeQueuedBubble(content) {
+  if (_queuedPending.length && _queuedPending[0].content === content) {
+    var q = _queuedPending.shift();
+    if (q.el) {
+      var flag = q.el.querySelector('.queued-flag');
+      if (flag) flag.remove();
+    }
+    return true;
+  }
+  return false;
 }
 
 function clearQueuedFlags() {
@@ -391,8 +422,10 @@ function addToolCall(name, args, tool_call_id) {
           '<span class="tool-msg-status" data-state="running">运行中...</span>' +
         '</div>' +
         '<div class="tool-msg-body">' +
-          '<div class="tool-args-label">参数:</div>' +
-          '<pre class="tool-args-json">' + escapeHtml(prettyArgs) + '</pre>' +
+          '<div class="tool-args-block">' +
+            '<div class="tool-args-label">参数:</div>' +
+            '<pre class="tool-args-json">' + escapeHtml(prettyArgs) + '</pre>' +
+          '</div>' +
         '</div>' +
       '</div>' +
     '</div>';
@@ -447,7 +480,8 @@ function addToolResult(name, result, isError, tool_call_id) {
     statusEl.dataset.state = newState;
   }
 
-  // ── 格式化结果 ──
+  // ── 格式化结果，**追加**在参数块之后（不再整块覆盖 —— 参数保留，
+  //    同卡折叠即可对照「什么输入带来什么输出」）──
   var bodyEl = target.querySelector('.tool-msg-body');
   if (bodyEl) {
     var displayResult = result || '(空)';
@@ -457,9 +491,14 @@ function addToolResult(name, result, isError, tool_call_id) {
       displayResult = JSON.stringify(parsed, null, 2);
     } catch(e) { /* 保持原样 */ }
 
-    bodyEl.innerHTML =
+    var oldBlock = bodyEl.querySelector('.tool-result-block');
+    if (oldBlock) oldBlock.remove();  // 重复 tool_result 事件 → 幂等
+    var resBlock = document.createElement('div');
+    resBlock.className = 'tool-result-block';
+    resBlock.innerHTML =
       '<div class="tool-result-label">' + (isError ? '错误:' : '返回:') + '</div>' +
       '<pre class="tool-result-body">' + escapeHtml(displayResult) + '</pre>';
+    bodyEl.appendChild(resBlock);
   }
 
   scrollToBottom();
@@ -538,6 +577,7 @@ function clearUI() {
   lastGroupEl = null;
   liveMsgIndex = 0;  // 重置索引计数器，后续由 fetchSessionHistory 重新设置
   toolCardMap = {};  // 清空工具卡片映射表
+  _queuedPending = [];  // 排队对账表随气泡一起作废（重拉/回溯后从新渲染）
   removeThinking();
   // 重置状态栏
   _sbData.toolsActive = 0;
@@ -687,13 +727,24 @@ function renderHistoryMessages(sid, messages) {
 
   var allRendered = [];
 
-  // 第一遍：从 assistant 消息构建 tool_call_id → tool_name 映射
+  // 第一遍：从 assistant 消息构建 tool_call_id → tool_name / tool_args 映射
+  //（tool 消息本身只有返回值；调用参数存在对应 assistant.tool_calls 里）
   var toolNameMap = {};
+  var toolArgsMap = {};
   messages.forEach(function(msg) {
     if (msg.tool_calls && msg.tool_calls.length > 0) {
       msg.tool_calls.forEach(function(tc) {
         if (tc.id && tc.function && tc.function.name) {
           toolNameMap[tc.id] = tc.function.name;
+          var rawArgs = tc.function.arguments;
+          if (rawArgs && rawArgs !== '{}' && rawArgs !== '') {
+            try {
+              toolArgsMap[tc.id] = JSON.stringify(
+                typeof rawArgs === 'string' ? JSON.parse(rawArgs) : rawArgs, null, 2);
+            } catch (e) {
+              toolArgsMap[tc.id] = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs, null, 2);
+            }
+          }
         }
       });
     }
@@ -728,12 +779,12 @@ function renderHistoryMessages(sid, messages) {
 
     if (msg.role === 'tool') {
       // ── tool 消息：可折叠，使用 data-tool-state 状态驱动 ──
+      var toolName = toolNameMap[msg.tool_call_id] || 'Tool';
       msgDiv.className = 'msg tool-msg collapsed';
       msgDiv.dataset.toolState = 'completed';
       msgDiv.dataset.toolName = toolName;
       msgDiv.onclick = toggleToolMsg;
 
-      var toolName = toolNameMap[msg.tool_call_id] || 'Tool';
       var hasResult = msg.content && msg.content !== '';
       var displayResult = hasResult ? msg.content : '(空)';
       // 尝试 JSON 格式化
@@ -741,6 +792,16 @@ function renderHistoryMessages(sid, messages) {
         var parsed = typeof displayResult === 'string' ? JSON.parse(displayResult) : displayResult;
         displayResult = JSON.stringify(parsed, null, 2);
       } catch(e) { /* 保持原样 */ }
+
+      var argsBlockHtml = '';
+      var histArgs = toolArgsMap[msg.tool_call_id];
+      if (histArgs) {
+        argsBlockHtml =
+          '<div class="tool-args-block">' +
+            '<div class="tool-args-label">参数:</div>' +
+            '<pre class="tool-args-json">' + escapeHtml(histArgs) + '</pre>' +
+          '</div>';
+      }
 
       msgDiv.innerHTML =
         '<div class="msg-avatar tool" aria-hidden="true">🔧</div>' +
@@ -759,8 +820,11 @@ function renderHistoryMessages(sid, messages) {
               '<span class="tool-msg-status" data-state="completed">完成</span>' +
             '</div>' +
             '<div class="tool-msg-body">' +
-              '<div class="tool-result-label">返回:</div>' +
-              '<pre class="tool-result-body">' + escapeHtml(displayResult) + '</pre>' +
+              argsBlockHtml +
+              '<div class="tool-result-block">' +
+                '<div class="tool-result-label">返回:</div>' +
+                '<pre class="tool-result-body">' + escapeHtml(displayResult) + '</pre>' +
+              '</div>' +
             '</div>' +
           '</div>' +
         '</div>';

@@ -52,10 +52,16 @@ except ImportError as e:
 # ── 唯一接口组导入（协议 §5：前端只许 fp_core.api + 纯工具模块） ──
 from fp_core.api import ExitReason, RestIO, WebSocketIO, portal
 from fp_core.logger import get_logger
+from fp_webui.bridge import WebUIBridge
 
 # EventBus 类已下沉至 core（fp_core.api.EventBus），webui 直接用 portal.events
 # （transport 层的 seq/run_id 断连续传语义原样保留）。
 event_bus = portal.events
+
+# ── 消息级生命周期桥：ON_CTX_APPEND(op=user)/ON_COMMAND → user_message ──
+# 一切用户消息（直发/泵注入/排队消费/命令回显）统一经 ws 事件广播渲染，
+# 多设备单端口看到同一份消息流（见 fp_webui/bridge.py 模块 docstring）
+_WEBUI_BRIDGE = WebUIBridge(event_bus)
 
 # ════════════════════════════════════════════════════════════
 # 1a. SessionRuntime — 会话级运行时（与 WS 连接解耦）
@@ -185,7 +191,11 @@ async def ensure_agent() -> None:
     async with _agent_lock:
         if portal.is_open:
             return
-        await portal.ctl.open(enable_log=False, resume=os.environ.get("FP_RELOAD_SID") or None)
+        await portal.ctl.open(
+            enable_log=False,
+            resume=os.environ.get("FP_RELOAD_SID") or None,
+            plugins=(_WEBUI_BRIDGE,),
+        )
         get_logger().info(f"[WebUI] 实例已初始化 (model={portal.run.status.model})")
 
 
@@ -491,7 +501,7 @@ async def _replace_agent() -> dict[str, Any]:
 
         # ── 创建新实例 ──
         try:
-            await portal.ctl.open(enable_log=False)
+            await portal.ctl.open(enable_log=False, plugins=(_WEBUI_BRIDGE,))
         except Exception as e:
             get_logger().error(f"[WebUI] ❌ 新实例创建失败: {e}")
             raise HTTPException(status_code=500, detail=f"新 Agent 创建失败: {e}") from e
@@ -795,10 +805,16 @@ async def websocket_chat(
       {"type": "tool_result", "name": "...", "result": "..."}
       {"type": "response", "content": "..."}
       {"type": "ask", "prompt": "选择: "}          ← 命令等待用户输入
+      {"type": "user_message", "content": "...", "ephemeral?": true}
+        ← 一切用户消息的显示触发源（直发/泵注入/排队消费经 ON_CTX_APPEND、
+           命令回显经 ON_COMMAND 发 ephemeral）——前端只凭此事件渲染用户气泡，
+           多设备单端口同步、与历史 REST 视图一致
       {"type": "info", "content": "..."}          ← IO 通道输出
       {"type": "hint", "content": "..."}
       {"type": "error", "error": "..."}
-      {"type": "queued", "content": "..."}       ← 运行中 submit 入队回执（前端渲染 ⏳ 气泡）
+      {"type": "queued", "content": "..."}       ← 运行中 submit 入队回执（总线广播，
+                                                    全设备渲染 ⏳ 气泡，消费时经
+                                                    user_message 就地转正）
       {"type": "queue_error", "error": "..."}    ← 排队被拒（如运行中斜杠），不动 processing 态
       {"type": "item", "content": "..."}
       {"type": "done", "session_id": "...", "final_content": "..."}
@@ -907,7 +923,9 @@ async def websocket_chat(
                 if session_runtime.is_running:
                     result = await portal.run.submit(content)
                     if result == "queued":
-                        await websocket.send_json({"type": "queued", "content": content})
+                        # 总线广播（非直发）：全部设备渲染 ⏳ 气泡，
+                        # 消费时经 user_message 事件就地转正（对账见前端 _queuedPending）
+                        await event_bus.publish({"type": "queued", "content": content})
                     else:
                         _err = {
                             "rejected_command": "运行中斜杠命令已禁用，轮次结束后再执行",
