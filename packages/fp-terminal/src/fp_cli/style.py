@@ -51,19 +51,27 @@ def color_supported() -> bool:
 
 
 def get_display_style(name: str) -> DisplayStyle:
-    """获取显示样式"""
-    raw: dict[str, object] = _json_styles().get(name, {})
-    color_name = cast(str, raw.get("color", "default"))
-    return {
-        "color": ANSI_COLORS.get(color_name, ""),
-        "bold": cast(bool, raw.get("bold", False)),
-        "dim": cast(bool, raw.get("dim", False)),
-        "italic": cast(bool, raw.get("italic", False)),
-    }
+    """获取显示样式：rich 样式串（tui.styles）→ ANSI 属性。
+
+    ANSI 通道只认 ANSI_COLORS 里的 14 色与 bold/dim/italic 三旗标，
+    其余 token（#hex / 256 色名 / underline…）静默忽略——能力边界，不是错误。
+    """
+    color = ""
+    bold = dim = italic = False
+    for token in _json_styles().get(name, "").split():
+        if token in ANSI_COLORS:
+            color = ANSI_COLORS[token]
+        elif token == "bold":
+            bold = True
+        elif token == "dim":
+            dim = True
+        elif token == "italic":
+            italic = True
+    return {"color": color, "bold": bold, "dim": dim, "italic": italic}
 
 
-def _json_styles() -> dict[str, dict[str, object]]:
-    """从 config.json 读取 display_styles 段"""
+def _json_styles() -> dict[str, str]:
+    """从 config.json 读取 ``tui.styles`` 段（REPL 与 TUI 共用，旧 display_styles 已废弃）"""
     import json
 
     from fp_core.platform_utils import get_config_dir
@@ -72,9 +80,13 @@ def _json_styles() -> dict[str, dict[str, object]]:
     if os.path.isfile(path):
         try:
             with open(path, encoding="utf-8") as f:
-                return json.load(f).get("display_styles", {})
-        except (json.JSONDecodeError, OSError):
-            pass
+                raw: object = json.load(f).get("tui", {}).get("styles", {})
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+            return {}
+        if isinstance(raw, dict):
+            return {
+                k: v for k, v in cast(dict[object, object], raw).items() if isinstance(k, str) and isinstance(v, str)
+            }
     return {}
 
 

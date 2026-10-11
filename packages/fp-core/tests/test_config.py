@@ -107,6 +107,13 @@ class TestGetDefaultConfig:
         cfg = config.get_default_config()
         assert json.loads(json.dumps(cfg)) == cfg
 
+    def test_contains_tui_theme_knob(self):
+        """默认配置带 tui 段，theme 键可被用户直接编辑"""
+        cfg = config.get_default_config()
+        tui = cfg["tui"]
+        assert tui["theme"] == ""  # 空 = 跟随默认主题（且 palette 仍可生效）
+        assert set(tui) >= {"theme", "palette", "styles", "symbols", "ascii"}
+
 
 class TestValueFunction:
     """_value() — 三级优先级取值"""

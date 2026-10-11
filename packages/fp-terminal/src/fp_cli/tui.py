@@ -35,9 +35,11 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
+from textual.css.query import NoMatches
 from textual.geometry import Offset
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
+from textual.theme import BUILTIN_THEMES
 from textual.widget import Widget
 from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
 
@@ -45,9 +47,19 @@ from fp_core.api import IOChannel, portal
 from fp_core.logger import Logger
 
 from . import charts, completion
+from .appearance import (
+    AppearancePanel,
+    install_appearance,
+    install_theme,
+    persist_tui,
+    tui_glyph,
+    tui_style,
+)
 from .history import append_history, load_history
 
 if TYPE_CHECKING:
+    from textual.theme import Theme
+
     from fp_core.api.types import ReloadDirective
 
 
@@ -206,7 +218,7 @@ class TUIIO(IOChannel):
 
     async def thinking_start(self, streaming: bool = False) -> None:
         if not streaming:
-            self._emit("status", "💭 思考中…")
+            self._emit("status", f"{tui_glyph('think')} 思考中…")
 
     async def thinking_stop(self) -> None:
         self._emit("status", "")
@@ -308,12 +320,12 @@ class AskModal(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with Container(id="ask_box"):
-            yield Static(f"❓ {self._prompt}", id="ask_prompt")
+            yield Static(f"{tui_glyph('ask')} {self._prompt}", id="ask_prompt")
             if self._options:
                 yield OptionList(*self._options, id="ask_opts")
             hint = "Enter 提交 · Esc 跳过"
             if self._suggest:
-                hint = f"💡 推荐默认值：{self._suggest}（空回车采纳） · {hint}"
+                hint = f"{tui_glyph('hint')} 推荐默认值：{self._suggest}（空回车采纳） · {hint}"
             yield Static(hint, id="ask_hint")
             yield Input(placeholder="输入编号或自由文本…", id="ask_input")
 
@@ -365,7 +377,7 @@ class StatsModal(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Container(id="stats_box"):
-            yield Static("📊 会话统计", id="stats_title")
+            yield Static(f"{tui_glyph('stats')} 会话统计", id="stats_title")
             yield Static(self._body, id="stats_body")
             yield Static("Enter/Esc 关闭", id="stats_hint")
 
@@ -385,7 +397,7 @@ def build_stats_body() -> Text:
         text.append(row + "\n")
     lens = [len(str(m.get("content") or "")) for m in msgs if m.get("role") != "system"][-30:]
     text.append("\n近 30 条消息长度\n")
-    text.append(charts.spark_segments(lens) or "（数据不足）", style="cyan")
+    text.append(charts.spark_segments(lens) or "（数据不足）", style=tui_style("spark"))
     text.append(f"\n共 {len(msgs)} 条消息")
     return text
 
@@ -514,6 +526,15 @@ class FPApp(App[None]):
     AskModal, StatsModal { align: center middle; background: $background 60%; }
     """
 
+    #: 待抑制的「静默主题变更」计数：apply_theme_silently 每真正改一次主题 +1，
+    #: 每收到一次 theme_changed_signal −1。用计数而不是布尔量，是因为信号投递
+    #: 不是同步的——`_watch_theme` 先 `call_next` 投递 publish，publish 再对每个
+    #: 订阅者 `call_next`（textual/signal.py::Signal.subscribe）→ 两跳之后才轮到
+    #: `_on_theme_changed`。任何「置 True → 关闭面板时置回 False」的写法都会在
+    #: 第二跳之前把抑制解掉（实测：Esc 一按，config 里凭空多出 "theme"）。计数
+    #: 与信号一一对应，跟中间隔了几跳无关。
+    _silent_theme_changes = 0
+
     BINDINGS = [
         # ctrl+shift+c：kitty 键盘协议终端下与 ctrl+c 字节不同（99;6u），语义相同
         Binding("ctrl+c,ctrl+shift+c", "copy_or_interrupt", "复制/打断", priority=True),
@@ -524,6 +545,8 @@ class FPApp(App[None]):
         # LF(0x0A) 是所有终端都可区分的字节 → 发送兜底键
         Binding("ctrl+j", "submit_prompt", show=False, priority=True),
         Binding("tab", "tab_complete", show=False, priority=True),
+        # ctrl+t：打开外观设置面板（主题/配色/样式/符号/开关，现场改并写回 config）
+        Binding("ctrl+t", "open_appearance", "外观", priority=True),
     ]
 
     def __init__(
@@ -568,12 +591,14 @@ class FPApp(App[None]):
                 placeholder="消息…（Enter 换行 · Shift+Enter/Ctrl+J 发送）",
                 id="prompt",
             )
-            yield Button("↑", id="send_btn")
+            yield Button(tui_glyph("send"), id="send_btn")
 
     async def on_mount(self) -> None:
         self.mounted = True
         self._hist = load_history(_history_path())
         self._hist_idx = len(self._hist)
+        # 主题切换落盘：Ctrl+P 命令面板 → Theme 选完即写回 config.json tui.theme
+        self.theme_changed_signal.subscribe(self, self._on_theme_changed)
         # 挂载前缓冲的 agent 输出（含泵起轮残段）→ FIFO 冲刷
         for msg in self._io.take_pending():
             self._handle_io(msg)
@@ -582,22 +607,64 @@ class FPApp(App[None]):
         if self._directive is not None and self._directive.should_continue:
             self.run_worker(self._continue_round())
         elif self._directive is not None and self._directive.notice:
-            self._line(self._directive.notice, "cyan")
+            self._line(self._directive.notice, tui_style("notice"))
         # 状态刷新（覆盖泵起轮的忙碌态——它们不经本应用）
         self.set_interval(0.4, self._refresh_status)
         self._refresh_status()
         self.query_one("#prompt", PromptInput).focus()
 
+    def action_open_appearance(self) -> None:
+        """Ctrl+T：打开外观设置面板（主题/配色/样式/符号/开关）。"""
+        self.push_screen(AppearancePanel())
+
+    def apply_theme_silently(self, name: str) -> None:
+        """改主题但**不落盘**——外观面板的实时预览 / Esc 回滚专用。
+
+        计数与信号一一对应：只有「值真的变了」才 +1（reactive 的 watcher 只在值
+        变化时触发，值没变就没有信号，加计数会错位吞掉下一次正常落盘）。
+        """
+        if self.theme == name:
+            return
+        self._silent_theme_changes += 1
+        self.theme = name
+
+    def _on_theme_changed(self, theme: Theme) -> None:
+        """主题变更 → 写回 config.json（``tui.theme``），跨重启存活。
+
+        两条路径会触发本 watcher：
+        - ``Ctrl+P`` → 命令面板 Theme（Textual 自带，仍在）
+        - 外观面板的实时预览（Ctrl+T）——**它自己负责落盘**，故走
+          ``apply_theme_silently``：本次信号消费掉一个抑制计数后直接返回。
+
+        只落盘**内置**主题名（``BUILTIN_THEMES``）：
+        - ``fp-custom``（palette 注册出来的）不算——它是对 config 里 palette 的
+          派生结果，写进去反而变成「config 说主题叫 fp-custom，但启动时又不认识」
+          的鬼状态。palette 本来就写在 config 里，重启后照样生效。
+        - 注意不能用 ``available_themes`` 判：``register_theme`` 之后它也会包含
+          ``fp-custom``，判了等于没判。
+        - 落盘失败静默（persist_tui 内部兜住），不打断交互。
+        """
+        if self._silent_theme_changes > 0:
+            self._silent_theme_changes -= 1
+            return
+        if theme.name not in BUILTIN_THEMES:
+            return
+        if persist_tui({"tui.theme": theme.name}):
+            self._line(
+                f"{tui_glyph('hint')} 主题 → {theme.name}（已记入 config.json）",
+                tui_style("hint"),
+            )
+
     async def _continue_round(self) -> None:
         if self._directive is not None and self._directive.notice:
-            self._line(self._directive.notice, "cyan")
-        self._line("🔄 reload 续接：已恢复会话，继续上一轮对话…", "cyan")
+            self._line(self._directive.notice, tui_style("notice"))
+        self._line(f"{tui_glyph('reload')} reload 续接：已恢复会话，继续上一轮对话…", tui_style("notice"))
         try:
             await portal.run.continue_()
         except (SystemExit, asyncio.CancelledError):
             raise
         except Exception as e:  # noqa: BLE001 — 续接失败展示而非崩溃
-            self._line(f"续接失败: {e}", "red")
+            self._line(f"续接失败: {e}", tui_style("error"))
 
     def _render_welcome(self) -> None:
         try:
@@ -606,18 +673,19 @@ class FPApp(App[None]):
         except Exception:  # noqa: BLE001
             model, sid = "?", "?"
         head = Text()
-        head.append("🤖 FP · ", style="bold")
-        head.append(model, style="cyan")
+        head.append(f"{tui_glyph('bot')} FP · ", style=tui_style("logo"))
+        head.append(model, style=tui_style("model"))
         head.append(" · ", style="dim")
         head.append(sid, style="dim")
         self._mount_block(head)
         if self._resume:
-            self._line(f"💡 续会话: {sid}，输入 /help 查看命令", "cyan")
+            self._line(f"{tui_glyph('hint')} 续会话: {sid}，输入 /help 查看命令", tui_style("hint"))
         else:
-            self._line("💡 输入 /help 查看命令，/resume 可回到历史会话", "cyan")
+            self._line(f"{tui_glyph('hint')} 输入 /help 查看命令，/resume 可回到历史会话", tui_style("hint"))
         self._line(
-            "⌨ Enter 换行 · Shift+Enter/Ctrl+J 提交 · 选中后 Ctrl+C 复制 · Ctrl+Q 退出 · Ctrl+G 统计",
-            "dim",
+            f"{tui_glyph('keys')} Enter 换行 · Shift+Enter/Ctrl+J 提交 · 选中后 Ctrl+C 复制"
+            " · Ctrl+T 外观 · Ctrl+Q 退出 · Ctrl+G 统计",
+            tui_style("keys"),
         )
 
     # ── 消息流渲染 ───────────────────────────────────────────
@@ -659,7 +727,9 @@ class FPApp(App[None]):
             self._finalize_live()
             self._live_kind = kind
             self._live_buf = chunk
-            widget: Markdown | Static = Markdown(chunk) if kind == "content" else Static(Text(chunk, style="dim"))
+            widget: Markdown | Static = (
+                Markdown(chunk) if kind == "content" else Static(Text(chunk, style=tui_style("think")))
+            )
             self._chat().mount(widget)
             self._live = widget
         else:
@@ -671,7 +741,7 @@ class FPApp(App[None]):
             else:
                 st = self._live
                 assert isinstance(st, Static)
-                st.update(Text(self._live_buf, style="dim"))
+                st.update(Text(self._live_buf, style=tui_style("think")))
         self._follow_scroll(at_bottom)
 
     # ── IO 分发 ──────────────────────────────────────────────
@@ -683,15 +753,17 @@ class FPApp(App[None]):
     def _handle_io(self, msg: IOMsg) -> None:
         kind, payload = msg.kind, msg.payload
         if kind == "info":
-            self._line(str(payload), "cyan")
+            self._line(str(payload), tui_style("info"))
         elif kind == "warning":
-            self._line(str(payload), "yellow")
+            self._line(str(payload), tui_style("warning"))
         elif kind == "error":
-            self._line(str(payload), "red")
+            self._line(str(payload), tui_style("error"))
         elif kind == "tool":
-            self._mount_block(Text("  ⚙ ", style="magenta") + Text(str(payload), style="magenta"))
+            self._mount_block(
+                Text(f"  {tui_glyph('tool')} ", style=tui_style("tool")) + Text(str(payload), style=tui_style("tool"))
+            )
         elif kind == "tool_result":
-            self._line(str(payload), "dim")
+            self._line(str(payload), tui_style("tool_result"))
         elif kind == "think":
             if self._live_kind == "content":
                 self._finalize_live()
@@ -728,7 +800,14 @@ class FPApp(App[None]):
             return False
 
     def _refresh_status(self) -> None:
-        bar = self.query_one("#status", Static)
+        # 0.4s 定时器可能在「屏幕已卸载 / 应用正在退出」的那一拍触发：此刻 #status
+        # 与 #prompt 已不在 DOM 上，刷新既无意义又会把 NoMatches 冒泡成异常栈
+        # （真实退出瞬间同样会撞到，不止测试场景）。拿不到节点就直接放弃这一拍。
+        try:
+            bar = self.query_one("#status", Static)
+            prompt = self.query_one("#prompt", PromptInput)
+        except NoMatches:
+            return
         try:
             st = portal.run.status if portal.is_open else None
         except Exception:  # noqa: BLE001
@@ -736,15 +815,17 @@ class FPApp(App[None]):
         busy = self._is_busy()
         t = Text()
         if st is not None:
-            t.append(st.model, style="bold cyan")
+            t.append(st.model, style=tui_style("status_model"))
             t.append(" · ")
-            t.append(st.session_id[:8], style="dim")
+            t.append(st.session_id[:8], style=tui_style("status_session"))
             t.append(" · ")
-        t.append("🔴 运行中" if busy else "🟢 空闲", style="bold" if busy else "green")
+        t.append(
+            f"{tui_glyph('busy')} 运行中" if busy else f"{tui_glyph('idle')} 空闲",
+            style=tui_style("status_busy") if busy else tui_style("status_idle"),
+        )
         if self._status_note:
-            t.append(f" · {self._status_note}", style="yellow")
+            t.append(f" · {self._status_note}", style=tui_style("status_note"))
         bar.update(t)
-        prompt = self.query_one("#prompt", PromptInput)
         prompt.placeholder = (
             "运行中 · 输入将排队注入（斜杠禁用）" if busy else "消息…（Enter 换行 · Shift+Enter/Ctrl+J 发送）"
         )
@@ -775,23 +856,28 @@ class FPApp(App[None]):
         self._hist_idx = len(self._hist)
 
         if action == "reject_slash":
-            self._line("⛔ 运行中已禁用斜杠命令（本轮结束后可用，Ctrl+C 可打断）", "yellow")
+            self._line(
+                f"{tui_glyph('reject')} 运行中已禁用斜杠命令（本轮结束后可用，Ctrl+C 可打断）",
+                tui_style("warning"),
+            )
             return
         if action == "queue":
-            self._mount_block(Text(f"❯ {text}  ⏳已排队", style="bold cyan"))
+            self._mount_block(
+                Text(f"{tui_glyph('prompt')} {text}  {tui_glyph('queued')}已排队", style=tui_style("prompt"))
+            )
             try:
                 result = await portal.run.submit(text)
             except Exception as e:  # noqa: BLE001
-                self._line(f"排队失败: {e}", "red")
+                self._line(f"排队失败: {e}", tui_style("error"))
                 return
             if result == "rejected_command":  # 理论不可达（上面已拦）
-                self._line("⛔ 斜杠命令不入队", "yellow")
+                self._line(f"{tui_glyph('reject')} 斜杠命令不入队", tui_style("warning"))
             elif result != "queued":
-                self._line(f"排队结果: {result}", "yellow")
+                self._line(f"排队结果: {result}", tui_style("warning"))
             return
 
         # command / send：本地发送标志同步置位（防连按双发），轮锁兜底泵交错
-        self._mount_block(Text(f"❯ {text}", style="bold cyan"))
+        self._mount_block(Text(f"{tui_glyph('prompt')} {text}", style=tui_style("prompt")))
         self._sending = True
         self._io.consumed_stream = False
         self.run_worker(self._do_round(text, command=action == "command"))
@@ -802,13 +888,13 @@ class FPApp(App[None]):
             resp = await portal.run.send(text)
         except SystemExit as e:
             if str(e):
-                self._line(str(e), "yellow")
+                self._line(str(e), tui_style("warning"))
             self.exit()
             return
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001 — 单轮失败展示而非崩溃
-            self._line(f"错误: {e}", "red")
+            self._line(f"错误: {e}", tui_style("error"))
             return
         finally:
             self._sending = False
@@ -837,9 +923,9 @@ class FPApp(App[None]):
             return
         body = Text()
         for word, desc in self._hint_matches:
-            body.append(word, style="bold cyan")
+            body.append(word, style=tui_style("completion"))
             if desc:
-                body.append(f"  {desc}", style="dim")
+                body.append(f"  {desc}", style=tui_style("completion_desc"))
             body.append("\n")
         hint.update(body)
         hint.add_class("visible")
@@ -898,7 +984,7 @@ class FPApp(App[None]):
         # 3) 忙碌 + 无选区 → 打断（保留旧语义）
         if self._is_busy() and portal.is_open:
             portal.run.cancel()
-            self._line("⏹ 已请求打断", "yellow")
+            self._line(f"{tui_glyph('stop')} 已请求打断", tui_style("warning"))
             self._refresh_status()
             return
         # 4) 空闲 + 无选区 → 不退出（防复制误触），提示键位
@@ -944,6 +1030,8 @@ async def run_tui(
 ) -> None:
     """运行 TUI 直至退出（main() 的 finally 负责 ctl.close）。"""
     app = FPApp(io, directive=directive, resume=resume)
+    install_theme(app)  # config.json tui 段：内置主题名/palette，坏数据静默回落
+    install_appearance()  # 语义样式/符号表：tui.styles/symbols/ascii，坏数据静默回落
     io.attach(app)
     await app.run_async()
 

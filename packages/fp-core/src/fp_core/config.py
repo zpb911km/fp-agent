@@ -614,6 +614,17 @@ def get_default_config() -> dict[str, Any]:
         "MAX_ITERATIONS": 50,
         "MAX_CONTEXT_TOKENS": 8000,
         "BASH_PATH": "",
+        # 终端前端（REPL + TUI）外观。字段说明见 docs/guide/配置指南.md §tui
+        # theme: 21 个内置主题名之一（如 "dracula"）；留空 = 跟随 Textual 默认，
+        #        此时 palette 仍可生效（内置名优先于 palette）
+        # palette/styles/symbols 空 = 全部走内置默认，无需填满
+        "tui": {
+            "theme": "",
+            "palette": {},
+            "styles": {},
+            "symbols": {},
+            "ascii": False,
+        },
     }
 
 

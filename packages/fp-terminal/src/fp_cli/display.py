@@ -2,8 +2,8 @@
 display.py — FP 显示模块（fp-terminal 版）
 
 将 6 类输出 (A操作反馈/B行为提示/C异常警示/D LLM流/E系统日志/🎨仪式感)
-统一着色输出到终端。所有颜色、样式、截断长度均从 config.json
-的 display_styles / display_truncation 按名称读取。
+统一着色输出到终端。所有颜色、样式从 config.json 的 tui.styles 按名称读取，
+截断长度从 display_truncation 按名称读取。
 """
 
 import asyncio
@@ -14,6 +14,7 @@ import sys
 import time
 from typing import Any, cast
 
+from fp_cli.appearance import tui_glyph
 from fp_cli.style import apply_style, color_supported, truncate
 from fp_core.api import TokenUsage
 
@@ -169,12 +170,12 @@ def _tool_parts(name: str, args: Any) -> list[str]:
         try:
             args = json.loads(args)
         except (json.JSONDecodeError, TypeError):
-            return [f"  🛠️  {name}({_trunc_struct(args, _STRUCT_MAX)})"]
+            return [f"  {tui_glyph('tool')}  {name}({_trunc_struct(args, _STRUCT_MAX)})"]
     if not isinstance(args, dict):
-        return [f"  🛠️  {name}({args})"]
+        return [f"  {tui_glyph('tool')}  {name}({args})"]
 
     items = cast(dict[str, Any], args)
-    segs = [f"  🛠️  {name}(\n"]
+    segs = [f"  {tui_glyph('tool')}  {name}(\n"]
     for i, (k, v) in enumerate(items.items()):
         if i:
             segs.append(", \n")
@@ -314,32 +315,34 @@ class LLMStreamer:
 
     @staticmethod
     def _think_rich_style() -> str:
-        """从 config.json 读取 llm_thought 样式，构建 rich 风格字符串"""
+        """从 config.json 读取 llm_thought 样式（tui.styles，rich 样式串）。
+
+        旧 ``display_styles`` dict 格式已废弃——直接读新格式字符串，
+        非法样式静默返回 ""（不阻断渲染）。
+        """
         import json
         import os
 
         from fp_core.platform_utils import get_config_dir
 
         path = os.path.join(get_config_dir(), "config.json")
-        raw: dict[str, Any] = {}
+        raw: object = ""
         if os.path.isfile(path):
             try:
                 with open(path, encoding="utf-8") as f:
-                    raw = json.load(f).get("display_styles", {}).get("llm_thought", {})
+                    raw = json.load(f).get("tui", {}).get("styles", {}).get("llm_thought", "")
             except Exception:
                 pass
 
-        parts: list[str] = []
-        color = raw.get("color", "default")
-        if color and color != "default":
-            parts.append(color)
-        if raw.get("bold"):
-            parts.append("bold")
-        if raw.get("dim"):
-            parts.append("dim")
-        if raw.get("italic"):
-            parts.append("italic")
-        return " ".join(parts) if parts else ""
+        if not isinstance(raw, str) or not raw.strip():
+            return ""
+        try:
+            from rich.style import Style
+
+            Style.parse(raw)
+        except Exception:
+            return ""
+        return raw
 
     def write(self, text: str):
         """实时流式 Markdown 渲染内容 token
@@ -406,7 +409,7 @@ class LLMStreamer:
         if self.silent:
             return
         async with LLMStreamer._get_tool_lock():
-            text = truncate(f"  📋  {result.strip()}", "llm_tool")
+            text = truncate(f"  {tui_glyph('tool_result')}  {result.strip()}", "llm_tool")
             self._safe_print(apply_style(text, "llm_tool"))
 
     def end(self, interrupted: bool = False):
@@ -419,7 +422,7 @@ class LLMStreamer:
             return
         if interrupted:
             self._exit_live()
-            self._safe_print(apply_style("⏹️ 已中断", "yellow_bold"))
+            self._safe_print(apply_style(f"{tui_glyph('stop')} 已中断", "yellow_bold"))
             return
 
         if self._live:
@@ -466,9 +469,9 @@ def startup(model: str, resume: bool = False):
     if _silent():
         return
     if resume:
-        print(apply_style(f"🤖 FP 已续会话 (模型: {model})", "startup"))
+        print(apply_style(f"{tui_glyph('bot')} FP 已续会话 (模型: {model})", "startup"))
     else:
-        print(apply_style(f"🤖 FP 已启动 (模型: {model})", "startup"))
+        print(apply_style(f"{tui_glyph('bot')} FP 已启动 (模型: {model})", "startup"))
     print()
 
 
@@ -507,12 +510,12 @@ def shutdown_panel(
         token_text = base
 
     entries: list[tuple[str, str]] = [
-        ("📂  会话结束", "header"),
+        (f"{tui_glyph('session_end')}  会话结束", "header"),
         ("", "sep"),
         (f"总结: {summary}", "info"),
         (f"文件: {file}", "info"),
         ("", "sep"),
-        ("📊  统计信息", "header"),
+        (f"{tui_glyph('stats')}  统计信息", "header"),
         ("", "sep"),
         (f"模型: {model}", "info"),
         (f"消息: {msg_count} 条", "info"),

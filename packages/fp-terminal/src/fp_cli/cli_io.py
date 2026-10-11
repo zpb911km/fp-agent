@@ -8,6 +8,7 @@ import asyncio
 from typing import Any, Protocol, cast
 
 from fp_cli import display as _display_mod
+from fp_cli.appearance import tui_glyph
 from fp_cli.display import LLMStreamer
 from fp_core.api import IOChannel
 
@@ -124,14 +125,14 @@ class CLIIO(IOChannel):
         """
 
         def _read() -> str:
-            lines = ["", f"❓ {prompt}"]
+            lines = ["", f"{tui_glyph('ask')} {prompt}"]
             for i, opt in enumerate(options or [], 1):
                 marker = " （推荐）" if suggest and opt == suggest else ""
                 lines.append(f"   {i}. {opt}{marker}")
             if suggest:
-                lines.append(f"   💡 推荐默认值：{suggest}（直接回车采纳）")
+                lines.append(f"   {tui_glyph('hint')} 推荐默认值：{suggest}（直接回车采纳）")
             print("\n".join(lines))
-            return input("❯ ").strip()
+            return input(f"{tui_glyph('prompt')} ").strip()
 
         # ── 显示时序（返工 n9）：防止工具行挤占回答区 ──
         # ① 先等已入队的展示任务落盘 — tool_call 是 create_task 异步调度

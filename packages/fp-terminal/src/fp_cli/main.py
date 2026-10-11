@@ -15,6 +15,7 @@ from fp_core.api import IOChannel, portal
 from fp_core.logger import Logger, set_logger
 
 from . import display
+from .appearance import install_appearance, tui_glyph
 from .cli_io import CLIIO
 from .tui import TUIIO, run_tui, tui_available
 
@@ -120,7 +121,8 @@ async def _resident_loop() -> None:
         signal.signal(signal.SIGTERM, _on_term_signal)
 
     display.info(
-        f"🖥  无头驻留中（session={portal.run.status.session_id}），邻居铃声/注入事件照常处理，Ctrl+C 或 SIGTERM 退出"
+        f"{tui_glyph('headless')}  无头驻留中（session={portal.run.status.session_id}），"
+        "邻居铃声/注入事件照常处理，Ctrl+C 或 SIGTERM 退出"
     )
     # SIGINT 全局 handler 取消任务 → 视为退出请求，静默交给 finally 收尾
     with contextlib.suppress(asyncio.CancelledError):
@@ -162,6 +164,11 @@ async def main():
     if not config.check_llm_config():
         return
 
+    # 语义外观装配（config.json 的 tui 段）：样式表与符号表在此发布为进程级快照。
+    # REPL 路径必须显式装配——TUI 是在 run_tui() 里装的，而 L1/L2 不走那里；
+    # 漏了这步，display/cli_io 的 tui_glyph() 会静默用内置默认（配置不生效）。
+    install_appearance()
+
     # 角色注入（多智能体编排器）：FP_SUBAGENT_ROLE 传 JSON。
     # 实例以 getattr 盲取 role 属性（duck-typed），故用 SimpleNamespace 还原即可，
     # 无需引入核心 AgentRole 类依赖。
@@ -199,7 +206,7 @@ async def main():
     )
     if _interactive and not _use_tui:
         # L1 降级可见性：用户应知道当前不在 TUI（排障第一现场）
-        display.hint(f"⏸ 经典 REPL（{_tui_reason}）")
+        display.hint(f"{tui_glyph('paused')} 经典 REPL（{_tui_reason}）")
 
     # subagent 标记：子进程自身先写 source + parent_sid（父进程会在结束时兜底）
     if os.environ.get("FP_IS_SUBAGENT") == "1":
@@ -248,7 +255,7 @@ async def main():
         _reloaded = _directive.should_continue
         if _reloaded:
             display.divider()
-            display.info("🔄 reload 续接：已恢复会话，继续上一轮对话…")
+            display.info(f"{tui_glyph('reload')} reload 续接：已恢复会话，继续上一轮对话…")
             print()
             resp = await portal.run.continue_()
             if os.environ.get("FP_SUBAGENT_SILENT") and resp.content:
@@ -264,9 +271,9 @@ async def main():
             # 无 -m：进入 L1 经典 REPL（reload 续接完成后同样回到这里等输入）
             # prompt_toolkit 已退场：裸 input（executor 不阻塞事件循环），无补全/历史
             if args.resume:
-                display.hint(f"💡 续会话: {portal.run.status.session_id}，输入 /help 查看命令")
+                display.hint(f"{tui_glyph('hint')} 续会话: {portal.run.status.session_id}，输入 /help 查看命令")
             else:
-                display.hint("💡 输入 /help 查看命令，/resume 可回到历史会话")
+                display.hint(f"{tui_glyph('hint')} 输入 /help 查看命令，/resume 可回到历史会话")
             print()
 
             try:
@@ -277,7 +284,7 @@ async def main():
                         line_open = True
 
                     try:
-                        user_input = await _read_line("❯ ")
+                        user_input = await _read_line(f"{tui_glyph('prompt')} ")
                     except (EOFError, KeyboardInterrupt):
                         print()
                         break

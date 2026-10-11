@@ -10,8 +10,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -451,6 +453,67 @@ class TestCopyAndFallbackKeys(unittest.TestCase):
         out = asyncio.run(_run())
         self.assertTrue(out["selected"])  # 拖选确实选中了聊天文本
         self.assertEqual(out["clipboard"], out["selected"])
+
+
+class TestThemeSignalPersist(unittest.TestCase):
+    """主题信号落盘（Ctrl+P → Theme 那条路）：内置名写回 config，自定义主题不写。
+
+    注：Ctrl+T 现在打开的是外观设置面板（见 test_appearance_panel.py），不再走
+    Textual 自带主题面板；但 App 的 theme_changed_signal 订阅仍在，负责命令面板
+    与程序化改主题这两条路的落盘。
+    """
+
+    def _run(self, pick: str, *, register_custom: bool = False) -> dict[str, object]:
+        from fp_core.api import portal as real_portal
+
+        fake = _FakePortal()
+        tmp = tempfile.TemporaryDirectory()
+        cfg = os.path.join(tmp.name, "config.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            json.dump({"LLM_MODEL": "m", "tui": {"theme": ""}}, f)
+
+        try:
+
+            async def _scenario() -> dict[str, object]:
+                io = TUIIO()
+                app = FPApp(io)
+                io.attach(app)
+                with (
+                    patch.object(type(real_portal), "is_open", property(lambda self: True)),
+                    patch.object(real_portal, "run", fake, create=True),
+                    patch("fp_cli.appearance.configio.get_config_dir", lambda: tmp.name),
+                ):
+                    async with app.run_test(size=(100, 30)) as pilot:
+                        await pilot.pause()
+                        # ① Ctrl+T 绑定指向外观面板（不再是 Textual 的 change_theme）
+                        bindings = {b.key: b.action for b in FPApp.BINDINGS}
+                        self.assertEqual(bindings.get("ctrl+t"), "open_appearance")
+                        # ② 命令面板那条路：直接改主题 → 触发落盘
+                        if register_custom:
+                            from textual.theme import Theme
+
+                            app.register_theme(Theme(name=pick, primary="#ff0000", dark=True))
+                        app.theme = pick
+                        await pilot.pause()
+                        await pilot.pause()  # 信号两跳投递
+                        return {}
+
+            asyncio.run(_scenario())
+            with open(cfg, encoding="utf-8") as f:
+                written = json.load(f)
+            return {"written": written}
+        finally:
+            tmp.cleanup()
+
+    def test_builtin_pick_is_persisted(self) -> None:
+        written = self._run("dracula")["written"]
+        self.assertEqual(written["tui"]["theme"], "dracula")  # type: ignore[index]
+        self.assertEqual(written["LLM_MODEL"], "m")  # type: ignore[index]
+
+    def test_custom_theme_is_not_persisted(self) -> None:
+        # fp-custom 不是内置名 → 不落盘（它只是 config 里 palette 的派生结果）
+        written = self._run("fp-custom", register_custom=True)["written"]
+        self.assertEqual(written["tui"]["theme"], "")  # type: ignore[index]
 
 
 if __name__ == "__main__":
