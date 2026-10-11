@@ -100,7 +100,16 @@ jobs:
           pip install pytest pytest-asyncio httpx pyyaml textual rich wcwidth fastapi uvicorn websockets
 
       - name: 🧪 全量 pytest
-        run: python -m pytest -q
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q --tb=short -rfE > pytest.log 2>&1
+          rc=$?
+          tail -n 60 pytest.log
+          # 失败用例发布为 annotations：Actions 日志需鉴权，annotation 可匿名经 API 读，
+          # 供跨平台 triage 自取失败清单（macOS #169 / Windows #170）
+          grep -E '^(FAILED|ERROR) ' pytest.log | head -300 | sed 's/^/::error::/'
+          exit $rc
 
   test-windows:
     name: 全量测试（Windows · 非阻断）
@@ -125,7 +134,15 @@ jobs:
           pip install pytest pytest-asyncio httpx pyyaml textual rich wcwidth fastapi uvicorn websockets
 
       - name: 🧪 全量 pytest（采失败清单）
-        run: python -m pytest -q
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q --tb=short -rfE > pytest.log 2>&1
+          rc=$?
+          tail -n 60 pytest.log
+          # 失败用例发布为 annotations（可匿名经 API 读），供 #170 采机器失败清单
+          grep -E '^(FAILED|ERROR) ' pytest.log | head -300 | sed 's/^/::error::/'
+          exit $rc
 
   onboarding-windows:
     name: 首跑向导（Windows）
