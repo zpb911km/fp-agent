@@ -17,7 +17,7 @@
 
 import os
 
-from fp_core.platform_utils import get_data_dir
+from fp_core import platform_utils
 
 # 资产类型 → 相对子路径（从来源根算起）
 ASSET_LAYOUTS: dict[str, tuple[str, ...]] = {
@@ -43,8 +43,14 @@ LEGACY_TOOLS_PLUGINS: tuple[str, ...] = ("tools", "plugins")
 
 
 def data_dir() -> str:
-    """fp 数据目录（跨平台，复用 fp_core 纯路径层）。"""
-    return get_data_dir()
+    """fp 数据目录（跨平台，复用 fp_core 纯路径层）。
+
+    经**模块属性**调用（而非 ``from ... import get_data_dir`` 的本地绑定）：
+    本地绑定在 import 时固化，``monkeypatch.setattr(platform_utils, "get_data_dir", ...)``
+    将无法命中——这会让测试隔离悄悄退化为「依赖 XDG_DATA_HOME 环境变量」，
+    而 macOS 的 ``get_data_dir()`` 不读该变量，隔离随之失效（#169）。
+    """
+    return platform_utils.get_data_dir()
 
 
 # ── 三来源路径 ─────────────────────────────────────────────────
