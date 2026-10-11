@@ -231,11 +231,9 @@ class TestInstallTheme(unittest.TestCase):
         assert base is not None
         self.assertEqual(cur.dark, base.dark)
 
-    def test_default_config_tui_block_is_noop(self) -> None:
-        # 回归：默认模板新增 tui 段后，必须等价于「无配置」——不得改变默认外观
-        from fp_core.config import get_default_config
-
-        tui = get_default_config()["tui"]
+    def test_empty_tui_block_is_noop(self) -> None:
+        # 回归：空 tui 段必须等价于「无配置」——不得改变默认外观
+        tui = {"theme": "", "palette": {}, "styles": {}, "symbols": {}, "ascii": False}
         app = _app()
         before = app.theme
         self.assertIsNone(install_theme(app, tui))

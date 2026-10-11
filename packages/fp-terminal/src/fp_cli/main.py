@@ -138,7 +138,6 @@ async def main():
     parser.add_argument(
         "-r", "--resume", nargs="?", const="auto", default=None, metavar="SESSION_ID", help="恢复历史会话"
     )
-    parser.add_argument("--init", action="store_true", help="初始化配置文件")
     parser.add_argument(
         "--headless",
         action="store_true",
@@ -157,12 +156,9 @@ async def main():
             if callable(_reconf):
                 _reconf(line_buffering=True)
 
-    if args.init:
-        config.init_config()
-        return
-
     if not config.check_llm_config():
-        return
+        # 配置缺失：正常经 fp.main 门禁已拦截并给出指引；此处兜底（如直接 python -m fp_cli）
+        sys.exit(1)
 
     # 语义外观装配（config.json 的 tui 段）：样式表与符号表在此发布为进程级快照。
     # REPL 路径必须显式装配——TUI 是在 run_tui() 里装的，而 L1/L2 不走那里；

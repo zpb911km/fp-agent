@@ -36,7 +36,6 @@ fp
 | `-m <msg>` | `--message <msg>` | 单次消息模式。发送一条消息后直接退出，不进入交互循环 |
 | `-r` | `--resume` | 恢复最新会话。不加参数值则自动恢复最新的历史会话 |
 | `-r <SID>` | `--resume <SID>` | 恢复指定 ID 的会话 |
-| `--init` | — | 初始化配置文件。生成默认 `~/.config/fp/config.json` 后退出 |
 | `--headless` | — | 无头驻留模式。跳过 logo 与交互提示，启动即常驻，直到 `Ctrl+C`/`SIGTERM`；无 pty、stdin EOF 都不会导致退出。可与 `-r` 组合 |
 
 > **`-m` 的双义规则**：取值是 `cli|webui|acp` 之一 → 视为 `--mode`（选启动模式）；
@@ -92,13 +91,15 @@ fp -r session_abc123
 fp --session session_abc123
 ```
 
-### 5. 初始化配置文件
+### 5. 配置 LLM 连接
 
 ```bash
-fp --init
+# 直接运行 fp；缺配置时自动进入交互式配置向导
+fp
 ```
 
-在项目根目录生成默认 `~/.config/fp/config.json`。
+`LLM_API_KEY` / `LLM_API_BASE_URL` / `LLM_MODEL` 三项均为必填、无内置默认值。
+也可编辑 `~/.config/fp/config.json` 或设置同名环境变量。
 
 ### 6. 无头驻留模式
 

@@ -5,7 +5,6 @@ Agent v2 配置管理
 
 import json
 import os
-import sys
 from typing import Any, cast
 
 from fp_core.logger import get_logger
@@ -455,18 +454,14 @@ LLM_EXTRA_BODY: dict[str, Any] = (
     dict(_resolved_active["extra_body"]) if _resolved_active is not None else {"enable_thinking": False}
 )
 LLM_API_KEY: str = _resolved_active["api_key"] if _resolved_active is not None else _value("LLM_API_KEY", "")
-LLM_API_BASE_URL: str = (
-    _resolved_active["base_url"]
-    if _resolved_active is not None
-    else _value("LLM_API_BASE_URL", "https://api.deepseek.com/v1")
-)
+LLM_API_BASE_URL: str = _resolved_active["base_url"] if _resolved_active is not None else _value("LLM_API_BASE_URL", "")
 # 旧版扁平配置（无 LLM_PROVIDERS 表）时 resolve_active_llm 返回 None，
 # 此处仍让 FP_MODEL 覆盖模型名（provider 前缀在无表场景无意义，取 / 后段）。
 _fp_model_legacy = os.environ.get("FP_MODEL", "").strip()
 LLM_MODEL: str = (
     _resolved_active["model"]
     if _resolved_active is not None
-    else (_fp_model_legacy.rsplit("/", 1)[-1] or _value("LLM_MODEL", "deepseek-v4-flash"))
+    else (_fp_model_legacy.rsplit("/", 1)[-1] or _value("LLM_MODEL", ""))
 )
 LLM_TEMPERATURE: float = (
     float(_resolved_active["temperature"]) if _resolved_active is not None else _value("TEMPERATURE", 0.8)
@@ -555,31 +550,61 @@ def user_dirs(kind: str) -> list[str]:
 # ═══════════════════════════════════════════════════════════════
 
 
-def check_llm_config() -> bool:
+# required 连接键：缺失即无法联网。与 _CONFIG_SCHEMA 中 required=True 的三项一致。
+_REQUIRED_LLM_KEYS: tuple[str, ...] = ("LLM_API_KEY", "LLM_API_BASE_URL", "LLM_MODEL")
+
+
+def missing_llm_keys() -> list[str]:
+    """返回当前缺失（未设 / 空串 / 纯空白）的 required 连接键。"""
+    out: list[str] = []
+    for key in _REQUIRED_LLM_KEYS:
+        val = globals().get(key)
+        if not (isinstance(val, str) and val.strip()):
+            out.append(key)
+    return out
+
+
+def llm_setup_hint(missing: list[str] | None = None) -> str:
+    """面向终端用户的配置修复指引（门禁 / 向导 / fp_cli 共用的单一文案源）。"""
+    missing = missing_llm_keys() if missing is None else missing
+    lines = ["LLM 配置不完整，无法启动。"]
+    if missing:
+        lines.append(f"  缺少：{'、'.join(missing)}")
+    lines += [
+        "  配置方式（任选其一）：",
+        "    ① 交互式向导：在终端直接运行 `fp`，按提示完成配置",
+        f"    ② 编辑配置文件：{USER_CONFIG_PATH}",
+        "         填入以下三键（均为必填）：LLM_API_KEY / LLM_API_BASE_URL / LLM_MODEL",
+        "    ③ 设置环境变量：LLM_API_KEY / LLM_API_BASE_URL / LLM_MODEL",
+        "  详见：fp docs guide/配置指南.md",
+    ]
+    return "\n".join(lines)
+
+
+def check_llm_config(quiet: bool = False) -> bool:
     """检查 LLM 配置是否完整。
 
-    返回 True 表示配置可用，False 表示存在致命问题（无法联网调用 LLM）。
-    通过 Logger 输出警告信息（调用方需先注入 Logger 实现）。
+    Args:
+        quiet: True 时只返回结果、不输出任何信息（供首跑门禁静默探测复用）。
+
+    Returns:
+        True = 三键齐备、可联网调用 LLM；False = 存在致命缺失（无法联网）。
+        非 quiet 时经 Logger 输出面向用户的修复指引（含配置文件绝对路径）。
     """
-    ok = True
+    missing = missing_llm_keys()
+    ok = not missing
+
+    if quiet:
+        return ok
+
     log = get_logger()
-
-    if not LLM_API_KEY:
-        log.warning("LLM_API_KEY not set\n  → 设置方式：① 修改 config.json ② 设置环境变量 LLM_API_KEY")
-        ok = False
-
-    if not LLM_API_BASE_URL:
-        log.warning("LLM_API_BASE_URL not set\n  → 设置方式：① 修改 config.json ② 设置环境变量 LLM_API_BASE_URL")
-        ok = False
-
-    if not LLM_MODEL:
-        log.warning("LLM_MODEL not set\n  → 设置方式：① 修改 config.json ② 设置环境变量 LLM_MODEL")
-        ok = False
+    if missing:
+        log.warning(llm_setup_hint(missing))
 
     # 打印所有 Schema 验证发现的问题
     global _validation_issues
     if _validation_issues:
-        log.warning(f"配置文件中存在 {len(_validation_issues)} 个配置问题（通过 check_llm_config() 可知详情）")
+        log.warning("配置文件存在问题：\n  - " + "\n  - ".join(_validation_issues))
 
     # fp --model 未命中 LLM_PROVIDERS 表 → 已回退配置激活项，这里如实告警
     global _fp_model_miss
@@ -601,54 +626,9 @@ def check_llm_config() -> bool:
     return ok
 
 
-def get_default_config() -> dict[str, Any]:
-    """获取默认配置（用于生成 config.json）"""
-    return {
-        "LLM_API_KEY": "your-api-key-here",
-        "LLM_API_BASE_URL": "https://api.deepseek.com/v1",
-        "LLM_MODEL": "deepseek-v4-flash",
-        "TEMPERATURE": 0.8,
-        "MAX_TOKENS": 32768,
-        "TIMEOUT": 300,
-        "RETRY_COUNT": 3,
-        "MAX_ITERATIONS": 50,
-        "MAX_CONTEXT_TOKENS": 8000,
-        "BASH_PATH": "",
-        # 终端前端（REPL + TUI）外观。字段说明见 docs/guide/配置指南.md §tui
-        # theme: 21 个内置主题名之一（如 "dracula"）；留空 = 跟随 Textual 默认，
-        #        此时 palette 仍可生效（内置名优先于 palette）
-        # palette/styles/symbols 空 = 全部走内置默认，无需填满
-        "tui": {
-            "theme": "",
-            "palette": {},
-            "styles": {},
-            "symbols": {},
-            "ascii": False,
-        },
-    }
-
-
-def init_config(path: str | None = None):
-    """初始化用户配置文件（跨平台：Linux ~/.config/fp/，Windows %APPDATA%/fp/）"""
-    log = get_logger()
-    config_path = path or USER_CONFIG_PATH
-    if os.path.exists(config_path):
-        log.info(f"[Config] {config_path} already exists")
-        return
-
-    # 确保父目录存在（首次运行配置目录可能不存在）
-    parent = os.path.dirname(config_path)
-    os.makedirs(parent, exist_ok=True)
-
-    default_cfg = get_default_config()
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(default_cfg, f, indent=2, ensure_ascii=False)
-    log.info(f"[Config] Created {config_path}")
-
-
 if __name__ == "__main__":
-    # 打印当前配置
-    print("=== Agent v2 Configuration ===")
+    # 打印当前配置（诊断用；配置缺失时 check_llm_config 会给出面向用户的修复指引）
+    print("=== FP 配置 ===")
     print(f"LLM_API_KEY: {'***' + LLM_API_KEY[-8:] if LLM_API_KEY else 'NOT SET'}")
     print(f"LLM_API_BASE_URL: {LLM_API_BASE_URL}")
     print(f"LLM_MODEL: {LLM_MODEL}")
@@ -657,6 +637,3 @@ if __name__ == "__main__":
     print(f"MAX_ITERATIONS: {MAX_ITERATIONS}")
     print()
     check_llm_config()
-
-    if "--init" in sys.argv:
-        init_config()

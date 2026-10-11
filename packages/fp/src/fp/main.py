@@ -51,7 +51,6 @@ _EPILOG = """\
 透传给 CLI 模式（--mode cli，由 fp_cli 解析）：
   -m, --message MSG     单次消息模式：发送一条后退出
   -r, --resume [SID]    恢复会话；省略 SID 时恢复最近一次
-  --init                初始化配置文件后退出
   --headless            无头驻留：跳过 logo 与提示符，常驻至 Ctrl+C/SIGTERM
                         （可与 -r 组合；管道/服务管理器拉起不因 stdin EOF 退出）
 
@@ -152,6 +151,17 @@ def main():
         from fp.docs import open_docs
 
         sys.exit(open_docs(*rest))
+
+    # ── 首跑配置门禁/引导 ──
+    # 早于 ext 迁移与版本检查等副作用；交互终端缺配置时进入向导（写盘后本次生效），
+    # 非交互环境打印引导并以非 0 退出。--version/--update 无需配置，跳过。
+    from fp.setup import ensure_llm_configured
+
+    ensure_llm_configured(
+        mode=args.mode,
+        passthrough=rest,
+        skip=bool(args.version or args.update),
+    )
 
     # ── 存量迁移（幂等）：core 只认三目录，老结构自动并入 private/ ──
     from fp.ext_migrate import ensure as ext_migrate_ensure

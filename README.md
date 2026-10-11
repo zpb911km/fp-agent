@@ -104,6 +104,8 @@ pip install fp-agent fp-webui fp-acp
 
 要求 **Python ≥ 3.11**。
 
+> **首次运行**：直接运行 `fp`——若尚未配置 LLM 连接，会进入交互式配置向导（`LLM_API_KEY` / `LLM_API_BASE_URL` / `LLM_MODEL` 三项必填，无内置默认值）；非交互环境则打印配置指引并以非 0 退出。
+
 > **Windows 用户**：推荐安装 [Git for Windows](https://git-scm.com)（安装时勾选"Git Bash"并添加到 PATH），以获得完整的 Unix 命令支持（`ls`/`grep`/`awk`/`sed` 等）。未安装时会自动降级到 cmd.exe，仅支持 Windows 原生命令（`dir`/`type`/`findstr`）。
 
 ---

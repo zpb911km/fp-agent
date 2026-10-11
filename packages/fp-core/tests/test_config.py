@@ -85,34 +85,47 @@ class TestValidateValue:
         assert len(errors) == 1
 
 
-class TestGetDefaultConfig:
-    """get_default_config() — 默认配置模板"""
+class TestRequiredKeys:
+    """零默认语义：missing_llm_keys() 判定 + llm_setup_hint() 用户指引"""
 
-    def test_contains_required_keys(self):
-        """返回的配置包含所有必填字段"""
-        cfg = config.get_default_config()
-        assert "LLM_API_KEY" in cfg
-        assert "LLM_API_BASE_URL" in cfg
-        assert "LLM_MODEL" in cfg
+    def test_all_missing(self, monkeypatch):
+        for key in config._REQUIRED_LLM_KEYS:
+            monkeypatch.setattr(config, key, "", raising=False)
+        assert set(config.missing_llm_keys()) == set(config._REQUIRED_LLM_KEYS)
 
-    def test_temperature_default(self):
-        """TEMPERATURE 默认值为 0.8"""
-        cfg = config.get_default_config()
-        assert cfg["TEMPERATURE"] == 0.8
+    def test_blank_string_counts_as_missing(self, monkeypatch):
+        monkeypatch.setattr(config, "LLM_API_KEY", "", raising=False)
+        monkeypatch.setattr(config, "LLM_API_BASE_URL", "  ", raising=False)
+        monkeypatch.setattr(config, "LLM_MODEL", "real-model", raising=False)
+        missing = config.missing_llm_keys()
+        assert "LLM_API_KEY" in missing
+        assert "LLM_API_BASE_URL" in missing
+        assert "LLM_MODEL" not in missing
 
-    def test_is_valid_json(self):
-        """返回的配置可以序列化为 JSON（无特殊对象）"""
-        import json
+    def test_all_set(self, monkeypatch):
+        for key in config._REQUIRED_LLM_KEYS:
+            monkeypatch.setattr(config, key, "x", raising=False)
+        assert config.missing_llm_keys() == []
 
-        cfg = config.get_default_config()
-        assert json.loads(json.dumps(cfg)) == cfg
+    def test_hint_mentions_path_keys_and_docs(self, monkeypatch):
+        for key in config._REQUIRED_LLM_KEYS:
+            monkeypatch.setattr(config, key, "", raising=False)
+        hint = config.llm_setup_hint()
+        assert config.USER_CONFIG_PATH in hint
+        assert "fp docs" in hint
+        for key in config._REQUIRED_LLM_KEYS:
+            assert key in hint
 
-    def test_contains_tui_theme_knob(self):
-        """默认配置带 tui 段，theme 键可被用户直接编辑"""
-        cfg = config.get_default_config()
-        tui = cfg["tui"]
-        assert tui["theme"] == ""  # 空 = 跟随默认主题（且 palette 仍可生效）
-        assert set(tui) >= {"theme", "palette", "styles", "symbols", "ascii"}
+    def test_no_placeholder_template_exists(self):
+        """零默认：不再提供任何带占位值的 config.json 模板/初始化函数"""
+        assert not hasattr(config, "get_default_config")
+        assert not hasattr(config, "init_config")
+
+    def test_quiet_check_returns_only_bool(self, monkeypatch, capsys):
+        """quiet=True 只返回结果、不打印任何东西"""
+        monkeypatch.setattr(config, "LLM_API_KEY", "", raising=False)
+        assert config.check_llm_config(quiet=True) is False
+        assert capsys.readouterr().out == ""
 
 
 class TestValueFunction:

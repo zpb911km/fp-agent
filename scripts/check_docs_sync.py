@@ -103,6 +103,12 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
         ["docs/dev/项目概览.md"],
         ["docs/guide/CLI入门.md", "docs/guide/快速开始.md"],
     ),
+    # FP 首跑配置门禁/向导（入口层，行为文档随项目概览；新增/删除即结构变更）
+    (
+        "packages/fp/src/fp/setup.py",
+        ["docs/dev/项目概览.md"],
+        ["docs/guide/快速开始.md", "docs/guide/配置指南.md"],
+    ),
     ("packages/fp/src/fp/docs.py", ["docs/dev/项目概览.md"], ["docs/guide/CLI入门.md", "docs/self/README.md"]),
     ("packages/fp/src/fp/version_checker.py", ["docs/dev/项目概览.md"], []),
     # fp ext 扩展分发系统（新增模块）
@@ -130,6 +136,8 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
     ("scripts/*.py", ["docs/CONTRIBUTING.md"], []),
     # 工程配置
     (".pre-commit-config.yaml", ["docs/CONTRIBUTING.md"], []),
+    # CI 工作流（矩阵 / 平台覆盖变化 → 测试文档同步；结构变更另确认贡献指南）
+    (".github/workflows/*.yml", ["docs/dev/测试.md"], ["docs/CONTRIBUTING.md"]),
     ("pyproject.toml", ["docs/dev/测试.md"], []),
 ]
 

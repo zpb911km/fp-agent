@@ -19,7 +19,7 @@
 **新入口接入契约（四步，未来新入口照此实现即自动兼容 reload）：**
   0. ``main()`` 首行 ``capture_launch_command()``——捕获原始启动命令
      （``FP_LAUNCH_JSON``，setdefault 保证重启链恒为首次命令；
-     快照缺失时激活核心从 ``/proc/self`` 精确重建，不依赖入口版本）
+     快照缺失时激活核心从 ``/proc/self`` 精确重建——仅 Linux 有 /proc）
   1. 构造 Agent：``resume=os.environ.get("FP_RELOAD_SID")``
   2. Agent 就绪（ensure_initialized 后）：``consume_reload_handoff(agent)``
   3. 返回 True → 驱动 ``await agent.continue_conversation(io=本入口IO)``，
@@ -96,7 +96,8 @@ async def perform_exec_reload(state: State, *, kind: str, tool_result_text: str 
 
     # ── 前置检查：启动命令快照 ──
     # 快照缺失（入口早于捕获机制启动的存量实例）→ 从 /proc/self 精确重建：
-    # cmdline/cwd 是内核记录的 exec 事实，与快照同源、非猜测；两者皆不可得才拒绝。
+    # cmdline/cwd 是内核记录的 exec 事实，与快照同源、非猜测。
+    # /proc 是 Linux 专有；macOS/Windows 无，此路走不通（但正常入口必已写快照）。
     launch_raw = os.environ.get("FP_LAUNCH_JSON", "")
     launch_argv: list[str]
     if launch_raw:
@@ -106,6 +107,13 @@ async def perform_exec_reload(state: State, *, kind: str, tool_result_text: str 
         except (ValueError, KeyError, TypeError):
             return "❌ FP_LAUNCH_JSON 损坏，无法重启。"
     else:
+        from fp_core.platform_utils import has_procfs
+
+        if not has_procfs():
+            return (
+                "❌ 无法重建启动命令：缺少 FP_LAUNCH_JSON，且本平台无 /proc/self。"
+                "请确认入口在 argv 改写前调用了 capture_launch_command()。"
+            )
         try:
             with open("/proc/self/cmdline", "rb") as f:
                 launch_argv = [p.decode("utf-8", "surrogateescape") for p in f.read().split(b"\0") if p]

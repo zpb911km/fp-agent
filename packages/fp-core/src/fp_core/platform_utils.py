@@ -243,3 +243,20 @@ def ansi_supported() -> bool:
         return False
 
     return True
+
+
+# ═══════════════════════════════════════════════════════════════
+# procfs 探测
+# ═══════════════════════════════════════════════════════════════
+
+
+def has_procfs() -> bool:
+    """本平台是否提供 procfs（``/proc``）。
+
+    Linux:           是（handoff 可经 ``/proc/self`` 重建启动命令）。
+    macOS / Windows: 否（无 /proc，需走各自的替代路径）。
+
+    用运行期探测（``/proc/self`` 是否为目录）而非平台名判断——
+    Linux 容器 / WSL / 受限环境各有差异，探测比猜名字更可靠。
+    """
+    return os.path.isdir("/proc/self")

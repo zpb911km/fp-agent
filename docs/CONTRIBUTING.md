@@ -65,10 +65,12 @@ for d in fp-core fp-terminal fp-webui fp-acp fp; do
 done
 pip install pytest
 
-# 4. 配置 API Key（生成 ~/.config/fp/config.json 后退出）
-fp --init
-# 编辑 ~/.config/fp/config.json，将 LLM_API_KEY 替换为你的密钥
-# （或直接 export LLM_API_KEY=sk-...，优先级见 docs/guide/快速开始.md）
+# 4. 配置 LLM 连接（三项均必填，无内置默认值）
+#    最简：直接运行 fp，缺配置时会进入交互式配置向导
+#    或编辑 ~/.config/fp/config.json / export 环境变量，见 docs/guide/快速开始.md
+export LLM_API_KEY=sk-...
+export LLM_API_BASE_URL=https://api.deepseek.com/v1
+export LLM_MODEL=deepseek-chat
 
 # 5. 验证安装
 fp --version
