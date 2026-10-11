@@ -112,12 +112,12 @@ jobs:
           exit $rc
 
   test-windows:
-    name: 全量测试（Windows · 非阻断）
+    name: 全量测试（Windows）
     needs: quality
     runs-on: windows-latest
-    # #170 尚未完成移植：先以非阻断方式接入，采「机器失败清单」，
-    # 待 Windows 真正跨平台后摘掉 continue-on-error，转为硬门禁。
-    continue-on-error: true
+    # #170 完成：平台差异已全部下沉 platform_utils（进程树击杀 / 文件锁 /
+    # 权限 / 重启 / Git Bash 定位），全量套件在 windows-latest 通过 →
+    # 摘掉 continue-on-error，与 ubuntu / macOS 同级硬门禁。
     steps:
       - uses: actions/checkout@v4
         with:
@@ -133,14 +133,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest pytest-asyncio httpx pyyaml textual rich wcwidth fastapi uvicorn websockets
 
-      - name: 🧪 全量 pytest（采失败清单）
+      - name: 🧪 全量 pytest
         shell: bash
         run: |
           set +e
           python -m pytest -q --tb=short -rfE > pytest.log 2>&1
           rc=$?
           tail -n 60 pytest.log
-          # 失败用例发布为 annotations（可匿名经 API 读），供 #170 采机器失败清单
+          # 失败用例发布为 annotations（可匿名经 API 读），便于无真机环境 triage
           grep -E '^(FAILED|ERROR) ' pytest.log | head -300 | sed 's/^/::error::/'
           exit $rc
 
