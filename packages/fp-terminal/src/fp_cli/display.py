@@ -481,9 +481,59 @@ def _display_width(text: str) -> int:
         from wcwidth import wcswidth
 
         w = wcswidth(text)
-        return w if w >= 0 else len(text)
+        if w >= 0:
+            return w
+        # 含 wcswidth 无法判定的字符：逐字符回退，避免整串退化为 len()
+        total = 0
+        for ch in text:
+            cw = wcswidth(ch)
+            total += cw if cw >= 0 else 1
+        return total
     except ImportError:
         return len(text)
+
+
+def _terminal_columns(default: int = 80) -> int:
+    """终端列数；非 tty / 探测失败时回退默认值"""
+    try:
+        import shutil
+
+        return shutil.get_terminal_size((default, 24)).columns or default
+    except Exception:
+        return default
+
+
+def _wrap_by_width(text: str, width: int) -> list[str]:
+    """按显示宽度折行，不丢弃任何字符。
+
+    - 显式换行符按段落切开，各段独立折行；
+    - 折行优先回退到最近空格处断开（不把词/数字切碎），
+      无合适空格时按字符硬折（CJK 文本走此分支）。
+    """
+    if width <= 0:
+        return text.split("\n")
+    lines: list[str] = []
+    for para in text.split("\n"):
+        if not para:
+            lines.append("")
+            continue
+        cur = ""
+        cur_w = 0
+        for ch in para:
+            cw = _display_width(ch)
+            if cur and cur_w + cw > width:
+                cut = cur.rfind(" ")
+                if cut > 0 and _display_width(cur[:cut]) >= width // 2:
+                    lines.append(cur[:cut].rstrip())
+                    rest = cur[cut + 1 :]
+                else:
+                    lines.append(cur)
+                    rest = ""
+                cur, cur_w = rest, _display_width(rest)
+            cur += ch
+            cur_w += cw
+        lines.append(cur)
+    return lines
 
 
 def shutdown_panel(
@@ -498,8 +548,9 @@ def shutdown_panel(
     """退出时的统计面板（框线装饰），自动适应内容宽度"""
     if _silent():
         return
+    # 宽度区间：内容自适应；上限取面板美观上限，同时不超出终端（留 2 格防折行）
     MIN_W = 48
-    MAX_W = 60
+    MAX_W = 72
 
     token_text = ""
     if token_usage is not None and token_usage.call_count > 0:
@@ -527,24 +578,17 @@ def shutdown_panel(
         entries.append((f"耗时: {duration}", "info"))
 
     max_text_width = max(_display_width(text) for text, _ in entries)
-    W = min(max(MIN_W, max_text_width + 6), MAX_W)
+    W = min(max(MIN_W, max_text_width + 6), MAX_W, max(_terminal_columns() - 2, MIN_W))
     text_w = W - 6
     sep = "─" * (W - 2)
 
     def tb(text: str) -> str:
-        if _display_width(text) <= text_w:
-            pad = text_w - _display_width(text)
-            return f"║  {text}{' ' * pad}  ║"
-        else:
-            result = ""
-            for ch in text:
-                candidate = result + ch
-                if _display_width(candidate + "…") > text_w:
-                    break
-                result = candidate
-            display = result + "…"
-            pad = text_w - _display_width(display)
-            return f"║  {display}{' ' * pad}  ║"
+        """内容行：超宽时按显示宽度折行（每行都带边框），不丢弃任何字符"""
+        lines: list[str] = []
+        for seg in _wrap_by_width(text, text_w):
+            pad = max(text_w - _display_width(seg), 0)
+            lines.append(f"║  {seg}{' ' * pad}  ║")
+        return "\n".join(lines)
 
     def sep_line() -> str:
         return f"║{sep}║"
