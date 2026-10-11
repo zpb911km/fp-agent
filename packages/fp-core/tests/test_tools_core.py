@@ -394,18 +394,15 @@ class TestBash:
         assert "错误：" in result
 
     @pytest.mark.asyncio
-    async def test_unix_branch_uses_explicit_bash(self):
-        """非 Windows 分支必须显式 create_subprocess_exec(find_bash()...) 而非 shell。
+    async def test_uses_explicit_bash_not_shell(self):
+        """必须是显式 create_subprocess_exec(find_bash()...) 而非 shell。
 
         回归锚点：旧实现用 create_subprocess_shell 走 /bin/sh（dash），
         导致 ${var:0:6} / [[ ]] / heredoc 等 bash 语法 Bad substitution。
+        #170 起 Windows 也走同一路径（强制 Git Bash，不再降级 cmd.exe），
+        故本用例三平台一致，不再需要 is_windows 分支。
         """
-        from fp_core.platform_utils import is_windows
-
-        if is_windows():
-            pytest.skip("仅验证 Unix 分支")
         with (
-            patch("fp_core.tools.core.is_windows", return_value=False),
             patch("fp_core.tools.core.find_bash", return_value="/bin/bash"),
             patch("fp_core.tools.core.asyncio.create_subprocess_exec") as mock_exec,
         ):
@@ -418,6 +415,16 @@ class TestBash:
         args = mock_exec.await_args.args
         assert args[0] == "/bin/bash"
         assert args[1] == "-c"
+
+    @pytest.mark.asyncio
+    async def test_missing_git_bash_gives_actionable_error(self):
+        """find_bash() 返 None（Windows 缺 Git Bash）→ 可操作诊断，而非 FileNotFoundError。"""
+        with patch("fp_core.tools.core.find_bash", return_value=None):
+            result = await _execute_bash("echo hi")
+
+        assert result.startswith("❌")
+        assert "Git Bash" in result
+        assert "bash.exe" in result
 
 
 # ═══════════════════════════════════════════════════════════

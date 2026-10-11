@@ -27,6 +27,8 @@ import warnings
 from collections.abc import Iterable
 from typing import Any
 
+from fp_core.platform_utils import restrict_file_permissions
+
 
 class _AbortError(Exception):
     """用户主动取消向导（Ctrl+C / EOF / 空输入）。"""
@@ -111,8 +113,7 @@ def _atomic_write_json(path: str, data: dict[str, Any]) -> None:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             json.dump(data, fh, indent=2, ensure_ascii=False)
             fh.write("\n")
-        if os.name != "nt":  # Windows 不依赖 POSIX 权限位
-            os.chmod(tmp, 0o600)
+        restrict_file_permissions(tmp, 0o600)  # Windows 上是 no-op（无 POSIX 权限位）
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -168,6 +169,21 @@ def _run_wizard(config: Any) -> bool:
     _say("  密钥一项输入时不显示；任意一项直接回车留空 = 取消")
     _say(bar)
     _say()
+
+    # Windows：bash 工具强制依赖 Git Bash（不降级 cmd/PowerShell）。
+    # 缺了不影响本次配置，但配置完 bash 工具仍然跑不了——提前告知，免得到时困惑。
+    try:
+        from fp_core.platform_utils import check_git_bash, is_windows
+
+        if is_windows():
+            _bash_ok, _bash_detail = check_git_bash()
+            if not _bash_ok:
+                _say(f"  {_sym('⚠', '!')} {_bash_detail}")
+                _say("    （配置可继续；但 bash 工具需 Git Bash 才能执行命令）")
+                _say()
+    except Exception:  # noqa: BLE001 — 提示性检查，失败不影响配置主流程
+        pass
+
     try:
         api_key = _read_secret("① API 密钥").strip()
         base_url = _read_text("② API 基础地址（例：https://api.deepseek.com/v1）").strip()

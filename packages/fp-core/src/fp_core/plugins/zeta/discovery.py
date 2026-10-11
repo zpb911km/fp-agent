@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from fp_core.platform_utils import process_alive
 from fp_core.plugins.zeta.domain import (
     Capabilities,
     Endpoint,
@@ -127,13 +128,8 @@ def _pid_alive(pid: Any) -> bool:
         n = int(pid)
     except (TypeError, ValueError):
         return False
-    try:
-        os.kill(n, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    # 经 platform_utils：os.kill(pid, 0) 的探测语义在 Windows 上不成立
+    return process_alive(n)
 
 
 class InstanceRegistry:

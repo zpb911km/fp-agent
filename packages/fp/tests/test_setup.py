@@ -4,11 +4,16 @@ import json
 import os
 import stat
 import sys
+import tempfile
 
 import pytest
 
-os.environ.setdefault("XDG_CONFIG_HOME", "/tmp/fp_test_config")
-os.environ.setdefault("XDG_DATA_HOME", "/tmp/fp_test_data")
+# 配置/数据目录隔离（跨平台）：POSIX 走 XDG_*，Windows 走 APPDATA/LOCALAPPDATA
+# （XDG_* 在 Windows 被 platform_utils 忽略）。指向系统临时目录，测试不碰真实用户配置。
+os.environ.setdefault("XDG_CONFIG_HOME", os.path.join(tempfile.gettempdir(), "fp_test_config"))
+os.environ.setdefault("XDG_DATA_HOME", os.path.join(tempfile.gettempdir(), "fp_test_data"))
+os.environ.setdefault("APPDATA", os.path.join(tempfile.gettempdir(), "fp_test_appdata"))
+os.environ.setdefault("LOCALAPPDATA", os.path.join(tempfile.gettempdir(), "fp_test_localappdata"))
 
 import fp.setup as setup
 import fp_core.config as config

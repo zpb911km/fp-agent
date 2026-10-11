@@ -215,4 +215,6 @@ bash --version
 | 配置文件 | `~/.config/fp/config.json` | `%APPDATA%/fp/config.json` |
 | 会话/记忆/任务 | `~/.local/share/fp/` | `%LOCALAPPDATA%/fp/` |
 
-> 如果未安装 Git Bash，bash 工具会自动降级到 cmd.exe（Windows 原生命令），输出会带 `[cmd.exe 回退]` 前缀。
+> **未安装 Git Bash 时 bash 工具不降级到 cmd.exe**：自 #170 起改为「强制 Git Bash」——缺 Git Bash 时
+> bash 工具直接返回可操作的诊断（提示安装 Git for Windows，或在 config.json 设 `BASH_PATH` 指向 bash.exe），
+> 而不是悄悄换一套 shell 语言。管道 / `&&` / 进程组击杀的语义在两套 shell 下差异巨大，混用会让同一条命令时对时错。

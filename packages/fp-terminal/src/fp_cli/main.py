@@ -226,6 +226,8 @@ async def main():
     # SIGTERM 同样走优雅取消：父进程 subagent 超时先 terminate()，
     # 让子进程有机会走 finally → shutdown → save_and_summarize 写摘要。
     # 使用专用软中断 handler（不 cancel task，否则 finally 里的 await 会中断）。
+    # 平台语义（#170）：Windows 能装 SIGTERM 处理器，但系统从不投递该信号
+    # （无 POSIX 信号模型）——那边靠 Ctrl+C 走 SIGINT；安装本身不报错，故无需分支。
     signal.signal(signal.SIGTERM, _raw_sigterm_handler)
 
     # headless 无交互语境，logo 只会污染驻留日志；TUI 有自己的欢迎屏

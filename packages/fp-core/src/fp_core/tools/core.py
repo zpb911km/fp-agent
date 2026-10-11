@@ -18,17 +18,15 @@ import asyncio
 import contextlib
 import difflib
 import hashlib
-import locale
 import os
 import re
-import signal
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, TypedDict
 
-from fp_core.platform_utils import find_bash, is_windows
+from fp_core.platform_utils import find_bash, kill_process_tree
 
 # ── OpenAI function calling schema 类型（精确声明，替代裸 dict） ──────────
 
@@ -147,20 +145,44 @@ class ToolSpec:
 
 
 async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
-    """击杀整个进程组（shell 及其所有子进程），防止孤儿泄漏。
+    """击杀整个进程树（shell 及其所有子进程），防止孤儿泄漏。
 
-    必须配合 start_new_session=True 使用：子进程独立会话/进程组，
-    killpg(proc.pid) 只杀该组，不波及宿主进程。
+    POSIX：子进程以 ``start_new_session=True`` 独立成组，按组击杀，不波及宿主。
+    Windows：无进程组概念（``start_new_session`` 是 no-op），改由
+             ``taskkill /F /T`` 按父子关系递归终止整棵树。
+
+    平台差异全部收敛在 ``platform_utils.kill_process_tree``，本函数只管降级策略——
+    业务代码里不出现 ``os.killpg`` / ``signal.SIGKILL``（两者在 Windows 上均不可用）。
     """
     if proc.returncode is not None:
         return
     try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError) as e:
-        # 进程组已不存在（恰好退出）→ 忽略；权限不足 → 退化为只杀主进程
-        if isinstance(e, PermissionError):
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
+        kill_process_tree(proc.pid)
+    except ProcessLookupError:
+        return  # 进程/进程组已不存在（恰好退出）
+    except (PermissionError, OSError):
+        # 权限不足或无法枚举子树 → 退化为只杀主进程（至少不留直接子进程）
+        with contextlib.suppress(ProcessLookupError, OSError):
+            proc.kill()
+
+
+def _git_bash_missing_message() -> str:
+    """Windows 缺 Git Bash 时的可操作诊断（强制 Git Bash 策略，不降级 cmd）。
+
+    此路径只在 Windows + 未找到真 bash 时触发（POSIX 上 find_bash 恒返回 "bash"）。
+    要点：说清「为什么不能用」+「怎么修」，而不是抛一句 FileNotFoundError。
+    """
+    from fp_core.platform_utils import check_git_bash
+
+    _ok, detail = check_git_bash()
+    return (
+        "❌ 未找到 Git Bash，bash 工具无法执行。\n"
+        f"{detail}\n"
+        "提示：FP 在 Windows 上强制使用 Git Bash（不降级 cmd/PowerShell）——"
+        "两套 shell 的管道/进程语义不同，混用会让同一条命令时对时错。\n"
+        "安装 Git for Windows 后重开终端即可；也可在 config.json 里设 "
+        "BASH_PATH 指向 bash.exe 的完整路径。"
+    )
 
 
 # ── bash 副作用检查 ─────────────────────────────────────────────────────
@@ -227,23 +249,8 @@ async def _format_bash_result(
     duration: float,
     output: str,
     stderr_text: str,
-    cmd_prefix: str,
-    out_f: Any = None,
-    err_f: Any = None,
 ) -> str:
     """bash 结果统一格式化（前台直返与后台收集共用 — 单一出口）"""
-    if cmd_prefix and output.strip():
-        if "\ufffd" in output and out_f is not None:
-            enc = locale.getpreferredencoding()
-            out_f.seek(0)
-            output = out_f.read().decode(enc, errors="replace")
-            if err_f:
-                err_f.seek(0)
-                stderr_text2 = err_f.read().decode(enc, errors="replace")
-                if stderr_text2.strip():
-                    output += f"\n[stderr]\n{stderr_text2}"
-        return cmd_prefix + output.lstrip()
-
     if returncode != 0:
         return f"❌ 命令执行失败（exit={returncode}，{duration:.1f}s）\n命令: {command}\n{output}"
     if len(output) < 3000:
@@ -279,7 +286,6 @@ async def _bash_collect(
     out_f: Any,
     err_f: Any,
     command: str,
-    cmd_prefix: str,
     start_time: float,
 ) -> str:
     """超时转后台（P3）的执行体：继续等待进程并收集输出。
@@ -302,7 +308,7 @@ async def _bash_collect(
         stderr_text = err_f.read().decode("utf-8", errors="replace") if err_f else ""
         if stderr_text.strip():
             output = f"{output}\n[stderr]\n{stderr_text}" if output else f"[stderr]\n{stderr_text}"
-        return await _format_bash_result(command, returncode, duration, output, stderr_text, cmd_prefix, out_f, err_f)
+        return await _format_bash_result(command, returncode, duration, output, stderr_text)
     finally:
         with contextlib.suppress(Exception):
             out_f.close()
@@ -323,8 +329,11 @@ async def _execute_bash(
       继承管道写端，导致 bash 工具无谓阻塞（等后台进程结束）。
     - 文件重定向后 _pipes 为空，wait() 只等进程退出，后台命令即时返回；
       同时天然规避管道 64KB 死锁，大输出由文件承载。
-    - 配合 start_new_session=True（独立进程组）+ killpg 击杀，SIGINT/超时
+    - 配合 start_new_session=True + 进程树击杀，SIGINT/超时
       时 shell 与子进程一并清理，不挂死、不泄漏。
+      平台语义（#170）：POSIX 上 start_new_session 让子进程独立成组，
+      killpg 按组击杀；Windows 上 start_new_session 是静默 no-op、也没有进程组，
+      改由 platform_utils.kill_process_tree 走 `taskkill /F /T` 按父子关系递归终止。
 
     Args:
         command: 要执行的 shell 命令
@@ -393,7 +402,6 @@ async def _execute_bash(
             ensure_ascii=False,
         )
 
-    cmd_prefix = ""
     start_time = time.monotonic()
     # 手动管理文件（非 with）：on_timeout=background 移交时所有权转给
     # _bash_collect，前台不得关闭（否则后台收集器读不到输出）。
@@ -402,38 +410,23 @@ async def _execute_bash(
     _handed_off = False
     try:
         try:
-            if is_windows():
-                bash_path = find_bash()
-                if bash_path:
-                    proc = await asyncio.create_subprocess_exec(
-                        bash_path,
-                        "-c",
-                        command,
-                        stdout=out_f,
-                        stderr=err_f,
-                        start_new_session=True,
-                    )
-                else:
-                    cmd = f"chcp 65001 >nul & {command}"
-                    proc = await asyncio.create_subprocess_shell(
-                        cmd,
-                        stdout=out_f,
-                        stderr=err_f,
-                        start_new_session=True,
-                    )
-                    cmd_prefix = "[cmd.exe 回退] "
-            else:
-                # 显式用 bash 而非 create_subprocess_shell（后者走 /bin/sh，
-                # Linux 上常为 dash：不支持 ${var:0:6}、[[ ]]、heredoc 差异等
-                # bash 语法，曾导致部署脚本反复 Bad substitution 返工）
-                proc = await asyncio.create_subprocess_exec(
-                    find_bash() or "bash",
-                    "-c",
-                    command,
-                    stdout=out_f,
-                    stderr=err_f,
-                    start_new_session=True,
-                )
+            # 强制 Git Bash 策略：不降级 cmd/PowerShell。
+            # 降级意味着两套 shell 语言（管道/&&/进程组击杀语义天差地别），
+            # 命令能否跑取决于用户机器状态——这种不确定性比"明确报缺"更坏。
+            bash_path = find_bash()
+            if bash_path is None:
+                return _git_bash_missing_message()
+            # 显式用 bash 而非 create_subprocess_shell（后者走 /bin/sh，
+            # Linux 上常为 dash：不支持 ${var:0:6}、[[ ]]、heredoc 差异等
+            # bash 语法，曾导致部署脚本反复 Bad substitution 返工）
+            proc = await asyncio.create_subprocess_exec(
+                bash_path,
+                "-c",
+                command,
+                stdout=out_f,
+                stderr=err_f,
+                start_new_session=True,
+            )
 
             try:
                 returncode = await asyncio.wait_for(proc.wait(), timeout=timeout)
@@ -455,7 +448,7 @@ async def _execute_bash(
 
                 job = start_job(
                     f"bash(超时转后台): {command.strip()[:50]}",
-                    _bash_collect(proc, out_f, err_f, command, cmd_prefix, start_time),
+                    _bash_collect(proc, out_f, err_f, command, start_time),
                 )
                 _handed_off = True
                 return _json.dumps(
@@ -484,49 +477,7 @@ async def _execute_bash(
             stderr_text = err_f.read().decode("utf-8", errors="replace") if err_f else ""
             if stderr_text.strip():
                 output = f"{output}\n[stderr]\n{stderr_text}" if output else f"[stderr]\n{stderr_text}"
-
-            if cmd_prefix and output.strip():
-                if "\ufffd" in output:
-                    enc = locale.getpreferredencoding()
-                    out_f.seek(0)
-                    output = out_f.read().decode(enc, errors="replace")
-                    if err_f:
-                        err_f.seek(0)
-                        stderr_text2 = err_f.read().decode(enc, errors="replace")
-                        if stderr_text2.strip():
-                            output += f"\n[stderr]\n{stderr_text2}"
-                return cmd_prefix + output.lstrip()
-
-            if returncode != 0:
-                return f"❌ 命令执行失败（exit={returncode}，{duration:.1f}s）\n命令: {command}\n{output}"
-            if len(output) < 3000:
-                return output
-
-            _fd, _path = tempfile.mkstemp(prefix="fp_bash_", suffix=".log")
-            with os.fdopen(_fd, "w", encoding="utf-8") as _f:
-                _f.write(output)
-
-            # 结构化预览：头部 + 尾部 + stderr 摘要，让 LLM 一次拿到关键信息
-            # （报错通常在尾部或 stderr，旧实现只给头部 200 字符，常漏掉真正要看的）
-            total_chars = len(output)
-            total_lines = output.count("\n") + 1
-            head = output[:200]
-            tail = output[-200:] if total_chars > 400 else ""
-
-            summary = (
-                f"✅ 命令执行成功（exit=0，{duration:.1f}s）\n"
-                f"输出较长（{total_chars} 字符 / {total_lines} 行），已保存至 {_path}"
-            )
-            if stderr_text.strip():
-                summary += f"\n⚠️ stderr 存在（{len(stderr_text)} 字符），开头：\n{stderr_text[:200]}"
-            return (
-                f"{summary}\n\n"
-                f"── 头部 200 字符 ────────────────────────\n{head}\n"
-                f"────────────────────────────────────────\n"
-                f"── 尾部 200 字符 ────────────────────────\n{tail}\n"
-                f"────────────────────────────────────────\n\n"
-                f"需要完整内容 → read_file({_path!r})"
-            )
+            return await _format_bash_result(command, returncode, duration, output, stderr_text)
         except Exception as e:
             return f"错误：{e}"
     finally:

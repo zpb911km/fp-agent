@@ -36,6 +36,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, cast
 
+from fp_core.platform_utils import process_alive
+
 # ── 存储布局 ────────────────────────────────────────────
 JOB_DIR = os.path.join(tempfile.gettempdir(), "fp_jobs")
 
@@ -291,11 +293,7 @@ def sweep_stale() -> None:
             if data.get("id") in job_registry:
                 continue
             pid = int(data.get("pid") or 0)
-            alive = False
-            if pid > 0:
-                with contextlib.suppress(OSError, ProcessLookupError):
-                    os.kill(pid, 0)
-                    alive = True
+            alive = pid > 0 and process_alive(pid)
             if not alive:
                 data["status"] = "killed"
                 data["error"] = data.get("error") or "进程退出时未完成（stale 清扫）"

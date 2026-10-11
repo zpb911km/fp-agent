@@ -8,7 +8,7 @@
 流程（旧实例发起，见用户红线 reload_gate_protocol）：
     旧实例: 落盘会话（tool 面补齐全轮缺失的 tool 结果）→ 写 handoff 文件
             → 设置 FP_RELOAD_HANDOFF/FP_RELOAD_SID 环境变量
-            → os.execve 按原启动命令重启；任何一步失败全回滚，当前实例无损
+            → restart_self 按原启动命令重启；任何一步失败全回滚，当前实例无损
     新实例: 入口构造 Agent 时传 resume=FP_RELOAD_SID 恢复会话
             → Agent 就绪后调 consume_reload_handoff()
               · kind="tool"    → 置 state._pending_continue，返回 True
@@ -42,6 +42,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from fp_core.core.lifecycle import LifecycleHook
+from fp_core.platform_utils import restart_self
 
 if TYPE_CHECKING:
     from fp_core.core.agent import Agent
@@ -205,7 +206,10 @@ async def perform_exec_reload(state: State, *, kind: str, tool_result_text: str 
             os.remove(hp)
         return f"❌ handoff 写入失败，未重启（已回滚）: {e}"
 
-    # ── 4) execve 按原启动命令重启（旧进程到此为止，不再返回）──
+    # ── 4) 按原启动命令重启（旧进程到此为止，不再返回）──
+    #    平台差异收敛在 platform_utils.restart_self：
+    #      POSIX  → os.execve（真·映像替换，PID 不变）
+    #      Windows→ spawn 新实例 + 本进程退出（execve 在 Windows 非真替换）
     #    失败则全部回滚——当前实例继续活着，可修复后重试。
     try:
         cwd = launch.get("cwd")
@@ -213,10 +217,10 @@ async def perform_exec_reload(state: State, *, kind: str, tool_result_text: str 
             os.chdir(cwd)
         exe = launch_argv[0]
         if os.path.isfile(exe) and os.access(exe, os.X_OK):
-            os.execve(exe, launch_argv, env)
+            restart_self(launch_argv, env)
         else:
             # 非可执行入口（如 python 脚本路径）：经解释器启动
-            os.execve(sys.executable, [sys.executable, exe] + launch_argv[1:], env)
+            restart_self([sys.executable, exe, *launch_argv[1:]], env)
     except OSError as e:
         if snapshot is not None:
             conv.replace_all(snapshot)
@@ -224,9 +228,9 @@ async def perform_exec_reload(state: State, *, kind: str, tool_result_text: str 
                 session.save_context(conv.to_serializable())
         with contextlib.suppress(OSError):
             os.remove(hp)
-        return f"❌ exec 重启失败（{e}）。已回滚消息与 handoff，当前实例仍在运行——请修复后重试。"
+        return f"❌ 重启失败（{e}）。已回滚消息与 handoff，当前实例仍在运行——请修复后重试。"
 
-    return "❌ execve 意外返回（进程未被替换）。请检查 FP_LAUNCH_JSON。"
+    return "❌ 重启意外返回（进程未被替换）。请检查 FP_LAUNCH_JSON。"
 
 
 def consume_reload_handoff(agent: Agent) -> bool:

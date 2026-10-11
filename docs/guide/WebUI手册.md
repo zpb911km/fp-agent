@@ -513,6 +513,8 @@ ws://host:port/ws/chat?token=your_token
 - 使用 `secrets.compare_digest()` 进行**常量时间比较**，防止时序攻击
 - Token 存储在浏览器 `sessionStorage`（关闭标签页即失效）
 - 部署时应确保 `.webui_token` 文件不被公开访问
+- 文件权限：写入后 POSIX 平台收窄为 `0o600`（`platform_utils.restrict_file_permissions`）；
+  Windows 无 POSIX 权限位，此处是有意的 no-op——访问控制由用户目录 ACL 承担
 
 ---
 

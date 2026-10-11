@@ -22,7 +22,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import time
@@ -30,6 +29,7 @@ from datetime import date, datetime
 from typing import Any, cast
 
 from fp_core import config
+from fp_core.platform_utils import FileLock
 
 from . import tree as memory_tree
 
@@ -245,41 +245,39 @@ def run(force: bool = False) -> str:
         except OSError:
             pass
 
-    # ── flock 单写者（同进程多次 open 亦互斥；拿不到锁 = 别处正在跑，立即让位）──
-    lock_fd = os.open(LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o644)
+    # ── 排他锁单写者（同进程多次 open 亦互斥；拿不到锁 = 别处正在跑，立即让位）──
+    # 平台差异（POSIX flock / Windows msvcrt.locking）收敛在 FileLock 里——
+    # 此前这里裸 `import fcntl`，而插件顶层 import 本模块，Windows 上会
+    # 在加载期直接 ImportError，整个记忆子系统起不来。
+    lock = FileLock(LOCK_PATH)
+    if not lock.acquire():
+        return "巩固检测：另一实例持锁（单写者），本次跳过"
     try:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return "巩固检测：另一实例持锁（单写者），本次跳过"
-        try:
-            all_findings = [detect("~"), detect(".")]
-            entries: list[dict[str, Any]] = []
-            for f in all_findings:
-                for key in ("split", "merge", "empty", "orphan", "stale", "near_dup", "misfile", "forbidden"):
-                    raw_items: Any = f.get(key) or []
-                    if not isinstance(raw_items, list):
-                        continue
-                    for item in cast(list[Any], raw_items):
-                        entries.append({
-                            "ts": datetime.now().isoformat(timespec="seconds"),
-                            "kind": key,
-                            "root": f["root"],
-                            "item": item,
-                        })
-            _journal(entries)
-            report = _write_report(today, all_findings)
+        all_findings = [detect("~"), detect(".")]
+        entries: list[dict[str, Any]] = []
+        for f in all_findings:
+            for key in ("split", "merge", "empty", "orphan", "stale", "near_dup", "misfile", "forbidden"):
+                raw_items: Any = f.get(key) or []
+                if not isinstance(raw_items, list):
+                    continue
+                for item in cast(list[Any], raw_items):
+                    entries.append({
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "kind": key,
+                        "root": f["root"],
+                        "item": item,
+                    })
+        _journal(entries)
+        report = _write_report(today, all_findings)
 
-            # 门控盖章
-            with open(GATE_PATH, "w", encoding="utf-8") as fp:
-                fp.write(today)
+        # 门控盖章
+        with open(GATE_PATH, "w", encoding="utf-8") as fp:
+            fp.write(today)
 
-            counts = {
-                k: sum(len(f.get(k) or []) for f in all_findings)
-                for k in ("split", "merge", "near_dup", "misfile", "orphan", "stale")
-            }
-            return f"巩固检测完成：{counts} | journal={JOURNAL_PATH} | 报告={report}"
-        finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        counts = {
+            k: sum(len(f.get(k) or []) for f in all_findings)
+            for k in ("split", "merge", "near_dup", "misfile", "orphan", "stale")
+        }
+        return f"巩固检测完成：{counts} | journal={JOURNAL_PATH} | 报告={report}"
     finally:
-        os.close(lock_fd)
+        lock.release()

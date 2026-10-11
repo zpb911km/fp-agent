@@ -7,7 +7,6 @@
 - 插件 memory 只接线不测逻辑（ON_INITIALIZED → run，异常不阻塞启动）
 """
 
-import fcntl
 import json
 import os
 from datetime import date, datetime, timedelta
@@ -15,6 +14,7 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from fp_core import config
+from fp_core.platform_utils import FileLock
 from fp_core.plugins.memory import consolidate as mc
 from fp_core.plugins.memory import tree as memory_tree
 
@@ -113,15 +113,14 @@ def test_run_flock_single_writer(memory_env):
     g = memory_env["global"]
     _write(g, "skill", "s1", "技能条目一")
 
-    # 同进程第二个 open fd 持锁 → flock 互斥成立
-    fd = os.open(mc.LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o644)
+    # 另一实例（此处用第二个 FileLock 具象化）持锁 → 单写者互斥成立
+    holder = FileLock(mc.LOCK_PATH)
+    assert holder.acquire(), "测试前置：holder 应能拿到锁"
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         out = mc.run(force=True)
         assert "单写者" in out and "跳过" in out
-        fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
-        os.close(fd)
+        holder.release()
 
     out2 = mc.run(force=True)
     assert "巩固检测完成" in out2

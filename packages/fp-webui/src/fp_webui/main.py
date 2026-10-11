@@ -35,7 +35,7 @@ from contextlib import asynccontextmanager, suppress
 from typing import Any, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
-from fp_core.platform_utils import get_data_dir
+from fp_core.platform_utils import get_data_dir, restrict_file_permissions
 
 # ── FastAPI / WebSocket ─────────────────────────────────
 try:
@@ -163,9 +163,7 @@ def _load_or_create_token() -> str:
     try:
         with open(_TOKEN_FILE, "w") as f:
             f.write(new_token)
-        os.chmod(_TOKEN_FILE, 0o600)
-    except PermissionError:
-        pass  # Windows 不支持 chmod，静默跳过
+        restrict_file_permissions(_TOKEN_FILE, 0o600)  # Windows 上是 no-op
     except OSError:
         pass
     return new_token
