@@ -14,12 +14,18 @@ from collections.abc import Generator
 from unittest.mock import patch
 
 from fp_cli.style import get_display_style
-from fp_core.platform_utils import get_config_dir
+from fp_core import platform_utils
 
 
 @contextlib.contextmanager
 def _write_config(data: object) -> Generator[None]:
-    """把 data 写进临时 $XDG_CONFIG_HOME/fp/config.json，进入时生效、退出时还原 env。
+    """把 data 写进临时配置目录，进入时生效、退出时还原。
+
+    隔离靠**打补丁**（patch ``platform_utils.get_config_dir``），而非
+    ``XDG_CONFIG_HOME`` 环境变量——后者只在 Linux 生效，macOS/Windows 的
+    ``get_config_dir()`` 不读它，测试会悄悄读到真实用户配置目录（#169）。
+    ``style.py`` / ``display.py`` 均在函数内 ``from fp_core.platform_utils import
+    get_config_dir``，故补丁在调用点命中。
 
     传 str 时按原样写入（用于构造坏 JSON）。
     """
@@ -29,7 +35,7 @@ def _write_config(data: object) -> Generator[None]:
     path = os.path.join(cfg_dir, "config.json")
     with open(path, "w", encoding="utf-8") as f:
         f.write(data if isinstance(data, str) else json.dumps(data))
-    with patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}):
+    with patch("fp_core.platform_utils.get_config_dir", lambda: cfg_dir):
         yield
 
 
@@ -76,8 +82,10 @@ class TestGetDisplayStyle(unittest.TestCase):
 
     def test_missing_config_returns_empty(self) -> None:
         tmp = tempfile.mkdtemp(prefix="fp-style-empty-")
-        with patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}):
-            self.assertEqual(get_config_dir(), os.path.join(tmp, "fp"))
+        cfg_dir = os.path.join(tmp, "fp")
+        # 隔离配置目录：patch 路径来源函数（而非 XDG env，见 _write_config 说明）
+        with patch("fp_core.platform_utils.get_config_dir", lambda: cfg_dir):
+            self.assertEqual(platform_utils.get_config_dir(), cfg_dir)
             self.assertEqual(get_display_style("info")["color"], "")
 
 
