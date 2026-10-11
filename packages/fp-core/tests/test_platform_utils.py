@@ -304,3 +304,53 @@ class TestRestartSelf:
             assert child_pid != proc.pid, "Windows 应 spawn 新进程（PID 必变）"
         else:
             assert child_pid == proc.pid, "POSIX execve 应保持同一 PID"
+
+
+class TestFindBashFallback:
+    """find_bash 的 Windows 搜索链：BASH_PATH → PATH → 常见安装位置。"""
+
+    def _fake_bash(self, root, rel=("Git", "bin", "bash.exe")):  # noqa: ANN001, ANN202
+        p = root.joinpath(*rel)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x" * (300 * 1024))  # >200KB：走「非 WSL 空壳」快速路径
+        return p
+
+    def test_falls_back_to_default_install_location(self, tmp_path, monkeypatch):
+        """装了 Git for Windows 但没加 PATH → 仍应经默认安装位置找到。"""
+        import fp_core.config as config
+
+        bash = self._fake_bash(tmp_path / "PROGRAMFILES")
+        monkeypatch.setattr(platform_utils, "is_windows", lambda: True)
+        monkeypatch.setattr(config, "BASH_PATH", "", raising=False)
+        monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "PROGRAMFILES"))
+        monkeypatch.setenv("PROGRAMW6432", str(tmp_path / "nope"))
+        monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path / "nope"))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "nope"))
+        monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+        platform_utils.clear_bash_cache()
+        try:
+            assert platform_utils.find_bash() == str(bash)
+            ok, detail = platform_utils.check_git_bash()
+            assert ok is True
+            assert str(bash) in detail
+        finally:
+            platform_utils.clear_bash_cache()
+
+    def test_returns_none_when_nothing_found(self, tmp_path, monkeypatch):
+        import fp_core.config as config
+
+        monkeypatch.setattr(platform_utils, "is_windows", lambda: True)
+        monkeypatch.setattr(config, "BASH_PATH", "", raising=False)
+        monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "nope"))
+        monkeypatch.setenv("PROGRAMW6432", str(tmp_path / "nope"))
+        monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path / "nope"))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "nope"))
+        monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+        platform_utils.clear_bash_cache()
+        try:
+            assert platform_utils.find_bash() is None
+            ok, detail = platform_utils.check_git_bash()
+            assert ok is False
+            assert "git-scm.com" in detail  # 安装指引，而非裸 None
+        finally:
+            platform_utils.clear_bash_cache()

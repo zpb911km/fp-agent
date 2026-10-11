@@ -134,6 +134,31 @@ def _is_wsl_bash_stub(path: str) -> bool:
         return False  # 无法确认则放行（允许执行）
 
 
+def _git_bash_candidate_paths() -> list[str]:
+    """Git for Windows 的常见安装位置（PATH 未收录时的兜底探测）。
+
+    场景：用户装了 Git for Windows 但安装时没勾「加入 PATH」——此时单靠扫
+    PATH 找不到 bash.exe，强制 Git Bash 策略会直接判「缺失」，体验很差。
+    Git for Windows 默认装在 ``<ProgramFiles>\\Git\\bin``，逐处探一遍。
+    """
+    # 全大写：Windows 的 os.environ 会把键名归一化到大写，
+    # 用小写驼峰 '"ProgramFiles"' 在 Windows 上取不到值。
+    roots = (
+        os.environ.get("PROGRAMFILES"),
+        os.environ.get("PROGRAMW6432"),
+        os.environ.get("PROGRAMFILES(X86)"),
+        os.path.join(os.environ["LOCALAPPDATA"], "Programs") if os.environ.get("LOCALAPPDATA") else None,
+    )
+    out: list[str] = []
+    for root in roots:
+        if not root:
+            continue
+        cand = os.path.join(root, "Git", "bin", "bash.exe")
+        if cand not in out:
+            out.append(cand)
+    return out
+
+
 def find_bash() -> str | None:
     """在 Windows 上找到真正的 Git Bash，找不到返回 None
 
@@ -141,7 +166,8 @@ def find_bash() -> str | None:
       0. 模块级缓存                 → 避免重复扫描
       1. 用户配置 BASH_PATH         → config.json / 环境变量
       2. PATH 中的 bash（跳过 WSL 空壳）
-      3. 返回 None                  → 降级 cmd.exe
+      3. 常见安装位置（Git for Windows 默认路径，PATH 未收录时兜底）
+      4. 返回 None                  → 由调用方给出安装指引（强制 Git Bash，不降级）
 
     Linux/macOS 上始终返回 "bash"（系统自带）。
     """
@@ -175,7 +201,13 @@ def find_bash() -> str | None:
             _bash_cache = full
             return _bash_cache
 
-    # ── 3. 全部失败 ──
+    # ── 3. 常见安装位置兜底 ──
+    for cand in _git_bash_candidate_paths():
+        if os.path.isfile(cand) and not _is_wsl_bash_stub(cand):
+            _bash_cache = cand
+            return _bash_cache
+
+    # ── 4. 全部失败 ──
     _bash_cache = None
     return None
 
