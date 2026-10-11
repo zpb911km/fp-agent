@@ -35,8 +35,8 @@ import contextlib
 import time
 from typing import Any
 
-from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
-from fp_core.plugins.base.plugin import Plugin
+# 协议 §5：前端只许 fp_core.api（Plugin/HookContext/LifecycleHook 均由其导出）
+from fp_core.api import HookContext, LifecycleHook, LifecycleManager, Plugin
 
 
 class WebUIBridge(Plugin):
