@@ -41,7 +41,7 @@ from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.theme import BUILTIN_THEMES
 from textual.widget import Widget
-from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
+from textual.widgets import Button, Collapsible, Input, Markdown, OptionList, Static, TextArea
 
 from fp_core.api import IOChannel, portal
 from fp_core.logger import Logger
@@ -243,22 +243,13 @@ class TUIIO(IOChannel):
         self._flush_scheduled = False
 
     def tool_call(self, name: str, args: dict[str, Any]) -> None:
-        self._flush_now()  # 先落盘在途流段，再插工具行（顺序不变量）
-        try:
-            rendered = json.dumps(args, ensure_ascii=False, default=str)
-        except (TypeError, ValueError):
-            rendered = str(args)
-        if len(rendered) > 160:
-            rendered = rendered[:160] + "…"
-        self._emit("tool", f"{name}({rendered})")
+        self._flush_now()  # 先落盘在途流段，再插工具卡（顺序不变量）
+        # 结构化载荷：完整参数交给展示层（卡体），摘要由展示层压缩
+        self._emit("tool", {"name": name, "args": args})
 
     def tool_result(self, result: str) -> None:
         self._flush_now()
-        lines = result.splitlines() or [""]
-        head = "\n".join(lines[:6])
-        if len(lines) > 6:
-            head += f"\n… （共 {len(lines)} 行）"
-        self._emit("tool_result", head)
+        self._emit("tool_result", {"text": result})
 
     async def ask(
         self,
@@ -459,6 +450,60 @@ class PromptInput(TextArea):
 
 
 # ══════════════════════════════════════════════════════════════
+# 工具卡片 — 调用/返回的可折叠展示（TUI 版 webui tool-msg）
+# ══════════════════════════════════════════════════════════════
+
+#: 工具结果卡展开时的最大渲染行数：超出即截断，防超长输出拖垮终端布局。
+#: 折叠态只露标题（无内容渲染开销），故默认成本不高于旧的「6 行预览」。
+TOOL_RESULT_MAX_LINES = 200
+
+
+class ToolCard(Collapsible):
+    """工具调用/返回的可折叠卡片。
+
+    与 webui 的 tool-msg 同构：默认折叠，点击标题栏（或聚焦后回车）开合。
+    标题用 rich ``Text`` 承载——工具名/参数里的 ``[`` 原样显示，不会被当作
+    Textual 标记解析。完整内容放卡体，溢出由构造方截断。
+    """
+
+    def __init__(self, header: Text, body: str, *, card_class: str) -> None:
+        super().__init__(
+            Static(Text(body)),
+            title=cast("str", header),  # rich Text：from_text 保形且不解析标记
+            collapsed=True,
+            classes=card_class,
+        )
+
+
+def _tool_card(payload: Any) -> ToolCard:
+    """构造工具调用卡：标题=工具名，展开=完整参数（pretty JSON）。"""
+    data: dict[str, Any] = cast("dict[str, Any]", payload) if isinstance(payload, dict) else {}
+    name = str(data.get("name", ""))
+    args = data.get("args", {})
+    try:
+        pretty = json.dumps(args, ensure_ascii=False, indent=2, default=str)
+    except (TypeError, ValueError):
+        pretty = str(args)
+    header = Text(f"{tui_glyph('tool')} ", style=tui_style("tool")) + Text(name, style=tui_style("tool"))
+    return ToolCard(header, pretty, card_class="tool-card")
+
+
+def _tool_result_card(payload: Any) -> ToolCard:
+    """构造工具返回卡：标题=返回行数，展开=完整结果（超长截断）。"""
+    data: dict[str, Any] = cast("dict[str, Any]", payload) if isinstance(payload, dict) else {}
+    text = str(data.get("text", ""))
+    lines = text.splitlines() or [""]
+    total = len(lines)
+    body = text
+    if total > TOOL_RESULT_MAX_LINES:
+        body = "\n".join(lines[:TOOL_RESULT_MAX_LINES]) + f"\n… （共 {total} 行，已截断）"
+    header = Text(f"{tui_glyph('tool_result')} ", style=tui_style("tool_result")) + Text(
+        f"返回 · {total} 行", style=tui_style("tool_result")
+    )
+    return ToolCard(header, body, card_class="tool-result-card")
+
+
+# ══════════════════════════════════════════════════════════════
 # FPApp — 主界面
 # ══════════════════════════════════════════════════════════════
 
@@ -478,6 +523,11 @@ class FPApp(App[None]):
         padding: 0 1;
     }
     #chat { height: 1fr; padding: 0 1; }
+    .tool-card, .tool-result-card {
+        border: none; padding: 0; background: transparent; height: auto;
+    }
+    .tool-card > CollapsibleTitle, .tool-result-card > CollapsibleTitle { padding: 0 1; }
+    .tool-card > Contents, .tool-result-card > Contents { padding: 1 0 1 2; }
     #hint {
         height: auto; max-height: 9;
         background: $panel; color: $text;
@@ -759,11 +809,9 @@ class FPApp(App[None]):
         elif kind == "error":
             self._line(str(payload), tui_style("error"))
         elif kind == "tool":
-            self._mount_block(
-                Text(f"  {tui_glyph('tool')} ", style=tui_style("tool")) + Text(str(payload), style=tui_style("tool"))
-            )
+            self._mount_block(_tool_card(payload))
         elif kind == "tool_result":
-            self._line(str(payload), tui_style("tool_result"))
+            self._mount_block(_tool_result_card(payload))
         elif kind == "think":
             if self._live_kind == "content":
                 self._finalize_live()

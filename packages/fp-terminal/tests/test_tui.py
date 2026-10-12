@@ -149,6 +149,16 @@ class TestTUIIOBuffering(unittest.TestCase):
         pending = io.take_pending()
         self.assertEqual([m.kind for m in pending], ["content", "tool"])
 
+    def test_tool_events_carry_full_payload(self) -> None:
+        """结构化载荷：完整参数/结果交给展示层（卡片），不再在此截断。"""
+        io = TUIIO()
+        big = "\n".join(str(i) for i in range(50))
+        io.tool_call("bash", {"command": "ls", "n": 1})
+        io.tool_result(big)
+        pending = io.take_pending()
+        self.assertEqual(pending[0].payload, {"name": "bash", "args": {"command": "ls", "n": 1}})
+        self.assertEqual(pending[1].payload, {"text": big})  # 未截断
+
 
 class TestPilotSmoke(unittest.TestCase):
     """pilot 冒烟 — headless 启动 TUI，验证挂载与欢迎渲染。

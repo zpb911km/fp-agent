@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from fp_cli.tui import TUIIO, AskModal, FPApp, PromptInput
+from fp_cli.tui import TOOL_RESULT_MAX_LINES, TUIIO, AskModal, FPApp, PromptInput, ToolCard
 
 
 class _FakeStatus:
@@ -514,6 +514,105 @@ class TestThemeSignalPersist(unittest.TestCase):
         # fp-custom 不是内置名 → 不落盘（它只是 config 里 palette 的派生结果）
         written = self._run("fp-custom", register_custom=True)["written"]
         self.assertEqual(written["tui"]["theme"], "")  # type: ignore[index]
+
+
+class TestToolCards(unittest.TestCase):
+    """工具调用/返回 → 可折叠卡片（默认折叠、点击开合、内容保形不解析标记）。"""
+
+    def _run(self, scenario):  # noqa: ANN001, ANN202 — 桩场景
+        from fp_core.api import portal as real_portal
+
+        fake = _FakePortal()
+        out: dict[str, object] = {}
+
+        async def _wrap() -> None:
+            io = TUIIO()
+            app = FPApp(io)
+            io.attach(app)
+            with (
+                patch.object(type(real_portal), "is_open", property(lambda self: True)),
+                patch.object(real_portal, "run", fake, create=True),
+            ):
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    out.update(await scenario(io, app, pilot))
+
+        asyncio.run(_wrap())
+        return out
+
+    @staticmethod
+    def _title(card):  # noqa: ANN001, ANN205 — 卡片
+        from textual.widgets._collapsible import CollapsibleTitle
+
+        return card.query_one(CollapsibleTitle).render().plain
+
+    def test_cards_default_collapsed_and_titled(self) -> None:
+        async def _scenario(io, app, pilot):  # noqa: ANN001, ANN202
+            io.tool_call("bash", {"command": "ls", "timeout": 30})
+            io.tool_result("out1\nout2")
+            await pilot.pause(0.1)
+            cards = list(app.query(ToolCard))
+            return {
+                "n": len(cards),
+                "collapsed": [c.collapsed for c in cards],
+                "titles": [self._title(c) for c in cards],
+            }
+
+        out = self._run(_scenario)
+        self.assertEqual(out["n"], 2)  # 调用卡 + 返回卡
+        self.assertEqual(out["collapsed"], [True, True])  # 默认折叠
+        # 调用卡折叠态只露工具名，参数不外泄
+        title0 = out["titles"][0]  # type: ignore[index]
+        self.assertIn("bash", title0)
+        self.assertNotIn("command", title0)
+        self.assertIn("返回 · 2 行", out["titles"][1])  # type: ignore[operator]
+
+    def test_call_card_body_has_full_args(self) -> None:
+        async def _scenario(io, app, pilot):  # noqa: ANN001, ANN202
+            io.tool_call("bash", {"command": "ls", "timeout": 30})
+            await pilot.pause(0.1)
+            card = app.query(ToolCard).first()
+            body = card.query_one("Contents").query("Static").first().render()
+            return {"body": str(body)}
+
+        out = self._run(_scenario)
+        self.assertIn('"command": "ls"', out["body"])  # type: ignore[operator]
+        self.assertIn('"timeout": 30', out["body"])  # type: ignore[operator]
+
+    def test_click_expands_card(self) -> None:
+        from textual.widgets._collapsible import CollapsibleTitle
+
+        async def _scenario(io, app, pilot):  # noqa: ANN001, ANN202
+            io.tool_call("bash", {"command": "ls"})
+            await pilot.pause(0.1)
+            card = app.query(ToolCard).first()
+            await pilot.click(card.query_one(CollapsibleTitle))
+            await pilot.pause(0.05)
+            return {"collapsed": card.collapsed}
+
+        self.assertFalse(self._run(_scenario)["collapsed"])
+
+    def test_args_brackets_render_literally(self) -> None:
+        async def _scenario(io, app, pilot):  # noqa: ANN001, ANN202
+            io.tool_call("grep", {"pattern": "[a-z]+"})
+            await pilot.pause(0.1)
+            card = app.query(ToolCard).first()
+            body = card.query_one("Contents").query("Static").first().render()
+            return {"body": str(body)}
+
+        # 参数里的 [ ] 不得被当作 Textual 标记解析（rich Text 保形）
+        self.assertIn("[a-z]+", self._run(_scenario)["body"])  # type: ignore[operator]
+
+    def test_long_result_body_truncated(self) -> None:
+        async def _scenario(io, app, pilot):  # noqa: ANN001, ANN202
+            io.tool_result("\n".join(str(i) for i in range(TOOL_RESULT_MAX_LINES + 50)))
+            await pilot.pause(0.1)
+            card = app.query(ToolCard).first()
+            body = card.query_one("Contents").query("Static").first().render()
+            return {"text": str(body)}
+
+        out = self._run(_scenario)
+        self.assertIn("已截断", out["text"])  # type: ignore[operator]
 
 
 if __name__ == "__main__":
