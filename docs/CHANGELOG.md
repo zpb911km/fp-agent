@@ -3,6 +3,45 @@
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/) 和 [Keep a Changelog](https://keepachangelog.com/) 规范。
 
 
+## [0.2.1] — 2026-10-12
+
+### Added
+
+- **记忆树系统**（3489ce5）: 树布局 `<root>/<category>/<name>.md` + 派生缓存（stale 才重写，手动编辑优先）+ 三来源合并视图；注入层改读 level-0 冻结根索引（约 4828→1200 字符，O(类别) 而非 O(条数)，保 prefix cache）；`memory_read` 五入口（空参/name/path/query=FTS5 三段兜底/all=true 逃生档）+ 保存即 upsert 的 FTS5 trigram 索引 + `memory_consolidate` 巩固检测（P4 机检，flock 单写者 + 日门控）+ `scripts/migrate_memory_tree.py` 迁移脚本（已实迁 189 条，往返哈希一致）。
+- **输入架构升级 — core `submit()` 注入式输入 + fp-terminal 迁移 Textual TUI**（c60aa72）: `portal.run.submit()` 三重守卫 → `inject_event` 主动唤醒，忙碌排队空闲即起轮；TUI 三层降级链（L0 Textual → L1 裸 REPL → L2 headless）急救砖不了；prompt-toolkit 退场，历史格式兼容沿用。
+- **多行输入区 `PromptInput(TextArea)` + 发送按钮**（7156e6a, fd231ce）: Enter 换行 / Shift+Enter 发送、高度 auto 增长（max 6 行）；再叠输入区极简重设计（#157）——无背景无分割线、发送钮 ↑ 图标对齐、布局契约测试 ×3。
+- **多行输入 ↑↓ 按行边界翻历史**（4467aab, 386c277）: 分流条件从「有无正文」改为「光标是否在行边界」——首/末行按到底才翻历史，中间行只移光标。
+- **外观面板 Ctrl+T**（04d276f）: 新增 `fp_cli/appearance/` 独立包；config 新增 `tui` 段（theme/palette/styles/symbols/ascii 五分页），语义样式 24 键 + 符号 19 键现场调整即时生效并原子回写；REPL 与 TUI 共读一张表。
+- **WebUI 消息显示全量 ws 事件化 + 工具卡片折叠参数**（da516fb）: 新增 `WebUIBridge` 插件，一切用户消息经 `user_message` 事件驱动渲染（多设备单端口同步、queued 气泡转正、命令 ephemeral 回显）；工具卡输入→输出同卡对照；修复带 token 刷新页面登录遮罩盖满全页。
+- **WebUI 运行中排队发送**（fd231ce, #158）: 运行中 Enter 不再拒绝，入队回 `queued` 事件、气泡 ⏳ 标记、消费时按 FIFO 就地转正。
+- **首跑配置向导 + 零默认硬门禁**（75d5495）: 删除 `get_default_config`/`--init` 占位模板；新增 `setup.ensure_llm_configured` tty 交互向导（密钥隐藏回显、原子写盘、写后 reload 生效），非交互打印引导非 0 退出；配置门禁前置。
+- **Windows 移植 — OS 原语下沉 `platform_utils`**（4907c22, #170）: `kill_process_tree`/`process_alive`/`FileLock`/`restrict_file_permissions`/`restart_self` 中性原语双实现，平台差异只准住一个文件、业务代码零 `if is_windows()`；修掉 `os.killpg`/`fcntl`/`os.kill(pid,0)` 三处装完即坏硬伤。**Breaking**: Windows 上 bash 工具强制 Git Bash、移除 cmd.exe 降级（缺时返回安装指引）。
+- **`find_bash` 兜底探测 Git for Windows 默认安装位置**（9924cbe, #170）: PATH 未命中后探 `%PROGRAMFILES%/Git/bin` 等四处；首跑向导 Windows 先探测并提示。
+- **TUI 工具调用/返回渲染为可折叠卡片**（2a69ab4）: IO 层载荷结构化（`{name,args}`/`{text}`）不再提前截断；`ToolCard` 默认折叠，展开见完整参数/结果，返回卡超 200 行截断防拖垮布局——与 WebUI tool-msg 同构。
+
+### Changed
+
+- **重构: 记忆系统收编为单一 `memory` 插件**（f79b53a）: core 编排层归零，记忆逻辑全部下沉插件。
+- **自动更新改造**（8f6a692）: `do_update` 废弃 `[all]` 整批安装——逐包独立 pip、缺失包仅提示不强装、单包失败不阻塞；网络不进关键路径（后台线程 3s 超时 + `version_cache.json` TTL 24h 原子写），提示由前端在安全点读缓存渲染，零网络无 ANSI 不砸 TUI。
+- **CI: windows-latest 转硬门禁**（862157b, #170）: 摘掉 `continue-on-error`，与 ubuntu/macOS 同级阻断（Actions run 38129758947 全 12 job 全绿实证）。
+- **CI: 跨平台失败清单以 annotations 发布**（6df40ae）: macOS/Windows pytest 步骤把 FAILED/ERROR 打 `::error::`，绕开 Actions 日志鉴权 403 可匿名读。
+- **CI/docs: DOC_RULES 补登 `static/*.html`**（966027a）: WebUI 手册纳入 index.html 门禁。
+- **docs**: CLI 入门手册同步 TUI 新键位与 ↑↓ 行边界行为（386c277 等）。
+
+### Fixed
+
+- **`/reload` 门卫自锁**（86d8372）: 斜杠命令轮被算作忙碌导致空闲时永远拒绝——区分「泵位 `_run_active`」与「门卫位 `is_chat_round_active`」，只在别的整轮真在跑时拒绝；回归测试 `test_reload_guard.py`。
+- **鼠标点选 Markdown 崩溃**（60c0626）: 等价上游 #6643/#6645 竞态——`FPDefaultScreen` 覆写 `get_widget_and_offset_at`，detached 命中降级 miss；不动 site-packages，上游修复后可退场。
+- **Ctrl+C 选区复制优先 + Ctrl+J 发送兜底键**（c569d92, #159）: priority 绑定截胡内建 copy 致选中文本按 Ctrl+C 直接退出——改单一 action 三分支（选区 OSC52 → 忙碌打断 → 空闲 notify 不退出）并补绑 ctrl+shift+c；非 kitty 终端以 Ctrl+J(LF) 兜底 Shift+Enter。
+- **退出总结面板超宽内容折行不丢信息**（e7060ba）: 真因是宽度硬编码 60 致 Token 行差 1 格被 `…` 截断——宽度跟随终端列数、超宽改折行保边框，`_display_width` 在 `wcswidth=-1` 时逐字符回退（CJK 不再算错）。
+- **复制按钮非安全上下文失效**（afdbc71）: `http://LAN-IP` 访问时 `navigator.clipboard` 为 undefined 同步抛错致降级永不执行——判空 + `execCommand` 降级，双通道失败显 ⚠ 不假播放动画。
+- **`WebUIBridge` 改经 `fp_core.api` 导入**（76e317e）: 修 `test_api_surface` 前端导入白名单判红；协议 §5 补列 `LifecycleManager`。
+- **三处根因修复**（0d2c266）: `memory_save` 改同目录 temp + `os.replace` 原子写（多实例共写不再半写截断）；reload/webui 门卫判据 `is_processing` → `is_run_active`（不再漏拒工具执行期）；webui `_stamp_cache` 按 mtime 自动改写 `?_t=` 取代人肉 bump。
+- **macOS 测试隔离失效**（f6d4799, 6458a2d, #169）: `ext_assets`/style 测试依赖 `XDG_*` 环境变量而 macOS `get_data_dir`/`get_config_dir` 不读——改经模块属性调用 + patch 路径来源函数，单一 patch 点跨平台一致。
+- **全新机器/CI 环境自洽**（bf87663）: 根 conftest + 各包 tests/conftest 三层 `setdefault` 兜 LLM key 与 git 身份（runner 全新 HOME 下 87 用例连环挂）。
+- **CI: test job 补装 `pytest-asyncio`**（8d2b16f）: 测试矩阵漏登记 async 执行引擎致 215 用例全红。
+- **`_refresh_status` 定时器在屏幕卸载瞬间 tick 抛 `NoMatches`**（04d276f 内）: 退出/卸载那一拍直接放弃该拍，消除随机 flaky。
+
 ## [0.2.0] — 2026-10-05
 
 ### Added
@@ -439,6 +478,7 @@
 
 | 版本 | 日期 | 摘要 |
 |------|------|------|
+| 0.2.1 | 2026-10-12 | 记忆树系统 + Textual TUI 输入架构（多行输入/外观面板 Ctrl+T/工具折叠卡）+ Windows 移植硬门禁（#170）+ WebUI 消息全量 ws 事件化 + 首跑配置向导 + 记忆收编单一插件 |
 | 0.2.0 | 2026-10-05 | 唯一接口组 Portal 收口（中版本提升）+ 异步主动范式 ask/background/wait_job + Zeta 邻居协议 + ACP elicitation + 依赖声明与 CI 矩阵补齐 |
 | 0.1.14 | 2026-09-28 | 生命周期埋点 49 钩子全链路落点 + reload 统一 execve 激活 + 任务图重构与 /task 控制台 + 宪章守卫 |
 | 0.1.13 | 2026-09-08 | LLM 供应点两级结构 + 思考模式统一控制 + shortcircuit 退化模式 + 任务状态机扩展 + bash 副作用检查 + 全项目类型债清零 |
