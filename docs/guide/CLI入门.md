@@ -27,7 +27,7 @@ fp
 | `--model <spec>` | 覆盖本次激活模型：`provider/model` 精确形式，或 `LLM_PROVIDERS` 表内裸模型名（激活 provider 优先、全表唯一命中次之；查无/歧义则回退配置激活项并告警） |
 | `--session <SID>` | 恢复指定会话，等价于 CLI 的 `-r <SID>`；webui/acp 模式同样生效 |
 | `--docs` | 查看离线文档（等价 `fp docs`） |
-| `--version` / `--update` | 显示版本号 / 检查并自动更新所有 fp 组件 |
+| `--version` / `--update` | 显示版本号 / 检查并升级**本地已安装**的 fp 组件（缺失的包不强装；逐包执行，单包失败不阻塞其余） |
 
 **② 透传给 CLI 模式的参数**（顶层原样转发，由 `fp_cli` 解析）
 

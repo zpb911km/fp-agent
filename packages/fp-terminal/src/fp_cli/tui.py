@@ -732,6 +732,13 @@ class FPApp(App[None]):
             self._line(f"{tui_glyph('hint')} 续会话: {sid}，输入 /help 查看命令", tui_style("hint"))
         else:
             self._line(f"{tui_glyph('hint')} 输入 /help 查看命令，/resume 可回到历史会话", tui_style("hint"))
+        # 版本更新提示（安全点之一）：只读 fp 的本地版本缓存，零网络、不砸屏；
+        # 后台检查尚未完成（首装/缓存过期）时为 None，晚一个启动周期再提示。
+        from .display import take_update_notice
+
+        _notice = take_update_notice()
+        if _notice:
+            self._line(_notice, tui_style("hint"))
         self._line(
             f"{tui_glyph('keys')} Enter 换行 · Shift+Enter/Ctrl+J 提交 · 选中后 Ctrl+C 复制"
             " · Ctrl+T 外观 · Ctrl+Q 退出 · Ctrl+G 统计",

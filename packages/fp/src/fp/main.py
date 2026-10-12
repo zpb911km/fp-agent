@@ -141,7 +141,7 @@ def main():
         "--update",
         "-u",
         action="store_true",
-        help="检查并自动更新所有 fp 组件",
+        help="检查并升级本地已安装的 fp 组件（缺失的包不强装，单包失败不阻塞其余）",
     )
 
     args, rest = parser.parse_known_args(_normalize_mode_argv(sys.argv[1:]))
@@ -168,9 +168,13 @@ def main():
 
     ext_migrate_ensure()
 
-    from fp.version_checker import check_updates_background
+    # 启动期版本检查：后台守护线程刷新本地缓存（并行查询、TTL 内不重复），
+    # 提示由前端在安全点读缓存渲染，网络延迟不进启动关键路径。
+    # --version/--update 是退出即走的短命命令，无需后台检查（--update 自己会查）。
+    if not (args.version or args.update):
+        from fp.version_checker import check_updates_background
 
-    check_updates_background()
+        check_updates_background()
 
     if args.version:
         from fp_core import __version__
@@ -181,8 +185,7 @@ def main():
     if args.update:
         from fp.version_checker import do_update
 
-        do_update()
-        sys.exit(0)
+        sys.exit(do_update())
 
     # ── 转发 --session：cli 走 -r（fp_cli 原生 resume，显式 SID 后置覆盖
     #    用户同时给的 -r auto）；webui/acp 走 FP_RELOAD_SID —— 那是

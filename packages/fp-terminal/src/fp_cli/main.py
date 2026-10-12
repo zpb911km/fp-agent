@@ -268,6 +268,13 @@ async def main():
         elif not args.message:
             # 无 -m：进入 L1 经典 REPL（reload 续接完成后同样回到这里等输入）
             # prompt_toolkit 已退场：裸 input（executor 不阻塞事件循环），无补全/历史
+            # 版本更新提示（安全点之一）：读本地缓存，零网络等待；
+            # headless/-m 不走这里，静默/安静环境也不打扰。
+            if not os.environ.get("FP_SUBAGENT_QUIET") and not os.environ.get("FP_SUBAGENT_SILENT"):
+                _notice = display.take_update_notice()
+                if _notice:
+                    display.hint(_notice)
+                    print()
             if args.resume:
                 display.hint(f"{tui_glyph('hint')} 续会话: {portal.run.status.session_id}，输入 /help 查看命令")
             else:

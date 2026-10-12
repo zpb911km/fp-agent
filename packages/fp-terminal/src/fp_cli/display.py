@@ -60,6 +60,20 @@ def hint(msg: str):
     print(apply_style(msg, "hint"))
 
 
+def take_update_notice() -> str | None:
+    """取「有新版本」提示文本（安全点专用）：只读 fp 的本地版本缓存，零网络、无 ANSI。
+
+    fp（fp-agent）未随环境安装（fp-terminal 可独立分发）或缓存缺失时返回 None。
+    任何异常一律吞掉——提示是锦上添花，绝不允许影响启动。
+    """
+    try:
+        from fp.version_checker import take_notice
+
+        return take_notice()
+    except Exception:
+        return None
+
+
 def divider(char: str = "─"):
     """青色全宽隔离线（撑满终端宽度），用于分隔输入与回复区块"""
     if _silent():
