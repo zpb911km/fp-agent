@@ -123,7 +123,11 @@ class Agent:
         # ── 创建 LLM client ──
         from fp_core.core.llm_client import Client
 
-        self.client = Client(api_key=config.LLM_API_KEY, base_url=config.LLM_API_BASE_URL)
+        self.client = Client(
+            api_key=config.LLM_API_KEY,
+            base_url=config.LLM_API_BASE_URL,
+            timeout=config.LLM_TIMEOUT,
+        )
 
         # ── 注入服务 ─────────────────────────────────
 
@@ -136,8 +140,9 @@ class Agent:
             temperature=config.LLM_TEMPERATURE,
             max_tokens=config.LLM_MAX_TOKENS,
             extra_body=config.LLM_EXTRA_BODY,
+            retry_count=config.LLM_RETRY_COUNT,
         )
-        self._llm = LLMService(self.client, llm_config, on_usage=self._record_aux_usage)
+        self._llm = LLMService(self.client, llm_config, on_usage=self._record_aux_usage, on_retry=self._log_llm_retry)
 
         # ToolExecutor：工具执行
         # 不传参数 → ToolExecutor 自动创建独立的 ToolRegistry（不再使用全局单例）
@@ -160,8 +165,10 @@ class Agent:
                         temperature=getattr(role, "temperature", None) or config.LLM_TEMPERATURE,
                         max_tokens=config.LLM_MAX_TOKENS,
                         extra_body=config.LLM_EXTRA_BODY,
+                        retry_count=config.LLM_RETRY_COUNT,
                     ),
                     on_usage=self._record_aux_usage,
+                    on_retry=self._log_llm_retry,
                 )
 
             # 角色工具白名单过滤
@@ -1303,6 +1310,14 @@ class Agent:
     def _record_aux_usage(self, usage: dict[str, Any] | None, model: str) -> None:
         """LLMService.on_usage 回调：把隐性 LLM 调用的 usage 并入 TokenTracker 聚合统计"""
         self._token_tracker.accumulate(usage, model=model)
+
+    # ── #55 LLM 瞬时错误重试的可见性外抛（LLMService.on_retry 回调）──
+    def _log_llm_retry(self, attempt: int, max_retries: int, exc: BaseException, delay: float) -> None:
+        """重试发生时的告警（无人值守时便于事后定位抖动；子 agent 静默模式不刷屏）"""
+        if os.environ.get("FP_SUBAGENT_SILENT") == "1":
+            return
+        with contextlib.suppress(Exception):
+            self.io.warning(f"↻ LLM 调用失败，{delay:.1f}s 后重试（第 {attempt}/{max_retries} 次）: {exc}")
 
     # ============ 生命周期管理 ============
 

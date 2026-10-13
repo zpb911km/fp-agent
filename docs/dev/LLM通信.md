@@ -120,16 +120,47 @@ class ToolCallFunction:
     arguments: str             # 参数（JSON 字符串）
 ```
 
-#### 流式 — `SSEIterator`
+#### 流式 — `create_stream` + `StreamChunk`
 
-（当前版本仅支持非流式，流式接口预留。）
+流式接口已**全量实现**（SSE，`text/event-stream`）；Agent 主循环默认走流式路径。
+请求体自动带上 `"stream": true` 与 `"stream_options": {"include_usage": true}`
+（后者让服务端在流末回传 usage）。
 
 ```python
-# 流式用法示意（future）
-async for chunk in client.chat.completions.create(stream=True, ...):
-    # Chunk 包含 delta.content / delta.tool_calls / finish_reason
-    ...
+async def create_stream(
+    self,
+    model: str,
+    messages: list[dict],
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    tools: list[dict] | None = None,
+    extra_body: dict | None = None,
+    **kwargs,
+) -> AsyncIterator[StreamChunk]
 ```
+
+逐行解析 SSE（`data: {...}`，遇 `data: [DONE]` 结束），逐个 yield `StreamChunk`：
+
+```python
+class StreamChunk:
+    content: str | None            # 文本 token（delta.content）
+    reasoning_content: str | None  # 思考 token（delta.reasoning_content）
+    tool_calls: list[dict] | None  # 工具调用增量（delta.tool_calls）
+    finish_reason: str | None      # 结束原因
+    usage: dict | None             # 用量（开启 include_usage 后于末个 chunk 出现）
+```
+
+```python
+# 流式用法
+async for chunk in client.chat.completions.create_stream(model="...", messages=[...]):
+    if chunk.content:
+        ...
+    if chunk.usage:
+        ...
+```
+
+> 上层消费入口是 `LLMService.chat_stream()`（把 chunk 归一为 `StreamEvent`），
+> 通常不需直接调用 `create_stream`。
 
 ### `CompletionResponse` 使用示例
 
@@ -232,3 +263,42 @@ reply = message.content or "（无文本回复）"
 `summarize` 的隐性调用不经 agent 主循环，usage 曾在此被丢弃（边 #53 面外缺口）。现经
 `LLMService(on_usage=...)` 回调回流到 `TokenTracker` 聚合统计（agent 构造时注入
 `_record_aux_usage`）；主循环路径由 agent 自行 accumulate、不经过该回调，不会双计。
+
+---
+
+## 超时与瞬时错误重试
+
+无人值守时 LLM API 抖动（连接失败 / 超时 / 限流 / 5xx）不应终结整轮，故调用层内置两件
+健壮性机制：
+
+### 超时（`TIMEOUT` → `LLM_TIMEOUT`）
+
+`Agent.__init__` 构造 client 时显式传入超时，故 `TIMEOUT`（顶层键 / provider 级 `timeout`）
+真正生效：
+
+```python
+self.client = Client(
+    api_key=config.LLM_API_KEY,
+    base_url=config.LLM_API_BASE_URL,
+    timeout=config.LLM_TIMEOUT,   # ← 缺此参数则退回 llm_client 硬编码默认 300s
+)
+```
+
+（`httpx.Timeout(timeout, connect=10.0)`：总超时与连接超时分开。）
+
+### 瞬时错误重试（`RETRY_COUNT` → `LLM_RETRY_COUNT`）
+
+`LLMConfig.retry_count` 控制失败后的最大重试次数（默认 3，0 = 关闭）。
+`LLMService._with_retry`（非流式）与 `chat_stream`（流式）实现有界退避：
+
+| 维度 | 约定 |
+|------|------|
+| 触发条件 | 仅 `is_retryable(exc)` 为真：`APIError(status_code=0)`（连接失败/超时）、408/409/425/429、5xx |
+| 不重试 | 4xx 参数/鉴权类（400/401/403/404/422…）、非 APIError、用户中断 |
+| 退避 | 指数 `base·2^n` 封顶 `retry_max_delay`，再乘 `[0.5,1.0]` 抖动（防多实例惊群） |
+| 流式特例 | **仅在首个事件产出前**重试；一旦已 yield 过 token 则直接抛（否则与已展示内容重复） |
+| 中断安全 | `CancelledError` 是 `BaseException`，`except Exception` 不捕获 → 用户中断从不重试 |
+| 可见性 | 重试经 `LLMService(on_retry=...)` 外抛（agent 注入 `_log_llm_retry` → `io.warning`）；回调自身异常被吞，不影响重试 |
+
+调优字段（`LLMConfig`）：`retry_count` / `retry_base_delay`（默认 1.0s）/ `retry_max_delay`（默认 30s）。
+重试对 `chat` / `chat_stream` / `summarize` 全部生效（`summarize` 走 `chat`）。

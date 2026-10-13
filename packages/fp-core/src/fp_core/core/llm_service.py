@@ -6,12 +6,43 @@ LLMService — 纯 LLM 调用层
 - 输入：messages + tools → 输出：LLMResult(message, usage)
 - 不处理 IO、不显示 spinner、不格式化输出
 - 只做"消息→LLM→响应"的纯转换
+- 对**瞬时错误**（连接失败/超时/限流/5xx）做有界退避重试——无人值守时
+  API 抖动不应终结整轮；重试次数由 LLMConfig.retry_count 决定
+
+重试不进 IO：可见性经 on_retry 回调外抛给调用方（如 Agent 转 io.warning）。
 """
 
+import asyncio
+import contextlib
+import random
 import types
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+from fp_core.core.llm_client import APIError
+
+# 可重试的 HTTP 状态码（瞬时/服务端语义）：
+#   408 请求超时 / 409 冲突 / 425 过早 / 429 限流；叠加 5xx 段。
+# 其余 4xx（400/401/403/404/422…）是参数/鉴权类，重试无意义 → 直接抛。
+_RETRYABLE_HTTP_STATUS = frozenset({408, 409, 425, 429})
+
+
+def is_retryable(exc: BaseException) -> bool:
+    """判断 LLM 调用异常是否值得重试。
+
+    - ``APIError(status_code=0)``：连接失败 / 超时（llm_client 的兜底归类）
+    - 408 / 409 / 425 / 429：限流与瞬时状态
+    - 5xx：服务端错误
+    其余异常 → 不重试。
+
+    注：``asyncio.CancelledError`` / ``KeyboardInterrupt`` 是 ``BaseException``，
+    本函数只处理 ``Exception``，故用户中断天然不进入重试。
+    """
+    if isinstance(exc, APIError):
+        status = exc.status_code
+        return status == 0 or status in _RETRYABLE_HTTP_STATUS or 500 <= status < 600
+    return False
 
 
 @dataclass
@@ -22,6 +53,11 @@ class LLMConfig:
     temperature: float = 0.7
     max_tokens: int = 4096
     extra_body: dict[str, Any] = field(default_factory=lambda: {"enable_thinking": False})
+
+    # ── 重试（瞬时错误） ──────────────────────────────
+    retry_count: int = 3  # 失败后最多重试次数（0 = 不重试）
+    retry_base_delay: float = 1.0  # 首次重试基础退避（秒），指数增长
+    retry_max_delay: float = 30.0  # 单次退避上限（秒）
 
 
 @dataclass
@@ -57,6 +93,7 @@ class LLMService:
         client: Any,
         config: LLMConfig,
         on_usage: Callable[[dict[str, Any] | None, str], None] | None = None,
+        on_retry: Callable[[int, int, BaseException, float], None] | None = None,
     ):
         """
         Args:
@@ -65,14 +102,60 @@ class LLMService:
             config: LLM 配置
             on_usage: 隐性调用（summarize 等不经 agent 主循环的路径）的 usage 回流回调。
                     主循环 chat 路径由 agent 侧累计，故仅 summarize 主动调用，避免双计。
+            on_retry: 重试发生时的通知回调 (attempt, max_retries, exc, delay)。
+                    仅作可见性外抛；回调自身异常被吞，绝不影响重试主流程。
         """
         self._client: Any = client
         self._config = config
         self._on_usage = on_usage
+        self._on_retry = on_retry
 
     @property
     def model(self) -> str:
         return self._config.model
+
+    # ── 内部：参数解析 / 退避 / 重试 ──────────────────
+
+    def _resolve_params(self, overrides: dict[str, Any]) -> tuple[str, float, int, dict[str, Any]]:
+        """把 override 合并进配置（chat 与 chat_stream 共用，避免两份漂移）。"""
+        return (
+            overrides.get("model", self._config.model),
+            overrides.get("temperature", self._config.temperature),
+            overrides.get("max_tokens", self._config.max_tokens),
+            overrides.get("extra_body", self._config.extra_body),
+        )
+
+    def _retry_delay(self, attempt: int) -> float:
+        """指数退避 + 抖动；attempt 从 0 计（0 = 首次重试）。
+
+        抖动取 [0.5·delay, 1.0·delay]：避免多实例同时重试造成惊群，
+        同时保证间隔下界不至于过密。
+        """
+        base = max(0.0, self._config.retry_base_delay)
+        cap = max(0.0, self._config.retry_max_delay)
+        delay = min(base * (2**attempt), cap)
+        return delay * (0.5 + random.random() * 0.5)
+
+    def _notify_retry(self, attempt: int, retries: int, exc: BaseException, delay: float) -> None:
+        if self._on_retry is None:
+            return
+        with contextlib.suppress(Exception):
+            self._on_retry(attempt, retries, exc, delay)
+
+    async def _with_retry(self, make_coro: Callable[[], Awaitable[LLMResult]]) -> LLMResult:
+        """非流式调用的有界重试：仅对 is_retryable 的错误退避后重试。"""
+        retries = max(0, int(self._config.retry_count))
+        attempt = 0
+        while True:
+            try:
+                return await make_coro()
+            except Exception as e:  # CancelledError 是 BaseException → 不被捕获，用户中断不重试
+                if attempt >= retries or not is_retryable(e):
+                    raise
+                delay = self._retry_delay(attempt)
+                self._notify_retry(attempt + 1, retries, e, delay)
+                await asyncio.sleep(delay)
+                attempt += 1
 
     async def chat(
         self,
@@ -81,7 +164,7 @@ class LLMService:
         **overrides: Any,
     ) -> LLMResult:
         """
-        调用 LLM 并返回 LLMResult(message, usage)。
+        调用 LLM 并返回 LLMResult(message, usage)（瞬时错误自动退避重试）。
 
         Args:
             messages: 消息列表
@@ -96,11 +179,21 @@ class LLMService:
             usage dict:
                 {"prompt_tokens": int, "completion_tokens": int, "total_tokens": int}
         """
-        model: str = overrides.get("model", self._config.model)
-        temperature: float = overrides.get("temperature", self._config.temperature)
-        max_tokens: int = overrides.get("max_tokens", self._config.max_tokens)
-        extra_body: dict[str, Any] = overrides.get("extra_body", self._config.extra_body)
+        model, temperature, max_tokens, extra_body = self._resolve_params(overrides)
+        return await self._with_retry(
+            lambda: self._chat_once(messages, tools, model, temperature, max_tokens, extra_body)
+        )
 
+    async def _chat_once(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        extra_body: dict[str, Any],
+    ) -> LLMResult:
+        """单次非流式调用（不含重试）。"""
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -153,6 +246,9 @@ class LLMService:
 
         调用方在 done 事件中获取完整的 assistant_msg。
 
+        重试语义：仅当**首个事件产出之前**失败才退避重试；一旦已 yield 过
+        任何 token/事件，重试会与已展示内容重复，故直接抛出（由上层负责）。
+
         向后兼容：若 chat() 被覆写（如测试 mock），自动降级为
         非流式调用并 yield 单个 done 事件。
         """
@@ -165,11 +261,35 @@ class LLMService:
                 yield StreamEvent(type="usage", data=result.usage)
             yield StreamEvent(type="done", data=result.message)
             return
-        model: str = overrides.get("model", self._config.model)
-        temperature: float = overrides.get("temperature", self._config.temperature)
-        max_tokens: int = overrides.get("max_tokens", self._config.max_tokens)
-        extra_body: dict[str, Any] = overrides.get("extra_body", self._config.extra_body)
 
+        model, temperature, max_tokens, extra_body = self._resolve_params(overrides)
+        retries = max(0, int(self._config.retry_count))
+        attempt = 0
+        while True:
+            yielded = False
+            try:
+                async for event in self._stream_once(messages, tools, model, temperature, max_tokens, extra_body):
+                    yielded = True
+                    yield event
+                return
+            except Exception as e:  # CancelledError 是 BaseException → 用户中断不重试
+                if yielded or attempt >= retries or not is_retryable(e):
+                    raise
+                delay = self._retry_delay(attempt)
+                self._notify_retry(attempt + 1, retries, e, delay)
+                await asyncio.sleep(delay)
+                attempt += 1
+
+    async def _stream_once(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        extra_body: dict[str, Any],
+    ) -> AsyncIterator[StreamEvent]:
+        """单次流式调用（不含重试）；yield 与 chat_stream 同构的事件序列。"""
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,

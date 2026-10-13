@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from fp_core.core.llm_client import CompletionResponse, StreamChunk
+from fp_core.core.llm_client import APIError, CompletionResponse, StreamChunk
 from fp_core.core.llm_service import LLMConfig, LLMResult, LLMService
 
 
@@ -359,3 +359,164 @@ class TestSummarizeNoThinking:
         # 配置的 enable_thinking:True 被覆盖为关思考参数（具体格式随激活 provider）
         assert captured["extra_body"] == _cfg.no_thinking_body()
         assert captured["extra_body"]  # 非空
+
+
+class TestRetry:
+    """瞬时错误退避重试——无人值守时 API 抖动不应终结整轮"""
+
+    def _ok_response(self, content="ok"):
+        return CompletionResponse({
+            "choices": [{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}]
+        })
+
+    def _service(self, create_impl, *, retry_count=3, on_retry=None):
+        client = _make_fake_client()
+        client.chat.completions.create = create_impl
+        cfg = LLMConfig(model="m", retry_count=retry_count, retry_base_delay=0.0, retry_max_delay=0.0)
+        return LLMService(client, cfg, on_retry=on_retry)
+
+    @pytest.mark.asyncio
+    async def test_retry_then_success(self):
+        calls = {"n": 0}
+
+        async def create(**kwargs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise APIError("连接失败", status_code=0)
+            return self._ok_response()
+
+        svc = self._service(create)
+        result = await svc.chat([{"role": "user", "content": "hi"}])
+        assert result.message["content"] == "ok"
+        assert calls["n"] == 3  # 初次 + 2 次重试后成功
+
+    @pytest.mark.asyncio
+    async def test_retry_exhausted_raises(self):
+        calls = {"n": 0}
+
+        async def create(**kwargs):
+            calls["n"] += 1
+            raise APIError("超时", status_code=0)
+
+        svc = self._service(create, retry_count=2)
+        with pytest.raises(APIError):
+            await svc.chat([])
+        assert calls["n"] == 3  # 初次 + 2 次重试
+
+    @pytest.mark.asyncio
+    async def test_no_retry_on_client_error(self):
+        calls = {"n": 0}
+
+        async def create(**kwargs):
+            calls["n"] += 1
+            raise APIError("bad request", status_code=400)
+
+        svc = self._service(create)
+        with pytest.raises(APIError):
+            await svc.chat([])
+        assert calls["n"] == 1  # 4xx 参数类错误不重试
+
+    @pytest.mark.asyncio
+    async def test_retry_disabled(self):
+        calls = {"n": 0}
+
+        async def create(**kwargs):
+            calls["n"] += 1
+            raise APIError("x", status_code=503)
+
+        svc = self._service(create, retry_count=0)
+        with pytest.raises(APIError):
+            await svc.chat([])
+        assert calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_on_retry_callback(self):
+        seen = []
+        calls = {"n": 0}
+
+        async def create(**kwargs):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise APIError("boom", status_code=429)
+            return self._ok_response()
+
+        svc = self._service(create, on_retry=lambda a, m, e, d: seen.append((a, m, str(e))))
+        await svc.chat([])
+        assert seen and seen[0][0] == 1 and seen[0][1] == 3
+
+    @pytest.mark.asyncio
+    async def test_on_retry_callback_exception_swallowed(self):
+        calls = {"n": 0}
+
+        async def create(**kwargs):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise APIError("boom", status_code=500)
+            return self._ok_response()
+
+        def bad_cb(*a):
+            raise RuntimeError("callback bug")
+
+        svc = self._service(create, on_retry=bad_cb)
+        result = await svc.chat([])
+        assert result.message["content"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_stream_retry_before_first_token(self):
+        attempts = {"n": 0}
+
+        class FakeCompletions:
+            async def create_stream(self, **kwargs):
+                attempts["n"] += 1
+                if attempts["n"] < 2:
+                    raise APIError("connect", status_code=0)
+                yield StreamChunk({"choices": [{"delta": {"content": "ok"}}]})
+
+        client = _make_fake_client()
+        client.chat.completions = FakeCompletions()
+        cfg = LLMConfig(model="m", retry_count=3, retry_base_delay=0.0, retry_max_delay=0.0)
+        svc = LLMService(client, cfg)
+        events = [e async for e in svc.chat_stream([{"role": "user", "content": "hi"}])]
+        assert [e.type for e in events] == ["content", "done"]
+        assert attempts["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_stream_no_retry_after_content(self):
+        attempts = {"n": 0}
+
+        class FakeCompletions:
+            async def create_stream(self, **kwargs):
+                attempts["n"] += 1
+                yield StreamChunk({"choices": [{"delta": {"content": "partial"}}]})
+                raise APIError("mid-stream fail", status_code=0)
+
+        client = _make_fake_client()
+        client.chat.completions = FakeCompletions()
+        cfg = LLMConfig(model="m", retry_count=3, retry_base_delay=0.0, retry_max_delay=0.0)
+        svc = LLMService(client, cfg)
+        got = []
+        with pytest.raises(APIError):
+            async for e in svc.chat_stream([]):
+                got.append(e)
+        assert got and got[0].type == "content"
+        assert attempts["n"] == 1  # 已产出内容 → 不重试，避免重复展示
+
+
+class TestIsRetryable:
+    """is_retryable 的错误归类"""
+
+    def test_retryable_statuses(self):
+        from fp_core.core.llm_service import is_retryable
+
+        assert is_retryable(APIError("x", status_code=0))  # 连接失败/超时
+        assert is_retryable(APIError("x", status_code=429))
+        assert is_retryable(APIError("x", status_code=500))
+        assert is_retryable(APIError("x", status_code=503))
+
+    def test_non_retryable(self):
+        from fp_core.core.llm_service import is_retryable
+
+        assert not is_retryable(APIError("x", status_code=400))
+        assert not is_retryable(APIError("x", status_code=401))
+        assert not is_retryable(APIError("x", status_code=422))
+        assert not is_retryable(ValueError("boom"))
