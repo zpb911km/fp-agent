@@ -43,8 +43,9 @@ if TYPE_CHECKING:
     from fp_core.core.agent import Agent
     from fp_core.core.lifecycle import LifecycleHook
     from fp_core.plugins.base.plugin import Plugin
+    from fp_core.tools.core import OpenAISchema
 
-__all__ = ["Portal", "Subscription", "portal"]
+__all__ = ["Portal", "Subscription", "ToolPlane", "portal"]
 
 
 # ══════════════════════════════════════════════════════════════
@@ -65,6 +66,52 @@ class Subscription:
         if self._pump_task is not None:
             self._pump_task.cancel()
             self._pump_task = None
+
+
+# ══════════════════════════════════════════════════════════════
+# 工具面（run 域）— 插件/前端执行工具与改写工具 schema 的正规出口
+# ══════════════════════════════════════════════════════════════
+
+
+class ToolPlane:
+    """工具面 — 前置条件：portal.ctl.open() 已完成
+
+    两个能力（MCP 热点退化等插件的正规落点）：
+      1. execute — 按名执行任意已注册工具（含被 schema 面退化的冷工具）
+      2. add_definition_filter — 改写/裁剪发给 LLM 的工具 schema 列表
+         （钩子 ON_BEFORE_LLM_CALL 的 tools 不被 _invoke_llm 消费，
+           改写工具表必须走此过滤链）
+    """
+
+    def __init__(self, portal: Portal) -> None:
+        self._portal = portal
+
+    async def execute(self, name: str, params: dict[str, Any]) -> str:
+        """执行一个已注册工具（等价一次 LLM 工具调用，不落对话消息）
+
+        与 LLM 路径共用 ToolExecutor.execute —— background/SELF_MANAGED
+        语义一致。工具不存在时由 ToolRegistry 抛 KeyError。
+        """
+        import json as _json
+
+        tool_call = {
+            "id": f"portal_{id(self)}_{name}",
+            "type": "function",
+            "function": {"name": name, "arguments": _json.dumps(params, ensure_ascii=False)},
+        }
+        return await self._portal._require()._tool_exec.execute(tool_call)  # pyright: ignore[reportPrivateUsage]
+
+    def definitions(self) -> list[OpenAISchema]:
+        """当前工具 schema 列表（含过滤链应用结果）"""
+        return self._portal._require()._tool_exec.get_definitions()  # pyright: ignore[reportPrivateUsage]
+
+    def add_definition_filter(self, fn: Callable[[list[Any]], list[Any]]) -> None:
+        """注册工具表过滤器（fn: defs → defs；插件卸载时应配对 remove）"""
+        self._portal._require()._tool_exec.add_definition_filter(fn)  # pyright: ignore[reportPrivateUsage]
+
+    def remove_definition_filter(self, fn: Callable[[list[Any]], list[Any]]) -> None:
+        """移除工具表过滤器（幂等）"""
+        self._portal._require()._tool_exec.remove_definition_filter(fn)  # pyright: ignore[reportPrivateUsage]
 
 
 # ══════════════════════════════════════════════════════════════
@@ -452,6 +499,7 @@ class Portal:
     def __init__(self) -> None:
         self.run = RunPlane(self)
         self.ctl = ControlPlane(self)
+        self.tools = ToolPlane(self)
         self.events = EventBus()
         self._agent: Agent | None = None
         self._active_io: IOChannel | None = None

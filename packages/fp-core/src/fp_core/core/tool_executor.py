@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import json
 import os
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from fp_core.core import jobs as jobs_impl
@@ -58,11 +59,30 @@ class ToolExecutor:
             from fp_core.tools import create_registry
 
             self._registry = create_registry()
+        # 工具表过滤链：get_definitions() 出口统一应用。
+        # 供插件（如 MCP 热点退化）裁剪/改写工具 schema —— 正规落点，
+        # 取代「ON_BEFORE_LLM_CALL 修改 tools 不被 _invoke_llm 消费」的空转路径。
+        self._definition_filters: list[Callable[[list[OpenAISchema]], list[OpenAISchema]]] = []
 
     @property
     def registry(self) -> ToolRegistry:
         """工具注册表（供插件注册工具时使用）"""
         return self._registry
+
+    def add_definition_filter(self, fn: Callable[[list[OpenAISchema]], list[OpenAISchema]]) -> None:
+        """注册工具表过滤器（按注册顺序应用；插件 on_unregister 应成对移除）
+
+        Args:
+            fn: 接收当前工具 schema 列表，返回过滤后的列表。
+                应保持输入有序且不修改入参（返回新列表）。
+        """
+        if fn not in self._definition_filters:
+            self._definition_filters.append(fn)
+
+    def remove_definition_filter(self, fn: Callable[[list[OpenAISchema]], list[OpenAISchema]]) -> None:
+        """移除工具表过滤器（幂等无操作）"""
+        with contextlib.suppress(ValueError):
+            self._definition_filters.remove(fn)
 
     def get_definitions(self) -> list[OpenAISchema]:
         """获取所有工具的 OpenAI function calling schema 列表
@@ -83,6 +103,9 @@ class ToolExecutor:
                     "默认 false=前台阻塞执行（超过 10s 也会自动转后台并返回 job_id）"
                 ),
             }
+        # ── 定义过滤链（最后一个出口；顺序稳定：background 注入在前，过滤器看到完整面）──
+        for f in self._definition_filters:
+            definitions = f(definitions)
         return definitions
 
     async def execute(self, tool_call: dict[str, Any]) -> str:

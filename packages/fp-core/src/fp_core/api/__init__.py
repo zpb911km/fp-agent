@@ -16,7 +16,7 @@
     await portal.ctl.close(...)     # 终结
 """
 
-from fp_core.api.portal import ControlPlane, Portal, RunPlane, Subscription, portal
+from fp_core.api.portal import ControlPlane, Portal, RunPlane, Subscription, ToolPlane, portal
 from fp_core.api.types import (
     ExitReason,
     InstanceNotOpenError,
@@ -57,6 +57,7 @@ __all__ = [
     "SessionMeta",
     "Subscription",
     "TokenUsage",
+    "ToolPlane",
     "WebSocketIO",
     "portal",
 ]
