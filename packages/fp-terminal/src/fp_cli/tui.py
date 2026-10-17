@@ -503,6 +503,55 @@ def _tool_result_card(payload: Any) -> ToolCard:
     return ToolCard(header, body, card_class="tool-result-card")
 
 
+class ThinkCard(Collapsible):
+    """思考流的可折叠卡片 — 与 webui think-msg 同构，与 ToolCard 开合样式统一。
+
+    自动过程由 FPApp 驱动（两状态机 ``_think_card``/``_think_active``）：
+    - 思考段开始 → 开卡，默认**展开**，body 跟随 token 增量渲染；
+    - **首个正文 token 或工具调用到达 → ``fold()``** 折叠为「思考 · N 字」单行摘要；
+    - 点击标题栏（或聚焦后回车）随时开合，全文保留在卡体；
+    - ``finalize`` 只断流不折叠：纯思考轮的卡保持展开收尾（若随后 tool 到达
+      仍会被折叠）；开新卡前旧卡必先折叠——任一时刻至多一张展开的思考卡。
+
+    标题不用符号字形（💭 气泡已弃用），纯文本 + 字数统计；字数在折叠时定格，
+    折叠后的迟到 token 仍进 body（展开可见），不再改摘要行。
+    """
+
+    def __init__(self) -> None:
+        self._text = ""
+        self._body = Static(Text(""))
+        super().__init__(
+            self._body,
+            title=cast("str", self._header(0)),
+            collapsed=False,  # 流式期展开；首个正文 token 折叠
+            classes="think-card",
+        )
+
+    @staticmethod
+    def _header(chars: int) -> Text:
+        return Text("思考", style=tui_style("think")) + Text(f" · {chars} 字", style=tui_style("think"))
+
+    @property
+    def text(self) -> str:
+        return self._text
+
+    def feed(self, token: str) -> None:
+        """累积思考 token：body 全量更新；未折叠时标题字数实时跟随。"""
+        if not token:
+            return
+        self._text += token
+        self._body.update(Text(self._text, style=tui_style("think")))
+        if not self.collapsed:
+            self.title = self._header(len(self._text))
+
+    def fold(self) -> None:
+        """折叠为摘要行（幂等）：标题定格最终字数，全文保留在卡体可再展开。"""
+        if self.collapsed:
+            return
+        self.title = self._header(len(self._text))
+        self.collapsed = True
+
+
 # ══════════════════════════════════════════════════════════════
 # FPApp — 主界面
 # ══════════════════════════════════════════════════════════════
@@ -523,11 +572,13 @@ class FPApp(App[None]):
         padding: 0 1;
     }
     #chat { height: 1fr; padding: 0 1; }
-    .tool-card, .tool-result-card {
+    .tool-card, .tool-result-card, .think-card {
         border: none; padding: 0; background: transparent; height: auto;
     }
-    .tool-card > CollapsibleTitle, .tool-result-card > CollapsibleTitle { padding: 0 1; }
-    .tool-card > Contents, .tool-result-card > Contents { padding: 1 0 1 2; }
+    .tool-card > CollapsibleTitle,
+    .tool-result-card > CollapsibleTitle,
+    .think-card > CollapsibleTitle { padding: 0 1; }
+    .tool-card > Contents, .tool-result-card > Contents, .think-card > Contents { padding: 1 0 1 2; }
     #hint {
         height: auto; max-height: 9;
         background: $panel; color: $text;
@@ -614,10 +665,13 @@ class FPApp(App[None]):
         self.mounted = False
         # 本地发送标志（handler 同步置位，防连按双发）
         self._sending = False
-        # 流式 live 子件引用（None = 当前无在途流段）
-        self._live: Markdown | Static | None = None
-        self._live_kind: str | None = None  # "think" | "content"
+        # 流式 live 子件引用（None = 当前无在途正文流段）
+        self._live: Markdown | None = None
         self._live_buf = ""
+        # 当前思考卡（跨轮保留引用，供正文/工具调用到达时折叠）+ 是否正在接收
+        # 本轮思考 token（finalize 只断流不丢卡：纯思考轮的卡留给 tool 收尾折叠）
+        self._think_card: ThinkCard | None = None
+        self._think_active = False
         # 状态附注（spinner 文本）
         self._status_note = ""
         # 输入历史
@@ -772,33 +826,54 @@ class FPApp(App[None]):
     def _line(self, text: str, style: str = "") -> None:
         self._mount_block(Text(text, style=style) if style else Text(text))
 
-    def _finalize_live(self) -> None:
-        """固化当前流段（子件保留可见，引用置空以迎接下一段）。"""
+    def _seal_live(self) -> None:
+        """封口在途正文段（子件保留可见，引用置空以迎接下一段）。"""
         self._live = None
-        self._live_kind = None
         self._live_buf = ""
 
-    def _feed_live(self, kind: str, chunk: str) -> None:
+    def _fold_think(self) -> None:
+        """折叠当前思考卡并断开流式接收（正文/工具调用/新思考段到达时，幂等）。"""
+        if self._think_card is not None:
+            self._think_card.fold()
+        self._think_active = False
+
+    def _open_think_card(self) -> None:
+        """开一张新思考卡：旧卡先折叠——任一时刻至多一张展开的思考卡。"""
+        self._fold_think()
         at_bottom = self._at_bottom()
-        if self._live is None or self._live_kind != kind:
-            self._finalize_live()
-            self._live_kind = kind
+        self._think_card = ThinkCard()  # 默认展开，跟随流式
+        self._think_active = True
+        self._mount_block(self._think_card)
+        self._follow_scroll(at_bottom)
+
+    def _feed_content(self, chunk: str) -> None:
+        """正文流式：单个 Markdown 子件跟随更新（合批见 TUIIO 定时冲刷）。"""
+        at_bottom = self._at_bottom()
+        if self._live is None:
             self._live_buf = chunk
-            widget: Markdown | Static = (
-                Markdown(chunk) if kind == "content" else Static(Text(chunk, style=tui_style("think")))
-            )
-            self._chat().mount(widget)
-            self._live = widget
+            md: Markdown = Markdown(chunk)
+            self._chat().mount(md)
+            self._live = md
         else:
             self._live_buf += chunk
-            if self._live_kind == "content":
-                md = self._live
-                assert isinstance(md, Markdown)
-                md.update(self._live_buf)
-            else:
-                st = self._live
-                assert isinstance(st, Static)
-                st.update(Text(self._live_buf, style=tui_style("think")))
+            md = self._live
+            assert isinstance(md, Markdown)
+            md.update(self._live_buf)
+        self._follow_scroll(at_bottom)
+
+    def _feed_think(self, token: str) -> None:
+        """思考流式 → ThinkCard（自动展开跟随，正文/工具调用到达即折叠）。
+
+        思考段开始（非流式中）时：先封口在途正文段（交错思考 → 时序正确：
+        正文1 → 思考2 → 正文2），再开新卡——上一张卡无论何种状态先折叠。
+        """
+        if not self._think_active:
+            self._seal_live()
+            self._open_think_card()
+        at_bottom = self._at_bottom()
+        card = self._think_card
+        assert card is not None  # _open_think_card 刚保证
+        card.feed(token)
         self._follow_scroll(at_bottom)
 
     # ── IO 分发 ──────────────────────────────────────────────
@@ -816,17 +891,25 @@ class FPApp(App[None]):
         elif kind == "error":
             self._line(str(payload), tui_style("error"))
         elif kind == "tool":
+            # 工具调用 = 思考段结束信号 → 折叠思考卡；正文段同步封口防串位
+            self._fold_think()
+            self._seal_live()
             self._mount_block(_tool_card(payload))
         elif kind == "tool_result":
+            self._fold_think()
+            self._seal_live()
             self._mount_block(_tool_result_card(payload))
         elif kind == "think":
-            if self._live_kind == "content":
-                self._finalize_live()
-            self._feed_live("think", str(payload))
+            self._feed_think(str(payload))
         elif kind == "content":
-            self._feed_live("content", str(payload))
+            # 首个正文 token → 思考卡折叠为「思考 · N 字」摘要行（fold 幂等）
+            self._fold_think()
+            self._feed_content(str(payload))
         elif kind == "finalize":
-            self._finalize_live()
+            # 断开本轮流式接收但**保留卡引用**：纯思考轮的卡保持展开收尾，
+            # 若随后还有 tool 到达仍可折叠（tool 是最后一种到达事件）
+            self._seal_live()
+            self._think_active = False
         elif kind == "status":
             self._status_note = str(payload)
             self._refresh_status()
@@ -956,7 +1039,7 @@ class FPApp(App[None]):
             self._refresh_status()
         if resp is not None and resp.content and (command or not self._io.consumed_stream):
             # 斜杠命令输出 / 早退响应（blocked、过滤等未走流式）→ 补渲染
-            self._finalize_live()
+            self._seal_live()
             self._mount_block(Markdown(resp.content))
         self._refresh_status()
 

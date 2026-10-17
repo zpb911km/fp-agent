@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from fp_cli.tui import TOOL_RESULT_MAX_LINES, TUIIO, AskModal, FPApp, PromptInput, ToolCard
+from fp_cli.tui import TOOL_RESULT_MAX_LINES, TUIIO, AskModal, FPApp, PromptInput, ThinkCard, ToolCard
 
 
 class _FakeStatus:
@@ -613,6 +613,175 @@ class TestToolCards(unittest.TestCase):
 
         out = self._run(_scenario)
         self.assertIn("已截断", out["text"])  # type: ignore[operator]
+
+
+class TestThinkCard(unittest.TestCase):
+    """思考流 → ThinkCard：流式展开、正文到达折叠、字数统计、点击开合。"""
+
+    def _run(self, scenario):  # noqa: ANN001, ANN202 — 桩场景
+        from fp_core.api import portal as real_portal
+
+        fake = _FakePortal()
+        out: dict[str, object] = {}
+
+        async def _wrap() -> None:
+            io = TUIIO()
+            app = FPApp(io)
+            io.attach(app)
+            with (
+                patch.object(type(real_portal), "is_open", property(lambda self: True)),
+                patch.object(real_portal, "run", fake, create=True),
+            ):
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    out.update(await scenario(io, app, pilot))
+
+        asyncio.run(_wrap())
+        return out
+
+    @staticmethod
+    def _title(card) -> str:  # noqa: ANN001, ANN205 — 卡片
+        from textual.widgets._collapsible import CollapsibleTitle
+
+        return card.query_one(CollapsibleTitle).render().plain
+
+    def test_streaming_expanded_then_fold_on_content(self) -> None:
+        async def _scenario(io, app, pilot):  # noqa: ANN001, ANN202
+            io.stream_think("让我想想这个问题")
+            await pilot.pause(0.1)
+            card = app.query(ThinkCard).first()
+            during = {"collapsed": card.collapsed, "title": self._title(card)}
+            io.stream_write("# 答案")
+            await pilot.pause(0.1)
+            return {
+                "during": during,
+                "after_collapsed": card.collapsed,
+                "after_title": self._title(card),
+                "text": card.text,
+            }
+
+        out = self._run(_scenario)
+        during = out["during"]  # type: ignore[assignment]
+        self.assertFalse(during["collapsed"])  # 流式期展开
+        self.assertIn("思考", during["title"])
+        self.assertTrue(out["after_collapsed"])  # 正文到达 → 折叠
+        self.assertIn("8 字", out["after_title"])  # 字数统计（无 emoji）
+        self.assertNotIn("💭", out["after_title"])
+        self.assertEqual(out["text"], "让我想想这个问题")  # 全文保留在卡体
+
+    def test_pure_think_round_stays_expanded(self) -> None:
+        async def _scenario(io, app, pilot):  # noqa: ANN001, ANN202
+            io.stream_think("没有正文的一轮")
+            io.stream_end()
+            await pilot.pause(0.1)
+            card = app.query(ThinkCard).first()
+            return {"collapsed": card.collapsed, "title": self._title(card)}
+
+        out = self._run(_scenario)
+        self.assertFalse(out["collapsed"])  # 纯思考轮保持展开收尾
+        self.assertIn("7 字", out["title"])  # type: ignore[operator]
+
+    def test_click_folds_and_expands(self) -> None:
+        from textual.widgets._collapsible import CollapsibleTitle
+
+        async def _scenario(io, app, pilot):  # noqa: ANN001, ANN202
+            io.stream_think("想")
+            await pilot.pause(0.1)
+            card = app.query(ThinkCard).first()
+            initial = card.collapsed
+            await pilot.click(card.query_one(CollapsibleTitle))
+            await pilot.pause(0.05)
+            folded = card.collapsed
+            await pilot.click(card.query_one(CollapsibleTitle))
+            await pilot.pause(0.05)
+            return {"folded": folded, "reopened": card.collapsed, "initial": initial}
+
+        out = self._run(_scenario)
+        self.assertFalse(out["initial"])  # 流式期初始展开
+        self.assertTrue(out["folded"])  # 点击折叠
+        self.assertFalse(out["reopened"])  # 再点展开，全文可回看
+
+    def test_interleaved_think_opens_second_card(self) -> None:
+        async def _scenario(io, app, pilot):  # noqa: ANN001, ANN202
+            io.stream_think("第一段思考")
+            io.stream_write("中间正文")
+            await pilot.pause(0.1)
+            io.stream_think("第二段思考")
+            await pilot.pause(0.1)
+            cards = list(app.query(ThinkCard))
+            return {
+                "n": len(cards),
+                "collapsed": [c.collapsed for c in cards],
+                "texts": [c.text for c in cards],
+            }
+
+        out = self._run(_scenario)
+        self.assertEqual(out["n"], 2)  # 正文后穿插思考 → 另起新卡
+        self.assertEqual(out["texts"], ["第一段思考", "第二段思考"])  # type: ignore[arg-type]
+        # 第一张卡已被正文折叠，第二张仍在流式展开
+        self.assertEqual(out["collapsed"], [True, False])  # type: ignore[arg-type]
+
+    def test_tool_call_folds_pure_think_card(self) -> None:
+        """纯思考轮（思考 → finalize → 工具调用）：工具到达即折叠思考卡。"""
+
+        async def _scenario(io, app, pilot):  # noqa: ANN001, ANN202
+            io.stream_think("先想一想")
+            io.stream_end()  # 轮末：断流但不折叠（此时仍展开）
+            await pilot.pause(0.1)
+            card = app.query(ThinkCard).first()
+            before_tool = card.collapsed
+            io.tool_call("bash", {"command": "ls"})
+            await pilot.pause(0.1)
+            return {"before_tool": before_tool, "after_tool": card.collapsed}
+
+        out = self._run(_scenario)
+        self.assertFalse(out["before_tool"])  # 纯思考轮断流时仍展开
+        self.assertTrue(out["after_tool"])  # 工具调用到达 → 自动折叠
+
+    def test_tool_then_new_think_opens_fresh_expanded_card(self) -> None:
+        """思考 → 工具 → 新一轮思考：旧卡折叠，新卡展开且独立。"""
+
+        async def _scenario(io, app, pilot):  # noqa: ANN001, ANN202
+            io.stream_think("第一轮思考")
+            io.stream_end()
+            io.tool_call("bash", {"command": "ls"})
+            await pilot.pause(0.1)
+            io.stream_think("第二轮思考")
+            await pilot.pause(0.1)
+            cards = list(app.query(ThinkCard))
+            return {
+                "n": len(cards),
+                "collapsed": [c.collapsed for c in cards],
+                "texts": [c.text for c in cards],
+            }
+
+        out = self._run(_scenario)
+        self.assertEqual(out["n"], 2)
+        self.assertEqual(out["texts"], ["第一轮思考", "第二轮思考"])  # type: ignore[arg-type]
+        # 旧卡被折叠（工具调用 + 新卡开启双重触发），新卡展开流式
+        self.assertEqual(out["collapsed"], [True, False])  # type: ignore[arg-type]
+
+    def test_new_round_think_folds_previous_expanded_card(self) -> None:
+        """两轮连续纯思考：新思考到达时旧卡先折叠——至多一张展开的卡。"""
+
+        async def _scenario(io, app, pilot):  # noqa: ANN001, ANN202
+            io.stream_think("第一轮")
+            io.stream_end()
+            await pilot.pause(0.1)
+            first = app.query(ThinkCard).first()
+            io.stream_think("第二轮")
+            await pilot.pause(0.1)
+            cards = list(app.query(ThinkCard))
+            return {
+                "n": len(cards),
+                "first_text": first.text,
+                "collapsed": [c.collapsed for c in cards],
+            }
+
+        out = self._run(_scenario)
+        self.assertEqual(out["n"], 2)
+        self.assertTrue(out["collapsed"][0])  # type: ignore[index]  # 旧卡被折叠
+        self.assertFalse(out["collapsed"][1])  # type: ignore[index]  # 新卡展开
 
 
 if __name__ == "__main__":
