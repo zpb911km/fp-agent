@@ -10,6 +10,14 @@
    多实例，天然共享记忆/任务。身份锚点是会话 **sid**（非 cwd）；``workspace`` 只是
    项目归属属性（路由键）。
 
+**reload 语义（本模块最容易踩的坑）**：登记的 ``pid`` 只回答「进程还在不在」，答不了
+「还是不是刚才那个**化身**」。POSIX reload 是 ``os.execve`` **映像替换、PID 不变**，
+旧化身不会执行任何 shutdown 钩子（进程原地重生，没有"退出"可挂）——于是登记残留、
+``pid`` 判活为真、sid 又稳定 ⇒ 派生同名 ⇒ 新化身把自己认成别人、永久丧失邻居面。
+故 ``acquire`` 的判据是：**pid 等于本进程 pid 的登记必然是本实例的前身**（一个进程
+不可能有两个同名实例），接管而非报冲突。Windows reload 走「spawn 新进程 + 旧进程
+让位」（PID 变），由 ``acquire(takeover_wait=...)`` 的短暂重试覆盖交替窗口。
+
 防投毒（§1.2）：每实例只写自己的 ``<name>.json``（原子替换）；读取方验 hash +
 校验心跳新鲜度。目录是**发现缓存，不是信任源**。
 """
@@ -20,11 +28,14 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from fp_core.platform_utils import process_alive
+from fp_core.logger import get_logger
+from fp_core.platform_utils import FileLock, process_alive
 from fp_core.plugins.zeta.domain import (
     Capabilities,
     Endpoint,
@@ -35,6 +46,8 @@ from fp_core.plugins.zeta.domain import (
     sha256_hex,
     verify_card,
 )
+
+logger = get_logger()
 
 
 def default_peers_dir() -> Path:
@@ -132,6 +145,19 @@ def _pid_alive(pid: Any) -> bool:
     return process_alive(n)
 
 
+def _same_process(pid: Any) -> bool:
+    """登记的 pid 是否就是**本进程**——reload 的指纹。
+
+    ``pid`` 存活只证明"某个进程还活着"，不证明"还是那个实例"：POSIX reload 用
+    ``os.execve`` 替换映像，PID 不变而实例已重生。故 pid == 本进程时这条登记只能是
+    本实例的前身（一个进程不可能同时跑两个同名实例），接管而不是报冲突。
+    """
+    try:
+        return int(pid) == os.getpid()
+    except (TypeError, ValueError):
+        return False
+
+
 class InstanceRegistry:
     """一 workspace 多实例登记（§1.5 修订版，替换单实例锁）。
 
@@ -140,6 +166,8 @@ class InstanceRegistry:
     ``.fp/tasks.json``（都是 workspace 级）。
 
     - 默认（B1 多实例）：仅当**同名**且 pid 存活才冲突（sid 派生名全局唯一，几乎不撞）；
+    - **reload 例外**：同名登记的 pid == 本进程 pid ⇒ 是本实例的前身（execve 后 PID
+      不变），接管；不再让 reload 把自己认成别人（见模块 docstring）；
     - ``single=True``（保留旧语义）：任何活跃实例存在即冲突，本实例降级不启用邻居面；
     - 每次 acquire 前先 ``sweep_stale``，回收 pid 已死的僵尸登记（防崩溃留痕）。
     """
@@ -185,8 +213,15 @@ class InstanceRegistry:
     def read(self) -> dict[str, Any] | None:
         return self._read_one(self.path)
 
-    def acquire(self, *, sid: str = "") -> dict[str, Any]:
-        """登记本实例；冲突 → :class:`InstanceConflictError`。"""
+    def acquire(self, *, sid: str = "", takeover_wait: float = 0.5) -> dict[str, Any]:
+        """登记本实例；真正的冲突 → :class:`InstanceConflictError`。
+
+        Args:
+            sid: 会话 sid（身份锚点，仅落档便于排查）。
+            takeover_wait: 遇到「同名 + pid 存活但**不是**本进程」的登记时，最多等待
+                多少秒看它让位。只对 reload 的 spawn 形态（Windows：新进程先起、旧进程
+                随后 ``_exit``）有意义——把"交接窗口"与"真冲突"区分开；为 0 则不等待。
+        """
         self.sweep_stale()  # 先清僵尸，避免把死实例误判为占用
         if self.single:
             for rec in self.scan():
@@ -196,8 +231,18 @@ class InstanceRegistry:
                         f"（single 模式拒绝多实例）：{self.workspace}"
                     )
         existing = self.read()
-        if existing and _pid_alive(existing.get("pid")):
-            raise InstanceConflictError(f"实例名 {self.name!r} 已被占用 (pid={existing.get('pid')})：{self.workspace}")
+        if existing is not None:
+            holder = existing.get("pid")
+            if _same_process(holder):
+                # reload 的正常形态：POSIX 走 execve，映像换了、PID 没换，旧化身来不及注销。
+                # 同一进程不可能有两个同名实例 ⇒ 这条登记必然是我的前身，接管。
+                logger.info(f"[zeta] 接管本进程前一化身的登记（reload）: {self.name} (pid={holder})")
+            elif _pid_alive(holder):
+                deadline = time.monotonic() + max(0.0, takeover_wait)
+                while _pid_alive(holder) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if _pid_alive(holder):
+                    raise InstanceConflictError(f"实例名 {self.name!r} 已被占用 (pid={holder})：{self.workspace}")
         self.dir.mkdir(parents=True, exist_ok=True)
         payload: dict[str, Any] = {
             "name": self.name,
@@ -370,3 +415,168 @@ def check_session_workspace(sid: str, workspace: str | Path) -> str | None:
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, f)
     return prev if prev and prev != str(workspace) else None
+
+
+# ─────────────────────────────────────────────────────────
+#  共享目录卫生：可达性 GC（方案 B）
+# ─────────────────────────────────────────────────────────
+
+GC_CARD_GRACE = 7 * 86400.0  # 心跳过期多久后才「可能」回收（TTL 只判离线，回收要更保守）
+GC_LOCK_NAME = ".gc.lock"
+
+
+@dataclass
+class GcReport:
+    """一次 GC 的结果（``dry_run`` 时是「将会」的数字）。"""
+
+    cards: int = 0
+    inboxes: int = 0
+    kept_with_mail: int = 0
+    bytes_freed: int = 0
+    skipped_by_lock: bool = False
+
+    def __bool__(self) -> bool:
+        """是否真的动了东西（按此决定要不要打日志）。"""
+        return bool(self.cards or self.inboxes)
+
+    def summary(self) -> str:
+        if self.skipped_by_lock:
+            return "共享目录 GC：另一实例正在跑，本次跳过"
+        text = (
+            f"共享目录 GC：回收名片 {self.cards} 张 / 收件箱 {self.inboxes} 个 / 释放 {self.bytes_freed / 1024:.1f} KB"
+        )
+        if self.kept_with_mail:
+            text += f"；保留 {self.kept_with_mail} 个仍有未读留话的收件箱"
+        return text
+
+
+def instance_alive(workspace: str | Path, name: str) -> bool | None:
+    """``workspace`` 下是否还有 ``name`` 的**活登记**（回收名片的第二道判据）。
+
+    True=有活实例；False=**确定**没有（workspace/登记目录/登记文件不在，或 pid 已死）；
+    None=无法判定（读失败）——调用方须保守当"还在"处理，宁留勿删。
+    """
+    if not str(workspace or "").strip():
+        return None
+    ws = Path(str(workspace))
+    try:
+        if not ws.is_dir():
+            return False  # workspace 都没了 → 该实例不可能活着
+        d = ws / ".fp" / "zeta" / "instances"
+        if not d.is_dir():
+            return False  # 活实例 acquire 必建登记目录
+        p = d / f"{_safe_name(name)}.json"
+        if not p.exists():
+            return False  # 登记随正常退出删除 → 没有登记即已退出
+        rec = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(rec, dict):
+        return None
+    return _pid_alive(cast(dict[str, Any], rec).get("pid"))
+
+
+def _file_size(p: Path) -> int:
+    with contextlib.suppress(OSError):
+        return p.stat().st_size
+    return 0
+
+
+def _tree_size(d: Path) -> int:
+    total = 0
+    with contextlib.suppress(OSError):
+        for f in d.rglob("*"):
+            if f.is_file():
+                total += _file_size(f)
+    return total
+
+
+def collect_garbage(
+    backend: SharedDirBackend | None = None,
+    *,
+    card_grace: float = GC_CARD_GRACE,
+    now: float | None = None,
+    dry_run: bool = False,
+) -> GcReport:
+    """回收共享发现目录里的**死残留**——判据是「可达性」，不是「时间到了」。
+
+    名片要删需**同时**满足两条（缺一不删，宁留勿删）：
+      1. 心跳过期超过 ``card_grace``（默认 7 天；TTL 90s 只判"离线"，与"可回收"是两回事）;
+      2. 其 ``workspace`` 下已无同名**活登记**（回查 instances 的 pid；判不了就留）。
+    名片本质是派生缓存（活实例每 2s 重发），误删也会秒级自愈；真正的红线上在收件箱。
+
+    收件箱：**顶层有未读留话 → 永不删**——那是"给未来自己的话"，名字由 sid 派生，
+    会话 resume 即同名、上线即读到；无未读且对应名片已死/不存在 → 整目录回收
+    （含 ``.processed``：它只由**活**实例的 housekeeping 清理，实例死了就永无人清）。
+
+    多实例并发：经 ``FileLock`` 保证同一时刻只有一个实例在做（拿不到锁就跳过，不算失败）。
+    """
+    be = backend or SharedDirBackend()
+    root = be.root
+    t = time.time() if now is None else now
+    rep = GcReport()
+    if not root.is_dir():
+        return rep
+
+    lock = FileLock(str(root / GC_LOCK_NAME))
+    if not dry_run and not lock.acquire():
+        rep.skipped_by_lock = True
+        return rep
+    try:
+        keep: set[str] = set()
+        doomed_cards: list[Path] = []
+        for f in sorted(root.glob("*.json")):
+            raw: dict[str, Any] | None = None
+            with contextlib.suppress(OSError, json.JSONDecodeError):
+                loaded = json.loads(f.read_text(encoding="utf-8"))
+                raw = cast(dict[str, Any], loaded) if isinstance(loaded, dict) else None
+            if raw is not None:
+                hb = float(raw.get("heartbeat") or 0)
+                if t - hb <= card_grace:
+                    keep.add(f.stem)  # 心跳仍新鲜：活着
+                    continue
+                # 回查该实例的登记：True/None（保守）→ 留；False → 确定不在了
+                if instance_alive(str(raw.get("workspace") or ""), str(raw.get("name") or f.stem)) is not False:
+                    keep.add(f.stem)
+                    continue
+            else:
+                # 损坏/半写：无可回查的 workspace —— 按文件龄保守处理
+                if t - _mtime(f) <= card_grace:
+                    keep.add(f.stem)
+                    continue
+            doomed_cards.append(f)
+
+        doomed_inboxes: list[Path] = []
+        for d in sorted(root.glob("*.inbox")):
+            if not d.is_dir():
+                continue
+            if any(d.glob("msg-*.json")):
+                rep.kept_with_mail += 1  # 有未读留话：永不删
+                continue
+            if d.name[: -len(".inbox")] in keep:
+                continue  # 活实例自己的收件箱，由它的 housekeeping 管
+            doomed_inboxes.append(d)
+
+        for f in doomed_cards:
+            rep.cards += 1
+            rep.bytes_freed += _file_size(f)
+            if not dry_run:
+                with contextlib.suppress(OSError):
+                    f.unlink()
+        for d in doomed_inboxes:
+            rep.inboxes += 1
+            rep.bytes_freed += _tree_size(d)
+            if not dry_run:
+                shutil.rmtree(d, ignore_errors=True)
+
+        if not dry_run and rep:
+            logger.info(f"[zeta] {rep.summary()}")
+        return rep
+    finally:
+        lock.release()
+
+
+def _mtime(p: Path) -> float:
+    with contextlib.suppress(OSError):
+        return p.stat().st_mtime
+    return 0.0

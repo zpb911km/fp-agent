@@ -70,6 +70,7 @@ sid 全局唯一、reload/resume 稳定，天然是身份的锚点；"召回一�
 
 - 启动**不再拒绝**第二实例；各写自己的登记（写隔离不破）；
 - 启动时扫描同目录其他登记，`pid` 已死的 → 回收（僵尸清理）；
+- **`pid == 本进程` 的登记 = 本实例的前身 → 接管，不判冲突**（reload 语义，见 3.4）；
 - `--single`：保留旧语义（有活跃实例则本实例降级不启用邻居面，行为不变）；
 - 退出删自己的登记。
 
@@ -111,6 +112,40 @@ name（精确点对点）> tags（能力）> business（职能）> workspace（�
 
 「同项目」判据明确为 **workspace 相等**，而非 cwd 字符串相近。
 
+### 3.4 reload 语义：PID 不变，登记会「自吞」
+
+`fp` 的 reload 是 **`os.execve` 映像替换**（见 `core/handoff.py` +
+`platform_utils.restart_self`）：进程原地重生，**PID 不变**，且**没有任何
+shutdown 钩子会跑**（没有"退出"这一步可挂）。
+
+三个事实叠加 → 一个必然的自噬：
+
+1. 旧化身的登记文件残留（没人注销）；
+2. `pid` 判活为 **真** —— 那就是我自己；
+3. sid 稳定 ⇒ `derive_instance_name` 派生**同名**。
+
+⇒ 新化身把自己上一条登记当成"别人占着这个名"，降级、**邻居面永久丧失**
+（`peer_*` 工具还在，但只会返回"实例登记冲突"）。这不是偶发竞态，是**每次
+reload 必现**。
+
+**规则（唯一正确判据）**：`pid == 本进程 pid` 的登记**只能**是本实例的前身
+——一个进程不可能同时跑两个同名实例。故 `acquire` 直接**接管**（覆盖为自己、
+刷新 `started_at`），不判冲突。
+
+同理覆盖两类"同进程换宿主"：进程内 Agent 重建（如 portal recycle）、同进程内
+插件重新装配——它们都是同一身份的新化身，不是竞争者。
+
+**Windows 差异**：reload 走「spawn 新进程 + 旧进程 `_exit`」，PID 变。新旧交替
+有毫秒级窗口，旧进程尚在 ⇒ `acquire(takeover_wait=0.5)` 短暂等待其让位，把
+"交接窗口"与"真冲突"区分开（真冲突 = 占用者是**别的活进程**且不让位）。
+
+**没有采用的替代方案**（记录以免重复走）：
+- 「reload 前先跑 shutdown 钩子释放登记」——要在 `perform_exec_reload` 里发
+  `ON_SHUTDOWN`，会牵动 `builtin_shutdown`（清算 jobs、生成摘要、退出面板），
+  且 execve 失败时"旧进程无损"的救火承诺作废；判据在进程身份上更小更稳。
+- 「登记加心跳 TTL，陈旧即接管」——reload 前后心跳只差几秒，仍在 TTL 内，
+  挡不住；且会把真正卡住的活实例误接管。
+
 ## 4. 开放问题
 
 ### 4.1 workspace 的边界是什么
@@ -143,7 +178,7 @@ sid 全局，`.fp/memory` 是 workspace 级 —— `/projA` 的会话 X 在 `/pr
 - **C workspace 边界**：**C(a)** workspace = 启动目录（留 (b)/(c) 扩展位）
 - **E resume 跨 workspace**：**E(ii)** workspace 跟启动目录 + 首次错配提示
 
-**实现状态**：已落地，全量测试 679 passed / 2 skipped，pyright 0 errors，ruff 全过。
+**实现状态**：已落地；reload 接管（§3.4）修复后全量测试 1057 passed / 2 skipped，pyright 0 errors，ruff 全过。
 
 ## 7. 对现有文档的修订锚点
 

@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
+from fp_core.plugins.zeta.discovery import derive_instance_name
 from fp_core.plugins.zeta.plugin import (
     PEER_ANSWER_TOOL,
     PEER_LIST_TOOL,
@@ -12,6 +17,16 @@ from fp_core.plugins.zeta.plugin import (
     ZETA_DESCRIPTION,
     ZetaPlugin,
 )
+
+
+def _plant_holder(ws: Path, sid: str, *, pid: int) -> None:
+    """手工落一条"同名登记"——模拟同 workspace 里已被别的实例占着。"""
+    d = ws / ".fp" / "zeta" / "instances"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{derive_instance_name(ws, sid)}.json").write_text(
+        json.dumps({"name": derive_instance_name(ws, sid), "sid": sid, "pid": pid, "workspace": str(ws)}),
+        encoding="utf-8",
+    )
 
 
 class FakeRegistry:
@@ -77,9 +92,10 @@ def test_enabled_registers_tools_and_starts(monkeypatch, tmp_path):
 
 
 def test_lock_conflict_degrades_visibly(monkeypatch, tmp_path):
-    """同名实例（同一 sid）冲突：第二个丧失邻居面，但对 LLM 可见（工具仍在、返回原因）。
+    """同名实例（同一 sid）真冲突：第二个丧失邻居面，但对 LLM 可见（工具仍在、返回原因）。
 
     §1.5 修订后：默认多实例，仅**同名**（同 sid）冲突——不同 sid 的实例可同 workspace 共存。
+    注意"真冲突"= 占用者是**别的活进程**；同进程同名（reload）是接管，见下一用例。
     """
     monkeypatch.delenv("FP_ZETA_DISABLE", raising=False)
     monkeypatch.setenv("FP_ZETA_PEERS_DIR", str(tmp_path / "peers"))
@@ -88,25 +104,61 @@ def test_lock_conflict_degrades_visibly(monkeypatch, tmp_path):
     ws.mkdir()
     monkeypatch.chdir(ws)
 
-    first = ZetaPlugin()
-    second = ZetaPlugin()
-    reg2 = FakeRegistry()
-    ctx2 = FakeCtx()
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        _plant_holder(ws, "s_same", pid=proc.pid)
+        second = ZetaPlugin()
+        reg2 = FakeRegistry()
+        ctx2 = FakeCtx()
+
+        async def _run():
+            await second._on_init(ctx2, tool_registry=reg2, state=FakeState("s_same"))
+            # 工具照常注册（LLM 能看到"邻居能力存在"），但调用返回降级原因
+            msg = await reg2.tools["peer_list"]({})
+            assert "实例登记冲突" in msg
+            second._stop()
+            await asyncio.sleep(0)
+
+        asyncio.run(_run())
+    finally:
+        proc.kill()
+        proc.wait()
+
+    assert set(reg2.tools) == {"peer_list", "peer_send", "peer_answer", "peer_propose", "peer_ack"}
+    assert any("不可用" in s for s in ctx2.data["system_prompt_append"])
+
+
+def test_reload_reattaches_instead_of_degrading(monkeypatch, tmp_path):
+    """reload 回归：同进程同 sid 重建插件（POSIX execve 后 PID 不变）→ 接管，不得丧失邻居面。
+
+    旧实例不会跑 shutdown 钩子（进程原地重生），登记必然残留；若把"我自己刚才那条"
+    当成别人占用，新实例就永久降级——这正是本 bug 的表现。
+    """
+    monkeypatch.delenv("FP_ZETA_DISABLE", raising=False)
+    monkeypatch.setenv("FP_ZETA_PEERS_DIR", str(tmp_path / "peers"))
+    monkeypatch.setenv("FP_ZETA_STATE_DIR", str(tmp_path / "zeta_state"))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.chdir(ws)
+
+    old = ZetaPlugin()  # 旧化身：登记已落盘，随后被 execve 抹掉（不会注销）
+    new = ZetaPlugin()  # 新化身：同 sid → 同名
+    reg_new = FakeRegistry()
+    ctx_new = FakeCtx()
 
     async def _run():
-        await first._on_init(FakeCtx(), tool_registry=FakeRegistry(), state=FakeState("s_same"))
-        await second._on_init(ctx2, tool_registry=reg2, state=FakeState("s_same"))
-        # 工具照常注册（LLM 能看到"邻居能力存在"），但调用返回降级原因
-        msg = await reg2.tools["peer_list"]({})
-        assert "实例登记冲突" in msg
-        first._stop()
-        second._stop()
+        await old._on_init(FakeCtx(), tool_registry=FakeRegistry(), state=FakeState("s_same"))
+        await new._on_init(ctx_new, tool_registry=reg_new, state=FakeState("s_same"))
+        msg = await reg_new.tools["peer_list"]({})
+        assert "邻居表" in msg, msg
+        assert "不可用" not in msg
+        old._stop()
+        new._stop()
         await asyncio.sleep(0)
 
     asyncio.run(_run())
 
-    assert set(reg2.tools) == {"peer_list", "peer_send", "peer_answer", "peer_propose", "peer_ack"}
-    assert any("不可用" in s for s in ctx2.data["system_prompt_append"])
+    assert not any("不可用" in s for s in ctx_new.data["system_prompt_append"])
 
 
 def test_same_workspace_different_sid_coexist(monkeypatch, tmp_path):

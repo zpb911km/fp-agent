@@ -6,8 +6,13 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -88,10 +93,71 @@ def test_registry_allows_multiple_instances(tmp_path: Path):
     assert sorted(r["name"] for r in a.scan()) == ["proj-aaaa1111", "proj-bbbb2222"]
 
 
+def _live_foreign_pid() -> tuple[int, Any]:
+    """起一个**不属于本进程**的活进程，返回 (pid, proc)。用于模拟"真有别的实例占着"。"""
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    return proc.pid, proc
+
+
+def _write_record(reg: disc.InstanceRegistry, *, pid: int, sid: str = "s_a") -> None:
+    reg.dir.mkdir(parents=True, exist_ok=True)
+    reg.path.write_text(
+        json.dumps({
+            "name": reg.name,
+            "sid": sid,
+            "pid": pid,
+            "workspace": str(reg.workspace),
+            "started_at": 0,
+        }),
+        encoding="utf-8",
+    )
+
+
 def test_registry_same_name_conflicts(tmp_path: Path):
-    disc.InstanceRegistry(tmp_path, "proj-aaaa1111").acquire(sid="s_a")
-    with pytest.raises(disc.InstanceConflictError):
-        disc.InstanceRegistry(tmp_path, "proj-aaaa1111").acquire(sid="s_a")
+    """同名 + 占用者是**别的活进程** → 冲突（这才是真冲突）。"""
+    reg = disc.InstanceRegistry(tmp_path, "proj-aaaa1111")
+    pid, proc = _live_foreign_pid()
+    try:
+        _write_record(reg, pid=pid)
+        with pytest.raises(disc.InstanceConflictError):
+            reg.acquire(sid="s_a", takeover_wait=0)
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_registry_takes_over_own_previous_incarnation(tmp_path: Path):
+    """reload 回归（bug）：execve 后 PID 不变，旧化身的登记不能把新化身挡在门外。
+
+    POSIX reload 是映像替换：旧实例没有"退出"这一步，注销钩子不会跑，登记必然残留
+    且 pid 判活为真；sid 稳定 ⇒ 派生同名 → 旧实现把自己报成"实例名已被占用"，
+    邻居面永久丧失。同 pid 的登记只能是本实例的前身 → 必须接管。
+    """
+    reg = disc.InstanceRegistry(tmp_path, "proj-aaaa1111")
+    reg.acquire(sid="s_a")
+    assert reg.read() is not None and reg.read()["sid"] == "s_a"  # pyright: ignore[reportOptionalSubscript]
+
+    again = disc.InstanceRegistry(tmp_path, "proj-aaaa1111")  # 新化身（新插件实例）
+    payload = again.acquire(sid="s_a")
+    assert payload["sid"] == "s_a"
+    assert int(payload["pid"]) == os.getpid()
+    assert again.read() is not None
+
+
+def test_registry_waits_for_predecessor_to_exit(tmp_path: Path):
+    """占用者只是正在让位（Windows spawn reload 的交错窗口）→ 等它退出后接管，不降级。"""
+    reg = disc.InstanceRegistry(tmp_path, "proj-aaaa1111")
+    pid, proc = _live_foreign_pid()
+    _write_record(reg, pid=pid)
+    # 让位 = 进程消失（kill 后必须 wait 收割，否则它是僵尸、pid 探测仍判活）
+    killer = threading.Timer(0.15, lambda: (proc.kill(), proc.wait()))
+    killer.start()
+    try:
+        assert reg.acquire(sid="s_a", takeover_wait=5.0)["sid"] == "s_a"
+    finally:
+        killer.cancel()
+        proc.kill()
+        proc.wait()
 
 
 def test_registry_stale_pid_is_swept(tmp_path: Path):

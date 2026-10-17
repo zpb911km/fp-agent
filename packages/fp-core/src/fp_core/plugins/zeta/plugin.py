@@ -8,7 +8,10 @@
     - in-process L2 插件，合法引用 L1（``jobs.inject_event`` + ``LifecycleHook``）；
     - 用户启动任何前端即拉起本实例的 Zeta；
     - **不穿透 portal 改 core**——用的是 core 预留扩展点；
-    - 一目录一实例（``cwd`` 即身份键），锁冲突则本实例不启用邻居面。
+    - 身份锚点是会话 sid（``name = <workspace名>-<sid短handle>``），同 workspace 可多实例；
+      仅**同名**（同 sid）且占用者是别的活进程才算冲突，冲突时本实例降级不启用邻居面；
+    - reload（execve 换映像、PID 不变）残留的**自己那条**登记会被接管，不算冲突
+      ——否则每次 reload 都会把自己认成别人、永久丧失邻居面（见 discovery 模块 docstring）。
 
 测试/子 agent 环境经 ``FP_ZETA_DISABLE=1`` / ``FP_IS_SUBAGENT=1`` 关闭网络面。
 """
@@ -34,6 +37,7 @@ from fp_core.plugins.zeta.discovery import (
     SharedDirBackend,
     build_card,
     check_session_workspace,
+    collect_garbage,
     derive_instance_name,
     infer_business,
     refresh_heartbeat,
@@ -150,6 +154,8 @@ class ZetaPlugin(Plugin):
         self._workspace_mismatch: str | None = None
         self._task: asyncio.Task[None] | None = None
         self._poll_interval = 2.0
+        self._gc_interval = 24 * 3600.0  # 共享目录卫生：启动一次 + 每日一次
+        self._last_gc = 0.0
         self._disabled_reason: str | None = None
 
     # ── 生命周期 ─────────────────────────────────────
@@ -170,6 +176,8 @@ class ZetaPlugin(Plugin):
     # ── 启动 / 停止 ──────────────────────────────────
 
     def _start(self, sid: str = "") -> bool:
+        if self._service is not None:  # 重复初始化（同插件对象再次 ON_INIT）：先停旧，免双服务循环
+            self._stop()
         ws = Path(os.getcwd())
         name = derive_instance_name(ws, sid)
         self._instances = InstanceRegistry(ws, name, single=os.environ.get("FP_ZETA_SINGLE") == "1")
@@ -220,11 +228,28 @@ class ZetaPlugin(Plugin):
                 if self._backend is not None and self._card is not None:
                     refresh_heartbeat(self._card)
                     self._backend.publish(self._card)
+                self._maybe_gc()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — 后台循环不可因单次异常退出
                 logger.warning(f"[zeta] 服务循环异常: {exc}")
             await asyncio.sleep(self._poll_interval)
+
+    def _maybe_gc(self) -> None:
+        """低频回收共享发现目录的死残留（启动一次 + 每日一次）。
+
+        判据是可达性而非时间：名片心跳过期 >7 天**且**其 workspace 下已无同名活登记；
+        收件箱有未读留话则永不删（见 ``discovery.collect_garbage``）。
+        多实例并发由 flock 互斥，拿不到锁就等下一轮——卫生失败绝不拖垮服务循环。
+        """
+        now = time.time()
+        if now - self._last_gc < self._gc_interval:
+            return
+        self._last_gc = now
+        try:
+            collect_garbage(self._backend, now=now)
+        except Exception as exc:  # noqa: BLE001 — 卫生任务不得影响邻居面
+            logger.warning(f"[zeta] 共享目录 GC 失败: {exc}")
 
     # ── 钩子实现 ─────────────────────────────────────
 
