@@ -235,11 +235,13 @@ class EventBridge(Plugin):
         )
 
     async def _on_tool_result(self, ctx: HookContext, **kwargs: Any) -> None:
+        # result 由上游 _result_gate 统一截到 5000（ON_TOOL_RESULT hook payload 上限）后广播；
+        # 这里不再做展示级二次截断，前端 tool 卡片完整渲染所获内容（不再出现 "..."）。
         result = kwargs.get("result", "")
         await self._emit(
             "tool_result",
             name=kwargs.get("tool_name", ""),
-            result=(result[:200] + "...") if len(result) > 200 else result,
+            result=result,
             tool_call_id=kwargs.get("tool_call_id", ""),
         )
 
