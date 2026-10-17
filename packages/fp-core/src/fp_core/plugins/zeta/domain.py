@@ -508,6 +508,38 @@ def render_untrusted(body: str) -> str:
     return f"{UNTRUSTED_OPEN}\n{body}\n{UNTRUSTED_CLOSE}"
 
 
+# 展示层统一写成 ``peer:<name>``（铃声 / 邻居简报 / 接听回执），LLM 会照抄进工具的
+# ``to`` 参数 —— 故寻址层必须先剥掉它。
+PEER_NAME_PREFIXES = ("peer:", "peer：")
+# 包裹符：LLM 偶发把名字连同引号/尖括号/中文书名号一起抄下来。
+_WRAPPERS = (('"', '"'), ("'", "'"), ("`", "`"), ("<", ">"), ("【", "】"), ("《", "》"))
+
+
+def normalize_peer_name(name: str) -> str:
+    """把「展示名 / 随手抄来的写法」归一成「寻址名」。
+
+    展示与寻址是两套写法，混用会**静默丢件**：``to="peer:B"`` 经字符过滤落到
+    ``<root>/peerB.inbox``，而 B 轮询读的是 ``<root>/B.inbox`` —— 消息落盘成功、
+    回执报「已留话」，却永远没人读到。故所有入口（工具参数 / 服务方法 /
+    传输层）都过这里。
+    """
+    s = (name or "").strip()
+    changed = True
+    while changed and len(s) >= 2:
+        changed = False
+        for open_c, close_c in _WRAPPERS:
+            if s.startswith(open_c) and s.endswith(close_c):
+                s = s[len(open_c) : len(s) - len(close_c)].strip()
+                changed = True
+    while True:
+        s = s.strip()
+        low = s.casefold()
+        hit = next((p for p in PEER_NAME_PREFIXES if low.startswith(p)), None)
+        if hit is None:
+            return s
+        s = s[len(hit) :]
+
+
 def ring_line(peer: str, topic: str, waited_seconds: float) -> str:
     """铃声内容（来电显示级，不含正文）。"""
     mins = int(waited_seconds // 60)

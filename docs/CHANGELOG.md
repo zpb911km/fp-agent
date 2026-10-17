@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Zeta 邻居消息静默丢件（`peer:` 前缀污染寻址）**: 展示层写 `peer:<name>`，LLM 照抄进 `peer_send` 的 `to`，旧传输层只做字符过滤不归一 → 消息落到 `peer<name>.inbox`，而收件人轮询 `<name>.inbox`：落盘成功、回执报「离线（已留话）」、永远没人读（回执自身还会拼出 `peer:peer:...`）。新增 `domain.normalize_peer_name()`（剥 `peer:`/全角冒号/大小写/包裹引号，重复前缀也剥），在三层入口归一——工具参数、`PeerService.find/send`（`online` 判断与信封 `to`）、`DirTransport._safe`（目录路径），并顺带修掉带前缀时 `online` 恒为假。数据面：`scripts/fix_zeta_inbox_prefix.py` 以信封 `to` 为准把 8 个错位收件箱的 13 条留话归位、2 条过期留话回收（已实跑）。回归测试 `test_zeta_peer_addressing.py` + 双实例端到端 `test_two_instances_display_prefix_in_to_still_rings`（已验旧代码必红）。
+
 ### Added
 
 - **WebUI 思考 + 正文流式显示与自动折叠**: 前端消费 `thinking_content`/`chunk`/`stream_end` 事件——思考 token 渲染为可折叠思考块（正文未到时展开流式累积，首个正文批到达自动折叠为「思考 N 字 · Xs」单行，点击可展开全文）；正文流式渲染 markdown，`llm_end`/`done` 用权威全文终渲染并沿用 `_finalContentAlreadyShown` 去重；历史回看经 `reasoning_content`（`GET /api/sessions/<id>/messages` 新增透出）渲染同构折叠思考块。中断/异常保留思考最后一帧。

@@ -166,3 +166,60 @@ def test_two_instances_offline_leave_message_then_deliver(monkeypatch: pytest.Mo
     assert "离线" in out
     inbox = peers / "ws-b.inbox"
     assert inbox.exists() and any(inbox.glob("msg-*.json")), "留话未落到收件箱"
+
+
+def test_two_instances_display_prefix_in_to_still_rings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """真实故障回归：照抄 ``peer_list`` 的展示名（``peer:<name>``）当 ``to`` 也必须送达。
+
+    旧行为：消息被写进 ``peer<name>.inbox``，对方读 ``<name>.inbox`` → 永久静默丢件，
+    回执还报「已留话」；回执自身还会拼出 ``peer:peer:...``。
+    """
+    peers = tmp_path / "peers"
+    monkeypatch.setenv("FP_ZETA_PEERS_DIR", str(peers))
+    monkeypatch.delenv("FP_ZETA_DISABLE", raising=False)
+    monkeypatch.delenv("FP_IS_SUBAGENT", raising=False)
+
+    ws_a, ws_b = tmp_path / "ws-a", tmp_path / "ws-b"
+    ws_a.mkdir()
+    ws_b.mkdir()
+
+    async def _run() -> tuple[str, str]:
+        a, b = ZetaPlugin(), ZetaPlugin()
+        reg_a, reg_b = FakeRegistry(), FakeRegistry()
+
+        monkeypatch.chdir(ws_a)
+        await a._on_init(FakeCtx(), tool_registry=reg_a)
+        monkeypatch.chdir(ws_b)
+        await b._on_init(FakeCtx(), tool_registry=reg_b)
+        assert a._service is not None and b._service is not None
+        name_a, name_b = a._service.name, b._service.name
+
+        # 从邻居简报里**原样抄**展示名（LLM 的真实行为：简报写的是 peer:<name>）
+        listing = await reg_a.tools["peer_list"]({})
+        word = next(t for t in listing.split() if "peer:" in t)
+        token = word[word.index("peer:") :]  # 简报里是「【邻居】peer:<name>」，剥到 peer: 起
+        assert token == f"peer:{name_b}", listing
+
+        out = await reg_a.tools["peer_send"]({"to": token, "topic": "chat", "body": "在吗"})
+        assert "在线" in out, out
+        assert "peer:peer:" not in out, f"回执出现双前缀: {out}"
+
+        # B 必须真的收到铃声（不是「落盘了但没人读」）
+        jobs.drain_ready()
+        b._service.poll()
+        rings = jobs.drain_ready()
+        assert any(m.get("kind") == "peer_ring" for m in rings), f"B 未收到铃声: {rings}"
+
+        answer = await reg_b.tools["peer_answer"]({})
+        assert "在吗" in answer, answer
+        assert f"peer:{name_b}" not in answer, "正文串味：收件人名字不应出现在来电显示里"
+
+        a._stop()
+        b._stop()
+        await asyncio.sleep(0)
+        return name_a, name_b
+
+    asyncio.run(_run())
+    # 不得再出现任何 peer* 错位收件箱
+    strays = [d.name for d in peers.glob("*.inbox") if d.name.startswith("peer")]
+    assert strays == [], f"产生错位收件箱: {strays}"

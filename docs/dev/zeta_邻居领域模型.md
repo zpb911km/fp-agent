@@ -246,6 +246,31 @@ class InjectionHint:
   （如 `<untrusted_peer_content>...</untrusted_peer_content>`），SHOULD 过注入检测；
 - 每次注入记审计日志：envelope_id / sender / trust_label / inject_as。
 
+### 2.1 展示名 vs 寻址名：`peer:` 前缀必须归一
+
+展示层统一写成 `peer:<name>`（邻居简报、铃声、接听回执都这样），因为对 LLM 来说
+「这是一位邻居」比裸名字信息量更大。代价是 **LLM 会把展示名原样抄进 `to`** ——
+于是 `to` 存在两套写法，而寻址只认其中一套：
+
+| 写法 | 归一后 | 收件箱目录 |
+|---|---|---|
+| `B` | `B` | `<root>/B.inbox` |
+| `peer:B` / `PEER：B` / `` `peer:B` `` | `B` | `<root>/B.inbox`（同一个） |
+
+**MUST**：所有寻址入口先过 `domain.normalize_peer_name()` —— 工具参数（`peer_send` /
+`peer_propose` / `peer_ack`）、服务层（`PeerService.find/send`，决定 `online` 判断与
+信封 `to`）、传输层（`DirTransport._safe`，决定目录路径）。三处都归一 = 纵深防御：
+任何未来调用方都不会因为「名字带前缀」而把消息投进 `peer<name>.inbox`。
+
+历史教训：只做字符过滤而不归一，消息会落到 `peer<name>.inbox`，而收件人轮询的是
+`<name>.inbox` —— **落盘成功、回执报「已留话」、永远没人读**。这是最坏的一类失败：
+静默，且回执与真相相反。恢复手段见 `scripts/fix_zeta_inbox_prefix.py`
+（以信封 `to` 为准重新寻址）。
+
+**注意**：`_safe` 的字符过滤本身是**有损映射**（`a=b` 与 `ab` 撞同一目录）。收发双方
+各算同一个映射故日常可通，但不同实例名撞同一收件箱就会串信；目前只在有损时打一次
+warning，可逆编码方案待与实例名迁移一并设计。
+
 ## 3. Profile 协商（机械层，LLM 不参与）
 
 ```

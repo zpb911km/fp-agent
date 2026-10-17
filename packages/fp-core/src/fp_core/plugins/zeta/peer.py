@@ -34,6 +34,7 @@ from fp_core.plugins.zeta.domain import (
     ProfileState,
     Ttl,
     negotiate_profile,
+    normalize_peer_name,
     ring_line,
 )
 from fp_core.plugins.zeta.transport import DirTransport
@@ -145,8 +146,12 @@ class PeerService:
         return [c for c in self._backend.scan() if c.name != self.name]
 
     def find(self, name: str) -> NeighborCard | None:
+        """按名查在线邻居（名字先归一化：展示层的 ``peer:`` 前缀会被剥掉）。"""
+        key = normalize_peer_name(name)
+        if not key:
+            return None
         for c in self.neighbors():
-            if c.name == name:
+            if c.name == key or normalize_peer_name(c.name) == key:
                 return c
         return None
 
@@ -179,10 +184,16 @@ class PeerService:
     ) -> tuple[str, bool]:
         """投递一条语义消息。返回 ``(msg_id, online)``——离线也投（留话）。
 
+        ``to`` 先归一化（剥掉展示层的 ``peer:`` 前缀）：信封里的 ``to`` 与收件箱路径
+        必须同源，否则在线判断与落盘地址双双失真。
+
         TODO(n14) send 路由接线：当前恒走 DirTransport（文件收件箱），未按端点分派。
         应按邻居卡 ``endpoint.kind`` 路由——``a2a`` → :class:`a2a_http.A2aHttpClient`
         （外部异构 agent，已能独立工作），``local`` → DirTransport。此处只差分派逻辑。
         """
+        to = normalize_peer_name(to)
+        if not to:
+            raise ValueError("收件人为空")
         online = self.find(to) is not None
         env = Envelope(
             id=uuid.uuid4().hex,

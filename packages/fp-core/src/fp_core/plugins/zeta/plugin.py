@@ -42,7 +42,7 @@ from fp_core.plugins.zeta.discovery import (
     infer_business,
     refresh_heartbeat,
 )
-from fp_core.plugins.zeta.domain import NeighborCard, neighbor_brief
+from fp_core.plugins.zeta.domain import NeighborCard, neighbor_brief, normalize_peer_name
 from fp_core.plugins.zeta.peer import PeerService
 from fp_core.plugins.zeta.transport import DirTransport
 from fp_core.tools import ToolRegistry
@@ -77,7 +77,7 @@ PEER_SEND_TOOL: dict[str, Any] = {
         "parameters": {
             "type": "object",
             "properties": {
-                "to": {"type": "string", "description": "邻居名（见 peer_list）"},
+                "to": {"type": "string", "description": "邻居名（见 peer_list；可带 peer: 前缀，会自动剥掉）"},
                 "topic": {"type": "string", "description": "话题大类，如 contract/task/chat"},
                 "body": {"type": "string", "description": "正文"},
             },
@@ -109,7 +109,7 @@ PEER_PROPOSE_TOOL: dict[str, Any] = {
         "parameters": {
             "type": "object",
             "properties": {
-                "to": {"type": "string", "description": "邻居名（见 peer_list）"},
+                "to": {"type": "string", "description": "邻居名（见 peer_list；可带 peer: 前缀，会自动剥掉）"},
                 "contract": {
                     "type": "object",
                     "description": "契约 JSON 对象（contract_version/id/name/parties/scope/interfaces/governance…）",
@@ -128,7 +128,7 @@ PEER_ACK_TOOL: dict[str, Any] = {
         "parameters": {
             "type": "object",
             "properties": {
-                "to": {"type": "string", "description": "邻居名"},
+                "to": {"type": "string", "description": "邻居名（可带 peer: 前缀）"},
                 "contract_id": {"type": "string", "description": "契约 id"},
                 "hash": {"type": "string", "description": "接听时机器校验给出的 hash（锁字节）"},
                 "accept": {"type": "boolean", "description": "是否接受"},
@@ -327,7 +327,7 @@ class ZetaPlugin(Plugin):
     async def _exec_peer_send(self, params: dict[str, Any]) -> str:
         if self._service is None:
             return self._degraded_msg()
-        to = str(params.get("to") or "").strip()
+        to = normalize_peer_name(str(params.get("to") or ""))
         body = str(params.get("body") or "").strip()
         topic = str(params.get("topic") or "chat").strip()
         if not to or not body:
@@ -344,7 +344,7 @@ class ZetaPlugin(Plugin):
     async def _exec_peer_propose(self, params: dict[str, Any]) -> str:
         if self._service is None:
             return self._degraded_msg()
-        to = str(params.get("to") or "").strip()
+        to = normalize_peer_name(str(params.get("to") or ""))
         contract = params.get("contract")
         if not to or not isinstance(contract, dict):
             return "需要 to 与 contract（对象）。可用 peer_list 查看邻居名。"
@@ -358,7 +358,7 @@ class ZetaPlugin(Plugin):
     async def _exec_peer_ack(self, params: dict[str, Any]) -> str:
         if self._service is None:
             return self._degraded_msg()
-        to = str(params.get("to") or "").strip()
+        to = normalize_peer_name(str(params.get("to") or ""))
         contract_id = str(params.get("contract_id") or "").strip()
         expected_hash = str(params.get("hash") or "").strip()
         accept = bool(params.get("accept", True))

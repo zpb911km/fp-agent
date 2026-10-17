@@ -17,11 +17,21 @@ import time
 import uuid
 from pathlib import Path
 
+from fp_core.logger import get_logger
 from fp_core.plugins.zeta.discovery import default_peers_dir
+from fp_core.plugins.zeta.domain import normalize_peer_name
+
+logger = get_logger()
 
 
 def _safe(name: str) -> str:
-    safe = "".join(c for c in name if c.isalnum() or c in "-_.")
+    """目录名净化：**先归一化再过滤**，缺任一步都会静默丢件。
+
+    归一化剥掉展示用的 ``peer:`` 前缀（否则 ``peer:B`` → ``peerB.inbox``，
+    与接收方轮询的 ``B.inbox`` 是两条路：消息落盘成功，永远没人读）；
+    过滤只保留文件系统安全字符。
+    """
+    safe = "".join(c for c in normalize_peer_name(name) if c.isalnum() or c in "-_.")
     if not safe:
         raise ValueError(f"非法邻居名: {name!r}")
     return safe
@@ -30,11 +40,28 @@ def _safe(name: str) -> str:
 class DirTransport:
     """``<root>/<peer>.inbox/msg-<id>.json`` —— 文件即消息。"""
 
+    # 已就「名字净化有损」告警过的名字（每个名字只提醒一次，避免刷屏）
+    _lossy_warned: set[str] = set()
+
     def __init__(self, root: Path | None = None) -> None:
         self.root = Path(root) if root is not None else default_peers_dir()
 
+    def _inbox_name(self, name: str) -> str:
+        """收件箱目录名；净化有损时提醒一次（撞名风险，仅日志不阻断）。
+
+        ``''.join`` 过滤是**有损映射**：``a=b`` 与 ``ab`` 会落到同一收件箱。
+        收发双方各自算同一个映射，日常仍能互通；但两个不同实例名撞同一目录
+        就会串信，故告知一次（改名需三端协同迁移，不在此处私自变更路径）。
+        """
+        canon = normalize_peer_name(name)
+        safe = _safe(canon)
+        if safe != canon and canon not in self._lossy_warned:
+            self._lossy_warned.add(canon)
+            logger.warning(f"[zeta] 邻居名含不安全字符，收件箱名有损：{canon!r} → {safe!r}（存在撞名风险）")
+        return safe
+
     def inbox_dir(self, name: str) -> Path:
-        return self.root / f"{_safe(name)}.inbox"
+        return self.root / f"{self._inbox_name(name)}.inbox"
 
     def deliver(self, to: str, text: str) -> str:
         """投递一条消息（原子写）。返回 msg_id。对方离线也成立。"""
