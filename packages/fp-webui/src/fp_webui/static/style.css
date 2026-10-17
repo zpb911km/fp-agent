@@ -725,9 +725,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   font-size: 0.82em;
   font-family: var(--font-mono);
   color: var(--text-secondary);
-  max-height: 300px;
-  overflow: hidden;
-  transition: max-height 0.2s ease, opacity 0.15s;
+  /* 卡片级折叠已由 .tool-msg.collapsed 控制；展开态不再限高截断，
+     参数/返回内容完整显示，不再二次折叠 */
+  transition: opacity 0.15s;
 }
 .tool-msg.collapsed .tool-msg-body {
   display: block;        /* 覆盖 display:none 以支持过渡 */
