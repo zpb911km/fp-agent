@@ -3,6 +3,14 @@
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/) 和 [Keep a Changelog](https://keepachangelog.com/) 规范。
 
 
+## [Unreleased]
+
+### Added
+
+- **WebUI 思考 + 正文流式显示与自动折叠**: 前端消费 `thinking_content`/`chunk`/`stream_end` 事件——思考 token 渲染为可折叠思考块（正文未到时展开流式累积，首个正文批到达自动折叠为「思考 N 字 · Xs」单行，点击可展开全文）；正文流式渲染 markdown，`llm_end`/`done` 用权威全文终渲染并沿用 `_finalContentAlreadyShown` 去重；历史回看经 `reasoning_content`（`GET /api/sessions/<id>/messages` 新增透出）渲染同构折叠思考块。中断/异常保留思考最后一帧。
+- **WebSocketIO token 合并**（core `io.py`）: `stream_think`/`stream_write` 攒批（512 字符或 50ms）再发布，防每 token 一事件冲爆 EventBus 环形缓冲与订阅队列背压；`stream_end`/`thinking_stop` 先冲刷缓冲再发，顺序安全。前端配合 closed 轮次语义：迟到批次（fire-and-forget 排序晚于 `llm_end`/`done`）并入当前轮次不新建块。
+- **WebUI ws 消息宽松解析**: 客户端 JSON 手滑尾逗号/行注释/单引号不再整条断连——严格 `json.loads` 失败后依次尝试去注释去尾逗号、`ast.literal_eval` 安全子集，全败回 `error` 事件而非踢连接。
+
 ## [0.2.1] — 2026-10-12
 
 ### Added

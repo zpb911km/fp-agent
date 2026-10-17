@@ -21,6 +21,7 @@ FP — WebUI 服务器
 """
 
 import argparse
+import ast
 import asyncio
 import json
 import logging
@@ -610,6 +611,9 @@ async def get_session_messages(session_id: str) -> dict[str, Any]:
             "content": msg.get("content", ""),
             "tool_calls": msg.get("tool_calls"),
             "tool_call_id": msg.get("tool_call_id"),
+            # 思考模型跨轮产物：已随 to_serializable 落盘，此处透出供
+            # 前端历史回看渲染折叠思考块（无则 None）
+            "reasoning_content": msg.get("reasoning_content"),
         }
         if role != "system":
             non_system_idx += 1
@@ -778,6 +782,31 @@ async def clear_current_session():
 # ════════════════════════════════════════════════════════════
 
 
+_WS_RE_LINE_COMMENT = re.compile(r"(?m)^\s*//.*$")
+_WS_RE_TRAILING_COMMA = re.compile(r",(\s*[}\]])")
+
+
+def _parse_ws_json(raw: str) -> dict[str, Any] | None:
+    """宽松解析客户端 JSON（debug 场景：手滑尾逗号/注释/单引号不再整条断连）
+
+    严格 json.loads 先行；失败后依次尝试「去行注释 + 去尾逗号」与
+    ast.literal_eval（安全子集：不执行代码，仅字面量）。
+    全部失败返回 None（调用方回错误事件而非抛异常踢连接）。
+    """
+    for attempt in range(3):
+        try:
+            return cast(dict[str, Any], json.loads(raw))
+        except (json.JSONDecodeError, ValueError):
+            if attempt == 0:
+                raw = _WS_RE_TRAILING_COMMA.sub(r"\1", _WS_RE_LINE_COMMENT.sub("", raw))
+            elif attempt == 1:
+                try:
+                    return cast(dict[str, Any], json.loads(json.dumps(ast.literal_eval(raw))))
+                except (ValueError, SyntaxError, MemoryError, RecursionError):
+                    return None
+    return None
+
+
 @app.websocket("/ws/chat")
 async def websocket_chat(
     websocket: WebSocket,
@@ -901,7 +930,13 @@ async def websocket_chat(
         while True:
             raw = await websocket.receive_text()
             activity["ts"] = time.monotonic()
-            data = json.loads(raw)
+            data = _parse_ws_json(raw)
+            if data is None:
+                await websocket.send_json({
+                    "type": "error",
+                    "error": "消息解析失败：请发送合法 JSON（尾逗号/注释已容错）",
+                })
+                continue
 
             # 实例热替换由 portal 内部消化：run.* 永远指向当前实例，
             # 旧 WS 连接无需切换引用（reload/new_agent 后无缝续传）。

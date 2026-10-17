@@ -296,13 +296,30 @@ function handleEvent(data) {
       break;
 
     case 'llm_start':
+      startStreamRound();
       showThinking();
+      break;
+
+    case 'thinking_content':
+      // 思考 token（后端已批量合并）→ 思考块懒建 + 流式累积
+      streamThinkToken(data.token || '');
+      break;
+
+    case 'chunk':
+      // 正文 token（后端已批量合并）→ 首块折叠思考块 + 正文流式
+      streamContentChunk(data.content || '');
+      break;
+
+    case 'stream_end':
+      // 无操作：llm_end 走 finalizeStreamRound 终渲染（后端发 stream_end 前已冲刷缓冲）
       break;
 
     case 'llm_end':
       removeThinking();
+      // 流式已渲染正文 → 终渲染（权威全文），跳过 addAssistantMessage 双渲染
+      var streamed = finalizeStreamRound(data.content);
       if (data.has_tool_calls) {
-        if (data.content) {
+        if (data.content && !streamed) {
           // LLM 有推理文本 + 工具调用 → 显示文本，后续 tool_select 显示工具选择
           addAssistantMessage(data.content);
         }
@@ -312,15 +329,18 @@ function handleEvent(data) {
       } else if (data.content) {
         // 纯文本回复，无工具调用
         // done.final_content 与 data.content 相同 → 标记 true，避免 done 重复渲染
-        addAssistantMessage(data.content);
+        if (!streamed) addAssistantMessage(data.content);
         _finalContentAlreadyShown = true;
       } else {
+        // 无正文（纯思考后无内容/异常）：流式思考块保留最后一帧
+        finalizeStreamRound();
         _finalContentAlreadyShown = false;
       }
       break;
 
     case 'tool_select':
       removeThinking();
+      finalizeStreamRound(); // 工具轮可能无 llm_end 正文 → 兜底收尾
       if (data.tools && data.tools.length > 0) {
         // 改为正式的 assistant-toolcall 消息，有头像、时间戳、回溯按钮
         addAssistantToolCallMsg(data.tools);
@@ -329,6 +349,7 @@ function handleEvent(data) {
 
     case 'tool_call':
       removeThinking();
+      finalizeStreamRound();
       addToolCall(data.name, data.args, data.tool_call_id);
       break;
 
@@ -358,6 +379,7 @@ function handleEvent(data) {
 
     case 'error':
       removeThinking();
+      finalizeStreamRound(); // 异常：保留思考/已流式正文最后一帧
       showError(data.error);
       setProcessing(false);
       break;
@@ -370,9 +392,12 @@ function handleEvent(data) {
       // 命令和 LLM 回复统一通过 done.final_content 传递，
       // 不再走独立的 response 事件（参见 commits 71927ab）
       // 去重：纯文本回复（无工具调用）时 llm_end 已渲染过，跳过
-      if (data.final_content && data.final_content !== '' && !_finalContentAlreadyShown) {
+      var streamedDone = finalizeStreamRound(data.final_content);
+      if (data.final_content && data.final_content !== '' && !_finalContentAlreadyShown && !streamedDone) {
         addAssistantMessage(data.final_content);
       }
+      // 流式已渲染正文（极端：llm_end 缺失但 done 有终稿）→ 视为已显示
+      if (streamedDone) _finalContentAlreadyShown = true;
       // 重置标志，避免影响下一次
       _finalContentAlreadyShown = false;
       // ── 从后端获取权威索引计数，消除前端自增漂移 ──
@@ -396,6 +421,7 @@ function handleEvent(data) {
 
     case 'cancelled':
       removeThinking();
+      finalizeStreamRound(); // 中断：保留思考最后一帧/已流式正文
       // 取消 5 秒安全网定时器
       if (window._cancelTimeout) { clearTimeout(window._cancelTimeout); window._cancelTimeout = null; }
       setProcessing(false);

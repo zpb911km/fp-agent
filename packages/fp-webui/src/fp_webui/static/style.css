@@ -752,6 +752,81 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   font-size: 0.85em;
 }
 
+/* ── 思考块（流式 + 历史回看共用 buildThinkBlock）──
+   展开态 = 正文未到时的流式显示；collapsed = 单行摘要（正文到达自动折叠）*/
+.think-msg {
+  cursor: pointer;
+  margin-left: 0px;
+  padding-left: 12px;
+  border-right: 1px solid rgba(61,61,61,0.08);
+  padding-right: 4px;
+  position: relative;
+  font-size: 0.9em;
+}
+.think-msg::before {
+  content: 'θ';
+  position: absolute;
+  left: -4px;
+  top: 6px;
+  font-size: 8px;
+  font-weight: 700;
+  color: var(--purple, #8a6bbf);
+  opacity: 0.25;
+  font-family: var(--font-mono);
+  letter-spacing: 0;
+}
+.think-msg .think-msg-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  user-select: none;
+  padding: 2px 0;
+}
+.think-msg .think-msg-toggle:hover { color: var(--accent); }
+.think-msg .think-msg-icon {
+  display: inline-block;
+  font-size: 0.7em;
+  color: var(--text-dim);
+  transition: transform 0.15s ease;
+  width: 1em;
+  text-align: center;
+  flex-shrink: 0;
+}
+.think-msg:not(.collapsed) .think-msg-icon { transform: rotate(90deg); }
+.think-msg .think-msg-label { color: var(--text-dim); font-size: 0.85em; }
+.think-msg:not(.collapsed) .think-msg-label { display: none; } /* 流式中只留状态，避免噪音 */
+.think-msg .think-msg-body {
+  margin-top: 0.2em;
+  border-left: 3px solid var(--purple, #8a6bbf);
+  padding: 4px 0 4px 0.8em;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.82em;
+  color: var(--text-secondary);
+  max-height: 40vh;
+  overflow-y: auto;
+  transition: opacity 0.15s;
+}
+.think-msg.collapsed .think-msg-body {
+  display: block;        /* 覆盖 display:none 以支持过渡 */
+  max-height: 0;
+  opacity: 0;
+  padding: 0 0 0 0.8em;
+  margin-top: 0;
+  overflow: hidden;
+}
+.think-msg .think-msg-status {
+  margin-left: auto;
+  font-size: 0.78em;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+/* 流式思考期：正文未到时隐藏空 .msg-content，避免卡片下方空白占位；
+   首个正文块到达即移除该类（见 ui.js streamContentChunk） */
+.msg-content.stream-pending {
+  display: none;
+}
+
 /* ── 工具状态驱动样式 ── */
 .msg[data-tool-state="running"] {
   border-left: 3px solid var(--yellow);

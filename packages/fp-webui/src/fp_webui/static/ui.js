@@ -520,7 +520,7 @@ function showThinking() {
   var bars = '';
   for (var i = 0; i < 9; i++) { bars += '<span class="wave-bar"></span>'; }
   thinkingEl.innerHTML =
-    '<span class="thinking-label">⏳ 处理中</span>' +
+    '<span class="thinking-label">处理中</span>' +
     '<span class="thinking-wave" aria-label="处理中">' + bars + '</span>';
   group.appendChild(thinkingEl);
 
@@ -530,6 +530,145 @@ function showThinking() {
 function removeThinking() {
   if (thinkingEl && document.body.contains(thinkingEl)) { thinkingEl.remove(); thinkingEl = null; }
   if (progressEl && document.body.contains(progressEl)) { progressEl.remove(); progressEl = null; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   流式显示 — 思考块 + 正文流式（n3）
+   生命周期（一轮 LLM 调用 = llm_start → … → llm_end）：
+     llm_start        → startStreamRound()（重置状态，spinner 由 showThinking 管）
+     thinking_content → 思考块懒建（展开态）+ 文本累积，50ms 节流 flush
+     chunk            → 首块：折叠思考块；正文消息懒建，100ms 节流重渲染 markdown
+     stream_end       → flush（后端已先冲刷缓冲再发，顺序安全）
+     llm_end/done/…   → finalizeStreamRound()：终渲染 + 清理
+   折叠策略：正文到达前思考块展开；首个正文 chunk 到达即折叠为
+   「思考 N 字 · Xs」单行（点击可再展开，保留全文）。
+   ═══════════════════════════════════════════════════════════ */
+var _stream = null;
+var THINK_FLUSH_MS = 50;    // 思考文本 DOM flush 节流
+var CONTENT_FLUSH_MS = 100; // 正文 markdown 重渲染节流
+
+function startStreamRound() {
+  finalizeStreamRound(); // 上一轮残留兜底（flush + 终渲染）
+  _stream = {
+    thinkText: '', thinkChars: 0, thinkEl: null, thinkTimer: null,
+    contentText: '', contentEl: null, contentTimer: null,
+    closed: false  // llm_end/done 后置 true：迟到 token 并入本轮，不新建块
+  };
+}
+
+/** 折叠思考块为单行摘要（保留全文可展开） */
+function foldThinkEl(el, chars, elapsedMs) {
+  if (!el || el.classList.contains('collapsed')) return;
+  var statusEl = el.querySelector('.think-msg-status');
+  if (statusEl) {
+    statusEl.textContent = '思考 ' + chars + ' 字 · ' + (elapsedMs / 1000).toFixed(1) + 's';
+  }
+  el.classList.add('collapsed');
+}
+
+function toggleThinkMsg(event) {
+  if (event.target.closest('.backtrack-btn') || event.target.closest('.msg-avatar')) return;
+  event.currentTarget.classList.toggle('collapsed');
+}
+
+/** 构建思考块元素（流式与历史回看共用） */
+function buildThinkBlock(text) {
+  var el = document.createElement('div');
+  el.className = 'think-msg';
+  el.innerHTML =
+    '<div class="think-msg-toggle">' +
+      '<span class="think-msg-icon">▸</span>' +
+      '<span class="think-msg-label">思考中…</span>' +
+      '<span class="think-msg-status"></span>' +
+    '</div>' +
+    '<div class="think-msg-body"></div>';
+  el.querySelector('.think-msg-body').textContent = text;
+  el.onclick = toggleThinkMsg;
+  return el;
+}
+
+function streamThinkToken(token) {
+  if (!_stream) startStreamRound();
+  if (!_stream.thinkEl) {
+    // 首个思考 token：spinner 让位给真内容
+    removeThinking();
+    // 回复卡片先行创建，思考块插在卡片内部（header 与 content 之间），
+    // 与历史回看路径同构——不再裸挂 msg-group 下破坏卡片统一性
+    if (!_stream.contentEl) _stream.contentEl = addAssistantMessage('');
+    // 正文未到：隐藏空的 .msg-content，避免思考期卡片下方出现空白占位
+    _stream.contentEl.classList.add('stream-pending');
+    _stream.thinkEl = buildThinkBlock('');
+    _stream.thinkEl.dataset.streamStart = String(Date.now());
+    _stream.contentEl.parentNode.insertBefore(_stream.thinkEl, _stream.contentEl);
+    scrollToBottom();
+  }
+  _stream.thinkText += token;
+  _stream.thinkChars += token.length;
+  if (_stream.closed) {
+    // 迟到 token（llm_end 后 fire-and-forget 排序晚到）：直写终帧，不排定时器
+    if (_stream.thinkTimer) { clearTimeout(_stream.thinkTimer); _stream.thinkTimer = null; }
+    _stream.thinkEl.querySelector('.think-msg-body').textContent = _stream.thinkText;
+    return;
+  }
+  if (_stream.thinkTimer) return;
+  _stream.thinkTimer = setTimeout(function() {
+    if (!_stream || !_stream.thinkEl) return;
+    _stream.thinkTimer = null;
+    _stream.thinkEl.querySelector('.think-msg-body').textContent = _stream.thinkText;
+    scrollToBottom();
+  }, THINK_FLUSH_MS);
+}
+
+function streamContentChunk(chunk) {
+  if (!_stream) startStreamRound();
+  // 正文到达 → 思考块折叠（用户决策：正文前展开，正文流式时折叠）
+  if (_stream.thinkEl) {
+    var t0 = Number(_stream.thinkEl.dataset.streamStart || Date.now());
+    foldThinkEl(_stream.thinkEl, _stream.thinkChars, Date.now() - t0);
+  }
+  if (!_stream.contentEl) {
+    // 复用 addAssistantMessage 的完整消息结构（头像/时间戳/回溯/复制 + liveMsgIndex 记账）
+    _stream.contentEl = addAssistantMessage('');
+  }
+  // 正文首块到达 → 取消空占位隐藏
+  _stream.contentEl.classList.remove('stream-pending');
+  _stream.contentText += chunk;
+  if (_stream.closed) {
+    // 迟到 chunk：直写终帧，不排定时器
+    if (_stream.contentTimer) { clearTimeout(_stream.contentTimer); _stream.contentTimer = null; }
+    _stream.contentEl.innerHTML = renderMarkdown(_stream.contentText);
+    return;
+  }
+  if (_stream.contentTimer) return;
+  _stream.contentTimer = setTimeout(function() {
+    if (!_stream || !_stream.contentEl) return;
+    _stream.contentTimer = null;
+    _stream.contentEl.innerHTML = renderMarkdown(_stream.contentText);
+    scrollToBottom();
+  }, CONTENT_FLUSH_MS);
+}
+
+/** 终渲染：flush 残余 + 用权威全文重渲染。
+    轮次置 closed 但不销毁——迟到 token（后端 _pub fire-and-forget 排在
+    llm_end 之后的末批）并入本轮元素，避免开孤儿思考块。返回是否已显示正文 */
+function finalizeStreamRound(finalContent) {
+  if (!_stream) return false;
+  var s = _stream;
+  s.closed = true;
+  if (s.thinkTimer) { clearTimeout(s.thinkTimer); s.thinkTimer = null; }
+  if (s.contentTimer) { clearTimeout(s.contentTimer); s.contentTimer = null; }
+  if (s.thinkEl) {
+    // 未被正文折叠（如纯思考后中断/出错）→ 保留展开态最后一帧
+    s.thinkEl.querySelector('.think-msg-body').textContent = s.thinkText;
+  }
+  if (s.contentEl && finalContent != null) {
+    // 权威全文覆盖（llm_end.content / done.final_content）
+    s.contentEl.classList.remove('stream-pending');
+    s.contentEl.innerHTML = renderMarkdown(finalContent);
+    renderMath();
+  }
+  scrollToBottom();
+  return !!s.contentEl;
 }
 
 function showError(msg) {
@@ -892,6 +1031,14 @@ function renderHistoryMessages(sid, messages) {
 
       // 渲染内容
       var contentEl = msgDiv.querySelector('.msg-content');
+      // 思考块：已落盘的 reasoning_content → 折叠态插在正文前（n4 历史回看）
+      if (msg.reasoning_content) {
+        var thinkEl = buildThinkBlock(msg.reasoning_content);
+        thinkEl.classList.add('collapsed');
+        thinkEl.querySelector('.think-msg-status').textContent =
+          '思考 ' + msg.reasoning_content.length + ' 字';
+        contentEl.parentNode.insertBefore(thinkEl, contentEl);
+      }
       if (msg.content) {
         contentEl.innerHTML = renderMarkdown(msg.content);
         allRendered.push(contentEl);

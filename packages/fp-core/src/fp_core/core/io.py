@@ -147,6 +147,13 @@ class WebSocketIO(IOChannel):
 
     frontend = "webui"
 
+    # token 合并参数（n2）：单 token 单事件会以「每 token 一个 seq」冲爆
+    # EventBus 环形缓冲（2000）并挤占订阅队列（1024，丢最旧）——长思考
+    # 必然触发重连 gap 与关键事件（llm_end/done）丢失。合并为批：
+    # 攒满 _BATCH_CHARS 或距首个未刷 token _BATCH_SECONDS 秒即发一批。
+    _BATCH_CHARS = 512
+    _BATCH_SECONDS = 0.05
+
     def __init__(self, event_bus: EventBus):
         # EventBus 已下沉至 core（fp_core.core.events），此处为强类型引用；
         # 历史上 EventBus 定义在 fp-webui 导致分层倒挂，曾以 Any 兜底。
@@ -156,6 +163,10 @@ class WebSocketIO(IOChannel):
         # 当前等待中的 ask 元数据（供 snapshot 跨连接恢复）
         self._pending_ask_meta: dict[str, Any] | None = None
         self.is_running = False  # WebSocket 处理器用来判断当前是否有任务在处理
+        # token 合并缓冲（stream_think / stream_write 各自独立）
+        self._think_buf: list[str] = []
+        self._write_buf: list[str] = []
+        self._flush_handle: asyncio.TimerHandle | None = None
 
     # ── 供 WebSocket 处理器调用 ─────────────────────────
 
@@ -211,19 +222,66 @@ class WebSocketIO(IOChannel):
         self._pub("thinking", status="start")
 
     async def thinking_stop(self):
+        # 先冲刷残余思考 token 再发 stop——保证 stop 之后不再有 thinking_content
+        self._flush_think()
         self._pub("thinking", status="stop")
 
     def stream_write(self, content: str):
-        self._pub("chunk", content=content)
+        self._write_buf.append(content)
+        if sum(len(t) for t in self._write_buf) >= self._BATCH_CHARS:
+            self._flush_write()
+        else:
+            self._schedule_flush()
 
     def stream_think(self, token: str):
-        self._pub("thinking_content", token=token)
+        self._think_buf.append(token)
+        if sum(len(t) for t in self._think_buf) >= self._BATCH_CHARS:
+            self._flush_think()
+        else:
+            self._schedule_flush()
+
+    def _schedule_flush(self):
+        """首个未刷 token 起 50ms 后冲刷一批（同 loop 定时器，勿阻塞）"""
+        if self._flush_handle is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._flush_all()  # 无事件循环（测试/降级）→ 同步冲刷
+                return
+            self._flush_handle = loop.call_later(self._BATCH_SECONDS, self._flush_all)
+
+    def _flush_all(self):
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
+        self._flush_think()
+        self._flush_write()
+
+    def _flush_think(self):
+        if self._think_buf:
+            batch = "".join(self._think_buf)
+            self._think_buf.clear()
+            self._pub("thinking_content", token=batch)
+
+    def _flush_write(self):
+        if self._write_buf:
+            batch = "".join(self._write_buf)
+            self._write_buf.clear()
+            self._pub("chunk", content=batch)
 
     def stream_end(self):
+        # 冲刷残余 token 再发结束事件——前端凭 stream_end 收尾，
+        # 顺序颠倒会导致末尾 token 丢失
+        self._flush_all()
         self._pub("stream_end")
 
     def stream_reset(self):
-        """WebSocket 无状态管理，无需操作"""
+        """异常恢复：清空未刷缓冲并作废定时器"""
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
+        self._think_buf.clear()
+        self._write_buf.clear()
 
     def tool_call(self, name: str, args: dict[str, Any]):
         self._pub("tool_call", name=name, args=args)
