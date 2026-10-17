@@ -104,7 +104,9 @@ fp --version
 `check_docs_sync.py`（文档同步门禁）、`check_dep_layers.py`（依赖层级）、
 `check_charter.py`（宪章哈希）、`bump_docs.py`、
 `migrate_memory_tree.py`（记忆树迁移/回滚，实现见
-[guide/记忆系统](guide/记忆系统.md)）。新增脚本时同步此清单，
+[guide/记忆系统](guide/记忆系统.md)）、
+`fix_zeta_inbox_prefix.py`（Zeta 历史错位收件箱归位，一次性修复工具：
+以信封 `to` 为准重新寻址，默认 dry-run、`--apply` 才动盘）。新增脚本时同步此清单，
 并跑 `check_docs_sync.py --audit` 确认被 `DOC_RULES` 覆盖。
 
 ### Commit 规范
