@@ -15,9 +15,12 @@ import os
 import sys
 import tempfile
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from textual.widgets import Static
 
 from fp_cli.tui import TOOL_RESULT_MAX_LINES, TUIIO, AskModal, FPApp, PromptInput, ThinkCard, ToolCard
 
@@ -782,6 +785,158 @@ class TestThinkCard(unittest.TestCase):
         self.assertEqual(out["n"], 2)
         self.assertTrue(out["collapsed"][0])  # type: ignore[index]  # 旧卡被折叠
         self.assertFalse(out["collapsed"][1])  # type: ignore[index]  # 新卡展开
+
+
+class TestStreamFlushThrottle(unittest.TestCase):
+    """流式冲刷的时间节流契约（卡顿修复的回归锚）。
+
+    `call_later` 只是「下一 tick 回调」，**不是**节流——旧实现一 token 一帧，
+    每帧一次全屏重排（O(历史块数)）+ 全屏重绘。这里锁住：同一批 token 只排
+    一次冲刷、间隔未满走 `set_timer`、轮末（`stream_end`）即时收尾不丢字。
+    """
+
+    class _FakeTimer:
+        """定时器桩：只记录是否被取消（立即冲刷时须取消在途定时器）。"""
+
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    class _FakeApp:
+        """TUIIO 的最小宿主桩：记录调度方式与投递的消息。"""
+
+        mounted = True
+
+        def __init__(self) -> None:
+            self.immediate = 0
+            self.timers: list[float] = []
+            self.messages: list[object] = []
+            self.timer_objs: list[TestStreamFlushThrottle._FakeTimer] = []
+            self._pending_cb: Any = None
+
+        def call_later(self, callback: Any) -> bool:
+            self.immediate += 1
+            self._pending_cb = callback
+            return True
+
+        def set_timer(self, delay: float, callback: Any) -> Any:  # noqa: ANN401 — 桩
+            self.timers.append(delay)
+            self._pending_cb = callback
+            timer = TestStreamFlushThrottle._FakeTimer()
+            self.timer_objs.append(timer)
+            return timer
+
+        def post_message(self, message: Any) -> bool:
+            self.messages.append(message)
+            return True
+
+        def fire(self) -> None:
+            cb, self._pending_cb = self._pending_cb, None
+            assert cb is not None
+            cb()
+
+        def kinds(self) -> list[str]:
+            return [m.kind for m in self.messages]  # type: ignore[attr-defined]
+
+    def test_batch_tokens_into_single_flush(self) -> None:
+        app = self._FakeApp()
+        io = TUIIO()
+        io.attach(app)  # type: ignore[arg-type]
+        for _ in range(50):
+            io.stream_think("想")
+        self.assertEqual(app.immediate, 1)  # 50 token 只排一次冲刷
+        self.assertEqual(app.messages, [])  # 未到点：一个字都还没投
+        app.fire()
+        self.assertEqual(app.kinds(), ["think"])
+        self.assertEqual(app.messages[0].payload, "想" * 50)  # 合批，不丢字  # type: ignore[attr-defined]
+
+    def test_second_burst_waits_for_interval(self) -> None:
+        app = self._FakeApp()
+        io = TUIIO()
+        io.attach(app)  # type: ignore[arg-type]
+        io.stream_think("第一批")
+        app.fire()  # 首次冲刷：立即（距上次已够久）
+        self.assertEqual(app.kinds(), ["think"])
+        io.stream_think("第二批")
+        self.assertEqual(app.immediate, 1)  # 没有第二次立即冲刷
+        self.assertEqual(len(app.timers), 1)  # 改走定时器，间隔为正
+        self.assertGreater(app.timers[0], 0.0)
+        self.assertLessEqual(app.timers[0], 0.05)
+        app.fire()
+        self.assertEqual(app.kinds(), ["think", "think"])
+
+    def test_stream_end_flushes_pending_immediately(self) -> None:
+        app = self._FakeApp()
+        io = TUIIO()
+        io.attach(app)  # type: ignore[arg-type]
+        io.stream_think("尾字")
+        io.stream_end()  # 轮末：残留必须当场落盘，不等定时器
+        self.assertEqual(app.kinds(), ["think", "finalize"])
+        self.assertEqual(app.messages[0].payload, "尾字")  # type: ignore[attr-defined]
+
+    def test_immediate_flush_cancels_pending_timer(self) -> None:
+        """在途定时器被立即冲刷取消：否则它会到点再空刷一帧。"""
+        app = self._FakeApp()
+        io = TUIIO()
+        io.attach(app)  # type: ignore[arg-type]
+        io.stream_think("甲")
+        app.fire()  # 首次冲刷
+        io.stream_think("乙")
+        self.assertEqual(len(app.timer_objs), 1)
+        io.tool_call("bash", {"command": "ls"})  # 立即冲刷（工具卡要插在流段之后）
+        self.assertTrue(app.timer_objs[0].stopped)
+        self.assertEqual(app.kinds(), ["think", "think", "tool"])
+        self.assertEqual(app.messages[1].payload, "乙")  # type: ignore[attr-defined]
+
+
+class TestStatusRefreshIdempotent(unittest.TestCase):
+    """状态条刷新契约：内容没变就一个字节都不更新（idle 卡顿修复的回归锚）。
+
+    `Static.update` 默认 `layout=True`，每次调用都会触发**全屏重排**
+    （`_arrange_root` 遍历所有子件，O(历史块数)）——0.4s 定时器若无条件调用，
+    空闲时也在白烧 CPU 并整屏重绘。
+    """
+
+    def _spy(self, app: FPApp) -> list[bool]:
+        """给 #status 的 update 装探针，返回每次调用的 layout 参数。"""
+        bar = app.query_one("#status", Static)
+        calls: list[bool] = []
+        original = bar.update
+
+        def spy(content: Any = "", *, layout: bool = True) -> None:
+            calls.append(layout)
+            original(content, layout=layout)
+
+        bar.update = spy  # type: ignore[method-assign]
+        return calls
+
+    def test_unchanged_status_not_redrawn(self) -> None:
+        from fp_core.api import portal as real_portal
+
+        async def _scenario() -> dict[str, object]:
+            io = TUIIO()
+            app = FPApp(io)
+            io.attach(app)
+            with (
+                patch.object(type(real_portal), "is_open", property(lambda self: True)),
+                patch.object(real_portal, "run", _FakePortal(busy=False), create=True),
+            ):
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    calls = self._spy(app)
+                    app._refresh_status()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                    app._refresh_status()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                    await pilot.pause(0.5)  # 跨过 0.4s 定时器的一拍
+                    unchanged = list(calls)
+                    app._status_note = "思考中…"  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                    app._refresh_status()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                    return {"unchanged": unchanged, "changed": list(calls)}
+
+        out = asyncio.run(_scenario())
+        self.assertEqual(out["unchanged"], [])  # 空闲多拍：零更新
+        self.assertEqual(out["changed"], [False])  # 变了才更新，且不触发重排
 
 
 if __name__ == "__main__":

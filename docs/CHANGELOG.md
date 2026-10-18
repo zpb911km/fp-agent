@@ -7,6 +7,7 @@
 
 ### Fixed
 
+- **TUI 卡顿（idle 滚动与流式双源）**: 两处「白帧」把事件循环占满，键盘/滚轮只能排队 —— ① **idle 定时器空转整屏重排**：`_refresh_status` 每 0.4s 无条件 `Static.update(t)`，而其默认 `layout=True` → 每拍一次 `_arrange_root(visible_only=False)` 全量重排（遍历 `#chat` 全部子件，O(历史块数)）+ 整屏重绘；实测稳态空转 CPU 30/56/133 ms·s⁻¹（400/1200/2400 块），最坏单拍阻塞 **110ms**，正是「空闲时上下滚动也卡」。改为 diff 门（内容没变一个字节不动）+ `update(..., layout=False)`（dock 定高不必重排）+ 占位符同样 diff：空转降到 8 ms·s⁻¹ 且与历史长度无关，最坏单拍 2.8ms。② **流式「一 token 一帧」**：`_schedule_flush` 用 `call_later`（= 下一 tick）当节流，SSE 每块一次 await 故根本不合并 → 每 token 一次全屏重排+重绘（实测 10–30ms/帧，事件循环饱和，思考卡片更因整段重渲染而叠加）。改为时间门 `STREAM_FLUSH_INTERVAL=0.05s`（约 20fps 上限，间隔未满走 `set_timer`），同长度流式帧数降 6–10 倍、CPU 降 30%（body/arrange 次数同比减少）；`stream_end` 仍即时收尾不丢字。回归：`TestStreamFlushThrottle` + `TestStatusRefreshIdempotent`（4 例），`docs/dev/显示层.md` 记「渲染成本纪律」。
 - **Zeta 邻居消息静默丢件（`peer:` 前缀污染寻址）**: 展示层写 `peer:<name>`，LLM 照抄进 `peer_send` 的 `to`，旧传输层只做字符过滤不归一 → 消息落到 `peer<name>.inbox`，而收件人轮询 `<name>.inbox`：落盘成功、回执报「离线（已留话）」、永远没人读（回执自身还会拼出 `peer:peer:...`）。新增 `domain.normalize_peer_name()`（剥 `peer:`/全角冒号/大小写/包裹引号，重复前缀也剥），在三层入口归一——工具参数、`PeerService.find/send`（`online` 判断与信封 `to`）、`DirTransport._safe`（目录路径），并顺带修掉带前缀时 `online` 恒为假。数据面：`scripts/fix_zeta_inbox_prefix.py` 以信封 `to` 为准把 8 个错位收件箱的 13 条留话归位、2 条过期留话回收（已实跑）。回归测试 `test_zeta_peer_addressing.py` + 双实例端到端 `test_two_instances_display_prefix_in_to_still_rings`（已验旧代码必红）。
 
 ### Added

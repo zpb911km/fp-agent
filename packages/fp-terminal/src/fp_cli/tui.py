@@ -5,8 +5,16 @@
 
 渲染模型：VerticalScroll 消息流 + 常驻输入区（多行 PromptInput + 发送按钮，状态条/补全提示条）。
     - 已固化内容 = 追加的 Static/Markdown 子件（顺序天然正确，历史即日志）
-    - 流式中内容 = 单个 live 子件，token 节流（call_later 合批）update，
-      段末固化（live 引用置空，子件保留可见以迎接下一段）
+    - 流式中内容 = 单个 live 子件，**时间节流**（``STREAM_FLUSH_INTERVAL``，
+      约 20fps 上限）update，段末固化（live 引用置空，子件保留可见以迎接下一段）
+
+渲染成本模型（改这里之前先看）：
+    任何一次内容变更 = 一整帧。Textual 的自动高度子件一旦变高，就触发
+    ``_arrange_root(visible_only=False)`` 全量重排——**遍历 #chat 的全部子件**，
+    成本随历史块数线性增长；随后的重绘按可见区算。因此「多少帧」比「多少 token」
+    重要得多：一 token 一帧会把事件循环占满（实测每帧 10–30ms），
+    键盘/滚轮事件只能排队 → 卡顿。同理，内容没变就不要碰 widget：
+    ``Static.update`` 默认 ``layout=True``，空转一次就是一次全屏重排。
 
 输入路由（``route_input`` 纯函数，可独立测试）：
     空 → ignore ；斜杠+空闲 → command（send 完整钩子链）
@@ -27,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections import Counter
 from typing import TYPE_CHECKING, Any, cast
 
@@ -40,6 +49,7 @@ from textual.geometry import Offset
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.theme import BUILTIN_THEMES
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Button, Collapsible, Input, Markdown, OptionList, Static, TextArea
 
@@ -123,6 +133,12 @@ class AskRequest(Message):
 # ══════════════════════════════════════════════════════════════
 
 
+#: 流式合批节流：两次冲刷的最小间隔（秒）→ 屏幕刷新上限约 20fps。
+#: 一次冲刷 = 一整帧（重排 + 重绘可见区 + 终端写入）：SSE token 逐块冲刷
+#: 会让事件循环饱和（实测每 token 约 2ms CPU），且帧内并不产生可见差异。
+STREAM_FLUSH_INTERVAL = 0.05
+
+
 class TUIIO(IOChannel):
     """Textual 通道：IO 回调 → IOMsg（节流合批流式 token）。
 
@@ -139,6 +155,10 @@ class TUIIO(IOChannel):
         self._think_buf: list[str] = []
         self._content_buf: list[str] = []
         self._flush_scheduled = False
+        # 上次冲刷时刻（monotonic）：下次冲刷至少间隔 STREAM_FLUSH_INTERVAL
+        self._last_flush = 0.0
+        # 在途的节流定时器（立即冲刷时取消，防重复冲刷）
+        self._flush_timer: Timer | None = None
         # 本轮是否产生过流式输出（send 返回后判断是否需补渲染 response.content）
         self.consumed_stream = False
 
@@ -172,6 +192,11 @@ class TUIIO(IOChannel):
     def _flush_buffers(self, sink: list[IOMsg] | None, *, final: bool = False) -> None:
         """把流式缓冲落为 think/content(+finalize) 消息。"""
         self._flush_scheduled = False
+        self._last_flush = time.monotonic()
+        # 立刻冲刷时取消在途的节流定时器：否则它会到点再空刷一次（多一帧）
+        timer, self._flush_timer = self._flush_timer, None
+        if timer is not None:
+            timer.stop()
         target = sink if sink is not None else None
 
         def put(kind: str, payload: Any) -> None:
@@ -196,11 +221,22 @@ class TUIIO(IOChannel):
         self._flush_buffers(None)
 
     def _schedule_flush(self) -> None:
+        """安排一次合批冲刷：最早下一 tick，且距上次冲刷不短于节流间隔。
+
+        ``call_later`` 只是在下一 tick 插一条回调——**本身不做时间节流**，
+        SSE 每块一次 await，于是「一 token 一帧」。这里改用时间门：间隔未满
+        就交给 ``set_timer`` 到点再刷（同一时刻至多一个待触发，见
+        ``_flush_scheduled``），token 攒成一批只画一帧。
+        """
         if self._flush_scheduled or not self._ready:
             return
         assert self._app is not None
         self._flush_scheduled = True
-        self._app.call_later(self._timed_flush)
+        delay = STREAM_FLUSH_INTERVAL - (time.monotonic() - self._last_flush)
+        if delay <= 0:
+            self._app.call_later(self._timed_flush)
+        else:
+            self._flush_timer = self._app.set_timer(delay, self._timed_flush)
 
     def _timed_flush(self) -> None:
         self._flush_now()
@@ -241,6 +277,9 @@ class TUIIO(IOChannel):
         self._think_buf = []
         self._content_buf = []
         self._flush_scheduled = False
+        timer, self._flush_timer = self._flush_timer, None
+        if timer is not None:
+            timer.stop()
 
     def tool_call(self, name: str, args: dict[str, Any]) -> None:
         self._flush_now()  # 先落盘在途流段，再插工具卡（顺序不变量）
@@ -674,6 +713,9 @@ class FPApp(App[None]):
         self._think_active = False
         # 状态附注（spinner 文本）
         self._status_note = ""
+        # 状态条/占位符的最近一次渲染结果：内容没变就不重画（见 _refresh_status）
+        self._status_text: Text | None = None
+        self._placeholder = ""
         # 输入历史
         self._hist: list[str] = []
         self._hist_idx = 0
@@ -963,10 +1005,17 @@ class FPApp(App[None]):
         )
         if self._status_note:
             t.append(f" · {self._status_note}", style=tui_style("status_note"))
-        bar.update(t)
-        prompt.placeholder = (
-            "运行中 · 输入将排队注入（斜杠禁用）" if busy else "消息…（Enter 换行 · Shift+Enter/Ctrl+J 发送）"
-        )
+        # 差异才更新：``Static.update`` 默认 ``layout=True`` → 一次全屏重排
+        # （``_arrange_root(visible_only=False)`` 遍历所有子件，O(历史块数)），
+        # 空闲时每 0.4s 白烧一次。状态条是 dock+height:1 定高，改字根本不需要
+        # 重排，故 diff 门 + ``layout=False`` 双保险：内容没变 → 一个字节都不动。
+        if t != self._status_text:
+            self._status_text = t
+            bar.update(t, layout=False)
+        placeholder = "运行中 · 输入将排队注入（斜杠禁用）" if busy else "消息…（Enter 换行 · Shift+Enter/Ctrl+J 发送）"
+        if placeholder != self._placeholder:
+            self._placeholder = placeholder
+            prompt.placeholder = placeholder
 
     # ── 输入路由 ─────────────────────────────────────────────
 
