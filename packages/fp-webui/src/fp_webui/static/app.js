@@ -627,10 +627,13 @@ function loadSessionsList() {
         var msgCount = s.message_count || 0;
         // 后端 list() 已保证 summary 可展示；此处仅兜底——不再用 sid 冒充标题
         var summary = s.summary || (msgCount ? '（无摘要）' : '（空白会话）');
+        // 关键词由后端 KL 管线预先算好（meta.kw），前端只读不算
+        var kw = (s.kw && s.kw.length) ? s.kw.slice(0, 3).join(' · ') : '';
         html +=
           '<div class="session-item' + (isCurrent ? ' current' : '') + '" onclick="switchSession(\'' + s.id + '\')">' +
             '<div class="session-item-info">' +
               '<div class="session-item-summary">' + escapeHtml(summary) + '</div>' +
+              (kw ? '<div class="session-item-kw">' + escapeHtml(kw) + '</div>' : '') +
               '<div class="session-item-meta">' +
                 escapeHtml(created) + ' · ' + msgCount + ' 条消息' +
               '</div>' +

@@ -725,7 +725,26 @@ class SessionManager:
         if not summary:
             summary = meta.get("summary") or "empty_session"
         self.update_meta(target_sid, summary=summary)
+        self._refresh_keywords(target_sid, messages)
         return summary
+
+    def _refresh_keywords(self, sid: str, messages: list[dict[str, Any]]) -> None:
+        """刷新会话关键词（``meta.kw``）——挂在会话落盘/切换这条**低频**路径上。
+
+        为什么不在 ``list_sessions()`` 里算：那里是 900+ 会话的循环，实算会
+        把毫秒级列表拖成秒级。列表永远只读现成字段，缺失即留空。
+        单会话成本约 18ms（900 会话全量回放实测）。
+
+        关键词是**增强**功能：任何异常都静默吞掉，不能让会话保存失败。
+        """
+        try:
+            from .session_keywords import KW_VERSION, compute_from_messages
+
+            meta = self._meta if sid == self._session_id else (_read_meta_from_file(_session_path(sid)) or {})
+            kws = compute_from_messages(meta, messages)
+            self.update_meta(sid, kw=kws, kw_v=KW_VERSION)
+        except Exception:
+            pass
 
     def update_meta(self, sid: str | None = None, *, create: bool = True, **kwargs: Any) -> None:
         """更新指定会话的内嵌 meta 字段。

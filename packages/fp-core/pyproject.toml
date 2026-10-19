@@ -27,6 +27,11 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+# 会话关键词（KL 管线）用的中文分词器。缺失时自动退化为 bigram，
+# 功能不中断、只是词边界更粗——所以不做硬依赖。
+kw = ["jieba>=0.42"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["fp_core*"]

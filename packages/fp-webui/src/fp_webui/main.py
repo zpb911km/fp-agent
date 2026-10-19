@@ -451,6 +451,7 @@ async def list_sessions() -> dict[str, Any]:
             "message_count": info.get("message_count", 0),
             "created": info.get("created", ""),
             "summary": info.get("summary", ""),
+            "kw": info.get("kw") or [],  # KL 管线预算好的区分性关键词，前端只读
             "is_current": sid == current_sid,
         })
 

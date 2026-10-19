@@ -1789,6 +1789,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   min-width: 0;
   flex: 1;
 }
+.session-item-kw {
+  font-size: clamp(10px, 0.88vw, 12px);
+  color: var(--accent, #7aa2f7);
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 2px;
+  letter-spacing: 0.02em;
+}
 .session-item-meta {
   font-size: clamp(10px, 0.9vw, 12px);
   color: var(--text-dim);
