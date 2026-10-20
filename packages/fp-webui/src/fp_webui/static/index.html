@@ -185,6 +185,12 @@
         <span class="modal-title">📋 历史会话</span>
         <button class="modal-close" onclick="closeSessions()" aria-label="关闭会话列表">✕</button>
       </div>
+      <div class="modal-search">
+        <input type="search" id="sessionsSearchInput" autocomplete="off"
+               placeholder="搜索会话内容（正文/标题/关键词，多词同现）"
+               aria-label="搜索历史会话"
+               oninput="onSessionsSearchInput()">
+      </div>
       <div class="modal-body" id="sessionsList">
         <div class="no-sessions">加载中...</div>
       </div>
@@ -194,7 +200,7 @@
   <!-- ════════════════════════════════════════
        脚本加载（顺序重要：ui.js → app.js）
        ════════════════════════════════════════ -->
-  <script src="/static/ui.js?_t=20260928v12"></script>
-  <script src="/static/app.js?_t=20260928v12"></script>
+  <script src="/static/ui.js?_t=20261020v13"></script>
+  <script src="/static/app.js?_t=20261020v13"></script>
 </body>
 </html>

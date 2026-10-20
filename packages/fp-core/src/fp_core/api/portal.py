@@ -23,7 +23,7 @@ import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from fp_core.api.types import (
     Event,
@@ -414,6 +414,39 @@ class SessionCtl:
     def list(self) -> dict[str, SessionMeta]:
         """全部会话元数据 {sid: meta}"""
         return self._portal._require().state.session.list_sessions()
+
+    def search(self, query: str, *, limit: int = 30) -> list[dict[str, Any]]:
+        """按**正文内容**搜索会话（含命中片段；正文无命中但标题/关键词命中的也返回）
+
+        前端（webui）不允许直接 import 核内模块，检索能力经本方法暴露，
+        与终端 ``/find`` 共用同一套 ``core.session_search`` 实现。
+        """
+        from fp_core.core.session_search import search_sessions
+        from fp_core.core.session_view import matches
+
+        terms = [t for t in query.split() if t]
+        if not terms:
+            return []
+
+        sessions = self._portal._require().state.session.list_sessions()
+        body_hits: dict[str, dict[str, Any]] = {
+            str(r["sid"]): r for r in search_sessions(terms, limit=len(sessions) + 1)
+        }
+
+        results: list[dict[str, Any]] = []
+        for sid, info in sessions.items():
+            hit = body_hits.get(sid)
+            snippets = cast("list[dict[str, str]]", hit["snippets"]) if hit else []
+            if not snippets and not matches(info, terms, sid):
+                continue
+            results.append({
+                "id": sid,
+                "meta": info,
+                "snippets": snippets,
+                "updated": info.get("updated", ""),
+            })
+        results.sort(key=lambda r: str(r["updated"]), reverse=True)
+        return results[:limit]
 
     def delete(self, sid: str) -> bool:
         """删除指定会话文件"""

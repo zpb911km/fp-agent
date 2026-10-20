@@ -458,6 +458,27 @@ async def list_sessions() -> dict[str, Any]:
     return {"sessions": result}
 
 
+@app.get("/api/sessions/search")
+async def search_sessions(q: str = "", limit: int = 30) -> dict[str, Any]:
+    """按**正文内容**搜索历史会话（与终端 /find 同一套语义，经 api 层暴露）"""
+    await ensure_agent()
+    current_sid = portal.run.status.session_id
+    results: list[dict[str, Any]] = []
+    for item in portal.ctl.sessions.search(q, limit=limit):
+        raw_meta = item.get("meta")
+        meta: dict[str, Any] = cast("dict[str, Any]", raw_meta) if isinstance(raw_meta, dict) else {}
+        results.append({
+            "id": item["id"],
+            "summary": meta.get("summary", ""),
+            "kw": meta.get("kw") or [],
+            "message_count": meta.get("message_count", 0),
+            "updated": item.get("updated", ""),
+            "is_current": item["id"] == current_sid,
+            "snippets": item.get("snippets") or [],
+        })
+    return {"query": q, "results": results}
+
+
 @app.get("/api/commands")
 async def list_commands():
     """返回快捷命令列表（从 fp-core 命令注册表动态获取，自动适配新增命令）"""

@@ -602,12 +602,76 @@ function openSessions() {
   var modal = document.getElementById('sessionsModal');
   modal.classList.add('active');
   document.body.style.overflow = 'hidden';
+  var si = document.getElementById('sessionsSearchInput');
+  if (si) si.value = '';
   loadSessionsList();
 }
 
 function closeSessions() {
   document.getElementById('sessionsModal').classList.remove('active');
   document.body.style.overflow = '';
+}
+
+/** 单条会话 DOM（列表与搜索结果共用；搜索结果额外带正文片段） */
+function renderSessionItem(s, withSnippets) {
+  var isCurrent = s.is_current;
+  var when = s.created || s.updated || '—';
+  var msgCount = s.message_count || 0;
+  // 后端已保证 summary 可展示；此处仅兜底——不用 sid 冒充标题
+  var summary = s.summary || (msgCount ? '（无摘要）' : '（空白会话）');
+  // 关键词由后端 KL 管线预先算好（meta.kw），前端只读不算
+  var kw = (s.kw && s.kw.length) ? s.kw.slice(0, 3).join(' · ') : '';
+  var snippets = '';
+  if (withSnippets) {
+    (s.snippets || []).forEach(function(sn) {
+      snippets += '<div class="session-item-snippet">' +
+        '<span class="snip-role">' + (sn.role === 'user' ? '👤' : '🤖') + '</span>' +
+        escapeHtml(sn.text) + '</div>';
+    });
+  }
+  return '<div class="session-item' + (isCurrent ? ' current' : '') + '" onclick="switchSession(\'' + s.id + '\')">' +
+    '<div class="session-item-info">' +
+      '<div class="session-item-summary">' + escapeHtml(summary) + '</div>' +
+      (kw ? '<div class="session-item-kw">' + escapeHtml(kw) + '</div>' : '') +
+      snippets +
+      '<div class="session-item-meta">' + escapeHtml(when) + ' · ' + msgCount + ' 条消息</div>' +
+    '</div>' +
+    (isCurrent ? '<span class="session-item-badge">当前</span>' : '') +
+    '<button class="session-load-btn" onclick="event.stopPropagation(); switchSession(\'' + s.id + '\')">' +
+      (isCurrent ? '✓ 当前' : '切换到') +
+    '</button>' +
+    (!isCurrent ? '<button class="session-del-btn" onclick="event.stopPropagation(); deleteSession(\'' + s.id + '\', this)" title="删除会话" aria-label="删除会话">🗑</button>' : '') +
+  '</div>';
+}
+
+var _sessionsSearchTimer = null;
+
+function onSessionsSearchInput() {
+  var el = document.getElementById('sessionsSearchInput');
+  var q = (el && el.value ? el.value : '').trim();
+  clearTimeout(_sessionsSearchTimer);
+  if (!q) { loadSessionsList(); return; }
+  _sessionsSearchTimer = setTimeout(function() { runSessionsSearch(q); }, 250);
+}
+
+/** 搜正文（与终端 /find 同一套后端语义） */
+function runSessionsSearch(q) {
+  var list = document.getElementById('sessionsList');
+  authFetch('/api/sessions/search?q=' + encodeURIComponent(q))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var results = data.results || [];
+      if (!results.length) {
+        list.innerHTML = '<div class="no-sessions">没有找到含「' + escapeHtml(q) + '」的会话</div>';
+        return;
+      }
+      var html = '<div class="search-summary">『' + escapeHtml(q) + '』命中 ' + results.length + ' 个会话</div>';
+      results.forEach(function(s) { html += renderSessionItem(s, true); });
+      list.innerHTML = html;
+    })
+    .catch(function(err) {
+      list.innerHTML = '<div class="no-sessions">搜索失败: ' + escapeHtml(err.message) + '</div>';
+    });
 }
 
 function loadSessionsList() {
@@ -622,28 +686,7 @@ function loadSessionsList() {
       }
       var html = '';
       sessions.forEach(function(s) {
-        var isCurrent = s.is_current;
-        var created = s.created || '—';
-        var msgCount = s.message_count || 0;
-        // 后端 list() 已保证 summary 可展示；此处仅兜底——不再用 sid 冒充标题
-        var summary = s.summary || (msgCount ? '（无摘要）' : '（空白会话）');
-        // 关键词由后端 KL 管线预先算好（meta.kw），前端只读不算
-        var kw = (s.kw && s.kw.length) ? s.kw.slice(0, 3).join(' · ') : '';
-        html +=
-          '<div class="session-item' + (isCurrent ? ' current' : '') + '" onclick="switchSession(\'' + s.id + '\')">' +
-            '<div class="session-item-info">' +
-              '<div class="session-item-summary">' + escapeHtml(summary) + '</div>' +
-              (kw ? '<div class="session-item-kw">' + escapeHtml(kw) + '</div>' : '') +
-              '<div class="session-item-meta">' +
-                escapeHtml(created) + ' · ' + msgCount + ' 条消息' +
-              '</div>' +
-            '</div>' +
-            (isCurrent ? '<span class="session-item-badge">当前</span>' : '') +
-            '<button class="session-load-btn" onclick="event.stopPropagation(); switchSession(\'' + s.id + '\')">' +
-              (isCurrent ? '✓ 当前' : '切换到') +
-            '</button>' +
-            (!isCurrent ? '<button class="session-del-btn" onclick="event.stopPropagation(); deleteSession(\'' + s.id + '\', this)" title="删除会话" aria-label="删除会话">🗑</button>' : '') +
-          '</div>';
+        html += renderSessionItem(s, false);
       });
       list.innerHTML = html;
     })

@@ -1799,6 +1799,48 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   margin-top: 2px;
   letter-spacing: 0.02em;
 }
+/* 会话弹窗搜索框：输入即搜正文 */
+.modal-search {
+  padding: 8px 14px 4px;
+}
+.modal-search input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #3b4261);
+  background: var(--bg-input, rgba(255, 255, 255, 0.04));
+  color: var(--text, #c0caf5);
+  font-size: clamp(12px, 0.95vw, 14px);
+  outline: none;
+}
+.modal-search input:focus {
+  border-color: var(--accent, #7aa2f7);
+}
+.modal-search input::placeholder {
+  color: var(--text-muted, #565f89);
+}
+/* 搜索命中片段：一眼确认「是不是这条」 */
+.session-item-snippet {
+  font-size: clamp(10px, 0.85vw, 12px);
+  color: var(--text-dim);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono, monospace);
+  opacity: 0.9;
+}
+.session-item-snippet .snip-role {
+  margin-right: 4px;
+  opacity: 0.8;
+}
+.search-summary {
+  padding: 6px 4px 8px;
+  font-size: clamp(11px, 0.9vw, 13px);
+  color: var(--accent, #7aa2f7);
+  opacity: 0.9;
+}
 .session-item-meta {
   font-size: clamp(10px, 0.9vw, 12px);
   color: var(--text-dim);
