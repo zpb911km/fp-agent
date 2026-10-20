@@ -460,7 +460,7 @@ async def list_sessions() -> dict[str, Any]:
 
 @app.get("/api/sessions/search")
 async def search_sessions(q: str = "", limit: int = 30) -> dict[str, Any]:
-    """按**正文内容**搜索历史会话（与终端 /find 同一套语义，经 api 层暴露）"""
+    """按**正文内容**搜索历史会话（与终端 /resume -f 同一套语义，经 api 层暴露）"""
     await ensure_agent()
     current_sid = portal.run.status.session_id
     results: list[dict[str, Any]] = []

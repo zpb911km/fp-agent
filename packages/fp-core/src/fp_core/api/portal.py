@@ -419,7 +419,7 @@ class SessionCtl:
         """按**正文内容**搜索会话（含命中片段；正文无命中但标题/关键词命中的也返回）
 
         前端（webui）不允许直接 import 核内模块，检索能力经本方法暴露，
-        与终端 ``/find`` 共用同一套 ``core.session_search`` 实现。
+        与终端 ``/resume -f`` 共用同一套 ``core.session_search`` 实现。
         """
         from fp_core.core.session_search import search_sessions
         from fp_core.core.session_view import matches

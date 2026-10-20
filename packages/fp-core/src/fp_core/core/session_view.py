@@ -1,12 +1,12 @@
 """会话视图层（列表渲染 / 元数据筛选 / 检索结果渲染）
 
 放在 core（L1）而非 commands（L2）的原因：命令之间不允许互相依赖
-（R2：L2 跨单元互依 = 错误），而 `/resume` 的降级搜索需要 `/find` 的渲染。
+（R2：L2 跨单元互依 = 错误），而 `/resume` 的降级搜索（`-f`）同样需要这套渲染。
 把共用渲染下沉到内核，两个命令都只依赖 L1，分层才自洽。
 
 下方 `会话列表的共用视图逻辑（会话列表 / 筛选 / 检索结果共用）
 
-拆出本模块的原因：``/resume list`` 与 ``/find`` 必须共享**同一个排序池**。
+拆出本模块的原因：``/resume list`` 与 ``/resume -f`` 必须共享**同一个排序池**。
 序号是用户切换会话的唯一快捷键（``/resume 7``），若两处各自排序，
 「列表里显示 [12]、敲 12 却切到别的会话」——这是最难察觉的一类 bug。
 所以排序与序号解析只有一份实现，两个命令都从这里取。
@@ -100,7 +100,7 @@ def session_list_text(state: State, *, main_only: bool = False, terms: list[str]
         header = ["## 📂 会话列表"]
     header += [
         "使用 `/resume <sid|序号>` 切换，`/resume latest` 切换到最新",
-        "`/resume list <词>` 按关键词/标题筛选，`/find <词>` 搜正文内容，`/resume --main` 只看主会话",
+        "`/resume list <词>` 按关键词/标题筛选，`/resume -f <词>` 搜正文内容，`/resume --main` 只看主会话",
         "（列表从大到小打印：越靠下越新，**[1] = 最新会话**）",
     ]
 
@@ -116,7 +116,7 @@ def session_list_text(state: State, *, main_only: bool = False, terms: list[str]
 
 
 # ══════════════════════════════════════════════════════════
-# 检索结果渲染（/find 与 /resume 降级路径共用）
+# 检索结果渲染（/resume -f 与降级路径共用）
 # ══════════════════════════════════════════════════════════
 
 # 搜索结果最多列出多少个会话（序号仍基于全量池，不重编号）
@@ -140,7 +140,7 @@ def render_search(state: State, terms: list[str]) -> str:
 
     words = [t.strip() for t in terms if t.strip()]
     if not words:
-        return "❌ 请给出要搜索的词。用法: `/find <词...>`（多词之间为 AND）"
+        return "❌ 请给出要搜索的词。用法: `/resume -f <词...>`（多词之间为 AND）"
 
     pool = sorted_sessions(state)
     if not pool:

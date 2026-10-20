@@ -8,7 +8,7 @@
   /resume <sid|序号>        切换（支持 sid 或 list 中的序号）
   /resume delete <sid|序号> 删除指定会话
   /resume prune             清理 0 长度会话文件（移到 .trash/，不真删）
-  /resume <词...>           不是 sid/序号时自动按正文搜索（等价 /find <词>）
+  /resume -f <词...>        按**正文内容**搜索（扫全库约 300ms，多词 AND）
 """
 
 import os
@@ -21,7 +21,8 @@ aliases: list[str] = []
 description = (
     "切换/删除/清理历史会话。支持 sid 和 list 序号，可按关键词筛选。"
     "用法: /resume [list] [词...], /resume latest, /resume <sid|序号>, "
-    "/resume --main [词...], /resume delete <sid|序号>, /resume prune"
+    "/resume -f <词...> 搜正文, /resume --main [词...], "
+    "/resume delete <sid|序号>, /resume prune"
 )
 
 
@@ -95,6 +96,14 @@ async def execute(state: State, arg: str) -> tuple[bool, str]:
         terms = arg[5:].split() if arg.startswith("list ") else []
         return (True, session_list_text(state, terms=terms))
 
+    # ── /resume -f <词...>：按正文内容搜索 ────────────────────
+    if arg == "-f" or arg.startswith("-f "):
+        rest = arg.split(None, 1)
+        terms = rest[1].split() if len(rest) > 1 else []
+        if not terms:
+            return (True, "❌ 请给出要搜索的词。用法: `/resume -f <词...>`（多词之间为 AND）")
+        return (True, render_search(state, terms))
+
     # ── /resume --main [筛选词]：只看主会话（过滤 subagent） ───
     if arg in ("--main", "main") or arg.startswith(("--main ", "main ")):
         rest = arg.split(" ", 1)
@@ -127,6 +136,7 @@ async def execute(state: State, arg: str) -> tuple[bool, str]:
     if not known:
         # 既不是序号也不是任何存在的会话 —— 用户多半是在**查找**（敲了想找的词）。
         # 降级为正文搜索，而不是甩一句「会话不存在」让他自己猜语法。
+        # 显式形式是 /resume -f <词...>；这里只是省掉 -f 的便利路径。
         return (True, render_search(state, arg.split()))
 
     # 保存当前会话的上下文和摘要，再切换

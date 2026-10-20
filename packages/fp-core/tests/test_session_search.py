@@ -1,4 +1,4 @@
-"""会话正文检索 + /find 渲染 + /resume 降级搜索
+"""会话正文检索 + /resume -f 渲染 + /resume 降级搜索
 
 关键设计断言：
 - 只检索 user/assistant 正文，**tool 返回值一律不进检索范围**
@@ -165,6 +165,32 @@ class TestFindRender:
 
     def test_no_match_message(self, corpus):
         assert "没有找到" in session_view.render_search(_state_from(corpus), ["不存在词xyz"])
+
+
+class TestResumeDashF:
+    """`/resume -f <词>` 是正文搜索的显式入口（不另立独立的搜索命令）"""
+
+    def test_dash_f_searches_body(self, corpus):
+        state = _state_from(corpus)
+        ok, out = asyncio.run(resume.execute(state, "-f 量子"))
+        assert ok and "命中" in out and "量子" in out
+
+    def test_dash_f_multi_terms_are_and(self, corpus):
+        state = _state_from(corpus)
+        ok, out = asyncio.run(resume.execute(state, "-f 量子 不存在词xyz"))
+        assert ok and "没有找到" in out
+
+    def test_dash_f_without_terms_hints_usage(self, corpus):
+        state = _state_from(corpus)
+        ok, out = asyncio.run(resume.execute(state, "-f"))
+        assert ok and "-f" in out and "用法" in out
+
+    def test_no_standalone_search_command(self):
+        """查找动作必须挂在 /resume 下，命令表里不应再有 find/search"""
+        from fp_core.commands import get_command
+
+        assert get_command("find") is None
+        assert get_command("search") is None
 
 
 class TestResumeFallback:
