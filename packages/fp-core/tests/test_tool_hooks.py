@@ -77,8 +77,13 @@ def single_call_llm(tool_call_dicts: list[dict[str, Any]], final_content: str = 
     return _chat
 
 
-def fast_registry() -> ToolRegistry:
-    """三个秒回工具 + 一个必失败工具 + 一个取消工具 + 一个慢工具"""
+def fast_registry(slow_started: asyncio.Event | None = None) -> ToolRegistry:
+    """三个秒回工具 + 一个必失败工具 + 一个取消工具 + 一个慢工具
+
+    ``slow_started``：传入 Event 时，慢工具一进入执行就 set 它。
+    用于测试需要「确定工具已在跑」再取消的场景——靠 sleep 猜时间在
+    负载高时会漏判（cancel 早于工具启动 → 该触发的钩子没触发）。
+    """
     reg = ToolRegistry()
 
     def _add(name: str, executor: Any) -> None:
@@ -102,7 +107,16 @@ def fast_registry() -> ToolRegistry:
     _add("t2", lambda params: _ok("ok_2"))
     _add("t3", lambda params: _ok("ok_3"))
     _add("boom_cancel", lambda params: (_ for _ in ()).throw(asyncio.CancelledError()))
-    _add("slow", lambda params: asyncio.sleep(5))
+
+    if slow_started is None:
+        _add("slow", lambda params: asyncio.sleep(5))
+    else:
+
+        async def _slow_signal(params: Any) -> None:
+            slow_started.set()
+            await asyncio.sleep(5)
+
+        _add("slow", lambda params: _slow_signal(params))
 
     return reg
 
@@ -419,13 +433,17 @@ async def test_partial_interruption_records_remaining(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_abort_on_gather_cancel(tmp_path, monkeypatch):
-    reg = fast_registry()
+    # 用 Event 代替 sleep 猜时间：慢工具一进执行就发信号，此后 gather 必然已建立。
+    # 原先的 `sleep(0.3)` 在负载高时会早于工具启动，导致 ON_TOOL_ABORT 不触发（20% flaky）。
+    started = asyncio.Event()
+    reg = fast_registry(slow_started=started)
     mk = make_agent(tmp_path, monkeypatch, reg)
     agent, rec = mk(LifecycleHook.ON_TOOL_ABORT, LifecycleHook.ON_CTX_APPEND)
     agent._llm.chat = single_call_llm([call("c1", "slow")])
 
     task = asyncio.ensure_future(agent.process("go"))
-    await asyncio.sleep(0.3)  # 等待进入 gather
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await asyncio.sleep(0)  # 让出一次，确保 gather 进入挂起态
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError, KeyboardInterrupt):
         await task
