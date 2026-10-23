@@ -5,8 +5,10 @@
   非交互环境（管道 / --headless / -m / acp / subagent 子进程）打印
   面向用户的引导块并以非 0 退出，绝不阻塞、绝不静默 exit 0。
   cli 与 webui 都可进向导（stdin 属于用户）；acp 不可（stdin 是 JSON-RPC 协议）。
-- **零默认**：不生成任何带占位值的 config.json 模板；三键必须由用户显式输入。
-- **平台一致**：配置路径、隐藏输入、编码、原子写均对 Linux/macOS/Windows 一致。
+- **零默认**：不生成任何带占位值的 config.json 模板；三键必须由用户显式输入，
+  向导不给出任何示例/默认提示。
+- **明文回显**：三项（API 基础地址 → 模型名称 → API 密钥）均明文输入，便于当场核对。
+- **平台一致**：配置路径、编码、原子写均对 Linux/macOS/Windows 一致。
 - **本次生效**：写盘后 importlib.reload(fp_core.config)，当前启动即用新值，
   无需用户重启（config 在所有消费者处都是模块引用，reload 原地更新安全）。
 
@@ -17,13 +19,11 @@
 from __future__ import annotations
 
 import contextlib
-import getpass
 import importlib
 import json
 import os
 import sys
 import tempfile
-import warnings
 from collections.abc import Iterable
 from typing import Any
 
@@ -126,23 +126,8 @@ def _atomic_write_json(path: str, data: dict[str, Any]) -> None:
 # ═══════════════════════════════════════════════════════════════
 
 
-def _read_secret(label: str) -> str:
-    """隐藏输入；终端不支持关回显时显式告知『输入将可见』而非静默明文。"""
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", getpass.GetPassWarning)
-            return getpass.getpass(f"  {label}: ")
-    except getpass.GetPassWarning:
-        _say("  （当前终端无法隐藏输入，以下输入将可见）")
-        try:
-            return input(f"  {label}: ")
-        except (EOFError, KeyboardInterrupt):
-            raise _AbortError from None
-    except (EOFError, KeyboardInterrupt):
-        raise _AbortError from None
-
-
 def _read_text(label: str) -> str:
+    """明文输入（三项均回显，用户可当场核对输入是否正确）。"""
     try:
         return input(f"  {label}: ")
     except (EOFError, KeyboardInterrupt):
@@ -166,7 +151,7 @@ def _run_wizard(config: Any) -> bool:
     _say(bar)
     _say("  首次配置向导：需要 LLM 连接信息（三项均为必填）")
     _say(f"  将写入：{path}")
-    _say("  密钥一项输入时不显示；任意一项直接回车留空 = 取消")
+    _say("  三项均为明文回显；任意一项直接回车留空 = 取消")
     _say(bar)
     _say()
 
@@ -185,14 +170,14 @@ def _run_wizard(config: Any) -> bool:
         pass
 
     try:
-        api_key = _read_secret("① API 密钥").strip()
-        base_url = _read_text("② API 基础地址（例：https://api.deepseek.com/v1）").strip()
-        model = _read_text("③ 模型名称（例：deepseek-chat）").strip()
+        base_url = _read_text("① API 基础地址").strip()
+        model = _read_text("② 模型名称").strip()
+        api_key = _read_text("③ API 密钥").strip()
     except _AbortError:
         _say("\n已取消配置。")
         return False
 
-    fields = (("API 密钥", api_key), ("API 基础地址", base_url), ("模型名称", model))
+    fields = (("API 基础地址", base_url), ("模型名称", model), ("API 密钥", api_key))
     missing = [name for name, value in fields if not value]
     if missing:
         _say(f"\n以下项为空，配置未完成：{'、'.join(missing)}")

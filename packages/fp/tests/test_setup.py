@@ -119,12 +119,14 @@ def test_webui_non_tty_missing_exits_nonzero(monkeypatch, capsys):
 
 
 def _patch_wizard(monkeypatch, cfgpath, texts):
-    """把向导接到临时路径与脚本化输入上；importlib.reload 打桩避免真实重载。"""
+    """把向导接到临时路径与脚本化输入上；importlib.reload 打桩避免真实重载。
+
+    texts 依次对应三项明文输入：① API 基础地址 ② 模型名称 ③ API 密钥。
+    """
     monkeypatch.setattr(config, "check_llm_config", lambda quiet=False: cfgpath.exists())
     monkeypatch.setattr(config, "llm_setup_hint", lambda missing=None: "HINT")
     monkeypatch.setattr(config, "USER_CONFIG_PATH", str(cfgpath), raising=False)
     monkeypatch.setattr(config, "_json_cfg", {}, raising=False)
-    monkeypatch.setattr(setup, "_read_secret", lambda label: "sk-secret")
     it = iter(texts)
     monkeypatch.setattr(setup, "_read_text", lambda label: next(it))
     monkeypatch.setattr(setup, "importlib", _FakeImportlib)
@@ -132,7 +134,7 @@ def _patch_wizard(monkeypatch, cfgpath, texts):
 
 def test_wizard_writes_config_with_perms(monkeypatch, tmp_path):
     cfgpath = tmp_path / "fp" / "config.json"
-    _patch_wizard(monkeypatch, cfgpath, ["https://api.example.com/v1", "my-model"])
+    _patch_wizard(monkeypatch, cfgpath, ["https://api.example.com/v1", "my-model", "sk-secret"])
     monkeypatch.setattr(sys, "stdin", _TTY())
 
     setup.ensure_llm_configured(mode="cli", passthrough=[])
@@ -147,10 +149,31 @@ def test_wizard_writes_config_with_perms(monkeypatch, tmp_path):
         assert stat.S_IMODE(cfgpath.stat().st_mode) == 0o600
 
 
+def test_wizard_asks_api_then_model_then_key_without_examples(monkeypatch, tmp_path, capsys):
+    """交互契约：顺序 API 地址 → 模型 → 密钥；密钥明文回显；提示不含任何示例值。"""
+    cfgpath = tmp_path / "config.json"
+    seen = []
+
+    def fake_read(label):
+        seen.append(label)
+        return {"① API 基础地址": "https://a/v1", "② 模型名称": "m", "③ API 密钥": "sk"}[label]
+
+    _patch_wizard(monkeypatch, cfgpath, [])
+    monkeypatch.setattr(setup, "_read_text", fake_read)
+    monkeypatch.setattr(sys, "stdin", _TTY())
+
+    setup.ensure_llm_configured(mode="cli")
+
+    assert seen == ["① API 基础地址", "② 模型名称", "③ API 密钥"]
+    assert not hasattr(setup, "_read_secret")  # 密钥不再走隐藏输入
+    out = capsys.readouterr().out
+    assert "例" not in out and "默认" not in out
+
+
 def test_wizard_works_for_webui_mode(monkeypatch, tmp_path):
     """webui 的 stdin 归用户 → tty 下同样能完成向导，不再是 cli 专属。"""
     cfgpath = tmp_path / "fp" / "config.json"
-    _patch_wizard(monkeypatch, cfgpath, ["https://api.example.com/v1", "webui-model"])
+    _patch_wizard(monkeypatch, cfgpath, ["https://api.example.com/v1", "webui-model", "sk-webui"])
     monkeypatch.setattr(sys, "stdin", _TTY())
 
     setup.ensure_llm_configured(mode="webui", passthrough=["--port", "9000"])
@@ -161,7 +184,7 @@ def test_wizard_works_for_webui_mode(monkeypatch, tmp_path):
 
 def test_wizard_blank_field_aborts(monkeypatch, tmp_path):
     cfgpath = tmp_path / "config.json"
-    _patch_wizard(monkeypatch, cfgpath, ["", "my-model"])  # base_url 留空
+    _patch_wizard(monkeypatch, cfgpath, ["", "my-model", "sk"])  # base_url 留空
     monkeypatch.setattr(sys, "stdin", _TTY())
 
     with pytest.raises(SystemExit) as ei:
@@ -176,8 +199,7 @@ def test_wizard_preserves_existing_keys(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "llm_setup_hint", lambda missing=None: "H")
     monkeypatch.setattr(config, "USER_CONFIG_PATH", str(cfgpath), raising=False)
     monkeypatch.setattr(config, "_json_cfg", {"tui": {"theme": "dracula"}}, raising=False)
-    monkeypatch.setattr(setup, "_read_secret", lambda label: "sk")
-    it = iter(["https://a/v1", "m"])
+    it = iter(["https://a/v1", "m", "sk"])
     monkeypatch.setattr(setup, "_read_text", lambda label: next(it))
     monkeypatch.setattr(setup, "importlib", _FakeImportlib)
     monkeypatch.setattr(sys, "stdin", _TTY())
