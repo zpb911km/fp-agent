@@ -28,7 +28,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
 from textual.screen import ModalScreen
-from textual.widgets import Input, OptionList, Static, TabbedContent, TabPane
+from textual.widgets import Input, OptionList, Static, TabbedContent, TabPane, Tabs
 from textual.widgets.option_list import Option
 from wcwidth import wcswidth
 
@@ -65,7 +65,7 @@ class ValuePrompt(ModalScreen[str | None]):
     返回：``None`` = 取消；``""`` = 恢复默认；其余 = 用户输入的原文（调用方校验）。
     """
 
-    BINDINGS = [Binding("escape", "cancel", "取消")]
+    BINDINGS = [Binding("escape", "cancel", "取消", id="modal_close")]
 
     CSS = """
     ValuePrompt { align: center middle; }
@@ -109,12 +109,20 @@ class AppearancePanel(ModalScreen[None]):
     BINDINGS = [
         Binding("escape", "close_panel", "关闭"),
         Binding("r", "reset_field", "恢复默认"),
+        # 分页切换：焦点默认落在 OptionList 上（见 _focus_list），此时 Tabs
+        # widget 自己的 left/right 绑定不在绑定链里 —— 必须由 Screen 提供，
+        # 否则五个分页里只有「主题」能用键盘到达（配色/样式/符号/通用等于鼠标专属）。
+        Binding("left", "prev_tab", "上一页", show=False),
+        Binding("right", "next_tab", "下一页", show=False),
     ]
 
     CSS = """
     AppearancePanel { align: center middle; }
     #panel_box {
         width: 88; height: 30;
+        /* 小终端（80x24 及以下）里固定 30 行会越界：顶部标题和帮助行被裁到屏幕
+           之外，纯键盘用户既看不见「当前哪个分页」也看不见操作提示。 */
+        max-width: 100%; max-height: 100%;
         border: round $accent; background: $surface; padding: 0 1;
     }
     #panel_title { height: 1; text-style: bold; color: $accent; }
@@ -430,6 +438,21 @@ class AppearancePanel(ModalScreen[None]):
             self._preview_theme(self._baseline_theme)  # 回滚也不落盘（见 apply_theme_silently）
         self.dismiss(None)
 
+    def _cycle_tab(self, step: int) -> None:
+        """切到上/下一个分页（循环）。切完由 ``_tab_activated`` 把焦点送回列表。"""
+        bar = self.query_one(Tabs)
+        if step > 0:
+            bar.action_next_tab()
+        else:
+            bar.action_previous_tab()
+        self._refresh_help()
+
+    def action_prev_tab(self) -> None:
+        self._cycle_tab(-1)
+
+    def action_next_tab(self) -> None:
+        self._cycle_tab(1)
+
     # ── 文案 ────────────────────────────────────────────────
 
     def _refresh_help(self, tab_id: str | None = None) -> None:
@@ -439,7 +462,11 @@ class AppearancePanel(ModalScreen[None]):
         help_text = section.help if section else ""
         if section is not None and section.kind == "theme":
             help_text = f"当前主题：{self._host().theme} · " + help_text
-        self.query_one("#panel_help", Static).update(help_text)
+        line = Text(help_text)
+        # 分页切换是本面板唯一「不看提示猜不到」的键（焦点在列表上，看不出
+        # Tabs 也能操作），所以常驻在最右侧。
+        line.append("  · ←/→ 切页", style="dim")
+        self.query_one("#panel_help", Static).update(line)
 
     def _say(self, message: str, style: str) -> None:
         with contextlib.suppress(Exception):  # 面板已卸载时忽略

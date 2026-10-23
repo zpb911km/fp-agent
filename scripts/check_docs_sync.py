@@ -71,6 +71,17 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
         ["docs/dev/插件系统.md"],
         ["docs/guide/插件系统.md", "docs/self/扩展插件.md", "README.md"],
     ),
+    # TUI 交互层：键位/面板行为一变，两处用户文档（README 表格 + CLI 入门）必然漂移
+    (
+        "packages/fp-terminal/src/fp_cli/tui*.py",
+        ["docs/dev/显示层.md"],
+        ["docs/guide/CLI入门.md"],
+    ),
+    (
+        "packages/fp-terminal/src/fp_cli/keys_panel.py",
+        ["docs/dev/显示层.md"],
+        ["docs/guide/CLI入门.md"],
+    ),
     # 异步主动范式交付物（设计/验收随实现走；位于 docs/dev/，亦被 docs/* 视为文档）
     (
         "docs/dev/ASYNC_AGENT_DESIGN.md",

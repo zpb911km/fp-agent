@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.dirname(__file__))
 
 from test_tui_behavior import _FakePortal  # noqa: E402
-from textual.widgets import Input, Static, TabbedContent  # noqa: E402
+from textual.widgets import Input, OptionList, Static, TabbedContent  # noqa: E402
 
 from fp_cli.appearance import (  # noqa: E402
     CUSTOM_THEME_NAME,
@@ -74,7 +74,7 @@ class PanelCase(unittest.TestCase):
         section = self._config().get("tui")
         return section if isinstance(section, dict) else {}
 
-    def _run(self, scenario: Any) -> Any:  # noqa: ANN401 — 场景函数
+    def _run(self, scenario: Any, size: tuple[int, int] = (120, 40)) -> Any:  # noqa: ANN401 — 场景函数
         from fp_core.api import portal as real_portal
 
         fake = _FakePortal()
@@ -91,7 +91,7 @@ class PanelCase(unittest.TestCase):
                 install_theme(app)
                 install_appearance()
                 io.attach(app)
-                async with app.run_test(size=(120, 40)) as pilot:
+                async with app.run_test(size=size) as pilot:
                     await pilot.pause()
                     return await scenario(app, pilot)
 
@@ -103,6 +103,23 @@ class PanelCase(unittest.TestCase):
 
 
 class TestPanelEntry(PanelCase):
+    def test_ctrl_t_toggles_panel(self) -> None:
+        """Ctrl+T 是开关：再按一次关闭，不会把面板叠成两层。"""
+
+        async def scenario(app: FPApp, pilot: Any) -> None:  # noqa: ANN401
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            self.assertIsInstance(app.screen, AppearancePanel)
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, AppearancePanel)
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            self.assertIsInstance(app.screen, AppearancePanel)
+            self.assertEqual(sum(isinstance(screen, AppearancePanel) for screen in app.screen_stack), 1)
+
+        self._run(scenario)
+
     def test_ctrl_t_opens_panel_and_five_tabs(self) -> None:
         async def scenario(app: FPApp, pilot: Any) -> str:  # noqa: ANN401
             bindings = {b.key: b.action for b in FPApp.BINDINGS}
@@ -450,6 +467,140 @@ class TestFieldTabs(PanelCase):
 
         # 关掉后键仍在（值为 False）——显式关闭 ≠ 删除
         self.assertEqual(self._run(scenario), [False])
+
+
+class TestKeyboardOnly(PanelCase):
+    """纯键盘可达性 —— 全程只按真键，不用 ``_go()`` 程序化切页。
+
+    此前所有用例都靠 ``_go()`` 直接设 ``TabbedContent.active``，恰好绕开了
+    「焦点落在 OptionList 上时，Tabs widget 自己的 left/right 绑定不在绑定链里」
+    这个事实：五个分页里只有「主题」能用键盘到达，其余四个等于鼠标专属。
+    这组用例让键盘本身成为被测对象。
+    """
+
+    TABS = ["tab-theme", "tab-palette", "tab-styles", "tab-symbols", "tab-general"]
+
+    def test_arrows_cycle_all_five_tabs(self) -> None:
+        """→ 能走遍五个分页并回到起点；← 反向同样通。"""
+
+        async def scenario(app: FPApp, pilot: Any) -> tuple[list[str], list[str]]:  # noqa: ANN401
+            panel = _open_panel(app, pilot)
+            await pilot.pause()
+            tabs = panel.query_one(TabbedContent)
+            forward: list[str] = []
+            for _ in range(6):  # 恰好多按一次：验证循环回起点
+                forward.append(tabs.active)
+                await pilot.press("right")
+                await pilot.pause()
+            backward: list[str] = []
+            for _ in range(3):
+                await pilot.press("left")
+                await pilot.pause()
+                backward.append(tabs.active)
+            return forward, backward
+
+        forward, backward = self._run(scenario)
+        # 记录的是「每次按键前」的 active：第 6 条回到起点 = 循环成功
+        self.assertEqual(forward, [*self.TABS, self.TABS[0]])
+        # 接在 forward 之后时实际停在 tab-palette（forward 末次按键的结果），
+        # 故 ← 走的是 palette→theme→general→symbols
+        self.assertEqual(backward, ["tab-theme", "tab-general", "tab-symbols"])
+
+    def test_arrow_lands_on_the_visible_tab_list(self) -> None:
+        """切页后焦点必须落在**新页**的列表上，否则 ↑↓ 还在操作旧页。"""
+
+        async def scenario(app: FPApp, pilot: Any) -> list[str]:  # noqa: ANN401
+            panel = _open_panel(app, pilot)
+            await pilot.pause()
+            seen: list[str] = []
+            for _ in range(4):
+                await pilot.press("right")
+                await pilot.pause()
+                focused = app.focused
+                section_id = panel.query_one(TabbedContent).active.removeprefix("tab-")
+                expected = f"list-{section_id}"
+                seen.append(f"{getattr(focused, 'id', None)}=={expected}")
+                # ↑↓ 必须作用在当前页：高亮应能在本列表内移动（单行页如「通用」
+                # 只有一项，无可移动，跳过）
+                target = panel.query_one(f"#{expected}", OptionList)
+                if target.option_count > 1:
+                    before = target.highlighted
+                    await pilot.press("down")
+                    await pilot.pause()
+                    self.assertNotEqual(before, target.highlighted, f"{expected} 上按 ↓ 没有移动高亮")
+            return seen
+
+        for row in self._run(scenario):
+            left, right = row.split("==")
+            self.assertEqual(left, right)
+
+    def test_tab_key_moves_focus_inside_panel(self) -> None:
+        """面板内 Tab 不再是死键（它曾被 App 级 priority 的 tab_complete 吞掉）。"""
+
+        async def scenario(app: FPApp, pilot: Any) -> list[str]:  # noqa: ANN401
+            _open_panel(app, pilot)
+            await pilot.pause()
+            seen = [type(app.focused).__name__]
+            for _ in range(3):
+                await pilot.press("tab")
+                await pilot.pause()
+                seen.append(type(app.focused).__name__)
+            return seen
+
+        seen = self._run(scenario)
+        self.assertGreater(len(set(seen)), 1, f"Tab 没能移动焦点：{seen}")
+        self.assertIn("ContentTabs", seen)  # 能走到分页条
+
+    def test_prompt_input_keeps_tab_for_completion(self) -> None:
+        """主屏输入框里的 Tab 仍归补全所有 —— 门控不能误伤主交互路径。"""
+
+        async def scenario(app: FPApp, pilot: Any) -> str:  # noqa: ANN401
+            await pilot.press("tab")  # 主屏（无 modal）
+            await pilot.pause()
+            return type(app.focused).__name__
+
+        # 焦点停在输入框：若 Tab 被当成 focus_next，就会跑掉
+        self.assertEqual(self._run(scenario), "PromptInput")
+
+    def test_full_keyboard_edit_round_trip(self) -> None:
+        """全程键盘完成一次改动：→ 到配色 → Enter → 输入值 → Enter 落盘。"""
+
+        async def scenario(app: FPApp, pilot: Any) -> tuple[dict[str, Any], str]:  # noqa: ANN401
+            panel = _open_panel(app, pilot)
+            await pilot.pause()
+            await pilot.press("right")  # 主题 → 配色
+            await pilot.pause()
+            await pilot.press("enter")  # 第一行 = 该字段
+            await pilot.pause()
+            self.assertIsInstance(app.screen, ValuePrompt)
+            prompt = app.screen
+            assert isinstance(prompt, ValuePrompt)
+            prompt.query_one("#prompt_input", Input).value = "#123456"
+            await pilot.press("enter")  # 确认
+            await pilot.pause()
+            self.assertIsInstance(app.screen, AppearancePanel)  # 回到面板而不是退出
+            palette = self._tui().get("palette")
+            return (palette if isinstance(palette, dict) else {}), self._footer(panel)
+
+        palette, footer = self._run(scenario)
+        self.assertIn("#123456", palette.values())
+        self.assertIn("已更新", footer)
+
+    def test_small_terminal_keeps_title_and_help_on_screen(self) -> None:
+        """80x24 下不许越界：标题/帮助行被裁掉等于键盘用户失去导航提示。"""
+
+        async def scenario(app: FPApp, pilot: Any) -> tuple[int, int, list[str]]:  # noqa: ANN401
+            panel = _open_panel(app, pilot)
+            await pilot.pause()
+            box = panel.query_one("#panel_box")
+            help_line = str(panel.query_one("#panel_help", Static).render())
+            return box.region.y, box.region.bottom, [help_line]
+
+        top, bottom, helps = self._run(scenario, size=(80, 24))
+        self.assertGreaterEqual(top, 0, "面板顶部越界，标题被裁掉")
+        self.assertLessEqual(bottom, 24, "面板底部越界")
+        # 帮助行里必须有分页导航提示（否则「还有别的分页」这件事无从发现）
+        self.assertIn("切页", helps[0])
 
 
 if __name__ == "__main__":

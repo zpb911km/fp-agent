@@ -58,6 +58,7 @@ from fp_core.logger import Logger
 
 from . import charts, completion
 from .appearance import (
+    UNSET,
     AppearancePanel,
     install_appearance,
     install_theme,
@@ -66,11 +67,54 @@ from .appearance import (
     tui_style,
 )
 from .history import append_history, load_history
+from .keys_panel import KeyCapture, KeysPanel
+from .tui_actions import ACTIONS, BY_ID, check_clashes, load_keymap
 
 if TYPE_CHECKING:
     from textual.theme import Theme
 
     from fp_core.api.types import ReloadDirective
+
+
+#: 动作 id → App 上的方法名（少数动作两者不同）。
+_ACTION_METHODS: dict[str, str] = {
+    "keys": "open_keys",
+    "appearance": "open_appearance",
+}
+
+#: 输入框聚焦时也必须生效的键 → 方法名（修饰键组合；裸键留给输入框自己）。
+#: TextArea 会把一部分 ctrl 组合当自己的编辑键抢走，故这些键由
+#: ``FPApp._check_bindings`` 在绑定链之前截获，直接派发给 App。
+TUI_KEY_ACTIONS: dict[str, str] = {
+    key.strip(): _ACTION_METHODS.get(action.id, action.id)
+    for action in ACTIONS
+    if action.scope in ("global", "chat")
+    for key in ",".join(action.default_keys).split(",")
+    if key.strip() and "+" in key
+}
+
+
+def _kb(action_id: str, method: str, *, priority: bool = False, show: bool = True) -> Binding:
+    """由动作目录（``tui_actions.ACTIONS``）生成 ``Binding``。
+
+    默认键串**只在目录里写一次**；本函数把「动作 → action 方法」的映射
+    与优先级/可见性钉在 widget 侧，避免两处各存一份键位。
+
+    Args:
+        action_id: 动作目录中的 id，同时成为 ``Binding.id``（keymap 覆盖键）。
+        method: ``Binding.action``——app/screen/widget 上的方法名（不含前缀）。
+        priority: 是否优先于焦点 widget 的内建绑定（消息区动作一律 True）。
+        show: 是否进 Textual 自带的 footer/命令面板。
+    """
+    spec = BY_ID[action_id]
+    return Binding(
+        ",".join(spec.default_keys),
+        method,
+        spec.label,
+        show=show,
+        priority=priority,
+        id=spec.id,
+    )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -340,7 +384,7 @@ class AskModal(ModalScreen[str]):
     编号 → 选项原文；其余 → 原文。Esc → ""（未回答）。
     """
 
-    BINDINGS = [Binding("escape", "cancel", show=False)]
+    BINDINGS = [_kb("modal_close", "cancel", show=False)]
 
     def __init__(self, prompt: str, options: list[str] | None, suggest: str) -> None:
         super().__init__()
@@ -397,8 +441,8 @@ class StatsModal(ModalScreen[None]):
     """会话统计图表（Ctrl+G）：角色分布条形图 + 近 30 条长度 sparkline。"""
 
     BINDINGS = [
-        Binding("escape", "close", show=False),
-        Binding("enter", "close", show=False),
+        _kb("modal_close", "close", show=False),
+        _kb("modal_confirm", "close", show=False),
     ]
 
     def __init__(self, body: Text) -> None:
@@ -470,8 +514,8 @@ class PromptInput(TextArea):
     """
 
     BINDINGS = [
-        Binding("up", "prompt_up", show=False),
-        Binding("down", "prompt_down", show=False),
+        _kb("history_prev", "prompt_up", show=False),
+        _kb("history_next", "prompt_down", show=False),
     ]
 
     def action_prompt_up(self) -> None:
@@ -654,15 +698,21 @@ class FPApp(App[None]):
     }
     #send_btn:hover { color: $accent; text-style: bold; }
     #send_btn:focus { color: $accent; background: $accent 15%; }
-    #ask_box, #stats_box {
+    /* 键盘可达的前提是焦点可见：卡片标题是 Ctrl+N/P 与 Tab 的落点，
+       默认没有任何聚焦反馈，不补高亮则键盘导航形同虚设。 */
+    CollapsibleTitle:focus { background: $accent 25%; text-style: bold; }
+    CollapsibleTitle:hover { text-style: bold; }
+    #ask_box, #help_box, #stats_box {
         width: 80%; max-width: 100; height: auto;
         max-height: 90%;
         border: round $accent; background: $panel;
         padding: 1 2; margin: 2 1;
     }
-    #ask_prompt, #stats_title { text-style: bold; color: $accent; }
+    #ask_prompt, #help_title, #stats_title { text-style: bold; color: $accent; }
     #ask_opts { max-height: 14; }
-    #ask_hint, #stats_hint { color: $text-muted; }
+    #ask_hint, #help_hint, #stats_hint { color: $text-muted; }
+    #help_scroll { height: auto; max-height: 60vh; }
+    #help_body { width: auto; height: auto; }
     AskModal, StatsModal { align: center middle; background: $background 60%; }
     """
 
@@ -675,18 +725,28 @@ class FPApp(App[None]):
     #: 与信号一一对应，跟中间隔了几跳无关。
     _silent_theme_changes = 0
 
+    # 键位一律取自 tui_actions.ACTIONS（id 即 keymap 覆盖键）；改默认键只改那张表。
+    # ctrl+shift+c 与 ctrl+c 同义：kitty 协议终端下两者字节不同（99;6u）。
+    # ctrl+j 是发送兜底：不支持 kitty 协议的终端无法区分 Shift+Enter（退化为 CR），
+    # 而 LF(0x0A) 是所有终端都可区分的字节。
+    # 消息区动作全部 priority：输入框最多 6 行，翻页/卡片导航在其中的价值远低于
+    # 滚消息；让位换来「焦点在哪都能操作消息区」的确定性——不用先把焦点 Tab 出去。
     BINDINGS = [
-        # ctrl+shift+c：kitty 键盘协议终端下与 ctrl+c 字节不同（99;6u），语义相同
-        Binding("ctrl+c,ctrl+shift+c", "copy_or_interrupt", "复制/打断", priority=True),
-        Binding("ctrl+q", "app_quit", "退出", priority=True),
-        Binding("ctrl+g", "stats", "统计"),
-        Binding("shift+enter", "submit_prompt", show=False, priority=True),
-        # ctrl+j：终端不支持 kitty 协议时 Shift+Enter 无法区分（退化为 CR），
-        # LF(0x0A) 是所有终端都可区分的字节 → 发送兜底键
-        Binding("ctrl+j", "submit_prompt", show=False, priority=True),
-        Binding("tab", "tab_complete", show=False, priority=True),
-        # ctrl+t：打开外观设置面板（主题/配色/样式/符号/开关，现场改并写回 config）
-        Binding("ctrl+t", "open_appearance", "外观", priority=True),
+        _kb("submit", "submit_prompt", priority=True, show=False),
+        _kb("interrupt", "copy_or_interrupt", priority=True),
+        _kb("quit", "app_quit", priority=True),
+        _kb("stats", "stats"),
+        _kb("appearance", "open_appearance", priority=True),
+        # ctrl+k：键位设置（捕获式改键）；键位配坏时仍可输入 /keys 进入
+        _kb("keys", "open_keys", priority=True),
+        _kb("complete", "tab_complete", priority=True, show=False),
+        _kb("scroll_page_up", "scroll_page_up", priority=True, show=False),
+        _kb("scroll_page_down", "scroll_page_down", priority=True, show=False),
+        _kb("jump_latest", "jump_latest", priority=True, show=False),
+        _kb("card_next", "card_next", priority=True, show=False),
+        _kb("card_prev", "card_prev", priority=True, show=False),
+        _kb("card_toggle", "card_toggle", priority=True, show=False),
+        _kb("cards_toggle_all", "cards_toggle_all", priority=True, show=False),
     ]
 
     def __init__(
@@ -695,8 +755,11 @@ class FPApp(App[None]):
         *,
         directive: ReloadDirective | None = None,
         resume: str | None = None,
+        open_keys: bool = False,
     ) -> None:
         super().__init__()
+        # fp --keys：启动即开键位面板（不依赖任何键位，按键失灵时的兜底入口）
+        self._open_keys = open_keys
         self._io = io
         self._directive = directive
         self._resume = resume
@@ -755,13 +818,70 @@ class FPApp(App[None]):
         elif self._directive is not None and self._directive.notice:
             self._line(self._directive.notice, tui_style("notice"))
         # 状态刷新（覆盖泵起轮的忙碌态——它们不经本应用）
+        # 键位覆盖（config.json tui.keys）必须在首个按键到达前生效
+        keymap, problems, stale = load_keymap()
+        if stale:
+            # 陈旧条目（动作已改名或删除）是我们自己留下的残渣，静默自愈：
+            # 删掉再继续，不给用户看一条他无从理解的提示。
+            persist_tui({f"tui.keys.{action_id}": UNSET for action_id in stale})
+        # 与默认键的冲突 Textual 自己不报（只在 keymap 内部自相冲突时回调），自行校验
+        self._clash_notices = check_clashes(keymap)
+        problems += self._clash_notices
+        if keymap:
+            self.set_keymap(keymap)
         self.set_interval(0.4, self._refresh_status)
         self._refresh_status()
+        # 坏配置合并成一条明示（逐条刷屏同样是噪音）
+        if problems:
+            detail = problems[0] if len(problems) == 1 else f"{len(problems)} 项 —— " + "；".join(problems)
+            self._line(f"键位配置：{detail}", tui_style("warning"))
         self.query_one("#prompt", PromptInput).focus()
+        if self._open_keys:
+            self.action_open_keys()
 
     def action_open_appearance(self) -> None:
-        """Ctrl+T：打开外观设置面板（主题/配色/样式/符号/开关）。"""
+        """Ctrl+T：外观设置面板的**开关**（主题/配色/样式/符号/开关）。
+
+        与 ``Ctrl+K`` 同一套语义：再按一次关闭，避免重复按键叠层。
+        """
+        if isinstance(self.screen, AppearancePanel):
+            self.pop_screen()
+            return
         self.push_screen(AppearancePanel())
+
+    def action_open_keys(self) -> None:
+        """Ctrl+K：键位设置面板的**开关**（捕获式改键）。
+
+        再按一次关闭 —— 开关式而非只开不关，避免重复按键把同一个面板叠成多层。
+        """
+        if isinstance(self.screen, KeysPanel):
+            self.pop_screen()
+            return
+        self.push_screen(KeysPanel())
+
+    async def _check_bindings(self, key: str, priority: bool = False) -> bool:
+        """捕获键位时让出**全部**绑定。
+
+        ``priority=True`` 的绑定走完整绑定链（穿透 modal），若不让出，用户在
+        捕获界面按 ``Ctrl+Q`` 会直接退出程序、按 ``Ctrl+J`` 会发消息。覆盖的是
+        textual 私有钩子（无公开等价物），行为由 ``test_ctrl_q_inside_capture_does_not_quit``
+        锁定 —— 上游若改语义该测试会红。
+        """
+        if isinstance(self.screen, KeyCapture):
+            return False
+        # Tab 的语义分两种：在主屏输入框里是「补全提示」，其它任何地方（外观 /
+        # 键位 / 统计等 modal，或主屏焦点不在输入框）都是「焦点移到下一个控件」。
+        # ``tab_complete`` 是 priority 绑定（App 级），不门控的话 modal 里的 Tab
+        # 一律变成空操作 —— 面板内的焦点循环就断了。
+        if key == "tab" and not (isinstance(self.screen, FPDefaultScreen) and isinstance(self.focused, PromptInput)):
+            self.screen.focus_next()
+            return True
+        # 输入框聚焦时，TextArea 会把一部分 ctrl 组合当自己的编辑键抢走（它声明
+        # 消费一切可打印字符），priority 绑定也救不回来。这类键在这里截获——
+        # 本方法早于所有 widget 绑定，行为确定。
+        if not priority and (action_id := TUI_KEY_ACTIONS.get(key)) is not None:
+            return await self.run_action(action_id, self)
+        return await super()._check_bindings(key, priority)
 
     def apply_theme_silently(self, name: str) -> None:
         """改主题但**不落盘**——外观面板的实时预览 / Esc 回滚专用。
@@ -835,11 +955,7 @@ class FPApp(App[None]):
         _notice = take_update_notice()
         if _notice:
             self._line(_notice, tui_style("hint"))
-        self._line(
-            f"{tui_glyph('keys')} Enter 换行 · Shift+Enter/Ctrl+J 提交 · 选中后 Ctrl+C 复制"
-            " · Ctrl+T 外观 · Ctrl+Q 退出 · Ctrl+G 统计",
-            tui_style("keys"),
-        )
+        self._line(f"{tui_glyph('keys')} Ctrl+K 开关键位面板", tui_style("keys"))
 
     # ── 消息流渲染 ───────────────────────────────────────────
 
@@ -1032,6 +1148,8 @@ class FPApp(App[None]):
     def _on_send_click(self, event: Button.Pressed) -> None:
         # 点击会把焦点移到按钮——夺回输入焦点，保证后续键入不丢失
         self.query_one("#prompt", PromptInput).focus()
+        if self._open_keys:
+            self.action_open_keys()
         self.action_submit_prompt()
 
     async def _handle_input(self, text: str) -> None:
@@ -1183,6 +1301,76 @@ class FPApp(App[None]):
     def action_stats(self) -> None:
         self.push_screen(StatsModal(build_stats_body()))
 
+    # ── 消息区：滚轮与点击卡片的键盘等价 ─────────────────────
+    #
+    # 这几个动作用 priority 绑定且直接操作 #chat，不依赖焦点——键盘可达的
+    # 意义正是「焦点在输入框里也能操作消息区」。输入框最多 6 行，把它内建
+    # 的 PgUp/Ctrl+N 让位给消息区几乎无损失。
+
+    def _cards(self) -> list[Collapsible]:
+        """消息区内的可折叠卡片，按 DOM 顺序（= 对话顺序）。"""
+        return [child for child in self._chat().children if isinstance(child, Collapsible)]
+
+    def _card_of(self, widget: Widget | None) -> Collapsible | None:
+        """从焦点 widget 向上找到所属卡片（焦点通常落在 CollapsibleTitle 上）。"""
+        node: Widget | None = widget
+        while node is not None:
+            if isinstance(node, Collapsible):
+                return node
+            parent = node.parent
+            node = parent if isinstance(parent, Widget) else None
+        return None
+
+    def _focus_card(self, card: Collapsible) -> None:
+        """滚动到卡片并聚焦其标题栏——随后 Enter 即可开合。"""
+        card.scroll_visible(animate=False)
+        titles = card.query("CollapsibleTitle")
+        if len(titles):
+            titles.first().focus()
+
+    def action_scroll_page_up(self) -> None:
+        self._chat().scroll_page_up(animate=False)
+
+    def action_scroll_page_down(self) -> None:
+        self._chat().scroll_page_down(animate=False)
+
+    def action_jump_latest(self) -> None:
+        self._chat().scroll_end(animate=False)
+
+    def action_card_next(self) -> None:
+        cards = self._cards()
+        if not cards:
+            return
+        current = self._card_of(self.focused)
+        # 无聚焦卡片时视作「在末尾之前」→ 第一次按跳到最后一张
+        index = cards.index(current) if current in cards else -1
+        self._focus_card(cards[min(index + 1, len(cards) - 1)])
+
+    def action_card_prev(self) -> None:
+        cards = self._cards()
+        if not cards:
+            return
+        current = self._card_of(self.focused)
+        index = cards.index(current) if current in cards else len(cards)
+        self._focus_card(cards[max(index - 1, 0)])
+
+    def action_card_toggle(self) -> None:
+        card = self._card_of(self.focused)
+        if card is None:
+            cards = self._cards()
+            card = cards[-1] if cards else None
+        if card is not None:
+            card.collapsed = not card.collapsed
+
+    def action_cards_toggle_all(self) -> None:
+        """有展开的卡片 → 全折；否则全展（连按即在两种全态间切换）。"""
+        cards = self._cards()
+        if not cards:
+            return
+        collapse = any(not card.collapsed for card in cards)
+        for card in cards:
+            card.collapsed = collapse
+
 
 # ══════════════════════════════════════════════════════════════
 # 入口
@@ -1214,9 +1402,10 @@ async def run_tui(
     *,
     directive: ReloadDirective | None = None,
     resume: str | None = None,
+    open_keys: bool = False,
 ) -> None:
     """运行 TUI 直至退出（main() 的 finally 负责 ctl.close）。"""
-    app = FPApp(io, directive=directive, resume=resume)
+    app = FPApp(io, directive=directive, resume=resume, open_keys=open_keys)
     install_theme(app)  # config.json tui 段：内置主题名/palette，坏数据静默回落
     install_appearance()  # 语义样式/符号表：tui.styles/symbols/ascii，坏数据静默回落
     io.attach(app)

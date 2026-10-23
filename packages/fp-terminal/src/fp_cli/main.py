@@ -139,6 +139,11 @@ async def main():
         "-r", "--resume", nargs="?", const="auto", default=None, metavar="SESSION_ID", help="恢复历史会话"
     )
     parser.add_argument(
+        "--keys",
+        action="store_true",
+        help="打开键位设置面板 / 非交互环境打印键位表（按键失灵时的兜底入口）",
+    )
+    parser.add_argument(
         "--headless",
         action="store_true",
         help="无头驻留模式：跳过交互提示与 logo，常驻直到 SIGINT/SIGTERM（可与 -r 组合）",
@@ -186,6 +191,16 @@ async def main():
     # L2（headless/-m/管道）不进交互前端，走 CLIIO 打印通路。
     _interactive = not args.headless and not args.message
     _use_tui, _tui_reason = tui_available() if _interactive else (False, "非交互模式")
+    if args.keys and not _use_tui:
+        from .tui_actions import format_keymap_text, load_keymap
+
+        keymap, problems, stale = load_keymap()
+        print(format_keymap_text(keymap))
+        if stale:
+            print(f"提示：{len(stale)} 条陈旧键位将在下次启动时自动清理（{', '.join(stale)}）")
+        for problem in problems:
+            print(f"键位配置：{problem}")
+        return
     _io: IOChannel = TUIIO() if _use_tui else CLIIO()
     if _use_tui:
         # core 日志改走 TUI 消息流——裸 print 会砸 TUI 屏
@@ -244,7 +259,7 @@ async def main():
             # TUI：directive 交由应用 on_mount 处理（notice/续接渲染进消息流），
             # -m/headless 不会走到这里（_interactive 已过滤）。
             assert isinstance(_io, TUIIO)
-            await run_tui(_io, directive=_directive, resume=args.resume)
+            await run_tui(_io, directive=_directive, resume=args.resume, open_keys=args.keys)
             return
 
         if _directive.notice:
