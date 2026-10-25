@@ -14,6 +14,7 @@ from fp_core.core.session_ops import SessionInfo, SessionMeta
 
 __all__ = [
     "EVENT_TYPES",
+    "CommandInfo",
     "Event",
     "ExitReason",
     "InstanceNotOpenError",
@@ -62,6 +63,19 @@ class InstanceStatus:
     # 整轮忙碌（覆盖工具执行期）；忙碌门卫（reload/recycle）必须用它，
     # is_processing 仅覆盖 LLM 调用期（历史字段，保留供前端状态灯等展示用途）
     is_run_active: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CommandInfo:
+    """命令目录条目（run.command_catalog 的元素）—— 前端补全/帮助展平用。
+
+    doc 是命令模块的 docstring 全文（已 dedent）；取哪几行、怎么折行由前端定。
+    """
+
+    name: str
+    desc: str
+    aliases: tuple[str, ...] = ()
+    doc: str = ""
 
 
 # 事件形状：{"type": str, "seq": int, "ts": float, **payload} —— 目录见 core.events.EVENT_TYPES

@@ -18,6 +18,7 @@
 
 from fp_core.api.portal import ControlPlane, Portal, RunPlane, Subscription, ToolPlane, portal
 from fp_core.api.types import (
+    CommandInfo,
     ExitReason,
     InstanceNotOpenError,
     InstanceStatus,
@@ -34,6 +35,7 @@ from fp_core.plugins.base.plugin import Plugin
 
 __all__ = [
     "EVENT_TYPES",
+    "CommandInfo",
     "ControlPlane",
     "Event",
     "EventBridge",

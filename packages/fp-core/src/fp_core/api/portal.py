@@ -21,11 +21,13 @@ from __future__ import annotations
 # pyright: reportPrivateUsage=false
 import asyncio
 import contextlib
+import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 from fp_core.api.types import (
+    CommandInfo,
     Event,
     ExitReason,
     InstanceNotOpenError,
@@ -195,6 +197,30 @@ class RunPlane:
         from fp_core.commands import get_all_commands
 
         return get_all_commands()
+
+    @property
+    def command_catalog(self) -> list[CommandInfo]:
+        """完整命令目录（名/描述/别名/docstring），按命令名排序。
+
+        ``commands`` 只够做「名字 + 一句话」的场景；需要在一屏里同时给出别名与
+        用法正文（TUI 的补全浮层）时用它。docstring **原样**下发——怎么呈现
+        （抽「用法:」小节、折行、限行）是前端的事，core 不掺和展示策略。
+        """
+        from fp_core.commands import get_all_commands, get_command
+
+        out: list[CommandInfo] = []
+        for name, desc in sorted(get_all_commands().items()):
+            aliases: tuple[str, ...] = ()
+            doc = ""
+            mod = get_command(name)
+            if mod is not None:
+                try:
+                    aliases = tuple(str(a) for a in (getattr(mod, "aliases", ()) or ()) if str(a) and str(a) != name)
+                    doc = inspect.getdoc(mod) or ""
+                except Exception:  # noqa: BLE001 — 插件模块属性异构，坏一个不影响整张目录
+                    aliases, doc = (), ""
+            out.append(CommandInfo(name=name, desc=desc or "", aliases=aliases, doc=doc))
+        return out
 
     def reset_cancelled(self) -> None:
         """复位用户打断标记（原 agent.reset_cancelled）"""

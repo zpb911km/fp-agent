@@ -107,6 +107,9 @@ class TestPanelEntry(PanelCase):
         """Ctrl+T 是开关：再按一次关闭，不会把面板叠成两层。"""
 
         async def scenario(app: FPApp, pilot: Any) -> None:  # noqa: ANN401
+            # 外观动作默认未绑定（默认只保留基线键），测试里显式绑上
+            app.set_keymap({"appearance": "ctrl+t"})
+            app.refresh_key_actions({"appearance": "ctrl+t"})
             await pilot.press("ctrl+t")
             await pilot.pause()
             self.assertIsInstance(app.screen, AppearancePanel)
@@ -122,8 +125,9 @@ class TestPanelEntry(PanelCase):
 
     def test_ctrl_t_opens_panel_and_five_tabs(self) -> None:
         async def scenario(app: FPApp, pilot: Any) -> str:  # noqa: ANN401
-            bindings = {b.key: b.action for b in FPApp.BINDINGS}
-            self.assertEqual(bindings.get("ctrl+t"), "open_appearance")
+            # 外观动作默认未绑定（默认只保留基线键），测试里显式绑上
+            app.set_keymap({"appearance": "ctrl+t"})
+            app.refresh_key_actions({"appearance": "ctrl+t"})
             await pilot.press("ctrl+t")
             await pilot.pause()
             panel = app.screen

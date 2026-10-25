@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from rich.text import Text
@@ -26,11 +27,29 @@ from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
 from .appearance.configio import UNSET, persist_tui
-from .tui_actions import ACTIONS, BY_ID, SCOPE_LABELS, by_scope, check_clashes, is_valid_key
+from .tui_actions import (
+    ACTIONS,
+    BY_ID,
+    SCOPE_LABELS,
+    UNBOUND_KEY,
+    by_scope,
+    canonical_key,
+    check_clashes,
+    identical_keys,
+    is_valid_key,
+)
 
-# 退路键：无论用户多想改，都不允许把某个动作绑到这些键上——否则他一旦
-# 忘了自己的改法就再也退不出/中断不了。想改它们只能手编 config.json。
-RESERVED_KEYS = frozenset({"ctrl+q", "ctrl+c"})
+#: 捕获态下的"退路键"。在捕获界面按它，意图几乎总是"退出捕获"而非"要绑它"，
+#: 故**取消捕获**而不写盘——曾因把 ctrl+q 当成要绑的键写进配置，导致退出键丢失。
+#:
+#: 只放 ``ctrl+q``：它一旦被别的动作占走就**退不出程序**，无可替代。
+#: ``ctrl+c`` 曾在列，但它在"复制/打断"拆分后只是「复制选区」的默认键，把它
+#: 一并禁掉会让用户改走后**再也改不回来**——保留键的意义是防止丢失退路，
+#: 不是禁止用户动默认值。
+RESERVED_KEYS = frozenset({"ctrl+q"})
+
+#: 必须有键的动作：清空即失去唯一出口/入口，拒绝。
+REQUIRED_ACTIONS = frozenset({"quit"})
 # KeyCapture 用此前缀回传"拒绝"，与普通键名区分（面板据此给出具体原因）。
 RESERVED_PREFIX = "!reserved:"
 
@@ -54,7 +73,6 @@ class KeyCapture(ModalScreen[str | None]):
         border: round $accent; background: $surface; padding: 1 2;
     }
     #capture_title { text-style: bold; color: $accent; }
-    #capture_hint { color: $text-muted; }
     """
 
     def __init__(self, label: str) -> None:
@@ -64,7 +82,6 @@ class KeyCapture(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Container(id="capture_box"):
             yield Static(f"为「{self._label}」按新键", id="capture_title")
-            yield Static("Esc 取消 · 要绑 Esc 请直接改 config.json", id="capture_hint")
 
     def on_key(self, event: events.Key) -> None:
         event.stop()
@@ -86,6 +103,8 @@ class KeysPanel(ModalScreen[None]):
         Binding("escape", "close_panel", "关闭", id="keys_close"),
         Binding("r", "reset_current", "恢复默认", id="keys_reset"),
         Binding("ctrl+r", "reset_all", "全部重置", id="keys_reset_all"),
+        Binding("delete", "unbind", "取消绑定", id="keys_unbind"),
+        Binding("backspace", "unbind", "取消绑定", id="keys_unbind_bs", show=False),
     ]
 
     CSS = """
@@ -98,7 +117,6 @@ class KeysPanel(ModalScreen[None]):
         border: round $accent; background: $surface; padding: 0 1;
     }
     #keys_title { height: 1; text-style: bold; color: $accent; }
-    #keys_help { height: 1; color: $text-muted; }
     #keys_list { height: 1fr; background: $surface; }
     #keys_footer { height: 1; }
     """
@@ -122,29 +140,28 @@ class KeysPanel(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Container(id="keys_box"):
             yield Static("键位设置", id="keys_title")
-            yield Static("", id="keys_help")
             yield OptionList(id="keys_list")
             yield Static("", id="keys_footer")
 
     def on_mount(self) -> None:
         self._overrides = dict(cast("dict[str, str]", getattr(self._host(), "_keymap", {}) or {}))
         self._fill()
-        self._refresh_help()
-        self._say("Enter 改键 · R 恢复当前项 · Ctrl+R 全部重置 · Esc 关闭", "dim")
         self.query_one("#keys_list", OptionList).focus()
 
     # ── 行渲染 ──────────────────────────────────────────────
 
     def _keys_of(self, action_id: str) -> str:
-        return self._overrides.get(action_id) or ",".join(BY_ID[action_id].default_keys)
+        return self._overrides.get(action_id) or BY_ID[action_id].key
 
     def _row(self, action_id: str) -> Text:
         action = BY_ID[action_id]
         row = Text()
         row.append(f"{action.label:<12}", style="bold")
-        row.append(f"{self._keys_of(action_id):<18}", style="reverse")
-        if action.description:
-            row.append(action.description, style="dim")
+        keys = self._keys_of(action_id)
+        if keys:
+            row.append(keys, style="reverse")
+        else:
+            row.append("（未绑定）", style="dim italic")
         return row
 
     def _fill(self) -> None:
@@ -160,11 +177,6 @@ class KeysPanel(ModalScreen[None]):
                 options.add_option(Option(self._row(action.id), id=action.id))
         if options.option_count:
             options.highlighted = 1  # 跳过首个分组标题
-
-    def _refresh_help(self) -> None:
-        self.query_one("#keys_help", Static).update(
-            "选中动作后按 Enter 进入捕获；改键立即生效并写回 config.json（tui.keys）"
-        )
 
     def _say(self, message: str, style: str) -> None:
         self.query_one("#keys_footer", Static).update(Text(message, style=style))
@@ -189,23 +201,36 @@ class KeysPanel(ModalScreen[None]):
             return
         if key.startswith(RESERVED_PREFIX):
             reserved = key[len(RESERVED_PREFIX) :]
-            self._say(f"{reserved} 是退出/中断键，保留为退路，未修改", "red")
+            self._say(f"{reserved} 为保留键，未修改", "red")
             return
         if not is_valid_key(key):
             self._say(f"不支持的键名 {key!r}，未修改", "red")
             return
+        # 同字节别名归一到实际收到的键名：否则存下 ctrl+i 却在终端永远不触发。
+        key = canonical_key(key)
         candidate = {**self._overrides, action_id: key}
         clashes = check_clashes(candidate)
         if clashes:
-            self._say(f"未修改：{clashes[0]}（先给那个动作换键，或改 config.json）", "red")
+            self._say(f"未修改：{clashes[0]}", "red")
             return
+        identical = identical_keys(key)
         self._overrides = candidate
         self._commit(action_id, key)
-        self._say(f"「{label}」已改为 {key}，立即生效", "green")
+        note = f"（与 {'/'.join(identical)} 同字节，只能按 {key}）" if identical else ""
+        self._say(f"「{label}」已改为 {key}{note}，立即生效", "green")
 
     def _commit(self, action_id: str, value: object) -> None:
         """生效（运行时 + 写回 config.json）。"""
-        self._host().set_keymap(self._overrides)
+        host = self._host()
+        host.set_keymap(self._overrides)
+        # 截获表按新键位重建：否则刚改的键在输入框里按下去毫无反应。
+        # getattr 而非直接调用 —— 保持本模块不反向依赖 tui.FPApp（同 _host）。
+        refresh = cast(
+            "Callable[[dict[str, str]], None] | None",
+            getattr(host, "refresh_key_actions", None),
+        )
+        if refresh is not None:
+            refresh(self._overrides)
         persist_tui({f"tui.keys.{action_id}": value})
         self._fill()
 
@@ -226,7 +251,30 @@ class KeysPanel(ModalScreen[None]):
             return
         self._overrides.pop(action_id, None)
         self._commit(action_id, UNSET)
-        self._say(f"「{BY_ID[action_id].label}」已恢复默认 {','.join(BY_ID[action_id].default_keys)}", "green")
+        defaults = BY_ID[action_id].key
+        label = BY_ID[action_id].label
+        if defaults:
+            self._say(f"「{label}」已恢复默认 {defaults}", "green")
+        else:
+            self._say(f"「{label}」已清空", "green")
+
+    def action_unbind(self) -> None:
+        """Delete / Backspace：取消当前动作的绑定（动作保留，不再占任何键）。
+
+        与 ``R``（恢复默认）的区别：``R`` 让动作回到出厂键，本操作让它**没有键**。
+        默认本就未绑定的动作两者等价。
+        """
+        action_id = self._highlighted_action()
+        if action_id is None:
+            self._say("先选中一个动作", "yellow")
+            return
+        label = BY_ID[action_id].label
+        if action_id in REQUIRED_ACTIONS:
+            self._say(f"「{label}」必须保留一个键，未修改", "red")
+            return
+        self._overrides[action_id] = UNBOUND_KEY
+        self._commit(action_id, "")
+        self._say(f"「{label}」已取消绑定", "green")
 
     def action_reset_all(self) -> None:
         """Ctrl+R：清空全部覆盖，回到出厂键位。"""

@@ -3,7 +3,7 @@
 降级链（``main._tui_available`` 决策）：
     L0 TUI（本模块） → L1 经典 print REPL（裸 input，无补全） → L2 headless/-m/管道
 
-渲染模型：VerticalScroll 消息流 + 常驻输入区（多行 PromptInput + 发送按钮，状态条/补全提示条）。
+渲染模型：VerticalScroll 消息流 + 常驻输入区（多行 PromptInput + 发送按钮，状态条/补全浮层）。
     - 已固化内容 = 追加的 Static/Markdown 子件（顺序天然正确，历史即日志）
     - 流式中内容 = 单个 live 子件，**时间节流**（``STREAM_FLUSH_INTERVAL``，
       约 20fps 上限）update，段末固化（live 引用置空，子件保留可见以迎接下一段）
@@ -39,6 +39,7 @@ import time
 from collections import Counter
 from typing import TYPE_CHECKING, Any, cast
 
+from rich.console import Console
 from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
@@ -68,7 +69,7 @@ from .appearance import (
 )
 from .history import append_history, load_history
 from .keys_panel import KeyCapture, KeysPanel
-from .tui_actions import ACTIONS, BY_ID, check_clashes, load_keymap
+from .tui_actions import ACTIONS, BY_ID, UNBOUND_KEY, by_scope, check_clashes, display_keys, load_keymap
 
 if TYPE_CHECKING:
     from textual.theme import Theme
@@ -82,16 +83,47 @@ _ACTION_METHODS: dict[str, str] = {
     "appearance": "open_appearance",
 }
 
-#: 输入框聚焦时也必须生效的键 → 方法名（修饰键组合；裸键留给输入框自己）。
-#: TextArea 会把一部分 ctrl 组合当自己的编辑键抢走，故这些键由
-#: ``FPApp._check_bindings`` 在绑定链之前截获，直接派发给 App。
-TUI_KEY_ACTIONS: dict[str, str] = {
-    key.strip(): _ACTION_METHODS.get(action.id, action.id)
-    for action in ACTIONS
-    if action.scope in ("global", "chat")
-    for key in ",".join(action.default_keys).split(",")
-    if key.strip() and "+" in key
+
+#: 输入框聚焦时**必须**截获的键 → App 方法名。
+#:
+#: 为什么要截获：TextArea 声明消费一切可打印字符，被 focused widget 消费的键会从
+#: 上层绑定表里**就地删除**（``priority=True`` 也救不回来，因为它的 Binding 已经
+#: 不在表里了）。本方法早于所有 widget 绑定，行为确定。
+#:
+#: 为什么是**函数**而不是常量：用户可以在面板里改键，覆盖后的键同样要被截获，
+#: 否则「面板里改了键、输入框里按却没反应」。故必须在 keymap 生效后重建。
+def build_key_actions(overrides: dict[str, str] | None = None) -> dict[str, str]:
+    """按生效键位构建截获表（只含修饰键组合；裸键语义归焦点 widget）。"""
+    table: dict[str, str] = {}
+    for action in ACTIONS:
+        if action.scope not in ("global", "chat"):
+            continue
+        key = display_keys(action, overrides).strip()
+        if key and "+" in key:
+            table[key] = _ACTION_METHODS.get(action.id, action.id)
+    return table
+
+
+#: 输入框内编辑动作 → TextArea 的实际 action 方法名（绝大多数同名）。
+_PROMPT_EDIT_METHODS: dict[str, str] = {
+    "delete_to_end_of_line": "delete_to_end_of_line_or_delete_line",
 }
+
+
+def _kb_edit(action_id: str) -> Binding:
+    """生成输入框编辑绑定：键位来自动作目录，动作为 TextArea 原生方法。
+
+    带 ``id`` 才能被 ``App.set_keymap`` 覆盖，也才能在面板里改键。
+    """
+    spec = BY_ID[action_id]
+    return Binding(
+        spec.key or UNBOUND_KEY,
+        _PROMPT_EDIT_METHODS.get(action_id, action_id),
+        spec.label,
+        show=False,
+        priority=True,
+        id=action_id,
+    )
 
 
 def _kb(action_id: str, method: str, *, priority: bool = False, show: bool = True) -> Binding:
@@ -108,7 +140,9 @@ def _kb(action_id: str, method: str, *, priority: bool = False, show: bool = Tru
     """
     spec = BY_ID[action_id]
     return Binding(
-        ",".join(spec.default_keys),
+        # 目录里 key 为空 = **未绑定**（留给用户自设）：Binding 不接受空键，
+        # 用按不到的哨兵占位，用户设了键即被 keymap 覆盖。
+        spec.key or UNBOUND_KEY,
         method,
         spec.label,
         show=show,
@@ -181,6 +215,44 @@ class AskRequest(Message):
 #: 一次冲刷 = 一整帧（重排 + 重绘可见区 + 终端写入）：SSE token 逐块冲刷
 #: 会让事件循环饱和（实测每 token 约 2ms CPU），且帧内并不产生可见差异。
 STREAM_FLUSH_INTERVAL = 0.05
+
+#: 补全浮层：候选窗一屏可见行数（超出部分随选择滚动窗口，选中项恒可见）。
+HINT_ROWS = 6
+HINT_ROWS_NARROW = 3
+#: 候选窗最大列宽 / 帮助栏最小可用列宽。两栏加起来放不下就切上下叠放。
+HINT_LIST_MAX_W = 30
+HINT_DETAIL_MIN_W = 30
+#: 帮助栏最多占几行（含名字/描述/正文/键位提示）——超出在末行前插省略号。
+HINT_DETAIL_ROWS = 10
+HINT_DETAIL_ROWS_NARROW = 8
+
+#: 仅用于**度量**的 rich 控制台（CJK 记 2 格）。不做实际输出，Terminal 输出归 Textual。
+_MEASURE = Console(width=80)
+
+
+def _wrap_cells(text: Text, width: int, max_rows: int) -> Text:
+    """按单元格宽度折行并限行，返回已折好的多行 ``Text``。
+
+    为什么自己折行而不交给 ``text-wrap: wrap``：Textual 的 ``height: auto``
+    在**水平容器**里按「未折行」的行数计算高度（实测 9 逻辑行折成 11 行后，
+    容器只给了 5 行高，后半被静默裁掉）。先把折行结果算好交过去，宽度与高度
+    就对得上——这是「多行信息不折叠」的前提，别改回自动折行。
+
+    Args:
+        text: 待折行的富文本（span 样式随行保留）。
+        width: 目标列宽（单元格数，CJK 记 2）。
+        max_rows: 最多保留的行数。超了保留首部 + 尾行（键位提示），中间插省略号。
+    """
+    lines = text.wrap(_MEASURE, max(1, width))
+    if len(lines) > max_rows > 1:
+        keep = lines[: max_rows - 2]
+        lines = [*keep, Text("…", style=tui_style("keys")), lines[-1]]
+    out = Text()
+    for i, line in enumerate(lines):
+        if i:
+            out.append("\n")
+        out.append_text(line)
+    return out
 
 
 class TUIIO(IOChannel):
@@ -507,7 +579,9 @@ class PromptInput(TextArea):
     """多行输入框：Enter 换行（TextArea 原生），Shift+Enter 发送（App 优先级绑定）。
 
     ↑↓ 语义按光标位置分流（确定性，不依赖按键冒泡）：
-    - 光标未到边界（↑ 非首行 / ↓ 非末行）→ 光标移动（多行编辑）；
+    - 补全浮层打开时（正文以 '/' 开头且有候选）→ ↑↓ 只在候选间挪选择，
+      不碰正文、也不翻历史；Esc 关浮层（再输入自动重开），Tab 插入选中项；
+    - 否则：光标未到边界（↑ 非首行 / ↓ 非末行）→ 光标移动（多行编辑）；
     - ↑ 到首行再按 → 上一条历史，光标落在其**最后一行**（接着 ↑ 可继续上溯）；
     - ↓ 到末行再按 → 下一条历史，光标落在其**第一行**（接着 ↓ 可继续前行）。
     空正文即单行，↑↓ 直接分流到历史，沿袭单行 Input 时代的行为。
@@ -516,20 +590,29 @@ class PromptInput(TextArea):
     BINDINGS = [
         _kb("history_prev", "prompt_up", show=False),
         _kb("history_next", "prompt_down", show=False),
+        _kb("hint_dismiss", "dismiss_hint", show=False),
+        # 输入框内编辑动作：原硬编码在 TextArea.BINDINGS（用户既看不见也改不了，
+        # 还会与上层动作静默互抢）。登记进动作目录后：面板可见 / 可改键 / 冲突可检。
+        *[_kb_edit(_a.id) for _a in by_scope("prompt_edit")],
     ]
 
     def action_prompt_up(self) -> None:
+        app = cast("FPApp", self.app)  # pyright: ignore[reportUnknownMemberType]
         if self.cursor_location[0] > 0:
             self.action_cursor_up()
-        else:
-            # self.app 的返回类型带 Unknown（textual Widget.app 泛型），strict 下单点豁免
-            cast("FPApp", self.app).action_hist_prev()  # pyright: ignore[reportUnknownMemberType]
+        elif not app.hint_move(-1):
+            app.action_hist_prev()
 
     def action_prompt_down(self) -> None:
+        app = cast("FPApp", self.app)  # pyright: ignore[reportUnknownMemberType]
         if self.cursor_location[0] < self.document.line_count - 1:
             self.action_cursor_down()
-        else:
-            cast("FPApp", self.app).action_hist_next()  # pyright: ignore[reportUnknownMemberType]
+        elif not app.hint_move(1):
+            app.action_hist_next()
+
+    def action_dismiss_hint(self) -> None:
+        """Esc：只关浮层，不清正文（正文不匹配任何命令时浮层本来也没开）。"""
+        cast("FPApp", self.app).dismiss_hint()  # pyright: ignore[reportUnknownMemberType]
 
 
 # ══════════════════════════════════════════════════════════════
@@ -662,12 +745,30 @@ class FPApp(App[None]):
     .tool-result-card > CollapsibleTitle,
     .think-card > CollapsibleTitle { padding: 0 1; }
     .tool-card > Contents, .tool-result-card > Contents, .think-card > Contents { padding: 1 0 1 2; }
+    /* 斜杠补全浮层：左候选窗（选中行高亮）+ 右帮助栏（自动换行）。
+       窄屏（< HINT_NARROW_WIDTH）切成上下叠放，否则两栏都只剩碎片。 */
     #hint {
-        height: auto; max-height: 9;
+        height: auto; max-height: 11;
         background: $panel; color: $text;
         padding: 0 1; display: none;
     }
     #hint.visible { display: block; }
+    #hint_list {
+        width: auto; max-width: 30;
+        height: auto;
+        text-wrap: nowrap;   /* 候选一律单行：窗口行数才能和 HINT_ROWS 对上 */
+    }
+    #hint_detail {
+        width: 1fr; height: auto;
+        padding: 0 0 0 2;
+        border-left: solid $surface;
+    }
+    #hint.narrow { layout: vertical; max-height: 13; }
+    #hint.narrow #hint_list { width: 100%; max-width: 100%; }
+    #hint.narrow #hint_detail {
+        width: 100%; padding: 0;
+        border-left: none; border-top: solid $surface;
+    }
     #prompt_row {
         dock: bottom;
         height: auto;
@@ -733,7 +834,8 @@ class FPApp(App[None]):
     # 滚消息；让位换来「焦点在哪都能操作消息区」的确定性——不用先把焦点 Tab 出去。
     BINDINGS = [
         _kb("submit", "submit_prompt", priority=True, show=False),
-        _kb("interrupt", "copy_or_interrupt", priority=True),
+        _kb("copy_selection", "copy_selection", priority=True),
+        _kb("interrupt", "interrupt", priority=True),
         _kb("quit", "app_quit", priority=True),
         _kb("stats", "stats"),
         _kb("appearance", "open_appearance", priority=True),
@@ -760,6 +862,8 @@ class FPApp(App[None]):
         super().__init__()
         # fp --keys：启动即开键位面板（不依赖任何键位，按键失灵时的兜底入口）
         self._open_keys = open_keys
+        # 输入框聚焦时截获的键（on_mount 按生效 keymap 重建）
+        self._key_actions: dict[str, str] = build_key_actions()
         self._io = io
         self._directive = directive
         self._resume = resume
@@ -782,7 +886,9 @@ class FPApp(App[None]):
         # 输入历史
         self._hist: list[str] = []
         self._hist_idx = 0
-        self._hint_matches: list[tuple[str, str]] = []
+        # 斜杠补全浮层：当前候选全表 + 选中下标（↑↓ 移动，Tab 插入选中项）
+        self._hint_matches: list[completion.Candidate] = []
+        self._hint_idx = 0
 
     def get_default_screen(self) -> Screen[None]:
         """默认屏换用带 #6643 竞态修复的 FPDefaultScreen。"""
@@ -794,10 +900,13 @@ class FPApp(App[None]):
         yield Static(id="status")
         with VerticalScroll(id="chat"):
             yield Static("", id="chat_anchor")
-        yield Static(id="hint")
+        # 补全浮层：左候选窗 + 右帮助栏（窄屏由 .narrow 切成上下叠放）
+        with Horizontal(id="hint"):
+            yield Static(id="hint_list")
+            yield Static(id="hint_detail")
         with Horizontal(id="prompt_row"):
             yield PromptInput(
-                placeholder="消息…（Enter 换行 · Shift+Enter/Ctrl+J 发送）",
+                placeholder="消息…（Enter 换行 · Shift+Enter 发送）",
                 id="prompt",
             )
             yield Button(tui_glyph("send"), id="send_btn")
@@ -829,6 +938,9 @@ class FPApp(App[None]):
         problems += self._clash_notices
         if keymap:
             self.set_keymap(keymap)
+        # 截获表按**生效**键位重建：用户覆盖的键同样要在输入框聚焦时被截获，
+        # 否则「面板里改了键、输入框里按却没反应」。
+        self._key_actions = build_key_actions(keymap)
         self.set_interval(0.4, self._refresh_status)
         self._refresh_status()
         # 坏配置合并成一条明示（逐条刷屏同样是噪音）
@@ -859,6 +971,16 @@ class FPApp(App[None]):
             return
         self.push_screen(KeysPanel())
 
+    def refresh_key_actions(self, keymap: dict[str, str] | None = None) -> None:
+        """按新 keymap 重建输入框截获表。
+
+        面板改键后必须调用：截获表若停留在挂载时算出的旧值，用户新设的键
+        在输入框里按下去不会有任何反应（``set_keymap`` 只改 widget 绑定链，
+        不改这张表）。
+        """
+        self._key_actions = build_key_actions(keymap)
+        self.refresh_bindings()
+
     async def _check_bindings(self, key: str, priority: bool = False) -> bool:
         """捕获键位时让出**全部**绑定。
 
@@ -879,7 +1001,7 @@ class FPApp(App[None]):
         # 输入框聚焦时，TextArea 会把一部分 ctrl 组合当自己的编辑键抢走（它声明
         # 消费一切可打印字符），priority 绑定也救不回来。这类键在这里截获——
         # 本方法早于所有 widget 绑定，行为确定。
-        if not priority and (action_id := TUI_KEY_ACTIONS.get(key)) is not None:
+        if not priority and (action_id := self._key_actions.get(key)) is not None:
             return await self.run_action(action_id, self)
         return await super()._check_bindings(key, priority)
 
@@ -1128,7 +1250,7 @@ class FPApp(App[None]):
         if t != self._status_text:
             self._status_text = t
             bar.update(t, layout=False)
-        placeholder = "运行中 · 输入将排队注入（斜杠禁用）" if busy else "消息…（Enter 换行 · Shift+Enter/Ctrl+J 发送）"
+        placeholder = "运行中 · 输入将排队注入（斜杠禁用）" if busy else "消息…（Enter 换行 · Shift+Enter 发送）"
         if placeholder != self._placeholder:
             self._placeholder = placeholder
             prompt.placeholder = placeholder
@@ -1212,35 +1334,119 @@ class FPApp(App[None]):
 
     # ── 斜杠补全提示（n7） ───────────────────────────────────
 
+    def on_resize(self, event: Any) -> None:  # textual.events.Resize
+        """窗口宽度变了 → 帮助栏按新栏宽重折行（否则会按旧宽度折好再被裁）。
+
+        取 ``event.size`` 而不是 ``self.size``：Resize 到达时 App 自己的 size
+        还是**旧值**（实测 100x30 → 34x20 时 event=34、self=100），用 self 会把
+        浮层按旧宽度折好，再被新容器裁掉——正是要修的那个 bug。
+        """
+        if self._hint_matches:
+            self._render_hint(width=int(getattr(event.size, "width", 0) or 0) or None)
+
     @on(TextArea.Changed, "#prompt")
     def _on_change(self, event: TextArea.Changed) -> None:
-        hint = self.query_one("#hint", Static)
         value = event.text_area.text
-        if not value.startswith("/"):
-            self._hint_matches = []
-            hint.remove_class("visible")
-            hint.update("")
+        self._hint_matches = completion.slash_candidates(value) if value.startswith("/") else []
+        # 正文一变选择回到第一条：候选集换了，「上次选到第 3 项」不再指向同一个东西
+        self._hint_idx = 0
+        self._render_hint()
+
+    def _render_hint(self, width: int | None = None) -> None:
+        """重画补全浮层：候选窗（选中行反显）+ 帮助栏。无候选 → 收起。
+
+        Args:
+            width: 显式栏宽（resize 时用事件尺寸）；None = 取当前 App 宽度。
+        """
+        try:
+            hint = self.query_one("#hint", Horizontal)
+            list_box = self.query_one("#hint_list", Static)
+            detail_box = self.query_one("#hint_detail", Static)
+        except NoMatches:  # 界面销毁中（Changed 可能晚于卸载）→ 静默跳过
             return
-        self._hint_matches = completion.slash_matches(value)[:8]
         if not self._hint_matches:
             hint.remove_class("visible")
-            hint.update("")
             return
+
+        total = len(self._hint_matches)
+        self._hint_idx = max(0, min(self._hint_idx, total - 1))
+        # 两栏宽度先算清楚：右栏所剩无几就改上下叠放（.narrow）
+        content_w = max(8, (width or self.size.width) - 2)  # #hint 自己的左右 padding 0 1
+        list_w = min(max(len(c.word) for c in self._hint_matches) + 2, HINT_LIST_MAX_W)
+        narrow = content_w - list_w - 3 < HINT_DETAIL_MIN_W  # 3 = border-left + padding
+        wrap_w = content_w if narrow else content_w - list_w - 3
+        hint.set_class(narrow, "narrow")
+        list_box.styles.width = "100%" if narrow else list_w
+
+        rows = HINT_ROWS_NARROW if narrow else HINT_ROWS
+        # 窗口跟着选择走：选中行恒在可见范围内，不必依赖 widget 内部滚动
+        start = min(max(0, self._hint_idx - rows + 1), max(0, total - rows))
         body = Text()
-        for word, desc in self._hint_matches:
-            body.append(word, style=tui_style("completion"))
-            if desc:
-                body.append(f"  {desc}", style=tui_style("completion_desc"))
-            body.append("\n")
-        hint.update(body)
+        for i in range(start, min(total, start + rows)):
+            cand = self._hint_matches[i]
+            if i > start:
+                body.append("\n")
+            style = tui_style("completion")
+            if i == self._hint_idx:
+                # 选中行整行反显 + 光标记号（复用 prompt 字形：可配置、ascii 模式降级）
+                style += " reverse"
+                body.append(f"{tui_glyph('prompt')} ", style=style)
+            else:
+                body.append("  ", style=style)
+            body.append(cand.word, style=style)
+        detail_rows = HINT_DETAIL_ROWS_NARROW if narrow else HINT_DETAIL_ROWS
+        list_box.update(body)
+        detail_box.update(_wrap_cells(self._hint_detail(wrap_w), wrap_w, detail_rows))
         hint.add_class("visible")
+
+    def _hint_detail(self, wrap_w: int) -> Text:
+        """选中项的帮助文本：名字/别名、一行描述、用法正文、位置与键位提示。
+
+        这里只拼**未折行**的富文本；折行/限行由 :func:`_wrap_cells` 按当前
+        栏宽做——两件事分开，才能让行数上限与实际显示行数一致。
+        """
+        cand = self._hint_matches[self._hint_idx]
+        # 窄栏里键位提示自己就会折成两行，占掉本来就紧的正文空间 → 用短版
+        keys = "↑↓ 选择 · Tab 补全 · Esc 关闭" if wrap_w >= 40 else "↑↓ · Tab · Esc"
+        text = Text()
+        text.append(cand.word, style=tui_style("completion"))
+        if cand.aliases:
+            text.append("  " + " ".join(f"/{a}" for a in cand.aliases), style=tui_style("completion_desc"))
+        if cand.desc:
+            text.append("\n")
+            text.append(cand.desc, style=tui_style("info"))
+        if cand.help_text:
+            text.append("\n")
+            text.append(cand.help_text, style=tui_style("completion_desc"))
+        text.append("\n")
+        text.append(f"{self._hint_idx + 1}/{len(self._hint_matches)} · {keys}", style=tui_style("keys"))
+        return text
+
+    def hint_move(self, delta: int) -> bool:
+        """↑↓ 在浮层里挪选择。返回 False = 浮层没开（调用方回落到历史翻页）。"""
+        if not self._hint_matches:
+            return False
+        target = max(0, min(len(self._hint_matches) - 1, self._hint_idx + delta))
+        if target != self._hint_idx:
+            self._hint_idx = target
+            self._render_hint()
+        return True
+
+    def dismiss_hint(self) -> None:
+        """收起浮层（Esc）。正文不动——继续输入会因 Changed 自然重开。"""
+        if not self._hint_matches:
+            return
+        self._hint_matches = []
+        self._hint_idx = 0
+        self._render_hint()
 
     def action_tab_complete(self) -> None:
         if not self._hint_matches:
             return
+        idx = max(0, min(self._hint_idx, len(self._hint_matches) - 1))
+        word = self._hint_matches[idx].word
         prompt = self.query_one("#prompt", PromptInput)
-        word = self._hint_matches[0][0]
-        prompt.text = word + " "
+        prompt.text = word + " "  # 触发 Changed → 浮层自动收起（补全后无候选）
         prompt.move_cursor((0, len(word) + 1))
 
     # ── 输入历史（↑↓） ──────────────────────────────────────
@@ -1268,32 +1474,35 @@ class FPApp(App[None]):
 
     # ── 动作 ─────────────────────────────────────────────────
 
-    def action_copy_or_interrupt(self) -> None:
-        """Ctrl+C / Ctrl+Shift+C 分支：选区复制 → 忙碌打断 → 空闲提示（不退出）。
+    def action_copy_selection(self) -> None:
+        """复制当前选区（输入框内或聊天区拖选），走 OSC52 写入系统剪贴板。
 
-        旧实现无条件走打断/退出，导致"选中想复制却把 fp 退了"（App 优先级绑定
-        截胡了 TextArea/Screen 的内建 copy 绑定）。退出统一 Ctrl+Q。
+        只做这一件事。**打断是独立动作**（``interrupt``），各占自己的键槽——
+        两个语义不再共用一个键、靠「忙不忙 / 有没有选区」运行时猜用户意图。
         """
-        # 1) 输入框内建选区（TextArea 鼠标拖选 / Shift+方向键）
         focused = self.screen.focused
         if isinstance(focused, TextArea) and (text := focused.selected_text):
             self.copy_to_clipboard(text)
             self.notify(f"已复制 {len(text)} 字", timeout=1.5)
             return
-        # 2) 屏幕级选区（聊天区拖选；Markdown/Static 的 get_selection 从渲染文本抽取）
         if selected := self.screen.get_selected_text():
             self.screen.action_copy_text()  # 内部无选区会 SkipAction——上面已判非空
             self.screen.clear_selection()
             self.notify(f"已复制 {len(selected)} 字", timeout=1.5)
             return
-        # 3) 忙碌 + 无选区 → 打断（保留旧语义）
+        self.notify("未选中文本", timeout=2.0)
+
+    def action_interrupt(self) -> None:
+        """打断当前操作：思考中保留已生成内容，工具执行中标记当前工具失败。
+
+        空闲时给出提示而非静默——用户按了键总该知道发生了什么。
+        """
         if self._is_busy() and portal.is_open:
             portal.run.cancel()
             self._line(f"{tui_glyph('stop')} 已请求打断", tui_style("warning"))
             self._refresh_status()
             return
-        # 4) 空闲 + 无选区 → 不退出（防复制误触），提示键位
-        self.notify("未选中文本 · Ctrl+Q 退出 · 运行中 Ctrl+C 打断", timeout=2.0)
+        self.notify("当前没有运行中的操作", timeout=2.0)
 
     def action_app_quit(self) -> None:
         self.exit()

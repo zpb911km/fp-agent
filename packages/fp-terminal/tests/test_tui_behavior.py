@@ -339,11 +339,11 @@ class TestInputLayout(unittest.TestCase):
 
 
 class TestCopyAndFallbackKeys(unittest.TestCase):
-    """#159 键位修复契约：
-    - Ctrl+C / Ctrl+Shift+C：选区 → 复制（不退出）；空闲无选区 → 不退出；
-      忙碌无选区 → 打断（旧语义保留）
-    - Ctrl+J：Shift+Enter 的终端兜底（不支持 kitty 键盘协议的终端下
-      Shift+Enter 与 Enter 字节不可区分，LF 全终端可区分）
+    """复制与打断是两个**独立动作**，各占自己的键槽。
+
+    - ``copy_selection``（默认 ``Ctrl+C``）：选区 → 复制，不退出；无选区 → 提示。
+    - ``interrupt``（默认**未绑定**）：打断运行中的操作。
+      不再有「有选区就复制、忙就打断」的运行时分流——那是不可见也改不了的隐式语义。
     """
 
     def _run(
@@ -353,6 +353,7 @@ class TestCopyAndFallbackKeys(unittest.TestCase):
         busy: bool = False,
         select: bool = False,
         initial: str = "",
+        bind: dict[str, str] | None = None,
     ) -> dict[str, object]:
         from fp_core.api import portal as real_portal
 
@@ -378,6 +379,10 @@ class TestCopyAndFallbackKeys(unittest.TestCase):
                         prompt.text = "hello"
                         prompt.move_cursor((0, 5))
                         await pilot.press("shift+home")  # 选中整行 hello
+                    if bind:
+                        # 打断默认未绑定，测它的用例自己设键
+                        app.set_keymap(bind)
+                        app.refresh_key_actions(bind)
                     await pilot.press(*press.split())
                     await pilot.pause(0.1)
                     return {
@@ -395,9 +400,10 @@ class TestCopyAndFallbackKeys(unittest.TestCase):
         self.assertEqual(s["clipboard"], "hello")
         self.assertEqual(s["exits"], 0)  # 复制而非退出
 
-    def test_ctrl_shift_c_copies_prompt_selection(self) -> None:
+    def test_shift_variant_not_bound(self) -> None:
+        """一个动作一个键：``ctrl+shift+c`` 不再是复制别名（只留 ``ctrl+c``）。"""
         s = self._run(press="ctrl+shift+c", select=True)
-        self.assertEqual(s["clipboard"], "hello")
+        self.assertEqual(s["clipboard"], "")
         self.assertEqual(s["exits"], 0)
 
     def test_ctrl_c_idle_without_selection_does_not_exit(self) -> None:
@@ -405,14 +411,30 @@ class TestCopyAndFallbackKeys(unittest.TestCase):
         self.assertEqual(s["exits"], 0)  # 不再裸退出
         self.assertFalse(s["cancelled"])
 
-    def test_ctrl_c_busy_without_selection_cancels(self) -> None:
+    def test_ctrl_c_busy_no_longer_interrupts(self) -> None:
+        """``Ctrl+C`` 只管复制：忙碌时按它不该把任务打断掉。
+
+        旧实现让同一个键在「有选区」和「忙碌」两种情况下分流到不同语义，
+        用户既看不见也无法配置。现在打断是独立动作，需要用户自己绑键。
+        """
         s = self._run(busy=True, press="ctrl+c")
-        self.assertTrue(s["cancelled"])  # 忙碌打断语义保留
+        self.assertFalse(s["cancelled"])
         self.assertEqual(s["exits"], 0)
 
-    def test_ctrl_j_sends(self) -> None:
+    def test_interrupt_action_cancels_when_busy(self) -> None:
+        """``interrupt`` 自己绑了键就能打断（默认未绑定，由用户设）。"""
+        s = self._run(busy=True, bind={"interrupt": "f8"}, press="f8")
+        self.assertTrue(s["cancelled"])
+        self.assertEqual(s["exits"], 0)
+
+    def test_ctrl_j_not_bound(self) -> None:
+        """一个动作一个键：``ctrl+j`` 不再是发送别名（只留 ``shift+enter``）。
+
+        终端里 ``ctrl+j`` 与 ``LF`` 同字节，落到输入框就是换行——这正是取消
+        别名的理由：同一个字节不可能既换行又发送。
+        """
         s = self._run(press="ctrl+j", initial="hi")
-        self.assertEqual(s["sent"], ["hi"])
+        self.assertEqual(s["sent"], [])
 
     def test_shift_enter_still_sends(self) -> None:
         s = self._run(press="shift+enter", initial="yo")
@@ -488,10 +510,9 @@ class TestThemeSignalPersist(unittest.TestCase):
                 ):
                     async with app.run_test(size=(100, 30)) as pilot:
                         await pilot.pause()
-                        # ① Ctrl+T 绑定指向外观面板（不再是 Textual 的 change_theme）
-                        bindings = {b.key: b.action for b in FPApp.BINDINGS}
-                        self.assertEqual(bindings.get("ctrl+t"), "open_appearance")
-                        # ② 命令面板那条路：直接改主题 → 触发落盘
+                        # 外观动作默认未绑定；本用例测的是「程序内改主题是否落盘」，
+                        # 不经键位，省掉一次多余的绑定。
+                        # 命令面板那条路：直接改主题 → 触发落盘
                         if register_custom:
                             from textual.theme import Theme
 
