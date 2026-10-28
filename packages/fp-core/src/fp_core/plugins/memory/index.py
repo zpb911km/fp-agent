@@ -35,9 +35,16 @@ def _db_path() -> str:
     return os.path.join(config.data_dir(), "cache", "memory_index.sqlite")
 
 
-def _connect(path: str) -> sqlite3.Connection:
+def _connect(path: str, *, wal: bool = True) -> sqlite3.Connection:
+    """建立连接。
+
+    wal=False 用于「探测/读取既有库」：PRAGMA journal_mode=WAL 是对库文件的首次
+    真读，对损坏或非 sqlite 文件会立刻抛 DatabaseError("file is not a database")。
+    而 ensure() 需要的是「读不通 → 重建」，若在此处就炸，自愈路径永远走不到。
+    """
     conn = sqlite3.connect(path, timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
+    if wal:
+        conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
@@ -101,8 +108,12 @@ def _needs_rebuild(conn: sqlite3.Connection, leaves: list[dict[str, str]]) -> bo
     return any(abs(current[k] - stored[k]) > 0.001 for k in current)
 
 
-def _rebuild(conn: sqlite3.Connection, leaves: list[dict[str, str]]) -> None:
-    """全量重建到临时库再原子替换（崩溃也不留半截索引）"""
+def _rebuild(leaves: list[dict[str, str]]) -> None:
+    """全量重建到临时库再原子替换（崩溃也不留半截索引）。
+
+    刻意不接收旧库连接：重建只读磁盘叶子、写全新临时库再 os.replace，
+    因此旧库即便已损坏（连打开都失败）也能被直接换掉——这是自愈的前提。
+    """
     final = _db_path()
     os.makedirs(os.path.dirname(final), exist_ok=True)
     fd, tmp = tempfile.mkstemp(suffix=".sqlite.tmp", dir=os.path.dirname(final))
@@ -148,24 +159,23 @@ def _rebuild(conn: sqlite3.Connection, leaves: list[dict[str, str]]) -> None:
 
 
 def ensure(force: bool = False) -> None:
-    """确保索引与磁盘叶子一致（mtime/name 失配 → 全量重建）。失败静默降级（旁路可缺）。"""
+    """确保索引与磁盘叶子一致（库缺失/损坏/mtime 失配 → 全量重建）。失败静默降级（旁路可缺）。"""
     try:
         leaves = _all_leaves()
         path = _db_path()
         if not os.path.isfile(path):
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            conn = _connect(path)
-            conn.executescript(_SCHEMA)
-            conn.commit()
-            _rebuild(conn, leaves)
-            conn.close()
+            # _rebuild 内部自建目录与 schema，无需先连一次再覆盖
+            _rebuild(leaves)
             return
-        conn = _connect(path)
-        if force or _needs_rebuild(conn, leaves):
+        # 探测连接不设 WAL：坏库会在 _needs_rebuild 内抛 DatabaseError → return True
+        conn = _connect(path, wal=False)
+        try:
+            rebuild = force or _needs_rebuild(conn, leaves)
+        finally:
             conn.close()
-            conn = _connect(path)
-            _rebuild(conn, leaves)
-        conn.close()
+        if rebuild:
+            # 不依赖旧库可读：全新临时库 + 原子替换，坏库也能直接换掉
+            _rebuild(leaves)
     except (sqlite3.Error, OSError):
         # 旁路索引失败不阻塞主流程：query 会走 AND 兜底
         pass

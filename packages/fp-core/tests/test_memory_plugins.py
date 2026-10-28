@@ -510,6 +510,56 @@ class TestMemoryIndex:
         assert version == memory_index._SCHEMA_VERSION
         assert files_n == 2
 
+    def test_corrupt_db_is_rebuilt_on_ensure(self, memory_env):
+        """坏库（非 sqlite 内容）→ ensure() 必须自愈重建，不得静默留在坏状态。
+
+        回归：_connect() 的 WAL PRAGMA 是对库文件的首次真读，坏库在此抛 DatabaseError，曾被
+        ensure() 外层 except 吞掉，导致 _needs_rebuild 里的 `except DatabaseError: return True`
+        成为死代码——自愈入口永远抵达不了。
+        """
+        import sqlite3
+
+        from fp_core.plugins.memory import index as memory_index
+
+        _write_mem_cat(memory_env["global"], "skill", "alpha", "甲", "正文甲")
+        path = memory_index._db_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"not a sqlite database at all, pure garbage bytes" * 4)
+        with open(path, "rb") as f:
+            assert f.read(16) != b"SQLite format 3\x00"
+
+        memory_index.ensure()  # 不 force：损坏本身即应触发重建
+
+        with open(path, "rb") as f:
+            assert f.read(16) == b"SQLite format 3\x00", "坏库未被重建"
+        conn = sqlite3.connect(path)
+        try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            files_n = conn.execute("SELECT count(*) FROM files").fetchone()[0]
+            docs_n = conn.execute("SELECT count(*) FROM docs").fetchone()[0]
+            integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        finally:
+            conn.close()
+        assert version == memory_index._SCHEMA_VERSION
+        assert integrity == "ok"
+        assert files_n == 1
+        assert docs_n == 1
+
+    def test_search_recovers_from_corrupt_db(self, memory_env):
+        """坏库上检索不报错且能自愈出结果（用户可感知路径的端到端回归）"""
+        from fp_core.plugins.memory import index as memory_index
+
+        _write_mem_cat(memory_env["global"], "skill", "alpha", "告警降级", "corruption recovery note")
+        path = memory_index._db_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"garbage" * 100)
+
+        hits = memory_index.search("corruption")
+        assert hits, "坏库应被 ensure() 自愈后命中"
+        assert hits[0]["name"] == "alpha"
+
 
 # ═══════════════════════════════════════════════════════════
 # memory_read — execute 五入口
