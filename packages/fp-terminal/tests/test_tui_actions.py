@@ -579,6 +579,13 @@ class TestKeysPanel(unittest.TestCase):
         options = pilot_app.screen.query_one("#keys_list", OptionList)
         options.highlighted = options.get_option_index(action_id)
 
+    def _footer(self, pilot_app: FPApp) -> str:
+        """面板 footer 的纯文本（提示常驻 / 操作结果都落在这里）。"""
+        from textual.widgets import Static
+
+        widget = pilot_app.screen.query_one("#keys_footer", Static)
+        return str(widget.render())
+
     def test_ctrl_k_opens_panel(self) -> None:
         async def scenario(app: FPApp, pilot: Pilot[None]) -> None:
             await pilot.press("ctrl+k")
@@ -913,6 +920,102 @@ class TestKeysPanel(unittest.TestCase):
 
         with patch("fp_cli.keys_panel.persist_tui") as persist:
             self._run(scenario(persist))
+
+    def test_unbound_row_shows_label_not_placeholder(self) -> None:
+        """取消绑定后行上显示「（未绑定）」，绝不泄漏内部占位键。
+
+        占位键 ``ctrl+alt+shift+f12`` 是我们为绕开「Binding 不接受空串」造的
+        内部值，用户按完 Delete 看到这串乱码只会以为面板坏了。
+        """
+        from textual.widgets import OptionList
+
+        def scenario(persist):  # noqa: ANN001, ANN202
+            async def run(app: FPApp, pilot: Pilot[None]) -> None:
+                await pilot.press("ctrl+k")
+                await pilot.pause()
+                self._highlight(app, "copy_selection")
+                await pilot.press("delete")
+                await pilot.pause()
+                options = app.screen.query_one("#keys_list", OptionList)
+                row = options.get_option_at_index(options.get_option_index("copy_selection"))
+                plain = row.prompt.plain  # pyright: ignore[reportAttributeAccessIssue]
+                self.assertIn("未绑定", plain)
+                self.assertNotIn(UNBOUND_KEY, plain, "内部占位键泄漏到界面")
+
+            return run
+
+        with patch("fp_cli.keys_panel.persist_tui"):
+            self._run(scenario(None))
+
+    def test_panel_advertises_unbind_on_open(self) -> None:
+        """面板一打开就能看到「怎么取消绑定」（常驻提示）。
+
+        曾经只在操作后更新 footer，打开面板一片空白——功能存在但没人找得到。
+        """
+
+        async def scenario(app: FPApp, pilot: Pilot[None]) -> None:
+            await pilot.press("ctrl+k")
+            await pilot.pause()
+            footer = self._footer(app)
+            self.assertIn("取消绑定", footer)
+            self.assertIn("Delete", footer)
+
+        self._run(scenario)
+
+    def test_unbind_refuses_submit(self) -> None:
+        """发送键同 ``quit``：清空即输入框内容永远发不出去，拒绝。"""
+
+        def scenario(persist):  # noqa: ANN001, ANN202
+            async def run(app: FPApp, pilot: Pilot[None]) -> None:
+                await pilot.press("ctrl+k")
+                await pilot.pause()
+                self._highlight(app, "submit")
+                await pilot.press("delete")
+                await pilot.pause()
+                self.assertIn("必须保留", self._footer(app))
+                persist.assert_not_called()
+
+            return run
+
+        with patch("fp_cli.keys_panel.persist_tui") as persist:
+            self._run(scenario(persist))
+
+    def test_reset_current_refuses_clash(self) -> None:
+        """恢复默认也要过冲突检测：回落键被别的动作占着就拒绝。
+
+        真实场景：用户把「发送消息」改成 ``enter``，此时在「换行」上按 R，
+        出厂键 ``enter`` 已被占——盲写会让输入框里的 Enter 既换行又发送。
+        """
+
+        def scenario(persist):  # noqa: ANN001, ANN202
+            async def run(app: FPApp, pilot: Pilot[None]) -> None:
+                await pilot.press("ctrl+k")
+                await pilot.pause()
+                # 先腾出 enter（取消「换行」的绑定），再把 submit 改成 enter
+                self._highlight(app, "insert_newline")
+                await pilot.press("delete")
+                await pilot.pause()
+                self._highlight(app, "submit")
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(cast("dict[str, str]", app._keymap)["submit"], "enter")
+                # 「换行」按 R → 回落 enter 会与 submit 抢，必须拒绝
+                self._highlight(app, "insert_newline")
+                await pilot.press("r")
+                await pilot.pause()
+                self.assertIn("未恢复默认", self._footer(app))
+                self.assertEqual(
+                    cast("dict[str, str]", app._keymap)["insert_newline"],
+                    UNBOUND_KEY,
+                    "冲突时不得写入",
+                )
+
+            return run
+
+        with patch("fp_cli.keys_panel.persist_tui"):
+            self._run(scenario(None))
 
     def test_parse_empty_string_means_unbound(self) -> None:
         """``config.json`` 里写空串 = 显式取消绑定（不是「配置错误」）。"""

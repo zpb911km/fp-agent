@@ -35,6 +35,7 @@ from .tui_actions import (
     by_scope,
     canonical_key,
     check_clashes,
+    display_keys,
     identical_keys,
     is_valid_key,
 )
@@ -48,8 +49,22 @@ from .tui_actions import (
 #: 不是禁止用户动默认值。
 RESERVED_KEYS = frozenset({"ctrl+q"})
 
-#: 必须有键的动作：清空即失去唯一出口/入口，拒绝。
-REQUIRED_ACTIONS = frozenset({"quit"})
+#: 必须有键的动作：清空即失去**唯一出口**，拒绝。
+#:
+#: * ``quit`` —— 没有它退不出程序；
+#: * ``submit`` —— 没有它输入框里的内容永远发不出去（斜杠命令同样发不出），
+#:   TUI 沦为只读。它与 ``quit`` 同属"清空即自锁"，不是"用户不喜欢的键"。
+REQUIRED_ACTIONS = frozenset({"quit", "submit"})
+
+#: 面板**常驻**操作提示。
+#:
+#: 曾经只在操作后用 ``_say`` 更新 footer，打开面板看到的是空白一行——「取消
+#: 绑定」只能靠猜 ``Delete``（用户实测提问"怎么取消绑定"）。功能藏起来等于没有。
+#: 这里写死的键是本面板自己的 ``BINDINGS``，不属于可配置动作，故不会因改键失真。
+#:
+#: 分两行：单行 70 格，在 80 列终端上刚好贴边、更窄就截断；两行最宽 41 格，
+#: 窄到 46 列仍完整（footer 是 ``height: auto``，不写死行数）。
+HINTS = "Enter 改键 · Delete 取消绑定 · R 恢复默认\nCtrl+R 全部重置 · Esc 关闭"
 # KeyCapture 用此前缀回传"拒绝"，与普通键名区分（面板据此给出具体原因）。
 RESERVED_PREFIX = "!reserved:"
 
@@ -118,7 +133,7 @@ class KeysPanel(ModalScreen[None]):
     }
     #keys_title { height: 1; text-style: bold; color: $accent; }
     #keys_list { height: 1fr; background: $surface; }
-    #keys_footer { height: 1; }
+    #keys_footer { height: auto; }
     """
 
     def __init__(self) -> None:
@@ -146,12 +161,19 @@ class KeysPanel(ModalScreen[None]):
     def on_mount(self) -> None:
         self._overrides = dict(cast("dict[str, str]", getattr(self._host(), "_keymap", {}) or {}))
         self._fill()
+        self._say(HINTS, "dim")
         self.query_one("#keys_list", OptionList).focus()
 
     # ── 行渲染 ──────────────────────────────────────────────
 
     def _keys_of(self, action_id: str) -> str:
-        return self._overrides.get(action_id) or BY_ID[action_id].key
+        """行上显示的**生效**键串；显式未绑定归一为空串。
+
+        不能直接读 ``_overrides``：取消绑定存的是 ``UNBOUND_KEY`` 占位键，
+        原样显示会把 ``ctrl+alt+shift+f12`` 泄漏成"用户设的键"——用户按完
+        Delete 看到这串乱键，只会以为面板坏了。
+        """
+        return display_keys(BY_ID[action_id], self._overrides)
 
     def _row(self, action_id: str) -> Text:
         action = BY_ID[action_id]
@@ -260,12 +282,23 @@ class KeysPanel(ModalScreen[None]):
         return option.id
 
     def action_reset_current(self) -> None:
-        """R：当前项回落默认（从 tui.keys 删掉该键）。"""
+        """R：当前项回落默认（从 tui.keys 删掉该键）。
+
+        **恢复默认也要过冲突检测**：出厂键与用户改动后的其它动作可能撞车
+        （``insert_newline`` 回落到 ``enter``，而 ``submit`` 已被改成 ``enter``），
+        盲写会让一键同时触发两个动作——输入框里 Enter 既换行又发送。故与改键
+        走同一条校验，冲突则拒绝并指出是谁占着。
+        """
         action_id = self._highlighted_action()
         if action_id is None:
             self._say("先选中一个动作", "yellow")
             return
-        self._overrides.pop(action_id, None)
+        candidate = {k: v for k, v in self._overrides.items() if k != action_id}
+        clashes = check_clashes(candidate)
+        if clashes:
+            self._say(f"未恢复默认：{clashes[0]}（先把占用的动作改走）", "red")
+            return
+        self._overrides = candidate
         self._commit(action_id, UNSET)
         defaults = BY_ID[action_id].key
         label = BY_ID[action_id].label
