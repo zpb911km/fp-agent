@@ -337,6 +337,20 @@ class TestInputLayout(unittest.TestCase):
         self.assertIn("tall", str(s["row_border_top"]))
         self.assertTrue(str(s["row_border_left"]).startswith("('',"), s["row_border_left"])
 
+    def test_placeholder_does_not_advertise_keys(self) -> None:
+        """占位文案**不得写死按键**：换行/发送都是可改键动作，写死即谎话。
+
+        旧文案「消息…（Enter 换行 · Shift+Enter 发送）」在用户改键后就是错的，
+        而占位符恰恰是用户最先读到的一行——文案应只讲与按键无关的信息。
+        """
+        from fp_cli.tui import PROMPT_HINT_BUSY, PROMPT_HINT_IDLE
+
+        for text in (PROMPT_HINT_IDLE, PROMPT_HINT_BUSY):
+            with self.subTest(text=text):
+                for key_word in ("Enter", "Shift", "Ctrl", "Alt"):
+                    self.assertNotIn(key_word, text, f"占位文案混入了按键名：{text}")
+        self.assertIn("/", PROMPT_HINT_IDLE)  # 只保留与按键无关的命令提示
+
 
 class TestCopyAndFallbackKeys(unittest.TestCase):
     """复制与打断是两个**独立动作**，各占自己的键槽。

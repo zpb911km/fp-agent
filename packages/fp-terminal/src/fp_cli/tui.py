@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from rich.console import Console
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
@@ -69,7 +69,17 @@ from .appearance import (
 )
 from .history import append_history, load_history
 from .keys_panel import KeyCapture, KeysPanel
-from .tui_actions import ACTIONS, BY_ID, UNBOUND_KEY, by_scope, check_clashes, display_keys, load_keymap
+from .tui_actions import (
+    ACTIONS,
+    BY_ID,
+    UNBOUND_KEY,
+    by_scope,
+    canonical_key,
+    check_clashes,
+    display_keys,
+    effective_key,
+    load_keymap,
+)
 
 if TYPE_CHECKING:
     from textual.theme import Theme
@@ -575,8 +585,15 @@ class FPDefaultScreen(Screen[None]):
         return widget, offset
 
 
+#: 输入框占位文案。**刻意不提按键**：换行/发送都是可改键的动作
+#: （``insert_newline``/``submit``），写死「Enter 换行 · Shift+Enter 发送」
+#: 在用户改键之后就变成谎话——要查键位请按「键位设置」或 ``fp --keys``。
+PROMPT_HINT_IDLE = "消息…（/ 命令）"
+PROMPT_HINT_BUSY = "运行中 · 输入将排队注入（斜杠禁用）"
+
+
 class PromptInput(TextArea):
-    """多行输入框：Enter 换行（TextArea 原生），Shift+Enter 发送（App 优先级绑定）。
+    """多行输入框：换行键默认 ``Enter``（``insert_newline`` 动作，可改键），Shift+Enter 发送。
 
     ↑↓ 语义按光标位置分流（确定性，不依赖按键冒泡）：
     - 补全浮层打开时（正文以 '/' 开头且有候选）→ ↑↓ 只在候选间挪选择，
@@ -613,6 +630,37 @@ class PromptInput(TextArea):
     def action_dismiss_hint(self) -> None:
         """Esc：只关浮层，不清正文（正文不匹配任何命令时浮层本来也没开）。"""
         cast("FPApp", self.app).dismiss_hint()  # pyright: ignore[reportUnknownMemberType]
+
+    def action_insert_newline(self) -> None:
+        """插入换行——TextArea 原生 ``enter`` 行为的可改键版本。"""
+        start, end = self.selection
+        if start == end:
+            self.insert("\n")
+        else:
+            self.replace("\n", start, end, maintain_selection_offset=False)
+
+    async def _on_key(self, event: events.Key) -> None:
+        """让「哪个键换行」由动作目录决定，而不是 TextArea 的硬编码。
+
+        ``_kb_edit`` 生成的 binding 已能被 keymap 覆盖，但默认的裸键 ``enter`` 与
+        TextArea ``_on_key`` 里硬编码的 ``insert_values = {"enter": "\\n"}`` 同源：
+        用户把「换行」改到别的键之后，Enter 仍会插入换行。故在此兜底——只有
+        **生效换行键**才换行（同字节别名按规范键比较），被改走的 Enter 直接吞掉，
+        其余键照旧交给 TextArea。
+        """
+        app = cast("FPApp", self.app)  # pyright: ignore[reportUnknownMemberType]
+        newline = canonical_key(effective_key(app, "insert_newline"))
+        if newline and canonical_key(event.key) == newline:
+            event.stop()
+            event.prevent_default()
+            self.action_insert_newline()
+            return
+        if canonical_key(event.key) == "enter":
+            # 换行键被改走或显式取消绑定：Enter 不再换行
+            event.stop()
+            event.prevent_default()
+            return
+        await super()._on_key(event)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -906,7 +954,7 @@ class FPApp(App[None]):
             yield Static(id="hint_detail")
         with Horizontal(id="prompt_row"):
             yield PromptInput(
-                placeholder="消息…（Enter 换行 · Shift+Enter 发送）",
+                placeholder=PROMPT_HINT_IDLE,
                 id="prompt",
             )
             yield Button(tui_glyph("send"), id="send_btn")
@@ -982,12 +1030,18 @@ class FPApp(App[None]):
         self.refresh_bindings()
 
     async def _check_bindings(self, key: str, priority: bool = False) -> bool:
-        """捕获键位时让出**全部**绑定。
+        """键位面板（含其捕获子屏）打开期间让出**全部**可配置绑定。
 
         ``priority=True`` 的绑定走完整绑定链（穿透 modal），若不让出，用户在
         捕获界面按 ``Ctrl+Q`` 会直接退出程序、按 ``Ctrl+J`` 会发消息。覆盖的是
         textual 私有钩子（无公开等价物），行为由 ``test_ctrl_q_inside_capture_does_not_quit``
         锁定 —— 上游若改语义该测试会红。
+
+        **面板本身也要让，不只是捕获子屏**：面板的「选中动作」就是按 ``Enter``。
+        用户一旦把「发送消息」改到 ``Enter``，按 ``Enter`` 会先被 App 的 priority
+        绑定吃掉（发出消息而不是进入捕获态），键位从此改不动——自锁。面板打开
+        期间只留面板自己的 ``BINDINGS``、widget 原生绑定与 Tab 焦点循环，等价于
+        「所有快捷键被取消」；关闭即恢复（绑定本身没被销毁，见 ``KeysPanel.on_unmount``）。
         """
         if isinstance(self.screen, KeyCapture):
             return False
@@ -998,12 +1052,53 @@ class FPApp(App[None]):
         if key == "tab" and not (isinstance(self.screen, FPDefaultScreen) and isinstance(self.focused, PromptInput)):
             self.screen.focus_next()
             return True
+        if isinstance(self.screen, KeysPanel):
+            # 面板打开期间 = **App 级动作全部取消**，只有两处例外：
+            # ① 面板自身的开关（``keys``，且必须是带修饰键的组合）——否则「Ctrl+K
+            #    打开的面板 Ctrl+K 关不掉」。裸键一律不放行：Enter 选中、Tab 换位、
+            #    Esc 关闭这些面板交互归 widget/screen 原生绑定；
+            # ② screen/widget 级绑定照常——「选中动作」是 OptionList 的 non-priority
+            #    绑定（``enter → select``），若整层短路，按 Enter 什么都不发生。
+            toggle = canonical_key(effective_key(self, "keys"))
+            if priority and "+" in toggle and canonical_key(key) == toggle:
+                return await self.run_action("open_keys", self)
+            return await self._bindings_without_app(key, priority)
+        # 「发送消息」在非主屏 / 焦点不在输入框时不作数：它绑的是 Enter / Shift+Enter
+        # 这类**交互键**，modal 里真正需要它的是「选中列表项」「确认提问」。App 级
+        # priority 绑定会穿透弹窗抢先吃掉，于是用户的 Enter 变成「发出一句话」。
+        if (
+            priority
+            and key == canonical_key(effective_key(self, "submit"))
+            and not (isinstance(self.screen, FPDefaultScreen) and isinstance(self.focused, PromptInput))
+        ):
+            return await self._bindings_without_app(key, priority)
         # 输入框聚焦时，TextArea 会把一部分 ctrl 组合当自己的编辑键抢走（它声明
         # 消费一切可打印字符），priority 绑定也救不回来。这类键在这里截获——
         # 本方法早于所有 widget 绑定，行为确定。
         if not priority and (action_id := self._key_actions.get(key)) is not None:
             return await self.run_action(action_id, self)
         return await super()._check_bindings(key, priority)
+
+    async def _bindings_without_app(self, key: str, priority: bool) -> bool:
+        """走绑定链但**跳过 App 自身那一层**（screen / widget 的绑定照常生效）。
+
+        直接 ``return False`` 会短路整条链——连 ``OptionList`` 的 ``enter → select``
+        也一起没了，按 Enter 什么都不发生。故逐层复刻 textual 的遍历，只跳过
+        ``namespace is self``。覆盖的是私有属性（同 ``_check_bindings``），行为由
+        ``test_panel_suspends_other_shortcuts_and_restores_on_close`` 锁定。
+        """
+        chain = (
+            reversed(self.screen._binding_chain)  # pyright: ignore[reportPrivateUsage]
+            if priority
+            else self.screen._modal_binding_chain  # pyright: ignore[reportPrivateUsage]
+        )
+        for namespace, bindings in chain:
+            if namespace is self:
+                continue
+            for binding in bindings.key_to_bindings.get(key, ()):
+                if binding.priority == priority and await self.run_action(binding.action, namespace):
+                    return True
+        return False
 
     def apply_theme_silently(self, name: str) -> None:
         """改主题但**不落盘**——外观面板的实时预览 / Esc 回滚专用。
@@ -1250,7 +1345,7 @@ class FPApp(App[None]):
         if t != self._status_text:
             self._status_text = t
             bar.update(t, layout=False)
-        placeholder = "运行中 · 输入将排队注入（斜杠禁用）" if busy else "消息…（Enter 换行 · Shift+Enter 发送）"
+        placeholder = PROMPT_HINT_BUSY if busy else PROMPT_HINT_IDLE
         if placeholder != self._placeholder:
             self._placeholder = placeholder
             prompt.placeholder = placeholder

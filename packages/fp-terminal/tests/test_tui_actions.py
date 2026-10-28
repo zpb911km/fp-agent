@@ -103,6 +103,9 @@ class TestActionCatalog(unittest.TestCase):
 
         一个动作**一个键**（不接受逗号分隔的别名）：多键位会让「这个动作到底
         绑了什么」变得需要推理，也让冲突检测与面板显示都变复杂。
+
+        ``insert_newline`` 是输入框编辑里的唯一例外：不留默认键就等于「不能换行」，
+        而这本来就是 Enter 的原生行为——登记成动作只是让它可改键、可见。
         """
         bound = sorted(action.id for action in ACTIONS if action.key)
         self.assertEqual(
@@ -113,6 +116,7 @@ class TestActionCatalog(unittest.TestCase):
                 "hint_dismiss",
                 "history_next",
                 "history_prev",
+                "insert_newline",
                 "keys",
                 "modal_close",
                 "modal_confirm",
@@ -670,6 +674,93 @@ class TestKeysPanel(unittest.TestCase):
         with patch("fp_cli.keys_panel.persist_tui") as persist:
             self._run(scenario(persist))
 
+    def test_enter_bound_to_submit_does_not_freeze_panel(self) -> None:
+        """「发送消息」被绑到 Enter 后，面板里的 Enter 必须仍是「选中动作」。
+
+        否则 App 的 priority 绑定（``submit``）先吃掉 Enter：用户按 Enter 发出
+        消息、永远进不了捕获态，键位从此改不动——自锁。面板打开期间 App 级动作
+        一律让出（``FPApp._check_bindings``），正是为这条路径。
+        """
+
+        async def scenario(app: FPApp, pilot: Pilot[None]) -> None:
+            overrides = {"submit": "enter", "insert_newline": "ctrl+enter"}
+            app.set_keymap(overrides)
+            app.refresh_key_actions(overrides)
+            sent: list[str] = []
+            original = app.action_submit_prompt
+            app.action_submit_prompt = lambda: sent.append("sent")  # type: ignore[method-assign]
+            try:
+                await pilot.press("ctrl+k")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, KeysPanel)
+                self._highlight(app, "cards_toggle_all")
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, KeyCapture, "Enter 应进入捕获态，而不是发送消息")
+                self.assertEqual(sent, [], "面板里按 Enter 不该发出消息")
+            finally:
+                app.action_submit_prompt = original  # type: ignore[method-assign]
+
+        self._run(scenario)
+
+    def test_panel_suspends_other_shortcuts_and_restores_on_close(self) -> None:
+        """面板打开期间其余快捷键**全部失效**，关闭即按最后覆盖表重载。
+
+        「取消」的意义是把面板变成无快捷键的净室：任何自定义组合键都不能在
+        选中/捕获时抢走按键。关闭时重载必须覆盖 ``Ctrl+R`` 全重置这条绕过
+        ``_commit`` 的路径（否则输入框仍按旧键截获）。
+        """
+
+        async def scenario(app: FPApp, pilot: Pilot[None]) -> None:
+            app.set_keymap({"stats": "ctrl+u"})
+            app.refresh_key_actions({"stats": "ctrl+u"})
+            await pilot.press("ctrl+k")
+            await pilot.pause()
+            self.assertIsInstance(app.screen, KeysPanel)
+            await pilot.press("ctrl+u")  # 面板内：App 级动作让出
+            await pilot.pause()
+            self.assertIsInstance(app.screen, KeysPanel)
+            await pilot.press("ctrl+r")  # 全部重置（不经过 _commit）
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, KeysPanel)
+            await pilot.press("ctrl+u")  # 已重置：旧键不得再触发会话统计
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, StatsModal)
+
+        with patch("fp_cli.keys_panel.persist_tui"):
+            self._run(scenario)
+
+    def test_enter_bound_to_submit_is_inert_inside_modals(self) -> None:
+        """``submit = Enter`` 时，modal 里的 Enter 不该是「发出一句话」。
+
+        同一根源的另一面：``submit`` 是 App 级 priority 绑定（穿透弹窗），绑到
+        Enter 后统计/外观/提问弹窗里「选中、确认」的 Enter 都会变成发送。
+        故它只在「主屏 + 焦点在输入框」时作数。
+        """
+
+        async def scenario(app: FPApp, pilot: Pilot[None]) -> None:
+            overrides = {"submit": "enter", "insert_newline": "ctrl+enter", "stats": "ctrl+u"}
+            app.set_keymap(overrides)
+            app.refresh_key_actions(overrides)
+            sent: list[str] = []
+            original = app.action_submit_prompt
+            app.action_submit_prompt = lambda: sent.append("sent")  # type: ignore[method-assign]
+            try:
+                await pilot.press("ctrl+u")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, StatsModal)
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(sent, [], "统计弹窗里按 Enter 不该发出消息")
+                # Enter 归弹窗自己（StatsModal 的 modal_confirm → 关闭），不是发送
+                self.assertNotIsInstance(app.screen, StatsModal)
+            finally:
+                app.action_submit_prompt = original  # type: ignore[method-assign]
+
+        self._run(scenario)
+
     def test_capture_reserved_key_cancelled(self) -> None:
         """捕获时按退路键（ctrl+q）→ 取消捕获，绝不写盘。
 
@@ -986,3 +1077,42 @@ class TestPromptEditBindings(unittest.TestCase):
         edit = {a.key for a in by_scope("prompt_edit") if a.key}
         with self.subTest():
             self.assertEqual(upper & edit, set(), f"默认键冲突：{upper & edit}")
+
+    def test_newline_follows_remapped_key(self) -> None:
+        """「换行」进目录后必须**真能**改键：改走之后 Enter 不再换行，新键换行。
+
+        TextArea 把 ``enter → "\\n"`` 硬编码在 ``_on_key``（不走绑定表），只加一条
+        binding 是不够的——改键后 Enter 仍会插入换行。故 ``PromptInput._on_key``
+        按生效键自行插入，并吞掉被改走的 Enter。
+        """
+
+        async def scenario(app: FPApp, pilot: Pilot[None]) -> None:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.focus()
+            prompt.text = "abc"
+            prompt.cursor_location = (0, 0)
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(prompt.text, "\nabc", "默认 Enter 应换行")
+
+            app.set_keymap({"insert_newline": "ctrl+enter"})
+            app.refresh_key_actions({})
+            prompt.text = "abc"
+            prompt.cursor_location = (0, 0)
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(prompt.text, "abc", "换行键改走后 Enter 不该再换行")
+            await pilot.press("ctrl+enter")
+            await pilot.pause()
+            self.assertEqual(prompt.text, "\nabc", "新键必须换行")
+
+        async def _main() -> None:
+            io = TUIIO()
+            app = FPApp(io)
+            io.attach(app)
+            async with app.run_test(size=(110, 34)) as pilot:
+                await scenario(app, pilot)
+
+        asyncio.run(_main())

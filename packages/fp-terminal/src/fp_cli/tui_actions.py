@@ -152,7 +152,7 @@ def needs_kitty(key: str) -> bool:
 ACTIONS: tuple[Action, ...] = (
     # ── 全局 ──────────────────────────────────────────────────
     # 只保留「没有就不可用」的基线键；其余一律留空由用户自设。
-    Action("submit", "发送消息", "global", "shift+enter", "Enter 换行；此键发送"),
+    Action("submit", "发送消息", "global", "shift+enter", "发送输入框内容（换行键见「输入框编辑 · 换行」）"),
     Action("copy_selection", "复制选区", "global", "ctrl+c", "选中文本写入系统剪贴板（OSC52）"),
     # 打断**不预设键**：给它 Ctrl+C 就等于和复制抢同一个键槽；给别的键则是替用户拍板。
     Action("interrupt", "打断", "global", "", "中断运行中的操作：思考保留已生成内容，工具标记失败"),
@@ -174,7 +174,11 @@ ACTIONS: tuple[Action, ...] = (
     Action("complete", "补全", "prompt", "tab", "命令/路径补全（插入当前选中项）"),
     Action("hint_dismiss", "关闭补全浮层", "prompt", "escape", "浮层打开时优先关它"),
     # ── 输入框内编辑 ──────────────────────────────────────────
-    # 默认**全部留空**：不覆盖 TextArea 原生键，编辑能力一点不少（原生键照旧生效），
+    # 「换行」是这里唯一**必须**带默认键的动作：TextArea 把 ``enter → "\\n"`` 硬编码在
+    # ``_on_key`` 里（不走绑定表），故由 ``PromptInput`` 按本动作的生效键自己插入——
+    # 登记成动作后它才可改键，也能在面板里看见。改成别的键后 Enter 即不再换行。
+    Action("insert_newline", "换行", "prompt_edit", "enter", "输入框内插入换行（发送见「发送消息」）"),
+    # 其余**全部留空**：不覆盖 TextArea 原生键，编辑能力一点不少（原生键照旧生效），
     # 只是不再由我们"分配"、也不与上层动作相抢。需要换键的在这里自设。
     Action("cursor_line_start", "移到行首", "prompt_edit", "", "TextArea 原生 ctrl+a / home"),
     Action("cursor_line_end", "移到行尾", "prompt_edit", "", "TextArea 原生 ctrl+e / end"),
@@ -308,6 +312,16 @@ def display_keys(action: Action, overrides: dict[str, str] | None = None) -> str
     return bound_key(action.key)
 
 
+def effective_key(app: App[Any], action_id: str) -> str:
+    """单个动作的**生效**键串（未绑定返回空串）。
+
+    按键热路径（如 ``PromptInput._on_key`` 判断「换行键是哪个」）只需要一个键，
+    不必像 :func:`effective_keys` 那样构建整张表。
+    """
+    overrides = cast("dict[str, str]", getattr(app, "_keymap", {}) or {})
+    return display_keys(BY_ID[action_id], overrides)
+
+
 def format_keymap_text(keymap: dict[str, str] | None = None) -> str:
     """键位表纯文本（不依赖 TUI：``fp --keys`` 在非交互环境下直接打印）。
 
@@ -382,6 +396,7 @@ __all__ = [
     "canonical_key",
     "check_clashes",
     "display_keys",
+    "effective_key",
     "effective_keys",
     "format_keymap_text",
     "identical_keys",

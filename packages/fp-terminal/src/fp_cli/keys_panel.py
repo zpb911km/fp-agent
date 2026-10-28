@@ -219,18 +219,34 @@ class KeysPanel(ModalScreen[None]):
         note = f"（与 {'/'.join(identical)} 同字节，只能按 {key}）" if identical else ""
         self._say(f"「{label}」已改为 {key}{note}，立即生效", "green")
 
-    def _commit(self, action_id: str, value: object) -> None:
-        """生效（运行时 + 写回 config.json）。"""
+    def _reload(self) -> None:
+        """把当前覆盖表套回宿主：运行时 keymap + 输入框截获表。
+
+        ``set_keymap`` 只改 widget 绑定链，不改输入框那张截获表（``_key_actions``
+        是挂载时算出的快照）——只做前者会让「面板里改了键、输入框里按却没反应」。
+        """
         host = self._host()
         host.set_keymap(self._overrides)
-        # 截获表按新键位重建：否则刚改的键在输入框里按下去毫无反应。
-        # getattr 而非直接调用 —— 保持本模块不反向依赖 tui.FPApp（同 _host）。
         refresh = cast(
             "Callable[[dict[str, str]], None] | None",
             getattr(host, "refresh_key_actions", None),
         )
         if refresh is not None:
             refresh(self._overrides)
+
+    def on_unmount(self) -> None:
+        """关闭面板 → **强制重载全部快捷键**。
+
+        面板打开期间 App 级动作全部让出（``FPApp._check_bindings``），让人能在
+        「没有快捷键」的净室里改键。关闭时不依赖「绑定本来就没变」这个假设：
+        按面板里最后的覆盖表重套一遍，任何绕过 ``_commit`` 的路径（如 ``Ctrl+R``
+        全重置）留下的状态在此收敛。绑定本身没被销毁，故这一步是幂等重载。
+        """
+        self._reload()
+
+    def _commit(self, action_id: str, value: object) -> None:
+        """生效（运行时 + 写回 config.json）。"""
+        self._reload()
         persist_tui({f"tui.keys.{action_id}": value})
         self._fill()
 
@@ -282,7 +298,7 @@ class KeysPanel(ModalScreen[None]):
             self._say("当前没有任何自定义键位", "dim")
             return
         self._overrides = {}
-        self._host().set_keymap({})
+        self._reload()
         persist_tui({"tui.keys": UNSET})
         self._fill()
         self._say("已恢复全部默认键位", "green")
