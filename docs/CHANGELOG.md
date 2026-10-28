@@ -7,6 +7,7 @@
 
 ### Fixed
 
+- **记忆检索在跨类别同名时命中错文件（`files` 表 PK 与树布局矛盾）**: 记忆树允许 `name` 跨类别同名（真实库现役两例：`reload_gate_protocol` 在 `feedback/` 与 `architecture/`、`self_modification` 在 `~/skill/` 与 `./skill/`），但索引 `files` 表 PK 是 `(root,name)`，同一 root 下同名两行只留一行，而 `docs`（fts5 无 PK）照旧两行 —— 实测 `files 260 / docs 261`；`search` 的 `JOIN` 又只按 `(root,name)` 配，于是同一关键词出两条结果、其中一条 `path` 指向**另一类别**的同名文件。修法：PK 改 `(root,category,name)`，`upsert` 的 `DELETE` 与 `search` 的 `JOIN` 同步补 `category`（漏掉会互删/互配出伪命中）。迁移不写 `ALTER`，改为 `_SCHEMA_VERSION=1` 写进 `PRAGMA user_version`，失配即走既有的「临时库 + `os.replace`」全量重建（可丢弃缓存天然完成搬迁，实测 0→1 后 `files`/`docs` 对齐 260/260）。连带修 `parse_frontmatter` 对旧格式 `category:` 键的静默丢弃——原先直接归 `_legacy` 且不告知，现回退为分类并一次性告警。
 - **`ctrl+shift+<字符>` 被静默接受成「永不触发的死键」**: 与上条的「同字节别名」不同源——这是**终端能力缺失**。`ctrl+shift+_` 在传统终端里与 `ctrl+_` 发出同一个字节 `0x1F`，Shift 在终端层即被抹掉，应用侧无法恢复；只有 kitty 键盘协议（`CSI u`）才单独表达 Shift（实测 `\x1b[95;6u` → `ctrl+shift+underscore`），Textual 虽会写 `\x1b[>1u` 请求，但 conhost 不支持。旧行为把 `ctrl+shift+_` 判为合法键原样存盘，于是这条绑定永远等不到自己的字节且毫无提示。现新增 `needs_kitty()`：这类键**保留绑定**（kitty 终端上有效）并在启动问题列表如实预警；仅可打印字符适用，`ctrl+shift+up` 之类特殊键由 CSI 序列自带修饰位，不误报。
 - **改掉的默认键再也改不回来（`ctrl+c` 被误列为保留键）**: 捕获态把 `ctrl+q`/`ctrl+c` 一律当「退出捕获」，于是「复制选区」从 `ctrl+c` 改走之后**无法恢复**——而 `ctrl+c` 在「复制/打断」拆分后只是复制选区的默认键，与退路无关。保留键收窄为**只有 `ctrl+q`**（丢了就退不出程序，无可替代）；保留键的用途是防止丢失退路，不是禁止用户动默认值。
 - **`ctrl+i` 捕获后被静默改写成 `tab`**: 两者在终端发的是同一个字节 `0x09`，无法区分；旧行为直接存成 `tab` 且不告知。Textual 自带的 `KEY_ALIASES` **只用于显示、不参与绑定匹配**（实测绑 `ctrl+i` 后按 Tab 永不触发），故自建 `SAME_BYTE_KEYS` 表覆盖 6 组控制字节别名：配置里的别名归一到实际收到的规范键名并如实说明来由，冲突检测按规范键名归并。

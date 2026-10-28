@@ -395,6 +395,17 @@ class TestMemoryTree:
         assert memory_tree.read_index("~") == ""
         assert memory_tree.read_index(".") == ""
 
+    def test_legacy_category_key_falls_back(self, memory_env):
+        """旧格式扁平记忆用 category: 而非 type: —— 曾静默丢弃并误归 _legacy"""
+        root = memory_env["global"]
+        os.makedirs(root, exist_ok=True)
+        with open(os.path.join(root, "old.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: old\ndescription: d\ncategory: project\n---\n正文\n")
+        leaves = memory_tree.leaves_in_dir(root)
+        legacy = [x for x in leaves if x["name"] == "old"]
+        assert len(legacy) == 1
+        assert legacy[0]["category"] == "project"
+
 
 # ═══════════════════════════════════════════════════════════
 # memory_index — FTS5 双轨
@@ -425,6 +436,79 @@ class TestMemoryIndex:
         _write_mem_cat(memory_env["global"], "skill", "b", "d", "正文y")
         # 新文件 → ensure 检测 mtime 失配 → 重建后可查
         assert [r["name"] for r in memory_index.search("正文y")]
+
+    def test_same_name_across_categories_not_collapsed(self, memory_env):
+        """name 允许跨类别同名：files 与 docs 行数必须一致。
+
+        回归背景：files 表曾用 PK(root,name)，同一 root 下 skill/ 与 user/ 各有一份
+        dup.md 时会塌成 1 行，而 docs（fts5，无 PK）保留 2 行 → 检索 path 指向错文件。
+        """
+        import sqlite3
+
+        from fp_core.plugins.memory import index as memory_index
+
+        _write_mem_cat(memory_env["global"], "skill", "dup", "技能侧", "正文技能")
+        _write_mem_cat(memory_env["global"], "user", "dup", "用户侧", "正文用户")
+        memory_index.ensure(force=True)
+        conn = sqlite3.connect(memory_index._db_path())
+        files_n = conn.execute("SELECT count(*) FROM files").fetchone()[0]
+        docs_n = conn.execute("SELECT count(*) FROM docs").fetchone()[0]
+        cats = [r[0] for r in conn.execute("SELECT category FROM files WHERE name='dup' ORDER BY category")]
+        conn.close()
+        assert files_n == docs_n == 2
+        assert cats == ["skill", "user"]
+
+    def test_search_join_binds_category(self, memory_env):
+        """JOIN 缺 category 时同名跨类别会互配出伪命中（行数翻倍）"""
+        from fp_core.plugins.memory import index as memory_index
+
+        _write_mem_cat(memory_env["global"], "skill", "dup", "技能侧", "共有词正文")
+        _write_mem_cat(memory_env["global"], "user", "dup", "用户侧", "共有词正文")
+        results = memory_index.search("共有词")
+        assert len(results) == 2
+        assert {r["type"] for r in results} == {"skill", "user"}
+
+    def test_upsert_keeps_same_name_in_other_category(self, memory_env):
+        """upsert 的 DELETE 曾只按 (root,name) → 会连另一类别的同名记录一起删掉"""
+        import sqlite3
+
+        from fp_core.plugins.memory import index as memory_index
+
+        _write_mem_cat(memory_env["global"], "skill", "dup", "技能侧", "正文技能")
+        _write_mem_cat(memory_env["global"], "user", "dup", "用户侧", "正文用户")
+        memory_index.ensure(force=True)
+        target = [x for x in memory_index._all_leaves() if x["name"] == "dup" and x["category"] == "skill"][0]
+        memory_index.upsert(target, "改写后的技能正文")
+        conn = sqlite3.connect(memory_index._db_path())
+        cats = [r[0] for r in conn.execute("SELECT category FROM files WHERE name='dup' ORDER BY category")]
+        conn.close()
+        assert cats == ["skill", "user"]
+
+    def test_old_schema_rebuilds_via_user_version(self, memory_env):
+        """旧库（PK(root,name)、user_version=0）→ ensure() 不 force 也应重建迁移"""
+        import sqlite3
+
+        from fp_core.plugins.memory import index as memory_index
+
+        path = memory_index._db_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        legacy = sqlite3.connect(path)
+        legacy.executescript(
+            "CREATE TABLE files(name TEXT NOT NULL, root TEXT NOT NULL, category TEXT NOT NULL,"
+            " path TEXT NOT NULL, mtime REAL NOT NULL, description TEXT NOT NULL DEFAULT '',"
+            " updated TEXT NOT NULL DEFAULT '', PRIMARY KEY(root, name));"
+        )
+        legacy.commit()
+        legacy.close()
+        _write_mem_cat(memory_env["global"], "skill", "dup", "技能侧", "正文技能")
+        _write_mem_cat(memory_env["global"], "user", "dup", "用户侧", "正文用户")
+        memory_index.ensure()  # 不 force：版本失配须触发重建
+        conn = sqlite3.connect(path)
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        files_n = conn.execute("SELECT count(*) FROM files").fetchone()[0]
+        conn.close()
+        assert version == memory_index._SCHEMA_VERSION
+        assert files_n == 2
 
 
 # ═══════════════════════════════════════════════════════════

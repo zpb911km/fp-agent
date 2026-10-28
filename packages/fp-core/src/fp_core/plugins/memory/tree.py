@@ -25,6 +25,9 @@ from fp_core import config
 INDEX_FILE = "_index.md"
 NODE_FILE = "_node.md"
 
+# 旧键 category: 的告警去重（同一文件只提醒一次；扫描可能高频调用）
+_LEGACY_CATEGORY_WARNED: set[str] = set()
+
 # ── 静态词表用途（level-0 的"一行用途"；词表由 lint 周期性从实际目录再生成）──
 # 裁决 Q2：允许创建新分类（B 树分裂需要），词表外仅 lint 报告不拦截。
 VOCAB_PURPOSE: dict[str, str] = {
@@ -124,6 +127,17 @@ def leaves_in_dir(mem_dir: str) -> list[dict[str, str]]:
         elif entry.endswith(".md") and entry != INDEX_FILE:
             fm = parse_frontmatter(read_head(fpath))
             cat = str(fm.get("type") or "").strip().lower()
+            if not cat:
+                # 旧格式扁平记忆用 category: 而非 type:（历史布局）。静默丢弃会把它
+                # 误归 _legacy，且用户看不出归类为何变了 → 回退 + 一次性告警。
+                old_cat = str(fm.get("category") or "").strip().lower()
+                if old_cat:
+                    cat = old_cat
+                    if fpath not in _LEGACY_CATEGORY_WARNED:
+                        _LEGACY_CATEGORY_WARNED.add(fpath)
+                        from fp_core.logger import get_logger
+
+                        get_logger().warning(f"[memory] {fpath} 用旧键 category: {old_cat}（建议改为 type:）")
             if not cat or cat in config.FORBIDDEN_CATEGORIES:
                 cat = "_legacy"  # 词表外/无分类的遗留文件归入 _legacy（lint 报告）
             out.append({

@@ -25,6 +25,10 @@ from . import tree as memory_tree
 # FTS5 trigram 对 <3 字符查询静默失效的边界（设计文档实测结论）
 _MIN_TERM_LEN = 3
 
+# files 表结构版本：写进 PRAGMA user_version，失配即全量重建（重建走临时库+原子替换，
+# 天然完成迁移）。v1: PK 由 (root,name) 改为 (root,category,name)——记忆 name 允许跨类别同名。
+_SCHEMA_VERSION = 1
+
 
 def _db_path() -> str:
     # 动态计算：测试会 monkeypatch config._FP_DATA_DIR
@@ -46,7 +50,7 @@ CREATE TABLE IF NOT EXISTS files(
   mtime REAL NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   updated TEXT NOT NULL DEFAULT '',
-  PRIMARY KEY(root, name)
+  PRIMARY KEY(root, category, name)
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
   name UNINDEXED, root UNINDEXED, category UNINDEXED, text, tokenize='trigram'
@@ -82,11 +86,16 @@ def _doc_text(leaf: dict[str, str], meta: dict[str, Any]) -> str:
 
 def _needs_rebuild(conn: sqlite3.Connection, leaves: list[dict[str, str]]) -> bool:
     try:
-        rows = conn.execute("SELECT root, name, mtime FROM files").fetchall()
+        # 版本检查必须与表读取同处 try 内：库文件损坏/非 sqlite（"file is not a database"）
+        # 时两者都会抛 DatabaseError，此处 return True 才能让 ensure() 走重建自愈。
+        if conn.execute("PRAGMA user_version").fetchone()[0] != _SCHEMA_VERSION:
+            return True
+        rows = conn.execute("SELECT root, category, name, mtime FROM files").fetchall()
     except sqlite3.DatabaseError:
         return True
-    current = {(x["root"], x["name"]): float(x["mtime"]) for x in leaves}
-    stored = {(r[0], r[1]): float(r[2]) for r in rows}
+    # 键必须是 (root, category, name)：name 允许跨类别同名，用二元组会互相覆盖导致漏判
+    current = {(x["root"], x["category"], x["name"]): float(x["mtime"]) for x in leaves}
+    stored = {(r[0], r[1], r[2]): float(r[3]) for r in rows}
     if set(current) != set(stored):
         return True
     return any(abs(current[k] - stored[k]) > 0.001 for k in current)
@@ -101,6 +110,8 @@ def _rebuild(conn: sqlite3.Connection, leaves: list[dict[str, str]]) -> None:
     try:
         tconn = _connect(tmp)
         tconn.executescript(_SCHEMA)
+        # PRAGMA 不支持参数绑定；值取自模块常量，无注入面
+        tconn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
         for leaf in leaves:
             meta = memory_tree.leaf_meta(leaf)
             tconn.execute(
@@ -166,8 +177,14 @@ def upsert(leaf: dict[str, str], doc_text: str) -> None:
         ensure()
         meta = memory_tree.leaf_meta(leaf)
         conn = _connect(_db_path())
-        conn.execute("DELETE FROM files WHERE root=? AND name=?", (leaf["root"], leaf["name"]))
-        conn.execute("DELETE FROM docs WHERE root=? AND name=?", (leaf["root"], leaf["name"]))
+        conn.execute(
+            "DELETE FROM files WHERE root=? AND category=? AND name=?",
+            (leaf["root"], leaf["category"], leaf["name"]),
+        )
+        conn.execute(
+            "DELETE FROM docs WHERE root=? AND category=? AND name=?",
+            (leaf["root"], leaf["category"], leaf["name"]),
+        )
         conn.execute(
             "INSERT INTO files(name, root, category, path, mtime, description, updated) VALUES(?,?,?,?,?,?,?)",
             (
@@ -210,7 +227,8 @@ def search(query: str, limit: int = 20) -> list[dict[str, str]]:
         conn = _connect(_db_path())
         rows = conn.execute(
             "SELECT f.name, f.root, f.category, f.description, f.updated"
-            " FROM docs JOIN files f ON f.root=docs.root AND f.name=docs.name"
+            " FROM docs JOIN files f"
+            " ON f.root=docs.root AND f.category=docs.category AND f.name=docs.name"
             " WHERE docs MATCH ? ORDER BY bm25(docs) LIMIT ?",
             (_fts_query(query), limit),
         ).fetchall()
