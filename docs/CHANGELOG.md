@@ -7,6 +7,8 @@
 
 ### Changed
 
+- **键位面板改键后光标留在原处**: 面板每次提交都重建行（键位显示要跟着覆盖表变），而 `_fill` 重建后硬写 `highlighted = 1`——改一次键光标就跳回列表头部，连着调几个键得反复重新滚到原处（用户实测反馈「非常难受」）。现在重建前记住当前高亮的**动作 id**、建完按 id 复位（按 id 而非行号：动作增删会让行号漂移），只有首次挂载（无前值）才落回第 1 行跳过首个分组标题；取消绑定 / 恢复默认 / 全部重置走同一条 `_fill` 路径，行为一致。重建只 `clear_options()`、不重建 widget 本身，焦点仍留在列表上，可以接着按 `Enter` 改下一个。
+
 - **「换行」并入键位配置 + 输入框占位文案去按键化**: ① 换行原先是 `TextArea._on_key` 里硬编码的 `enter → "\n"`（不走绑定表，用户既改不了也看不见），现登记为 `prompt_edit` 作用域动作 `insert_newline`（默认 `Enter`，进 `Ctrl+K` 面板、可被 `tui.keys` 覆盖、进 `check_clashes` 检测）；执行侧由 `PromptInput._on_key` 按**生效键**插入，并把「已改走」的 `Enter` 吞掉——改成 `Ctrl+Enter` 后 `Enter` 才真的不再换行（同字节别名按 `canonical_key` 归并，绑 `Ctrl+M` 等价于 `Enter`，不会出现「绑了却按不出来」）。② 输入框 placeholder 不再写「Enter 换行 · Shift+Enter 发送」：两个键都是可配动作，写死就会在改键后变成谎话，改为与按键无关的 `消息…（/ 命令）`（常量 `PROMPT_HINT_IDLE`/`PROMPT_HINT_BUSY`，附回归测试锁定「占位文案不含按键名」）。
 
 - **docs/ 去垃圾（死链 / 过程产物 / 自举手册臃肿）**: ① `docs/README.md` 索引里 3 条**幽灵链接**（`acp/使用指南.md`、`acp/00-OVERVIEW.md`~`07-IMPLEMENTATION.md`）指向不存在的文件——`docs/acp/` 实际只有 `README.md`，完整规范在子包 `packages/fp-acp/README.md`，已按实情改写；② 一次性施工产物 `docs/dev/ACCEPTANCE_REPORT.md` **删除**：内容是「2026-09-30 凌晨 · supervisor 自行实现 · worker 4 次启动即卡死」的过程日志（带 job_id 与 `550 passed` 门禁数字），属过程记录而非文档，却由 release 注入随包分发、被 `fp docs` 列给未来自举的我读；③ 设计稿 `docs/dev/ASYNC_AGENT_DESIGN.md` 同属过程产物，**一并删除**（#143 已落地，其「唯一权威依据」抬头早已过期）；13 处源码注释 / 测试契约头 / 文档引用改指现行真相处 —— `dev/工具系统.md`「background 插件」「全工具后台化」与 `dev/引擎.md`「环顶惰性注入与退出清算」「注入消息身份协议」；④ `docs/self/README.md` §3「依赖层级」由 37 行（占全文 21%）压到 16 行三条判据——原文整段教人跑主仓库 `scripts/check_dep_layers.py`，与手册开篇「**分发后读不到源码仓库**」自相矛盾，完整分层模型交由 `dev/架构设计.md` 承载；§7 宪章守卫同源表述一并校正为「分发环境没有这道闸」。

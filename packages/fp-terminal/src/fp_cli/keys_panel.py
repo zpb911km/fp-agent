@@ -186,8 +186,26 @@ class KeysPanel(ModalScreen[None]):
             row.append("（未绑定）", style="dim italic")
         return row
 
-    def _fill(self) -> None:
+    def _index_of(self, action_id: str | None) -> int | None:
+        """动作 id → 当前列表里的行号（找不到则 None）。"""
+        if not action_id:
+            return None
         options = self.query_one("#keys_list", OptionList)
+        for index in range(options.option_count):
+            if options.get_option_at_index(index).id == action_id:
+                return index
+        return None
+
+    def _fill(self) -> None:
+        """重建行（键位显示要跟着覆盖表变）。
+
+        **重建会复位 ``highlighted``**：旧实现在建完硬写 ``highlighted = 1``，于是改一次
+        键光标就跳回列表头部，每改一次都得重新滚回原处——连续调几个键尤其难受。
+        现在先记住当前高亮的动作 id、建完按 id 复位（按 id 而非行号：动作增删会让
+        行号漂移），只有确实没有前值时（首次挂载）才落到第 1 行，跳过首个分组标题。
+        """
+        options = self.query_one("#keys_list", OptionList)
+        keep = self._highlighted_action()
         options.clear_options()
         scope_names = dict(SCOPE_LABELS)
         for scope in scope_names:
@@ -198,7 +216,8 @@ class KeysPanel(ModalScreen[None]):
             for action in members:
                 options.add_option(Option(self._row(action.id), id=action.id))
         if options.option_count:
-            options.highlighted = 1  # 跳过首个分组标题
+            restored = self._index_of(keep)
+            options.highlighted = restored if restored is not None else 1  # 无前值：跳过首个分组标题
 
     def _say(self, message: str, style: str) -> None:
         self.query_one("#keys_footer", Static).update(Text(message, style=style))

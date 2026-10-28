@@ -681,6 +681,77 @@ class TestKeysPanel(unittest.TestCase):
         with patch("fp_cli.keys_panel.persist_tui") as persist:
             self._run(scenario(persist))
 
+    def _highlighted_id(self, app: FPApp) -> str | None:
+        """面板当前高亮行对应的动作 id（分组标题行没有 id，故为 None）。"""
+        from textual.widgets import OptionList
+
+        options = app.screen.query_one("#keys_list", OptionList)
+        if options.highlighted is None:
+            return None
+        return options.get_option_at_index(options.highlighted).id
+
+    def test_remap_keeps_highlight_in_place(self) -> None:
+        """改键后光标**留在刚改的动作**上，不跳回列表头部。
+
+        ``_fill`` 重建 OptionList 会让 ``highlighted`` 复位，旧实现在重建后硬写
+        ``highlighted = 1``：改一次键光标就跳回头部，连着调几个键得反复重新找位置。
+        """
+
+        def scenario(persist):  # noqa: ANN001, ANN202
+            async def run(app: FPApp, pilot: Pilot[None]) -> None:
+                await pilot.press("ctrl+k")
+                await pilot.pause()
+                self._highlight(app, "stats")  # 刻意选不在头部的动作
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, KeyCapture)
+                await pilot.press("f9")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, KeysPanel)
+                self.assertEqual(self._highlighted_id(app), "stats", "改键后光标不应离开该动作")
+                self.assertIn("tui.keys.stats", persist.call_args[0][0])
+                # 重建不得踢掉焦点：否则改完一次就按不动 Enter，等于改完即卡死
+                from textual.widgets import OptionList
+
+                self.assertIs(app.focused, app.screen.query_one("#keys_list", OptionList))
+
+            return run
+
+        with patch("fp_cli.keys_panel.persist_tui") as persist:
+            self._run(scenario(persist))
+
+    def test_unbind_and_reset_keep_highlight_in_place(self) -> None:
+        """取消绑定 / 恢复默认同样不移动光标（两者都经 ``_commit → _fill``）。"""
+
+        def scenario(persist):  # noqa: ANN001, ANN202
+            async def run(app: FPApp, pilot: Pilot[None]) -> None:
+                await pilot.press("ctrl+k")
+                await pilot.pause()
+                self._highlight(app, "stats")
+                await pilot.press("delete")  # 取消绑定
+                await pilot.pause()
+                self.assertEqual(self._highlighted_id(app), "stats", "取消绑定后光标不应离开该动作")
+                self.assertIn("已取消绑定", self._footer(app))
+                await pilot.press("r")  # 恢复默认
+                await pilot.pause()
+                self.assertEqual(self._highlighted_id(app), "stats", "恢复默认后光标不应离开该动作")
+
+            return run
+
+        with patch("fp_cli.keys_panel.persist_tui"):
+            self._run(scenario(None))
+
+    def test_initial_highlight_skips_group_headers(self) -> None:
+        """首次挂载（无前值可复位）仍落在第一条**动作**上，不停在 disabled 的分组标题。"""
+
+        async def scenario(app: FPApp, pilot: Pilot[None]) -> None:
+            await pilot.press("ctrl+k")
+            await pilot.pause()
+            expected = by_scope(SCOPE_LABELS[0][0])[0].id
+            self.assertEqual(self._highlighted_id(app), expected)
+
+        self._run(scenario)
+
     def test_enter_bound_to_submit_does_not_freeze_panel(self) -> None:
         """「发送消息」被绑到 Enter 后，面板里的 Enter 必须仍是「选中动作」。
 
