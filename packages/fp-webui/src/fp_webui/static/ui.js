@@ -544,12 +544,23 @@ function removeThinking() {
    「思考 N 字 · Xs」单行（点击可再展开，保留全文）。
    ═══════════════════════════════════════════════════════════ */
 var _stream = null;
+// 轮次序号：每轮终结（done/cancelled/error）推进一次，流式轮创建时打上当时的
+// 序号（_stream.turnSeq）。_stream 终轮**不销毁**（迟到 token 要并入本轮元素），
+// 于是它天然会活过轮次边界——没有序号就无法区分「本轮卡片」与「N 轮前的卡片」。
+var _turnSeq = 0;
 var THINK_FLUSH_MS = 50;    // 思考文本 DOM flush 节流
 var CONTENT_FLUSH_MS = 100; // 正文 markdown 重渲染节流
+
+/** 终结当前轮：此后新建的流式轮才算「下一轮」，旧轮卡片不再被终渲染认领 */
+function endStreamTurn() { _turnSeq++; }
+
+/** 现存流式轮是否属于当前这一轮（命令轮没有 llm_start，会撞上上一轮的残留） */
+function isCurrentTurnRound() { return !!_stream && _stream.turnSeq === _turnSeq; }
 
 function startStreamRound() {
   finalizeStreamRound(); // 上一轮残留兜底（flush + 终渲染）
   _stream = {
+    turnSeq: _turnSeq,
     thinkText: '', thinkChars: 0, thinkEl: null, thinkTimer: null,
     contentText: '', contentEl: null, contentTimer: null,
     closed: false  // llm_end/done 后置 true：迟到 token 并入本轮，不新建块
@@ -661,14 +672,34 @@ function finalizeStreamRound(finalContent) {
     // 未被正文折叠（如纯思考后中断/出错）→ 保留展开态最后一帧
     s.thinkEl.querySelector('.think-msg-body').textContent = s.thinkText;
   }
-  if (s.contentEl && finalContent != null) {
+  // 卡片可能已随 clearUI 作废（重连 resync / 回溯重拉）：此时再写就是写进
+  // 脱离文档的"幽灵卡"——写成功了、用户什么也看不到。判为未显示，交回调用方重渲染。
+  var shown = !!s.contentEl && document.body.contains(s.contentEl);
+  if (shown && finalContent != null) {
     // 权威全文覆盖（llm_end.content / done.final_content）
     s.contentEl.classList.remove('stream-pending');
     s.contentEl.innerHTML = renderMarkdown(finalContent);
     renderMath();
   }
   scrollToBottom();
-  return !!s.contentEl;
+  return shown;
+}
+
+/** done 专用终渲染：只承接**本轮**的流式卡片，并推进轮次序号。
+
+    命令轮（/sc、/task、/memory…）不走 llm_start → startStreamRound 不重置
+    _stream，它仍指向上一轮的卡片（终轮不销毁，见上）。若 done 照旧把
+    `final_content` 写进去，命令输出的文本就会**覆盖上一轮的正文**：
+    卡片看似"被吞掉"、信息缺失，而刷新页面走 REST 历史又完好无损
+    （典型症状：/sc 的结果出现在上一轮答案的位置、命令气泡反而在它下面）。
+    故：跨轮不写，交回调用方 addAssistantMessage 另起卡片。
+
+    返回 true 表示「本轮正文已由流式卡片承载」（调用方跳过重复渲染）。*/
+function finalizeStreamRoundForDone(finalContent) {
+  var sameTurn = isCurrentTurnRound();
+  var shown = sameTurn ? finalizeStreamRound(finalContent) : false;
+  endStreamTurn();  // 本轮到此终结：下一轮的卡片必须换序号
+  return shown;
 }
 
 function showError(msg) {

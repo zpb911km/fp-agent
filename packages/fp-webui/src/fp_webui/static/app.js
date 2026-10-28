@@ -380,6 +380,7 @@ function handleEvent(data) {
     case 'error':
       removeThinking();
       finalizeStreamRound(); // 异常：保留思考/已流式正文最后一帧
+      endStreamTurn();       // 异常终结本轮，卡片不再被后续 done 认领
       showError(data.error);
       setProcessing(false);
       break;
@@ -392,7 +393,9 @@ function handleEvent(data) {
       // 命令和 LLM 回复统一通过 done.final_content 传递，
       // 不再走独立的 response 事件（参见 commits 71927ab）
       // 去重：纯文本回复（无工具调用）时 llm_end 已渲染过，跳过
-      var streamedDone = finalizeStreamRound(data.final_content);
+      // 命令轮无 llm_start → 这里只承接**本轮**卡片，跨轮走 addAssistantMessage，
+      // 否则命令输出会覆盖上一轮答案（吞卡 bug，见 ui.js finalizeStreamRoundForDone）
+      var streamedDone = finalizeStreamRoundForDone(data.final_content);
       if (data.final_content && data.final_content !== '' && !_finalContentAlreadyShown && !streamedDone) {
         addAssistantMessage(data.final_content);
       }
@@ -422,6 +425,7 @@ function handleEvent(data) {
     case 'cancelled':
       removeThinking();
       finalizeStreamRound(); // 中断：保留思考最后一帧/已流式正文
+      endStreamTurn();       // 中断终结本轮，卡片不再被后续 done 认领
       // 取消 5 秒安全网定时器
       if (window._cancelTimeout) { clearTimeout(window._cancelTimeout); window._cancelTimeout = null; }
       setProcessing(false);
