@@ -1,7 +1,7 @@
 """Zeta A2A codec —— IR ↔ A2A (Agent2Agent) wire 映射（翻译面，可插拔）。
 
 用途：与非 FP 的**异构 agent** 互联。只借 A2A 的词汇与 wire 形状（AgentCard /
-Message），**不借其零信任 / OAuth 世界观**（见 zeta_协议总览.md）。
+Message），**不借其零信任 / OAuth 世界观**（见 docs/dev/zeta_协议.md §1）。
 
 两条关键语义：
 

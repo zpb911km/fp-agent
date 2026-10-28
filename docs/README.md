@@ -34,16 +34,13 @@
 | | [dev/命令系统.md](dev/命令系统.md) | 命令格式、自动发现、开发指南 |
 | | [dev/工具系统.md](dev/工具系统.md) | ToolRegistry、核心工具、插件工具开发 |
 | | [dev/插件系统.md](dev/插件系统.md) | Plugin 基类、钩子注册、NotificationPlugin |
+| | [dev/zeta_协议.md](dev/zeta_协议.md) | 邻居协议：名片/信封/协商、契约 schema、铃声注入 |
 | | [dev/数据持久化.md](dev/数据持久化.md) | 会话/记忆/任务存储格式 |
 | | [dev/中断机制.md](dev/中断机制.md) | Ctrl+C 双重检查、恢复策略 |
 | | [dev/自我修改.md](dev/自我修改.md) | 自修改流程、测试、回滚 |
 | | [dev/测试.md](dev/测试.md) | 测试体系、会话隔离、防漂移门禁 |
 | | [dev/文件命名约定.md](dev/文件命名约定.md) | 「文件即开关」通用规则（Plugin/Skill/Command/Tool 共用） |
-| | [dev/ASYNC_AGENT_DESIGN.md](dev/ASYNC_AGENT_DESIGN.md) | 异步主动范式设计（#143 唯一权威依据）：ask_user / 后台任务 / 权威注入原则 |
-| | [dev/ACCEPTANCE_REPORT.md](dev/ACCEPTANCE_REPORT.md) | 异步主动范式验收报告（#143 交付物：门禁、端到端链、5 项偏差） |
-| 🔌 **ACP 协议** | [acp/README.md](acp/README.md) | ACP 协议索引 |
-| | [acp/使用指南.md](acp/使用指南.md) | IDE 集成指南 |
-| | [acp/00-OVERVIEW.md](acp/00-OVERVIEW.md) ~ [07-IMPLEMENTATION.md](acp/07-IMPLEMENTATION.md) | 协议规范全集 |
+| 🔌 **ACP 协议** | [acp/README.md](acp/README.md) | ACP 协议索引（完整规范在子包 `packages/fp-acp/README.md`） |
 | 📋 **项目信息** | [CHANGELOG.md](CHANGELOG.md) | 版本历史：0.2.1（迭代记录见 CHANGELOG） |
 | | [CONTRIBUTING.md](CONTRIBUTING.md) | PR 流程、代码风格、Commit 规范 |
 
@@ -90,14 +87,10 @@ docs/
 │   ├── 中断机制.md               Ctrl+C 处理
 │   ├── 自我修改.md               自修改流程
 │   ├── 测试.md                   测试体系、隔离、防漂移
-│   ├── 文件命名约定.md            文件即开关（四类扩展共用）
-│   ├── ASYNC_AGENT_DESIGN.md    异步主动范式设计（#143 权威依据）
-│   └── ACCEPTANCE_REPORT.md     异步主动范式验收报告（#143 交付物）
+│   └── 文件命名约定.md            文件即开关（四类扩展共用）
 │
 ├── acp/                       ← 🔌 ACP 协议规范
-│   ├── README.md                协议索引
-│   ├── 使用指南.md               IDE 集成指南
-│   ├── 00-OVERVIEW.md ~ 07-IMPLEMENTATION.md
+│   └── README.md                协议索引（完整规范在子包 packages/fp-acp/README.md）
 │
 ├── CHANGELOG.md                ← 版本历史
 └── CONTRIBUTING.md             ← 贡献指南
@@ -110,4 +103,4 @@ docs/
 ## 🔗 外部引用
 
 - 根目录 `README.md` 中的文档链接指向本目录下各文件
-- 本目录是文档的**唯一实体**：`CHANGELOG.md` / `CONTRIBUTING.md` / 设计验收交付物均直接存放于此，根目录不再保留同名文件或符号链接
+- 本目录是文档的**唯一实体**：`CHANGELOG.md` / `CONTRIBUTING.md` 均直接存放于此，根目录不再保留同名文件或符号链接

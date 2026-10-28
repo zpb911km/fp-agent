@@ -82,12 +82,6 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
         ["docs/dev/显示层.md"],
         ["docs/guide/CLI入门.md"],
     ),
-    # 异步主动范式交付物（设计/验收随实现走；位于 docs/dev/，亦被 docs/* 视为文档）
-    (
-        "docs/dev/ASYNC_AGENT_DESIGN.md",
-        ["docs/dev/架构设计.md"],
-        ["docs/dev/ACCEPTANCE_REPORT.md"],
-    ),
     # 核心引擎：按模块精准映射
     ("packages/fp-core/src/fp_core/core/llm_client.py", ["docs/dev/LLM通信.md"], []),
     ("packages/fp-core/src/fp_core/core/llm_service.py", ["docs/dev/LLM通信.md"], []),
@@ -104,6 +98,12 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
     ("packages/fp-core/src/fp_core/config.py", ["docs/guide/配置指南.md", "docs/dev/配置系统.md"], []),
     # 插件体系
     ("packages/fp-core/src/fp_core/plugins/*.py", ["docs/dev/插件系统.md", "docs/self/扩展插件.md"], []),
+    # Zeta 邻居协议（子目录插件：上面的 plugins/*.py 只匹配一层，子目录须单列）
+    (
+        "packages/fp-core/src/fp_core/plugins/zeta/*.py",
+        ["docs/dev/zeta_协议.md"],
+        [],
+    ),
     # 提示词（FP 的自我认知）
     ("packages/fp-core/src/fp_core/prompts/*.py", ["docs/dev/引擎.md"], []),
     # 其余 fp_core（logger/platform_utils/__init__ 及未来新模块）兜底
@@ -177,6 +177,8 @@ DOC_LINKS: list[tuple[str, list[str]]] = [
     ),
     # dev 设计文档 ↔ ext 模块（用 glob 覆盖全部 ext* 模块，新模块自动纳入）
     ("docs/dev/资产分发系统.md", ["packages/fp/src/fp/ext*.py"]),
+    # Zeta 协议：唯一权威文档 ↔ 插件全部模块
+    ("docs/dev/zeta_协议.md", ["packages/fp-core/src/fp_core/plugins/zeta/*.py"]),
 ]
 
 # 文档文件本身（变更它们不算「代码变更」）

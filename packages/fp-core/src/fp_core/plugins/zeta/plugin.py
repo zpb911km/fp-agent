@@ -4,7 +4,7 @@
 ``peer_list`` / ``peer_send`` / ``peer_answer`` 工具。领域模型见
 :mod:`fp_core.plugins.zeta.domain`（协议无关 IR）。
 
-形态（见 docs/dev/zeta_协议总览.md）：
+形态（见 docs/dev/zeta_协议.md §2）：
     - in-process L2 插件，合法引用 L1（``jobs.inject_event`` + ``LifecycleHook``）；
     - 用户启动任何前端即拉起本实例的 Zeta；
     - **不穿透 portal 改 core**——用的是 core 预留扩展点；

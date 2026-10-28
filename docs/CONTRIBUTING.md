@@ -306,7 +306,6 @@ echo "你是谁" | fp                   # 测试系统提示词
 的 `DOC_RULES`（命令/工具/钩子/核心/界面层/脚本各自关联到对应文档；
 TUI 交互层 `fp_cli/tui*.py`、`keys_panel.py` 关联 `docs/dev/显示层.md`
 与 `docs/guide/CLI入门.md`——键位/面板行为一变，两处用户可见的键位表必然漂移）；
-  设计/验收交付物（`docs/dev/ASYNC_AGENT_DESIGN.md`、`docs/dev/ACCEPTANCE_REPORT.md`）也已登记为文档。
 反向的 `DOC_LINKS`（文档 → 关联代码文件）用于：
 文档变更时提醒关联代码未同步变更（**不阻断**，文档允许先行编写/补充说明），
 以及 `--audit` 时校验文档里的代码引用是否仍存在。

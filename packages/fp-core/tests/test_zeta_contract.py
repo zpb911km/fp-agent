@@ -1,6 +1,6 @@
 """P2 契约机验收测试：双锁校验 / 机器判兼容 / 交换区写入权。
 
-对应 docs/dev/zeta_契约schema.md 的 P0 门禁：
+对应 docs/dev/zeta_协议.md §10 的 P0 门禁：
 - test_contract_requires_schema_and_hash（双锁）
 - 安全区 fail-closed、作用域规范化、parties ≥2
 - 机器判兼容不采信声明

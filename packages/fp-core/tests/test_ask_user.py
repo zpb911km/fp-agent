@@ -1,6 +1,6 @@
 """ask_user 测试 — 权威注入原则 + 单 flight + 降级路径 + 结构化契约 v2
 
-契约：docs/dev/ASYNC_AGENT_DESIGN.md §2/§7
+契约：docs/dev/工具系统.md「background 插件」（ask_user 结构化契约 v2）
 - 缺 io → unavailable 降级（不挂死，I1）
 - 有 io → 回答以**裸文本**入 pending 队列（user 角色、无标头 — I2，身份协议）
   + tool result 只回执 reply_file（收据，不含人类话语）

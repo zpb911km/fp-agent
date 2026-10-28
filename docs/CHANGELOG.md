@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **docs/ 去垃圾（死链 / 过程产物 / 自举手册臃肿）**: ① `docs/README.md` 索引里 3 条**幽灵链接**（`acp/使用指南.md`、`acp/00-OVERVIEW.md`~`07-IMPLEMENTATION.md`）指向不存在的文件——`docs/acp/` 实际只有 `README.md`，完整规范在子包 `packages/fp-acp/README.md`，已按实情改写；② 一次性施工产物 `docs/dev/ACCEPTANCE_REPORT.md` **删除**：内容是「2026-09-30 凌晨 · supervisor 自行实现 · worker 4 次启动即卡死」的过程日志（带 job_id 与 `550 passed` 门禁数字），属过程记录而非文档，却由 release 注入随包分发、被 `fp docs` 列给未来自举的我读；③ 设计稿 `docs/dev/ASYNC_AGENT_DESIGN.md` 同属过程产物，**一并删除**（#143 已落地，其「唯一权威依据」抬头早已过期）；13 处源码注释 / 测试契约头 / 文档引用改指现行真相处 —— `dev/工具系统.md`「background 插件」「全工具后台化」与 `dev/引擎.md`「环顶惰性注入与退出清算」「注入消息身份协议」；④ `docs/self/README.md` §3「依赖层级」由 37 行（占全文 21%）压到 16 行三条判据——原文整段教人跑主仓库 `scripts/check_dep_layers.py`，与手册开篇「**分发后读不到源码仓库**」自相矛盾，完整分层模型交由 `dev/架构设计.md` 承载；§7 宪章守卫同源表述一并校正为「分发环境没有这道闸」。
+
+- **`dev/zeta_协议.md`：四篇 Zeta 文档合并为单篇权威现状文档**: 原《协议总览》《邻居领域模型》《契约 schema》《身份与实例模型》（1399 行）互为导读、章节互指，且都挂着「草案 v0.2 / P0 草案 / 重构方案 v0.4」抬头与 v0.1→v0.2 评审对撞记录——Zeta 已实现并稳定，这些是**演化过程的残迹**，读它会误判协议仍在设计阶段（总览末节仍写「P1/P2/P3 未开始」，而插件代码已 2.9k 行）。合并为单篇 `docs/dev/zeta_协议.md`（11 章）：按「定位 → 运行时 → 发现/名片/身份 → 信封 → 协商 → 契约 schema → 边界 → 注入 → 映射 → 验收 → 未实现与待定」重排；**删除**三段评审对撞记录、文档地图、对现有文档的修订锚点、迁移爆炸半径表、草案版本标记；**保留**全部机器可校验结构（13 条防债原则、`deprecations[]` 状态机、JCS 规范化、校验器注册表）与**未实现项**（公网互联选型、6 条待决问题、3 个已知边界）——后者单列 §11 并注明「这是已知的未做，不是设计遗漏」。6 处代码文档引用、3 条记忆引用改指新页；`check_docs_sync.py` 新增 `plugins/zeta/*.py → zeta_协议.md` 规则（原 `plugins/*.py` 只匹配一层，**子目录插件一直是文档门禁盲区**，正是文档落后于代码的机制原因）。
+
 ### Fixed
 
 - **记忆索引损坏后无法自愈（`ensure()` 的「损坏即重建」承诺落空）**: `_connect()` 内的 `PRAGMA journal_mode=WAL` 是对库文件的**首次真读**，对损坏/非 sqlite 文件立即抛 `DatabaseError: file is not a database`；而 `ensure()` 外层 `except (sqlite3.Error, OSError): pass` 把它吞掉，流程永远走不到 `_rebuild` —— `_needs_rebuild()` 里那句 `except DatabaseError: return True` 是**死代码**，设计里唯一的自愈入口从未被抵达。后果不是崩溃而是**静默降级**：坏索引永久留存，`search` 落回 AND 兜底，功能不报错、用户零感知。修法：`_connect(path, *, wal=True)` 把「能否打开」与「设 WAL」解耦（探测阶段 `wal=False`），并删掉 `_rebuild()` 从未被使用的 `conn` 死参数——重建只读磁盘叶子 + 写全新临时库再 `os.replace`，本就不依赖旧库可读，这正是自愈的前提，那个参数恰好掩盖了这一点。回归测试做了变异验证（把 `wal` 开关短路为恒真后两条新用例均失败）。

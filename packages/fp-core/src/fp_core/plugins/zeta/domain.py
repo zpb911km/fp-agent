@@ -9,7 +9,7 @@
     必须存在一条非 LLM 的确定性校验路径——信任根不许放在任何实例的嘴里。
 
 本层只承载自描述数据与纯函数判定（协商/校验/裁决），不承载传输语义。
-codec 层负责字节映射（见 zeta_契约schema.md §6 映射锚点表）。
+codec 层负责字节映射（见 docs/dev/zeta_协议.md §9 映射锚点表）。
 """
 
 from __future__ import annotations
@@ -393,7 +393,7 @@ def probe_leader(name_a: str, name_b: str) -> str:
 #  契约协商（§4，语义层，双锁）
 # ─────────────────────────────────────────────────────────
 
-# P0 结构性必填项；完整 fp-contract-profile schema 见 zeta_契约schema.md（P2 补齐）。
+# P0 结构性必填项；完整 fp-contract-profile schema 见 docs/dev/zeta_协议.md §6。
 _CONTRACT_REQUIRED = ("contract_version", "schema_version", "interface", "scope", "governance")
 
 
