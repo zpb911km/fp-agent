@@ -118,8 +118,10 @@ fp-webui
 |------|------|
 | 📋 **会话** | 打开历史会话列表浮层 |
 | 🆕 **新建** | shutdown 旧 Agent，创建全新实例和会话 |
-| 🔄 **重载** | 热重载所有核心模块，加载修改后的代码 |
+| 🔄 **重载** | **进程级热重启**：落盘 → 重启 → 自动重连（等价聊天命令 `/reload`）。注意这不是模块热重载——改的是 `.py` 也要走重启，见 10.2 |
 | 🗑️ **清空** | 清空当前会话的消息记录 |
+| ✨/💤 **光环** | 开关光环背景装饰（默认关闭以省 GPU，状态存 `localStorage.webui_halo`），见 3.5 |
+| ☀️/🌙 **主题** | 切换深色 / 浅色主题（状态存 `localStorage.webui_theme`） |
 
 ### 3.3 工具调用
 
@@ -149,6 +151,27 @@ fp-webui
   前端兜底也不再用 sid 冒充标题
 - **0 长度会话不出现**：正文没有任何消息行的会话（「新建即弃」的占位、
   空跑的子任务）被后端过滤，列表里只看得到有内容的会话与当前会话
+
+### 3.5 光环背景（可选装饰）
+
+界面右下侧的「迭代器光环」是纯装饰层，`aria-hidden`，不影响任何交互与数据。
+
+- **默认关闭**：为省 GPU，首次进来不跑动画；点顶栏 ✨/💤 开启，选择存
+  `localStorage.webui_halo`（`on`/`off`）
+- **实现**：`static/halo.js` 用 Canvas 2D 逐帧绘制，移植自
+  `tools/halo2139_sim.py`（Rain World `OracleGraphics.Halo` 的逐参数复现）——
+  2 个主环 + 100 个独立呼吸的 MemoryBit + 20 条贝塞尔连线，`expand`/`push`/`white`
+  三个受激发的全局量，固定 40Hz tick，渲染端在两 tick 间线性插值。
+  时间基准是固定步长累加器而非 rAF 的 `dt`，掉帧只补 tick、不改变推进量，
+  因此行为与帧率无关
+- **双色**：空闲冷青 / 处理中暖橙。思考态只换色、不干预状态机——激发仍由
+  随机事件驱动；配色随深/浅主题切换（观察 `documentElement` 的 class）
+- **状态同步**：`halo.js` 包住 `ui.js` 的 `setProcessing`/`showThinking`/
+  `removeThinking`，从状态栏数据推出 `idle`/`thinking`，不需要 ui.js 反向依赖
+- **省电**：关闭时 `cancelAnimationFrame` 并清屏；页面不可见（`visibilitychange`）
+  时暂停 tick，回到前台重跑预热，避免长时间空转后状态跳变
+- **高分屏**：CSS 只负责让 canvas 铺满 `#halo-bg`，backing store 的像素比
+  由 `halo.js` 的 `resize()` 按 `devicePixelRatio`（上限 2）设置
 
 ---
 
@@ -641,10 +664,13 @@ core 内置 `reload` 工具为两段式：先调用获得隔离测试告示与�
 ### 10.1 目录结构
 
 ```
-```
 └── static/
-    ├── index.html         # 前端页面（单页应用）
-    ├── background.svg     # 背景图
+    ├── index.html         # 前端页面骨架（单页应用，仅容器 + 脚本挂载）
+    ├── style.css          # 全部样式（深/浅主题变量、光环层尺寸）
+    ├── ui.js              # 消息渲染、历史回看、输入框交互
+    ├── app.js             # WS 连接、认证、顶栏动作、主题/光环开关
+    ├── halo.js            # 光环背景（Canvas 2D 状态机仿真，见 3.5）
+    ├── live-symbol.svg    # 顶栏「运行中」动画符号
     └── favicon.png        # 网站图标
 ```
 

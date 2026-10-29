@@ -179,14 +179,14 @@ html, body, .topbar, .messages-container, .input-area, .input-hint,
   opacity: 0.40;
 }
 
-#halo-bg svg {
+#halo-bg canvas {
   position: absolute;
-  width: clamp(450px, 75vw, 1000px);
-  height: clamp(450px, 75vw, 1000px);
-  left: calc(80vw - clamp(225px, 37.5vw, 500px));
-  top: calc(20vh - clamp(225px, 37.5vw, 500px));
-  overflow: visible;
-  will-change: filter;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* 尺寸/像素比由 halo.js 的 resize() 按 DPR 设置 backing store，
+     CSS 这里只负责铺满 #halo-bg 的视口 */
 }
 
 :root.light-theme #halo-bg {
