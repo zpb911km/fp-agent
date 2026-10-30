@@ -155,11 +155,17 @@
     </div>
   </div>
 
+  <!-- ═══ 投影层 ═══
+       halo 不是背景，是屏幕前方投影仪落在各界面表面上的影像。
+       pointer-events:none，绝不拦截交互。见 proj.js -->
+  <canvas id="proj-layer" aria-hidden="true"></canvas>
+
   <!-- ════════════════════════════════════════
-       脚本加载（顺序重要：ui.js → app.js）
+       脚本加载（顺序重要：ui.js → halo.js → proj.js → app.js）
        ════════════════════════════════════════ -->
   <script src="/static/ui.js?_t=20261020v13"></script>
   <script src="/static/halo.js?_t=20261021v1"></script>
+  <script src="/static/proj.js?_t=20261030v2"></script>
   <script src="/static/app.js?_t=20261020v13"></script>
 </body>
 </html>

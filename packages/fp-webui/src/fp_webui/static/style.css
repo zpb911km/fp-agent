@@ -170,13 +170,16 @@ html, body, .topbar, .messages-container, .input-area, .input-hint,
   inset: 0;
   pointer-events: none;
   z-index: 0;
-  opacity: 0.25;
+  /* 光环本体完全不可见，只作为 proj.js 的**取样源**存在。
+     之前留 0.10 的淡影，结果「本体光环 + 壁面投影 + 消息投影」三份叠在
+     一起，看起来就是几个错位的光环。现在屏幕上只有投影这一份光。 */
+  opacity: 0;
   transition: opacity 1.8s ease;
   overflow: hidden;
 }
 
 #halo-bg[data-state="thinking"] {
-  opacity: 0.40;
+  opacity: 0;
 }
 
 #halo-bg canvas {
@@ -190,15 +193,33 @@ html, body, .topbar, .messages-container, .input-area, .input-hint,
 }
 
 :root.light-theme #halo-bg {
-  opacity: 0.25;
+  opacity: 0;
 }
 
 :root.light-theme #halo-bg[data-state="thinking"] {
-  opacity: 0.40;
+  opacity: 0;
+}
+
+/* ── 投影层 ──
+   halo 投在顶栏 / 输入区 / 每条消息表面上的影像。
+   screen 混合 = 只加光不遮字；pointer-events:none = 完全不碰交互。 */
+#proj-layer {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 9998;
+  mix-blend-mode: screen;
+  /* 投影是「落上去的光」，不该有硬边，也不该参与滚动 */
+}
+
+/* 浅色主题下 screen 在白底上没有加法空间，改用 multiply 让影像变暗 */
+:root.light-theme #proj-layer {
+  mix-blend-mode: multiply;
 }
 
 
-/* ── Base ── */
 /* ── Base ── */
 html {
   height: -webkit-fill-available;

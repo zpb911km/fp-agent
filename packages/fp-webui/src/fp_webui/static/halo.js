@@ -420,6 +420,26 @@
         ctx.fill();
       }
     }
+
+    /* ── 光照快照：把本帧的光源位置 / 半径 / 强度 / 色写到 DOM，
+          供 UI 层做「受光」（halo.js 自己不消费）。
+          每帧复用同一对象，不产生 GC 垃圾。 */
+    var light = window.__haloLight ||
+                (window.__haloLight = { x: 0, y: 0, r: 0, rgb: [0, 0, 0],
+                                        intensity: 0, expand: 1, white: 0 });
+    var connSum = 0;
+    for (var li = 0; li < halo.connections.length; li++) {
+      connSum += L(halo.connections[li].lastLightUp, halo.connections[li].lightUp, t);
+    }
+    light.x = cx;
+    light.y = cy;
+    light.r = rOuter * zoom;
+    light.rgb[0] = rgb[0]; light.rgb[1] = rgb[1]; light.rgb[2] = rgb[2];
+    light.expand = L(halo.lastExpand, halo.expand, t);
+    light.white  = L(halo.lastWhite,  halo.white,  t);
+    // 强度 = 基础 + 呼吸(expand) + 白化脉冲(white) + 连线闪光(connSum，归一到 ~3 即饱和)
+    light.intensity = 0.50 + 0.30 * light.expand + 0.90 * light.white +
+                      0.25 * Math.min(connSum / 3, 1);
   }
 
   /* ─────────────────────────── 运行时 */
@@ -557,9 +577,11 @@
     }
   });
 
-  /* ── 初始化：默认关闭以省 GPU */
-  var saved = false;
-  try { saved = localStorage.getItem('webui_halo') === 'on'; } catch (e) { saved = false; }
+  /* ── 初始化：默认开启
+     光环现在是 UI 的主要视觉（投影投在顶栏/输入区/消息上），
+     关掉等于整个界面失去光源。想关仍可从顶栏 💤 按钮或以 'off' 落盘。 */
+  var saved = true;
+  try { saved = localStorage.getItem('webui_halo') !== 'off'; } catch (e) { saved = true; }
   syncFromSbData();
   if (saved) setHaloEnabled(true);
   else haloEl.style.display = 'none';
