@@ -22,6 +22,15 @@ core 内置的 EventBridge 转发 LLM/工具级事件（llm_start/tool_call/…�
       显式让渡（handled=False 且无输出，稍后真正 append）**不发**，由
       ON_CTX_APPEND 兜底，防双渲染。
 
+  ON_BEFORE_COMMAND / ON_COMMAND(messages) 长度对比 → {"type":
+      "history_changed", "msg_count", "ts"}
+      改写型命令（/back、/sc、/clear、/fork…）直接 set_messages 重写上下文，
+      不走 ON_CTX_APPEND → 前端卡片与后端落盘失配。两钩子均携带 messages
+      快照，执行前后长度对比即为「是否发生重写」的通用判据——零硬编码命令
+      名，未来新命令自动覆盖。前端收到后 clearUI + 重拉历史 REST 全量重渲染。
+      显式让渡的 fallthrough 不在此列（append 由 ON_CTX_APPEND 兜底）；
+      命令被阻断（ON_COMMAND_BLOCKED）不发 ON_COMMAND，对比自然跳过。
+
 注册：随 ``portal.ctl.open(plugins=...)`` 走初始化前注册路径（main.py 两处 open）。
 
 事件目录说明：EVENT_TYPES（core.events）冻结的是 EventBridge/IOChannel 事件；
@@ -33,7 +42,7 @@ from __future__ import annotations
 
 import contextlib
 import time
-from typing import Any
+from typing import Any, cast
 
 # 协议 §5：前端只许 fp_core.api（Plugin/HookContext/LifecycleHook 均由其导出）
 from fp_core.api import HookContext, LifecycleHook, LifecycleManager, Plugin
@@ -51,6 +60,8 @@ class WebUIBridge(Plugin):
         """
         super().__init__()
         self._bus = bus
+        # ON_BEFORE_COMMAND 时的消息数快照，与 ON_COMMAND 对比判定上下文重写
+        self._msg_count_before: int | None = None
 
     async def _publish(self, payload: dict[str, Any]) -> None:
         """发布到总线；桥异常会 stop_propagation 打断主链，必须静默降级"""
@@ -64,6 +75,12 @@ class WebUIBridge(Plugin):
             self._on_ctx_append,
             priority=5,
             name="webui_ctx_append",
+        )
+        lifecycle.register(
+            LifecycleHook.ON_BEFORE_COMMAND,
+            self._on_before_command,
+            priority=5,
+            name="webui_before_command",
         )
         lifecycle.register(
             LifecycleHook.ON_COMMAND,
@@ -86,6 +103,25 @@ class WebUIBridge(Plugin):
             return
         await self._publish({"type": "user_message", "content": content})
 
+    @staticmethod
+    def _count_messages(raw: Any) -> int | None:
+        """钩子 data.messages 载荷 → 消息数（非 list 载荷返回 None）
+
+        pyright：isinstance 收窄 Any 会得到 list[Unknown]，len() 触发
+        reportUnknownArgumentType → cast 为 list[Any] 后再取长度。
+        """
+        if not isinstance(raw, list):
+            return None
+        return len(cast("list[Any]", raw))
+
+    async def _on_before_command(
+        self,
+        ctx: HookContext,
+        **kwargs: Any,
+    ) -> None:
+        """命令开始执行：快照当前消息数，供 ON_COMMAND 对比判定上下文重写"""
+        self._msg_count_before = self._count_messages(kwargs.get("messages"))
+
     async def _on_command(
         self,
         ctx: HookContext,
@@ -96,6 +132,14 @@ class WebUIBridge(Plugin):
         fallthrough（handled=False 且无输出）时输入随后真正 append，
         由 _on_ctx_append 发正式 user_message，此处必须让位防双渲染。
         """
+        # ── 上下文重写检测：命令前后消息数对比（/back /sc /clear /fork…）──
+        # 命令名不硬编码，长度变化即重写；广播后前端 clearUI + 重拉历史
+        after = self._count_messages(kwargs.get("messages"))
+        before = self._msg_count_before
+        self._msg_count_before = None
+        if before is not None and after is not None and before != after:
+            await self._publish({"type": "history_changed", "msg_count": after})
+
         if not kwargs.get("handled") and not kwargs.get("output"):
             return
         # name 已含斜杠（agent.process: parts = user_input.strip().split(maxsplit=1)）

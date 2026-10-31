@@ -373,6 +373,16 @@ function handleEvent(data) {
       }
       break;
 
+    case 'history_changed': {
+      // 上下文被改写型命令重写（/back /sc /clear /fork…，后端长度对比触发）：
+      // clearUI + 全量重渲染当前会话历史，消除卡片与后端落盘的失配。
+      // 与「↩ 回溯」按钮路径互斥：此处接管渲染后取消 done 侧的冗余拉取。
+      _pendingBacktrack = false;
+      clearUI();
+      if (sessionId) setTimeout(function() { fetchSessionHistory(sessionId); }, 100);
+      break;
+    }
+
     case 'queue_error':
       // 排队被拒（如运行中斜杠）：只提示，不动 processing 状态
       showError(data.error);
