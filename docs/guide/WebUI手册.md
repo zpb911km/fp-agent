@@ -508,7 +508,7 @@ ws://host:port/ws/chat?token=your_token
 | `tool_result` | `name`, `result` | 工具执行完成——前端自动折叠工具行为单行，结果追加在参数下方 |
 | `response` | `content` | Agent 生成最终回复 |
 | `error` | `error` | 发生错误 |
-| `done` | `session_id`, `final_content`, `from_command?` | 一次请求处理完毕；`from_command` 标记命令轮（如 `/status`），前端据此渲染为 ephemeral——不占回溯索引、无徽章无按钮，修掉命令挤占序号致回溯错位的问题 |
+| `done` | `session_id`, `final_content`, `from_command?` | 一次请求处理完毕；`from_command` 标记命令轮（如 `/history`），前端据此渲染为 ephemeral——不占回溯索引、无徽章无按钮，修掉命令挤占序号致回溯错位的问题 |
 | `cancelled` | — | 请求被取消 |
 | `shutdown` | — | Agent 关闭 |
 | `reload` | `message` | Agent 开始重载 |
