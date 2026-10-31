@@ -46,7 +46,7 @@ function showAskCard(data) {
 
   inputEl.placeholder = suggest ? ('回车采纳「' + suggest + '」，或输入回答...') : '输入回答... (Enter 发送)';
   inputEl.focus();
-  scrollToBottom();
+  scrollToBottom(true);
 }
 
 function clearAskCard() {
@@ -341,9 +341,10 @@ function handleEvent(data) {
     case 'tool_select':
       removeThinking();
       finalizeStreamRound(); // 工具轮可能无 llm_end 正文 → 兜底收尾
+      // 方案C：紫卡已移除。工具意图由后续 tool_call 紧凑行表达，
+      // 此处只确保本轮有承载工具行的助手卡片
       if (data.tools && data.tools.length > 0) {
-        // 改为正式的 assistant-toolcall 消息，有头像、时间戳、回溯按钮
-        addAssistantToolCallMsg(data.tools);
+        ensureToolContainer();
       }
       break;
 
@@ -366,7 +367,7 @@ function handleEvent(data) {
       // 一切用户消息的显示触发源：直发 / 空闲泵注入（ask 回答、任务终态、
       // 邻居消息）/ 排队消费 / 命令回显（ephemeral 不计入回溯索引）。
       // 不再乐观本地渲染 → 多设备单端口看到同一份消息流，且与历史 REST 一致。
-      if (!consumeQueuedBubble(data.content)) {
+      if (!consumeQueuedBubble(data.content, !!data.ephemeral)) {
         addUserMessage(data.content, !!data.ephemeral);
         lastGroupEl = null;
       }
@@ -395,9 +396,10 @@ function handleEvent(data) {
       // 去重：纯文本回复（无工具调用）时 llm_end 已渲染过，跳过
       // 命令轮无 llm_start → 这里只承接**本轮**卡片，跨轮走 addAssistantMessage，
       // 否则命令输出会覆盖上一轮答案（吞卡 bug，见 ui.js finalizeStreamRoundForDone）
+      // from_command：命令输出不落盘 → ephemeral 渲染（不占索引、无回溯按钮）
       var streamedDone = finalizeStreamRoundForDone(data.final_content);
       if (data.final_content && data.final_content !== '' && !_finalContentAlreadyShown && !streamedDone) {
-        addAssistantMessage(data.final_content);
+        addAssistantMessage(data.final_content, !!data.from_command);
       }
       // 流式已渲染正文（极端：llm_end 缺失但 done 有终稿）→ 视为已显示
       if (streamedDone) _finalContentAlreadyShown = true;
@@ -531,8 +533,10 @@ function sendMessage() {
   if (exitCmds.some(function(cmd) { return trimmed === cmd.trim(); })) {
     inputEl.value = '';
     autoResize(inputEl);
-    addUserMessage(text);
-    addAssistantMessage('🔄 检测到 `' + text.trim() + '`，自动新建会话…');
+    // /exit 命令不落盘 → 两张卡均 ephemeral（不占索引、无回溯按钮）；
+    // clearUI 会清空界面，这里只防 POST 失败时的索引污染
+    addUserMessage(text, true);
+    addAssistantMessage('🔄 检测到 `' + text.trim() + '`，自动新建会话…', true);
     authFetch('/api/sessions', { method: 'POST' }).then(function(r) {
       if (r.ok) {
         clearUI();
@@ -714,7 +718,7 @@ function switchSession(sid) {
         msg.style.borderBottom = 'none';
         msg.innerHTML = '<div class="msg" style="justify-content:center;padding:8px 0"><span style="color:var(--text-dim);font-size:12px">📂 已切换到 ' + sid.slice(0, 8) + '... 可发送消息继续对话</span></div>';
         document.getElementById('messagesContainer').appendChild(msg);
-        scrollToBottom();
+        scrollToBottom(true);
       }
     })
     .catch(function(err) { showError('切换会话失败: ' + err.message); });
@@ -770,7 +774,7 @@ function clearSession() {
       if (data.status === 'cleared') {
         clearUI();
         sessionLabel.textContent = '📄 新会话';
-        scrollToBottom();
+        scrollToBottom(true);
       }
     })
     .catch(function(err) { showError('清空失败: ' + err.message); });
@@ -799,7 +803,7 @@ function newAgent() {
         msg.className = 'msg-group';
         msg.innerHTML = '<div class="msg" style="justify-content:center;padding:16px 0"><span style="color:var(--text-dim);font-size:13px">🆕 已创建新 Agent（' + (data.model || '') + '）</span></div>';
         messagesEl.appendChild(msg);
-        scrollToBottom();
+        scrollToBottom(true);
       }
     })
     .catch(function(err) { showError('新建 Agent 失败: ' + err.message); })
@@ -857,7 +861,7 @@ switchSession = function(sid) {
         msg.style.borderBottom = 'none';
         msg.innerHTML = '<div class="msg" style="justify-content:center;padding:8px 0"><span style="color:var(--text-dim);font-size:12px">📂 已切换到 ' + sid.slice(0, 8) + '... 可发送消息继续对话</span></div>';
         document.getElementById('messagesContainer').appendChild(msg);
-        scrollToBottom();
+        scrollToBottom(true);
       }
     })
     .catch(function(err) { showError('切换会话失败: ' + err.message); });
@@ -966,7 +970,7 @@ document.addEventListener('DOMContentLoaded', function() {
   window.addEventListener('resize', function() {
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(function() {
-      if (!processing) scrollToBottom();
+      if (!processing) scrollToBottom(true);
     }, 150);
   });
 

@@ -697,16 +697,49 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   font-size: clamp(11px, 1.1vw, 14px);
 }
 
-/* ── tool 消息折叠 v3 —— 数据表样式 ── */
-.tool-msg {
+/* ── 头像列（头像 + 序号徽章）与序号徽章 ──
+   徽章 = 该卡片在上下文文件中的真实索引（与 /back 一致）。
+   ephemeral 消息（命令回显/输出）无徽章无按钮——它不落盘，不占号。 */
+.msg-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+.msg-index-badge {
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  opacity: 0.55;
+  user-select: none;
+  white-space: nowrap;
+}
+.msg-index-badge.standalone {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+/* 工具行展开态的索引行（徽章 + 回溯按钮） */
+.tool-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+/* ── 内嵌工具行（方案C：嵌于助手卡片内的紧凑单行，点击折叠/展开）── */
+.tool-row {
   cursor: pointer;
   margin-left: 0px;
   padding-left: 12px;
   border-right: 1px solid rgba(61,61,61,0.08);
   padding-right: 4px;
   position: relative;
+  font-size: 0.9em;
 }
-.tool-msg::before {
+.tool-row::before {
   content: 'T';
   position: absolute;
   left: -4px;
@@ -718,15 +751,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   font-family: var(--font-mono);
   letter-spacing: 0;
 }
-.tool-msg .tool-msg-toggle {
+.tool-row .tool-row-head {
   display: flex;
   align-items: center;
   gap: 0.4em;
   user-select: none;
-  padding: 2px 0;
+  padding: 1px 0;
+  min-width: 0;
 }
-.tool-msg .tool-msg-toggle:hover { color: var(--accent); }
-.tool-msg .tool-msg-icon {
+.tool-row .tool-row-head:hover .tool-row-name { color: var(--accent); }
+.tool-row .tool-row-icon {
   display: inline-block;
   font-size: 0.7em;
   color: var(--text-dim);
@@ -735,9 +769,32 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   text-align: center;
   flex-shrink: 0;
 }
-.tool-msg:not(.collapsed) .tool-msg-icon { transform: rotate(90deg); }
+.tool-row:not(.collapsed) .tool-row-icon { transform: rotate(90deg); }
+.tool-row .tool-row-name {
+  font-size: 0.88em;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+/* 折叠态参数预览：单行截断，挤满剩余空间 */
+.tool-row .tool-row-args-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78em;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  text-align: left;
+}
+.tool-row .tool-row-status {
+  margin-left: auto;
+  font-size: 0.78em;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
 
-.tool-msg .tool-msg-body {
+.tool-row .tool-row-body {
   margin-top: 0.2em;
   border-left: 3px solid var(--yellow);
   padding: 4px 0 4px 0.8em;
@@ -746,22 +803,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   font-size: 0.82em;
   font-family: var(--font-mono);
   color: var(--text-secondary);
-  /* 卡片级折叠已由 .tool-msg.collapsed 控制；展开态不再限高截断，
-     参数/返回内容完整显示，不再二次折叠 */
   transition: opacity 0.15s;
 }
-.tool-msg.collapsed .tool-msg-body {
+.tool-row.collapsed .tool-row-body {
   display: block;        /* 覆盖 display:none 以支持过渡 */
   max-height: 0;
   opacity: 0;
   padding: 0 0 0 0.8em;
   margin-top: 0;
   overflow: hidden;
-}
-.tool-msg .tool-msg-status {
-  margin-left: auto;
-  font-size: 0.78em;
-  color: var(--text-muted);
 }
 
 /* ── 工具状态图标 ── */
@@ -849,13 +899,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 /* ── 工具状态驱动样式 ── */
-.msg[data-tool-state="running"] {
+.tool-row[data-tool-state="running"] {
   border-left: 3px solid var(--yellow);
 }
-.msg[data-tool-state="running"] .tool-msg-toggle strong {
+.tool-row[data-tool-state="running"] .tool-row-name {
   color: var(--yellow);
 }
-.msg[data-tool-state="running"] .tool-msg-status[data-state="running"] {
+.tool-row[data-tool-state="running"] .tool-row-status[data-state="running"] {
   color: var(--yellow);
   animation: toolStatusPulse 1.2s ease-in-out infinite;
 }
@@ -864,17 +914,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   50%      { opacity: 1; }
 }
 
-.msg[data-tool-state="completed"] {
+.tool-row[data-tool-state="completed"] {
   border-left: 3px solid var(--green-bright);
 }
-.msg[data-tool-state="completed"] .tool-msg-toggle strong {
+.tool-row[data-tool-state="completed"] .tool-row-name {
   color: var(--green-bright);
 }
-.msg[data-tool-state="completed"] .tool-msg-status[data-state="completed"] {
+.tool-row[data-tool-state="completed"] .tool-row-status[data-state="completed"] {
   color: var(--green-bright);
 }
 
-.msg[data-tool-state="failed"] {
+.tool-row[data-tool-state="failed"] {
   border-left: 3px solid var(--red);
   animation: failSting 0.6s ease-out;
 }
@@ -886,10 +936,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   60%  { background: rgba(200, 66, 66, 0.08); transform: translateX(0); }
   100% { background: transparent; }
 }
-.msg[data-tool-state="failed"] .tool-msg-toggle strong {
+.tool-row[data-tool-state="failed"] .tool-row-name {
   color: var(--red);
 }
-.msg[data-tool-state="failed"] .tool-msg-status[data-state="failed"] {
+.tool-row[data-tool-state="failed"] .tool-row-status[data-state="failed"] {
   color: var(--red);
 }
 
@@ -934,7 +984,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   color: var(--text-secondary);
   line-height: 1.4;
 }
-.msg[data-tool-state="failed"] .tool-result-body {
+.tool-row[data-tool-state="failed"] .tool-result-body {
   border-left-color: var(--red-soft);
   color: var(--red);
 }
@@ -943,44 +993,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
       实时与历史卡片同构，折叠展开即可对照） ── */
 .tool-args-block + .tool-result-block {
   margin-top: 6px;
-}
-
-/* ── LLM 工具调用记录消息 ── */
-.assistant-toolcall-msg {
-  border-left: 3px solid var(--purple) !important;
-  border-right: 1px solid rgba(61,61,61,0.08) !important;
-  padding-left: 12px;
-  background: linear-gradient(90deg, var(--purple-soft) 0%, transparent 60%);
-  padding-right: 4px;
-  padding-right: 4px;
-  position: relative;
-}
-.assistant-toolcall-msg::before {
-  content: '→';
-  position: absolute;
-  left: 4px;
-  top: 8px;
-  font-size: 7px;
-  font-weight: 700;
-  color: var(--purple);
-  opacity: 0.25;
-  font-family: var(--font-mono);
-}
-.assistant-toolcall-msg .msg-author {
-  color: var(--purple) !important;
-}
-.assistant-toolcall-msg .msg-avatar.assistant {
-  border-color: var(--purple) !important;
-}
-.toolcall-content {
-  font-size: clamp(12px, 1.3vw, 14px);
-  color: var(--text-secondary);
-  padding: 2px 0;
-}
-.toolcall-arrow {
-  color: var(--purple);
-  margin-right: 4px;
-  font-size: 0.9em;
 }
 
 .msg-body {

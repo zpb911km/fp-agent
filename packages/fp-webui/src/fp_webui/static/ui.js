@@ -22,6 +22,11 @@ let progressEl = null;
 // 解决并行调用同名工具时按名称匹配错乱的问题
 var toolCardMap = {};
 
+// ── 当前轮工具行宿主：助手卡片的 .msg-body ──
+// 工具行内嵌于助手卡片（方案C），不再各自成卡。
+// 纯 tool_calls 轮（无正文）懒建空卡片承载。
+var _toolContainerEl = null;
+
 // ── 状态栏数据 ──
 var _sbData = {
   latency: null,
@@ -90,7 +95,23 @@ function formatTime(ts) {
   return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-function scrollToBottom() {
+// ── 跟随式滚底 ──
+// 只有当用户本就贴近底部时才自动跟随（距底 <80px 视为贴底）；
+// 上滑阅读历史即解除跟随，下滑回贴底部自动恢复。
+// 「视图重置」类场景（加载历史/切会话/回溯/发送消息/启动）传 force=true 强制滚。
+var FOLLOW_THRESHOLD_PX = 80;
+var _followBottom = true;
+
+function _isNearBottom() {
+  return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < FOLLOW_THRESHOLD_PX;
+}
+
+messagesEl.addEventListener('scroll', function() {
+  _followBottom = _isNearBottom();
+});
+
+function scrollToBottom(force) {
+  if (!force && !_followBottom) return;
   requestAnimationFrame(function() {
     messagesEl.scrollTop = messagesEl.scrollHeight;
   });
@@ -214,12 +235,12 @@ function copyMsgContent(btnEl) {
   }
 }
 
-// ── 点击折叠/展开 tool 消息
-function toggleToolMsg(event) {
-  if (event.target.closest('.backtrack-btn') || event.target.closest('.msg-avatar')) return;
-  var msg = event.currentTarget;
-  if (!msg.classList.contains('tool-msg')) return;
-  msg.classList.toggle('collapsed');
+// ── 点击折叠/展开内嵌工具行
+function toggleToolRow(event) {
+  if (event.target.closest('.backtrack-btn')) return;
+  var row = event.currentTarget;
+  if (!row.classList.contains('tool-row')) return;
+  row.classList.toggle('collapsed');
 }
 
 /**
@@ -236,7 +257,10 @@ function addUserMessage(content, ephemeral) {
   var msg = document.createElement('div');
   msg.className = 'msg user-msg';
   msg.innerHTML =
-    '<div class="msg-avatar user" aria-hidden="true">👤</div>' +
+    '<div class="msg-side">' +
+      '<div class="msg-avatar user" aria-hidden="true">👤</div>' +
+      (ephemeral ? '' : '<div class="msg-index-badge">#' + idx + '</div>') +
+    '</div>' +
     '<div class="msg-body">' +
       '<div class="msg-header">' +
         '<span class="msg-author user">OPERATOR</span>' +
@@ -256,7 +280,7 @@ function addUserMessage(content, ephemeral) {
   _sbData.msgs++;
   updateStatusBar();
 
-  scrollToBottom();
+  scrollToBottom(true);  // 用户主动发送 → 强制滚底展示自己的消息
   return msg;
 }
 
@@ -265,9 +289,10 @@ function addUserMessage(content, ephemeral) {
 // 各设备凭此表把已渲染的 ⏳ 气泡就地转正，防同一消息渲染两次。
 var _queuedPending = [];
 
-/** 运行中排队消息：普通用户气泡 + ⏳ 已排队标记（消费时转正 / done 时清除） */
+/** 运行中排队消息：先按 ephemeral 渲染（排队内容可能是命令——不落盘、不占号），
+ *  消费时经 user_message.ephemeral 判定真实身份再决定是否转正 */
 function addQueuedMessage(content) {
-  var msg = addUserMessage(content);
+  var msg = addUserMessage(content, true);
   if (msg) {
     var flag = document.createElement('span');
     flag.className = 'queued-flag';
@@ -279,17 +304,43 @@ function addQueuedMessage(content) {
   return msg;
 }
 
+/** 排队气泡转正：真实消息消费时补占索引位 + 徽章 + 回溯按钮 */
+function promoteQueuedBubble(msgEl) {
+  liveMsgIndex++;
+  var idx = liveMsgIndex;
+  var side = msgEl.querySelector('.msg-side');
+  if (side) {
+    var badge = document.createElement('div');
+    badge.className = 'msg-index-badge';
+    badge.textContent = '#' + idx;
+    side.appendChild(badge);
+  }
+  var header = msgEl.querySelector('.msg-header');
+  var copyBtn = header && header.querySelector('.copy-btn');
+  if (header && copyBtn) {
+    var btn = document.createElement('button');
+    btn.className = 'backtrack-btn';
+    btn.title = '回溯到此位置';
+    btn.dataset.index = String(idx);
+    btn.setAttribute('aria-label', '回溯到位置 ' + idx);
+    btn.textContent = '↩ 回溯';
+    header.insertBefore(btn, copyBtn);
+  }
+}
+
 /**
  * user_message 到达时尝试把排队气泡就地转正（摘除 ⏳ 标记、不新建气泡）。
  * @param {string} content 事件消息文本
+ * @param {boolean} [ephemeral] 命令回显 = true：气泡保持无索引无按钮
  * @returns {boolean} true = 命中队首排队气泡已转正；false = 应新建气泡
  */
-function consumeQueuedBubble(content) {
+function consumeQueuedBubble(content, ephemeral) {
   if (_queuedPending.length && _queuedPending[0].content === content) {
     var q = _queuedPending.shift();
     if (q.el) {
       var flag = q.el.querySelector('.queued-flag');
       if (flag) flag.remove();
+      if (!ephemeral) promoteQueuedBubble(q.el);
     }
     return true;
   }
@@ -300,22 +351,32 @@ function clearQueuedFlags() {
   document.querySelectorAll('.queued-flag').forEach(function (el) { el.remove(); });
 }
 
-function addAssistantMessage(content) {
+/**
+ * 助手消息卡片。
+ * @param {string} content 消息文本
+ * @param {boolean} [ephemeral] true = 命令输出等不落盘消息：
+ *   不计入回溯索引（liveMsgIndex）、不渲染回溯按钮/徽章、不登记为工具行宿主
+ */
+function addAssistantMessage(content, ephemeral) {
   var group = getOrCreateMsgGroup();
-  liveMsgIndex++;
+  if (!ephemeral) { liveMsgIndex++; }
   var idx = liveMsgIndex;
 
   var msg = document.createElement('div');
   msg.className = 'msg assistant-msg';
   msg.innerHTML =
-    '<div class="msg-avatar assistant" aria-hidden="true">' +
-      '<img src="/static/favicon.png" width="18" height="19" alt="" style="vertical-align:middle">' +
+    '<div class="msg-side">' +
+      '<div class="msg-avatar assistant" aria-hidden="true">' +
+        '<img src="/static/favicon.png" width="18" height="19" alt="" style="vertical-align:middle">' +
+      '</div>' +
+      (ephemeral ? '' : '<div class="msg-index-badge">#' + idx + '</div>') +
     '</div>' +
     '<div class="msg-body">' +
       '<div class="msg-header">' +
         '<span class="msg-author assistant">FP</span>' +
         '<span class="msg-time">' + formatTime(Date.now()/1000) + '</span>' +
-        '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>' +
+        (ephemeral ? '' :
+          '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>') +
         '<button class="copy-btn" title="复制消息内容" aria-label="复制消息内容">📋</button>' +
       '</div>' +
       '<div class="msg-content rendered"></div>' +
@@ -324,6 +385,12 @@ function addAssistantMessage(content) {
 
   // 复制按钮事件
   msg.querySelector('.copy-btn').onclick = function(e) { e.stopPropagation(); copyMsgContent(this); };
+
+  // 新助手卡片 = 本轮工具行的新宿主（ephemeral 命令卡不登记：
+  // 命令轮无工具调用，若被后续轮的 ensureToolContainer 复用会导致工具行错挂）
+  if (!ephemeral) {
+    _toolContainerEl = msg.querySelector('.msg-body');
+  }
 
   var contentEl = msg.querySelector('.msg-content');
   if (content) {
@@ -335,48 +402,28 @@ function addAssistantMessage(content) {
   return contentEl;
 }
 
-// ── LLM 工具调用记录消息 ──
-// 当 LLM 只返回 tool_calls 无文本内容时，显示专用消息
-function addAssistantToolCallMsg(toolNames) {
-  var group = getOrCreateMsgGroup();
-  liveMsgIndex++;
-  var idx = liveMsgIndex;
-
-  var msg = document.createElement('div');
-  msg.className = 'msg assistant-msg assistant-toolcall-msg';
-  msg.innerHTML =
-    '<div class="msg-avatar assistant" aria-hidden="true">' +
-      '<img src="/static/favicon.png" width="18" height="19" alt="" style="vertical-align:middle">' +
-    '</div>' +
-    '<div class="msg-body">' +
-      '<div class="msg-header">' +
-        '<span class="msg-author assistant">FP</span>' +
-        '<span class="msg-time">' + formatTime(Date.now()/1000) + '</span>' +
-        '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>' +
-        '<button class="copy-btn" title="复制消息内容" aria-label="复制消息内容">📋</button>' +
-      '</div>' +
-      '<div class="msg-content toolcall-content">' +
-        '<span class="toolcall-arrow">╰─➤</span> 调用工具: <strong>' +
-        toolNames.map(function(n) { return escapeHtml(n); }).join(', ') +
-        '</strong>' +
-      '</div>' +
-    '</div>';
-  group.appendChild(msg);
-  // 复制按钮事件
-  msg.querySelector('.copy-btn').onclick = function(e) { e.stopPropagation(); copyMsgContent(this); };
-  scrollToBottom();
+// ── 工具行宿主容器 ──
+// 方案C：紫卡已移除。tool_select 不再建卡，只确保当前轮有承载工具行的
+// 助手卡片。有正文的轮次复用正文卡片；纯 tool_calls 轮懒建空卡片
+//（空 .msg-content 挂 stream-pending 隐藏，只留 header + 工具行）。
+function ensureToolContainer() {
+  if (_toolContainerEl && document.body.contains(_toolContainerEl)) return _toolContainerEl;
+  var contentEl = addAssistantMessage('');
+  contentEl.classList.add('stream-pending');
+  return _toolContainerEl; // addAssistantMessage 内部已更新
 }
 
-// ── 工具卡片（tool_call_id 驱动匹配，解决并行调用同名工具错乱）──
+// ── 工具行（tool_call_id 驱动匹配，解决并行调用同名工具错乱）──
+// 方案C：降级为嵌在助手卡片内的紧凑行（一轮 = 一张卡）。
+// 运行中展开（实时看参数），完成/失败自动折叠为单行，点击行可再展开。
 function addToolCall(name, args, tool_call_id) {
   // 无 tool_call_id 的事件是重复源（WebSocketIO 直发），跳过
   if (!tool_call_id) return;
 
-  // 已有同名 tool_call_id 的卡片 → 跳过重复
+  // 已有同名 tool_call_id 的行 → 跳过重复
   if (toolCardMap[tool_call_id]) return;
 
   removeThinking();
-  var group = getOrCreateMsgGroup('tight');
 
   // 状态栏
   _sbData.toolsActive++;
@@ -396,61 +443,58 @@ function addToolCall(name, args, tool_call_id) {
   } catch(e) {
     prettyArgs = args || '{}';
   }
+  // 折叠态单行的参数预览：紧凑 JSON 截断
+  var argsPreview = prettyArgs.replace(/\s+/g, ' ').trim();
+  if (argsPreview.length > 80) argsPreview = argsPreview.slice(0, 80) + '…';
 
-  var msg = document.createElement('div');
-  msg.className = 'msg tool-msg collapsed';
-  msg.dataset.toolName = name;
-  msg.dataset.toolState = 'running';
-  msg.dataset.toolCallId = tool_call_id;
-  msg.dataset.msgIndex = idx;
-  msg.onclick = toggleToolMsg;
+  var container = ensureToolContainer();
 
-  msg.innerHTML =
-    '<div class="msg-avatar tool" aria-hidden="true">🔧</div>' +
-    '<div class="msg-body">' +
-      '<div class="msg-header">' +
-        '<span class="msg-author tool">Tool</span>' +
-        '<span class="msg-time">#' + idx + '</span>' +
+  var row = document.createElement('div');
+  row.className = 'tool-row';
+  row.dataset.toolName = name;
+  row.dataset.toolState = 'running';
+  row.dataset.toolCallId = tool_call_id;
+  row.dataset.msgIndex = idx;
+  row.dataset.startTime = String(Date.now());
+  row.onclick = toggleToolRow;
+
+  row.innerHTML =
+    '<div class="tool-row-head">' +
+      '<span class="tool-row-icon">▸</span>' +
+      '<span class="tool-state-icon">⏳</span>' +
+      '<strong class="tool-row-name">🛠️ ' + escapeHtml(name) + '</strong>' +
+      '<span class="tool-row-args-preview">' + escapeHtml(argsPreview) + '</span>' +
+      '<span class="tool-row-status" data-state="running">运行中…</span>' +
+    '</div>' +
+    '<div class="tool-row-body">' +
+      '<div class="tool-row-meta">' +
+        '<span class="msg-index-badge standalone">#' + idx + '</span>' +
         '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>' +
-        '<button class="copy-btn" title="复制消息内容" aria-label="复制消息内容">📋</button>' +
       '</div>' +
-      '<div class="msg-content rendered">' +
-        '<div class="tool-msg-toggle">' +
-          '<span class="tool-msg-icon">▶</span>' +
-          '<span class="tool-state-icon">⏳</span>' +
-          '<strong>🛠️ ' + escapeHtml(name) + '</strong>' +
-          '<span class="tool-msg-status" data-state="running">运行中...</span>' +
-        '</div>' +
-        '<div class="tool-msg-body">' +
-          '<div class="tool-args-block">' +
-            '<div class="tool-args-label">参数:</div>' +
-            '<pre class="tool-args-json">' + escapeHtml(prettyArgs) + '</pre>' +
-          '</div>' +
-        '</div>' +
+      '<div class="tool-args-block">' +
+        '<div class="tool-args-label">参数:</div>' +
+        '<pre class="tool-args-json">' + escapeHtml(prettyArgs) + '</pre>' +
       '</div>' +
     '</div>';
 
-  group.appendChild(msg);
+  container.appendChild(row);
 
-  // 复制按钮事件
-  msg.querySelector('.copy-btn').onclick = function(e) { e.stopPropagation(); copyMsgContent(this); };
-
-  // ── 注册到工具卡片映射表 ──
-  toolCardMap[tool_call_id] = msg;
+  // ── 注册到映射表 ──
+  toolCardMap[tool_call_id] = row;
 
   scrollToBottom();
 }
 
-// ── 更新工具卡片结果（tool_call_id 精确匹配）──
+// ── 更新工具行结果（tool_call_id 精确匹配）──
 function addToolResult(name, result, isError, tool_call_id) {
   // 无 tool_call_id 的事件无法精确匹配，跳过
   if (!tool_call_id) return;
 
-  // 从映射表中查找卡片
+  // 从映射表中查找行
   var target = toolCardMap[tool_call_id];
 
   if (!target || !document.body.contains(target)) {
-    // 卡片已不存在（如清空UI后）→ 忽略
+    // 行已不存在（如清空UI后）→ 忽略
     return;
   }
 
@@ -467,7 +511,7 @@ function addToolResult(name, result, isError, tool_call_id) {
     stateIcon.textContent = isError ? '❌' : '✅';
   }
 
-  var statusEl = target.querySelector('.tool-msg-status');
+  var statusEl = target.querySelector('.tool-row-status');
   if (statusEl) {
     // 计算耗时
     var startTime = parseInt(target.dataset.startTime, 10);
@@ -480,9 +524,9 @@ function addToolResult(name, result, isError, tool_call_id) {
     statusEl.dataset.state = newState;
   }
 
-  // ── 格式化结果，**追加**在参数块之后（不再整块覆盖 —— 参数保留，
-  //    同卡折叠即可对照「什么输入带来什么输出」）──
-  var bodyEl = target.querySelector('.tool-msg-body');
+  // ── 格式化结果，**追加**在参数块之后（参数保留，
+  //    展开即可对照「什么输入带来什么输出」）──
+  var bodyEl = target.querySelector('.tool-row-body');
   if (bodyEl) {
     var displayResult = result || '(空)';
     // 尝试 JSON 格式化
@@ -500,6 +544,9 @@ function addToolResult(name, result, isError, tool_call_id) {
       '<pre class="tool-result-body">' + escapeHtml(displayResult) + '</pre>';
     bodyEl.appendChild(resBlock);
   }
+
+  // ── 完成即折叠为单行（方案C：运行中展开，结束后让出历史高度）──
+  target.classList.add('collapsed');
 
   scrollToBottom();
 }
@@ -559,6 +606,7 @@ function isCurrentTurnRound() { return !!_stream && _stream.turnSeq === _turnSeq
 
 function startStreamRound() {
   finalizeStreamRound(); // 上一轮残留兜底（flush + 终渲染）
+  _toolContainerEl = null; // 新一轮：工具行宿主重置，不复用上一轮卡片
   _stream = {
     turnSeq: _turnSeq,
     thinkText: '', thinkChars: 0, thinkEl: null, thinkTimer: null,
@@ -618,14 +666,18 @@ function streamThinkToken(token) {
   if (_stream.closed) {
     // 迟到 token（llm_end 后 fire-and-forget 排序晚到）：直写终帧，不排定时器
     if (_stream.thinkTimer) { clearTimeout(_stream.thinkTimer); _stream.thinkTimer = null; }
-    _stream.thinkEl.querySelector('.think-msg-body').textContent = _stream.thinkText;
+    var lateBody = _stream.thinkEl.querySelector('.think-msg-body');
+    lateBody.textContent = _stream.thinkText;
+    lateBody.scrollTop = lateBody.scrollHeight; // 内部滚动区（40vh 封顶）跟随到底
     return;
   }
   if (_stream.thinkTimer) return;
   _stream.thinkTimer = setTimeout(function() {
     if (!_stream || !_stream.thinkEl) return;
     _stream.thinkTimer = null;
-    _stream.thinkEl.querySelector('.think-msg-body').textContent = _stream.thinkText;
+    var body = _stream.thinkEl.querySelector('.think-msg-body');
+    body.textContent = _stream.thinkText;
+    body.scrollTop = body.scrollHeight; // 内部滚动区跟随到底，最新思考始终可见
     scrollToBottom();
   }, THINK_FLUSH_MS);
 }
@@ -747,6 +799,7 @@ function clearUI() {
   lastGroupEl = null;
   liveMsgIndex = 0;  // 重置索引计数器，后续由 fetchSessionHistory 重新设置
   toolCardMap = {};  // 清空工具卡片映射表
+  _toolContainerEl = null;  // 工具行宿主随卡片一起作废
   _queuedPending = [];  // 排队对账表随气泡一起作废（重拉/回溯后从新渲染）
   removeThinking();
   // 重置状态栏
@@ -897,6 +950,9 @@ function renderHistoryMessages(sid, messages) {
 
   var allRendered = [];
 
+  // 最近一张助手卡片的 msg-body：后续 tool 行的内嵌宿主
+  var _histToolHost = null;
+
   // 第一遍：从 assistant 消息构建 tool_call_id → tool_name / tool_args 映射
   //（tool 消息本身只有返回值；调用参数存在对应 assistant.tool_calls 里）
   var toolNameMap = {};
@@ -948,12 +1004,8 @@ function renderHistoryMessages(sid, messages) {
     }
 
     if (msg.role === 'tool') {
-      // ── tool 消息：可折叠，使用 data-tool-state 状态驱动 ──
+      // ── tool 消息：紧凑行，内嵌前一张助手卡片（方案C，与实时渲染同构）──
       var toolName = toolNameMap[msg.tool_call_id] || 'Tool';
-      msgDiv.className = 'msg tool-msg collapsed';
-      msgDiv.dataset.toolState = 'completed';
-      msgDiv.dataset.toolName = toolName;
-      msgDiv.onclick = toggleToolMsg;
 
       var hasResult = msg.content && msg.content !== '';
       var displayResult = hasResult ? msg.content : '(空)';
@@ -963,70 +1015,57 @@ function renderHistoryMessages(sid, messages) {
         displayResult = JSON.stringify(parsed, null, 2);
       } catch(e) { /* 保持原样 */ }
 
-      var argsBlockHtml = '';
-      var histArgs = toolArgsMap[msg.tool_call_id];
-      if (histArgs) {
-        argsBlockHtml =
-          '<div class="tool-args-block">' +
-            '<div class="tool-args-label">参数:</div>' +
-            '<pre class="tool-args-json">' + escapeHtml(histArgs) + '</pre>' +
-          '</div>';
+      var histArgs = toolArgsMap[msg.tool_call_id] || '';
+      var argsPreview = histArgs ? histArgs.replace(/\s+/g, ' ').trim() : '';
+      if (argsPreview.length > 80) argsPreview = argsPreview.slice(0, 80) + '…';
+
+      // 宿主：前一张助手卡片的 msg-body；缺失（历史截断）→ 兜底独立成组
+      var hostBody = _histToolHost;
+      if (!hostBody || !document.body.contains(hostBody)) {
+        hostBody = null;
       }
 
-      msgDiv.innerHTML =
-        '<div class="msg-avatar tool" aria-hidden="true">🔧</div>' +
-        '<div class="msg-body">' +
-          '<div class="msg-header">' +
-            '<span class="msg-author tool">Tool</span>' +
-            '<span class="msg-time">#' + (msg.index || '?') + '</span>' +
-            (msg.index ? '<button class="backtrack-btn" title="回溯到此位置" data-index="' + msg.index + '" aria-label="回溯到位置 ' + msg.index + '">↩ 回溯</button>' : '') +
-            '<button class="copy-btn" title="复制消息内容" aria-label="复制消息内容">📋</button>' +
-          '</div>' +
-          '<div class="msg-content rendered">' +
-            '<div class="tool-msg-toggle">' +
-              '<span class="tool-msg-icon">▶</span>' +
-              '<span class="tool-state-icon">✅</span>' +
-              '<strong>🛠️ ' + escapeHtml(toolName) + '</strong>' +
-              '<span class="tool-msg-status" data-state="completed">完成</span>' +
-            '</div>' +
-            '<div class="tool-msg-body">' +
-              argsBlockHtml +
-              '<div class="tool-result-block">' +
-                '<div class="tool-result-label">返回:</div>' +
-                '<pre class="tool-result-body">' + escapeHtml(displayResult) + '</pre>' +
-              '</div>' +
-            '</div>' +
-          '</div>' +
-        '</div>';
+      var row = document.createElement('div');
+      row.className = 'tool-row collapsed';
+      row.dataset.toolState = 'completed';
+      row.dataset.toolName = toolName;
+      row.onclick = toggleToolRow;
 
-      group.appendChild(msgDiv);
-      msgDiv.querySelector('.copy-btn').onclick = function(e) { e.stopPropagation(); copyMsgContent(this); };
-
-    } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0 && !msg.content) {
-      // ── 纯工具调用消息（无文本内容）→ 渲染 LLM 工具选择记录，跳过空白条目 ──
-      msgDiv.className = 'msg assistant-msg assistant-toolcall-msg';
-      var toolCallNames = msg.tool_calls.map(function(tc) {
-        return (tc.function && tc.function.name) || 'Tool';
-      });
-      msgDiv.innerHTML =
-        '<div class="msg-avatar assistant" aria-hidden="true">' +
-          '<img src="/static/favicon.png" width="18" height="19" alt="" style="vertical-align:middle">' +
+      row.innerHTML =
+        '<div class="tool-row-head">' +
+          '<span class="tool-row-icon">▸</span>' +
+          '<span class="tool-state-icon">✅</span>' +
+          '<strong class="tool-row-name">🛠️ ' + escapeHtml(toolName) + '</strong>' +
+          '<span class="tool-row-args-preview">' + escapeHtml(argsPreview) + '</span>' +
+          '<span class="tool-row-status" data-state="completed">完成' +
+            (msg.index ? ' · #' + msg.index : '') + '</span>' +
         '</div>' +
-        '<div class="msg-body">' +
-          '<div class="msg-header">' +
-            '<span class="msg-author assistant">FP</span>' +
-            '<span class="msg-time">#' + (msg.index || '?') + '</span>' +
-            (msg.index ? '<button class="backtrack-btn" title="回溯到此位置" data-index="' + msg.index + '" aria-label="回溯到位置 ' + msg.index + '">↩ 回溯</button>' : '') +
-            '<button class="copy-btn" title="复制消息内容" aria-label="复制消息内容">📋</button>' +
-          '</div>' +
-          '<div class="msg-content toolcall-content">' +
-            '<span class="toolcall-arrow">╰─➤</span> 调用工具: <strong>' +
-            escapeHtml(toolCallNames.join(', ')) +
-            '</strong>' +
+        '<div class="tool-row-body">' +
+          (msg.index ?
+            '<div class="tool-row-meta">' +
+              '<span class="msg-index-badge standalone">#' + msg.index + '</span>' +
+              '<button class="backtrack-btn" title="回溯到此位置" data-index="' + msg.index + '" aria-label="回溯到位置 ' + msg.index + '">↩ 回溯</button>' +
+            '</div>' : '') +
+          (histArgs ?
+            '<div class="tool-args-block">' +
+              '<div class="tool-args-label">参数:</div>' +
+              '<pre class="tool-args-json">' + escapeHtml(histArgs) + '</pre>' +
+            '</div>' : '') +
+          '<div class="tool-result-block">' +
+            '<div class="tool-result-label">返回:</div>' +
+            '<pre class="tool-result-body">' + escapeHtml(displayResult) + '</pre>' +
           '</div>' +
         '</div>';
-      group.appendChild(msgDiv);
-      msgDiv.querySelector('.copy-btn').onclick = function(e) { e.stopPropagation(); copyMsgContent(this); };
+
+      if (hostBody) {
+        hostBody.appendChild(row);
+      } else {
+        // 无宿主：单独成组的裸行（不带头像/回溯，仅兜底展示）
+        row.style.marginLeft = '12px';
+        group.appendChild(row);
+        container.appendChild(group);
+      }
+      return;
 
     } else {
       // ── 普通消息（user / assistant）──
@@ -1040,7 +1079,10 @@ function renderHistoryMessages(sid, messages) {
         roleConfig = { avatar: '<img src=\"/static/favicon.png\" width=\"18\" height=\"19\" alt=\"\" style=\"vertical-align:middle\">', author: 'FP', cls: 'assistant' };
       }
 
-      var avatarHtml = '<div class="msg-avatar ' + roleConfig.cls + '" aria-hidden="true">' + roleConfig.avatar + '</div>';
+      var avatarHtml = '<div class="msg-side">' +
+        '<div class="msg-avatar ' + roleConfig.cls + '" aria-hidden="true">' + roleConfig.avatar + '</div>' +
+        (msg.index ? '<div class="msg-index-badge">#' + msg.index + '</div>' : '') +
+        '</div>';
 
       msgDiv.innerHTML =
         avatarHtml +
@@ -1062,6 +1104,14 @@ function renderHistoryMessages(sid, messages) {
 
       // 渲染内容
       var contentEl = msgDiv.querySelector('.msg-content');
+      // assistant 卡片登记为后续 tool 行的宿主；
+      // 纯 tool_calls 无正文的卡片隐藏空内容区（与实时流式同构）
+      if (msg.role === 'assistant') {
+        _histToolHost = msgDiv.querySelector('.msg-body');
+        if (msg.tool_calls && msg.tool_calls.length > 0 && !msg.content) {
+          contentEl.classList.add('stream-pending');
+        }
+      }
       // 思考块：已落盘的 reasoning_content → 折叠态插在正文前（n4 历史回看）
       if (msg.reasoning_content) {
         var thinkEl = buildThinkBlock(msg.reasoning_content);
@@ -1084,7 +1134,7 @@ function renderHistoryMessages(sid, messages) {
     renderMath();
   }
 
-  scrollToBottom();
+  scrollToBottom(true);  // 历史加载/回溯 = 视图重置 → 强制滚底
 }
 
 

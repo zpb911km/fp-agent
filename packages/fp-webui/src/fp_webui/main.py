@@ -241,6 +241,8 @@ async def _run_reload_continuation() -> None:
                 "session_id": _st.session_id,
                 "final_content": response.content,
                 "non_system_count": non_sys_count,
+                # 命令输出不落盘 → 前端据此以 ephemeral 渲染（不计索引、无回溯按钮）
+                "from_command": bool(response.metadata.get("from_command")),
             })
         except asyncio.CancelledError:
             await event_bus.publish({"type": "cancelled"})
@@ -1016,6 +1018,8 @@ async def websocket_chat(
                                 "session_id": portal.run.status.session_id,
                                 "final_content": response.content,
                                 "non_system_count": non_sys_count,
+                                # 命令输出不落盘 → 前端据此以 ephemeral 渲染（不计索引、无回溯按钮）
+                                "from_command": bool(response.metadata.get("from_command")),
                             })
                     except asyncio.CancelledError:
                         await event_bus.publish({"type": "cancelled"})
