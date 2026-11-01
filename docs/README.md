@@ -41,7 +41,7 @@
 | | [dev/测试.md](dev/测试.md) | 测试体系、会话隔离、防漂移门禁 |
 | | [dev/文件命名约定.md](dev/文件命名约定.md) | 「文件即开关」通用规则（Plugin/Skill/Command/Tool 共用） |
 | 🔌 **ACP 协议** | [acp/README.md](acp/README.md) | ACP 协议索引（完整规范在子包 `packages/fp-acp/README.md`） |
-| 📋 **项目信息** | [CHANGELOG.md](CHANGELOG.md) | 版本历史：0.2.1（迭代记录见 CHANGELOG） |
+| 📋 **项目信息** | [CHANGELOG.md](CHANGELOG.md) | 版本历史：0.2.2（迭代记录见 CHANGELOG） |
 | | [CONTRIBUTING.md](CONTRIBUTING.md) | PR 流程、代码风格、Commit 规范 |
 
 ---
