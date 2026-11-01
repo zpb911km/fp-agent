@@ -180,6 +180,22 @@ class TestAppendOnly(unittest.TestCase):
     def test_source_switch_is_not_append(self) -> None:
         self.assertFalse(ctxview.is_append_only(self._sig("a", "b"), self._sig("x", "y")))
 
+    def test_empty_baseline_with_content_is_not_append(self) -> None:
+        """空基线 + 非空投影 → 必须重画（新会话里 /resume 的真实形态）
+
+        回归：``current[:0] == ()`` 恒真，曾把任何换源误判成「纯尾部追加」，
+        基线被静默推进而视图永不重建。
+        """
+        self.assertFalse(ctxview.is_append_only((), self._sig("x", "y")))
+
+    def test_empty_baseline_and_empty_projection_agree(self) -> None:
+        """空基线 + 空投影 = 一致（新会话刚启动，无内容可画）"""
+        self.assertTrue(ctxview.is_append_only((), ()))
+
+    def test_nonempty_baseline_vs_empty_projection_is_not_append(self) -> None:
+        """上下文被清空（/new、/clear）→ 视图里还有旧卡 → 必须清屏重画"""
+        self.assertFalse(ctxview.is_append_only(self._sig("a"), ()))
+
     def test_message_count_skips_prompt(self) -> None:
         msgs = [_msg("system", "SP"), _msg("user", "hi"), _msg("assistant", "yo")]
         self.assertEqual(ctxview.message_count(msgs), 2)
@@ -311,6 +327,36 @@ class TestSyncView(_SyncHarness):
             return app._sync_view()  # noqa: SLF001
 
         self.assertTrue(self.drive(initial, action)["value"])
+
+    def test_empty_baseline_source_switch_redraws(self) -> None:
+        """新会话（只有 system，基线为空）里 /resume → 必须重建视图
+
+        真实场景回归：TUI 启动于新会话时基线为空，换源曾被判成「纯尾部追加」，
+        视图停在欢迎屏不动。
+        """
+        initial = [_msg("system", "SP")]  # project → 空投影 → settled == ()
+
+        def action(fake: _StubPortal, app: FPApp) -> tuple[bool, list[str]]:
+            fake.messages = [_msg("system", "SP2"), _msg("user", "目标会话内容")]
+            redrawn = app._sync_view()  # noqa: SLF001
+            return redrawn, [str(c.render()) for c in app.query_one("#chat").children]
+
+        out = self.drive(initial, action)["value"]
+        redrawn, texts = out
+        self.assertTrue(redrawn)
+        self.assertTrue(any("目标会话内容" in t for t in texts), texts)
+
+    def test_mount_renders_existing_history(self) -> None:
+        """启动即带上下文（-r 续会话）→ 历史立刻进视图，不等第一次断裂"""
+        initial = [_msg("system", "SP"), _msg("user", "历史第一句"), _msg("assistant", "历史回答")]
+
+        def action(fake: _StubPortal, app: FPApp) -> list[str]:
+            # Markdown.render() 是异步的（同步调用只回 Blank），故并取 source
+            return [str(c.render()) + str(getattr(c, "source", "")) for c in app.query_one("#chat").children]
+
+        texts = self.drive(initial, action)["value"]
+        self.assertTrue(any("历史第一句" in t for t in texts), texts)
+        self.assertTrue(any("历史回答" in t for t in texts), texts)
 
     def test_busy_defers_then_flushes(self) -> None:
         """在途不重画：只记账；busy 落定后的对账补齐"""

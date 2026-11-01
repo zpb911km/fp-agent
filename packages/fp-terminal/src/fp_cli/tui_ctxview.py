@@ -204,7 +204,15 @@ def is_append_only(settled: tuple[str, ...], current: tuple[str, ...]) -> bool:
 
     只看前缀，不做 LCS：改写只会「删块 / 插块 / 换内容」，不会重排；
     任一单元内容变化即 key 不同，前缀立刻断裂。
+
+    **空基线必须单独判**：``settled == ()`` 的含义是「视图里没有任何上下文单元」
+    （新会话启动，或只存了 system prompt），它不构成「已呈现的内容」。若对空
+    基线套前缀判据，``current[:0] == ()`` 恒成立 → 任何换源都被误判为「纯尾部
+    追加」，基线被静默推进而视图永不重建（现象：新会话里 ``/resume`` 之后
+    消息区仍是欢迎屏）。故空基线只在**投影也为空**时才算一致。
     """
+    if not settled:
+        return not current
     return len(current) >= len(settled) and current[: len(settled)] == settled
 
 

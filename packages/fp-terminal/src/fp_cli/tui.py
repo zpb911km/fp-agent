@@ -999,9 +999,10 @@ class FPApp(App[None]):
         # 否则「面板里改了键、输入框里按却没反应」。
         self._key_actions = build_key_actions(keymap)
         self.set_interval(0.4, self._refresh_status)
-        # 立对账基线：启动时的 transcript（-r 续会话）**不**触发重画——此刻视图
-        # 还是欢迎屏，重画历史既慢又突兀。之后任何前缀断裂都会走到 _sync_view。
+        # 立对账基线；启动时就带着上下文（-r 续会话 / 自动恢复最新会话）→ 立刻
+        # 把历史挂到欢迎头之下：「看见 == 实际」从第一帧就成立，不必等第一次断裂。
         self._mark_settled()
+        self._mount_history()
         self._refresh_status()
         # 坏配置合并成一条明示（逐条刷屏同样是噪音）
         if problems:
@@ -1388,6 +1389,31 @@ class FPApp(App[None]):
         )
         return True
 
+    def _fold_note(self, hidden: int) -> Static:
+        """超量单元的折叠提示（重画与启动渲染共用同一条文案/样式）"""
+        return Static(
+            Text(
+                f"… 更早 {hidden} 个单元已折叠（仅显示最后 {self.CTX_REDRAW_MAX_UNITS} 个）",
+                style=tui_style("hint"),
+            )
+        )
+
+    def _mount_history(self) -> None:
+        """启动即渲染既有上下文（``-r`` 续会话 / 自动恢复）。
+
+        与 ``_redraw_units`` 的区别：**不清屏**——欢迎头（模型 / 会话 / 版本提示）
+        是启动信息，历史挂在其下方即可。此后任何断裂重画都以投影为准。
+        """
+        units = ctxview.project(self._transcript())
+        if not units:
+            return
+        hidden = max(0, len(units) - self.CTX_REDRAW_MAX_UNITS)
+        widgets: list[Any] = [self._fold_note(hidden)] if hidden else []
+        widgets.extend(self._unit_widgets(units[hidden:]))
+        chat = self._chat()
+        chat.mount_all(widgets)
+        chat.scroll_end(animate=False)
+
     def _redraw_units(self, units: list[ctxview.Unit], note: str = "") -> None:
         """清空消息区并按投影重画。
 
@@ -1411,14 +1437,7 @@ class FPApp(App[None]):
             widgets.append(Static(Text(note, style=tui_style("notice"))))
         hidden = max(0, len(units) - self.CTX_REDRAW_MAX_UNITS)
         if hidden:
-            widgets.append(
-                Static(
-                    Text(
-                        f"… 更早 {hidden} 个单元已折叠（仅显示最后 {self.CTX_REDRAW_MAX_UNITS} 个）",
-                        style=tui_style("hint"),
-                    )
-                )
-            )
+            widgets.append(self._fold_note(hidden))
         widgets.extend(self._unit_widgets(units[hidden:]))
         if widgets:
             chat.mount_all(widgets)
