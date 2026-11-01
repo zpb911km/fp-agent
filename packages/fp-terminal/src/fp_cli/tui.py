@@ -58,6 +58,7 @@ from fp_core.api import IOChannel, portal
 from fp_core.logger import Logger
 
 from . import charts, completion
+from . import tui_ctxview as ctxview
 from .appearance import (
     UNSET,
     AppearancePanel,
@@ -937,6 +938,14 @@ class FPApp(App[None]):
         # 斜杠补全浮层：当前候选全表 + 选中下标（↑↓ 移动，Tab 插入选中项）
         self._hint_matches: list[completion.Candidate] = []
         self._hint_idx = 0
+        # ── 上下文对账（视图 == transcript 非 system 投影，见 _sync_view）──
+        # _ctx_settled：上次确认「视图与之相符」的投影指纹；_ctx_probe：O(1) 快查
+        # 基线（条数 + 末条角色/长度），用于把空闲期的对账成本压到接近零。
+        self._ctx_settled: tuple[str, ...] = ()
+        self._ctx_probe: tuple[int, str, str] | None = None
+        self._ctx_msgs = 0
+        # 流式/忙碌期检测到改写 → 记账，收尾拍统一补对账
+        self._sync_pending = False
 
     def get_default_screen(self) -> Screen[None]:
         """默认屏换用带 #6643 竞态修复的 FPDefaultScreen。"""
@@ -990,6 +999,9 @@ class FPApp(App[None]):
         # 否则「面板里改了键、输入框里按却没反应」。
         self._key_actions = build_key_actions(keymap)
         self.set_interval(0.4, self._refresh_status)
+        # 立对账基线：启动时的 transcript（-r 续会话）**不**触发重画——此刻视图
+        # 还是欢迎屏，重画历史既慢又突兀。之后任何前缀断裂都会走到 _sync_view。
+        self._mark_settled()
         self._refresh_status()
         # 坏配置合并成一条明示（逐条刷屏同样是噪音）
         if problems:
@@ -1148,6 +1160,10 @@ class FPApp(App[None]):
             raise
         except Exception as e:  # noqa: BLE001 — 续接失败展示而非崩溃
             self._line(f"续接失败: {e}", tui_style("error"))
+        finally:
+            # 续接同样走通用对账：reload 期间若上下文被换源（handoff/外部改写），
+            # 这里与 /sc 走的是同一条路径，无任何特判。
+            self._sync_view()
 
     def _render_welcome(self) -> None:
         try:
@@ -1289,6 +1305,147 @@ class FPApp(App[None]):
             self._status_note = str(payload)
             self._refresh_status()
 
+    # ── 上下文对账 ───────────────────────────────────────────
+    #
+    # 契约：消息区 == transcript 的非首条 system 投影（见 tui_ctxview 模块说明）。
+    # 判据是**状态**而不是事件——不回答「谁改了上下文」，只回答「当前投影是否仍是
+    # 已确认投影的尾部追加」。于是 /sc、/back、/resume、shortcircuit 工具、插件、
+    # reload 续接、外部客户端改写……全部一视同仁，机制里没有任何名字。
+
+    #: 重画上限：超出只画尾部。长会话（几百条）全量重建会明显卡顿，而用户真正
+    #: 要核对的是近处上下文。常量而非特判，调大即可换更多上下文。
+    CTX_REDRAW_MAX_UNITS = 200
+
+    def _transcript(self) -> list[dict[str, Any]]:
+        """读当前上下文（只读快照）；实例未开启时为空。"""
+        if not portal.is_open:
+            return []
+        try:
+            return list(portal.run.transcript)
+        except Exception:  # noqa: BLE001 — 对账失败绝不打断主链
+            return []
+
+    @staticmethod
+    def _probe(messages: list[dict[str, Any]]) -> tuple[int, str, str]:
+        """O(1) 快查指纹：条数 + 末条角色 + 末条正文摘要。
+
+        任一项变化即进入全量对账，命中即跳过整轮投影，空闲期成本≈两次字典取值。
+        摘要这一项是必需的——只比长度会漏掉「换源但末条等长」（``/resume`` 到
+        一个长度相同的会话）这类改写。
+        """
+        if not messages:
+            return (0, "", "")
+        # transcript 的元素理论上恒为 dict；外部注入可能塞进异物，故仍做运行时判定
+        last = messages[-1] if isinstance(messages[-1], dict) else {}  # pyright: ignore[reportUnnecessaryIsInstance]
+        content = last.get("content")
+        return (
+            len(messages),
+            str(last.get("role") or ""),
+            ctxview.digest(content) if isinstance(content, str) else "",
+        )
+
+    def _mark_settled(
+        self,
+        units: list[ctxview.Unit] | None = None,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """把当前投影记为「已对账」基线（此刻视图与之一致，或本就不打算重画）"""
+        messages = self._transcript() if messages is None else messages
+        units = ctxview.project(messages) if units is None else units
+        self._ctx_settled = ctxview.fingerprint(units)
+        self._ctx_probe = self._probe(messages)
+        self._ctx_msgs = ctxview.message_count(messages)
+        self._sync_pending = False
+
+    def _sync_view(self) -> bool:
+        """对账一次：视图需要重建则重建，返回是否重建过。
+
+        时机纪律：流式在途（busy / 正文在写 / 思考卡活跃）时不重画——会把正在
+        生成的卡拆掉，且此刻投影还在长。此时只记账，收尾拍统一补。
+        """
+        if not self.mounted:
+            return False
+        if self._is_busy() or self._live is not None or self._think_active:
+            self._sync_pending = True
+            return False
+        messages = self._transcript()
+        probe = self._probe(messages)
+        if not self._sync_pending and probe == self._ctx_probe:
+            return False  # 快查未变：一个字节都不动
+        units = ctxview.project(messages)
+        sig = ctxview.fingerprint(units)
+        if ctxview.is_append_only(self._ctx_settled, sig):
+            # 纯尾部追加：这些内容事件流已经渲染过，只推进基线，不动视图
+            self._ctx_settled, self._ctx_probe = sig, probe
+            self._ctx_msgs = ctxview.message_count(messages)
+            self._sync_pending = False
+            return False
+        previous = self._ctx_msgs
+        self._mark_settled(units, messages)
+        self._redraw_units(
+            units,
+            note=f"{tui_glyph('reload')} 上下文已同步：视图重建（{previous} → {self._ctx_msgs} 条消息）",
+        )
+        return True
+
+    def _redraw_units(self, units: list[ctxview.Unit], note: str = "") -> None:
+        """清空消息区并按投影重画。
+
+        事件流产生的「非上下文」块（提示行、报错、命令回显）会随之消失——它们
+        本就不属于上下文。调用方若需要保留某条回显，必须在重画**之后**补。
+        """
+        # 在途引用必须先断：否则后续 feed() 会写到已移除的 widget 上
+        self._live = None
+        self._live_buf = ""
+        self._think_card = None
+        self._think_active = False
+
+        chat = self._chat()
+        # 保留 #chat_anchor（compose 契约的一部分）：整体 remove_children 会让
+        # 同 id 的锚点在「移除尚未落定 + 立即重挂」之间撞 DuplicateIds。
+        for child in list(chat.children):
+            if child.id != "chat_anchor":
+                child.remove()
+        widgets: list[Any] = []
+        if note:
+            widgets.append(Static(Text(note, style=tui_style("notice"))))
+        hidden = max(0, len(units) - self.CTX_REDRAW_MAX_UNITS)
+        if hidden:
+            widgets.append(
+                Static(
+                    Text(
+                        f"… 更早 {hidden} 个单元已折叠（仅显示最后 {self.CTX_REDRAW_MAX_UNITS} 个）",
+                        style=tui_style("hint"),
+                    )
+                )
+            )
+        widgets.extend(self._unit_widgets(units[hidden:]))
+        if widgets:
+            chat.mount_all(widgets)
+        chat.scroll_end(animate=False)
+
+    def _unit_widgets(self, units: list[ctxview.Unit]) -> list[Any]:
+        """投影单元 → widget（重画的唯一渲染出口，复用事件流同款构件）"""
+        out: list[Any] = []
+        for unit in units:
+            if unit.kind == ctxview.KIND_THINK:
+                card = ThinkCard()
+                card.feed(unit.text)
+                card.fold()
+                out.append(card)
+            elif unit.kind == ctxview.KIND_ASSISTANT:
+                out.append(Markdown(unit.text))
+            elif unit.kind == ctxview.KIND_USER:
+                out.append(Static(Text(f"{tui_glyph('prompt')} {unit.text}", style=tui_style("prompt"))))
+            elif unit.kind == ctxview.KIND_TOOL_CALL:
+                out.append(_tool_card({"name": unit.name, "args": unit.args}))
+            elif unit.kind == ctxview.KIND_TOOL_RESULT:
+                out.append(_tool_result_card({"text": unit.text}))
+            else:
+                # 兜底：未知角色/未知结构**必须画出来**——漏一条，视图就不再等于上下文
+                out.append(Static(Text(f"[{unit.name or 'unknown'}] {unit.text}", style=tui_style("warning"))))
+        return out
+
     # ── ask（n8） ────────────────────────────────────────────
 
     @on(AskRequest)
@@ -1349,6 +1506,9 @@ class FPApp(App[None]):
         if placeholder != self._placeholder:
             self._placeholder = placeholder
             prompt.placeholder = placeholder
+        # 0.4s 拍的懒对账：覆盖「没人通知我们」的改写（reload 续接、外部客户端、
+        # 插件、后台任务）。快查未变时开销≈两次字典取值，空闲期可忽略。
+        self._sync_view()
 
     # ── 输入路由 ─────────────────────────────────────────────
 
@@ -1420,7 +1580,10 @@ class FPApp(App[None]):
             return
         finally:
             self._sending = False
-            self._refresh_status()
+        # 收尾拍对账：本轮任何来源（命令 / 工具 / 插件 / 外部）改了上下文，此刻落地。
+        # 必须早于下面命令输出的渲染——重画会清掉事件流块，先重画再补回显才不会丢。
+        self._sync_view()
+        self._refresh_status()
         if resp is not None and resp.content and (command or not self._io.consumed_stream):
             # 斜杠命令输出 / 早退响应（blocked、过滤等未走流式）→ 补渲染
             self._seal_live()
