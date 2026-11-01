@@ -374,10 +374,15 @@ function handleEvent(data) {
       break;
 
     case 'history_changed': {
-      // 上下文被改写型命令重写（/back /sc /clear /fork…，后端长度对比触发）：
-      // clearUI + 全量重渲染当前会话历史，消除卡片与后端落盘的失配。
+      // 上下文被整体重写（改写型命令 /back /sc /clear /fork…，或改写型工具
+      // 如 shortcircuit 退化历史块）——后端 msg_count 连续性校验触发。
+      // clearUI + 全量重渲染，消除卡片与后端落盘的失配。
       // 与「↩ 回溯」按钮路径互斥：此处接管渲染后取消 done 侧的冗余拉取。
       _pendingBacktrack = false;
+      // ── 时机闸门：turn 进行中禁止立刻刷新 ──
+      // 此刻前端正在流式渲染当前卡片，clearUI 会把它抹掉；且本轮尚未落盘，
+      // 重拉回来的历史里没有它 → 必须等 done/cancelled/error 收尾后再刷。
+      if (processing) { _pendingHistoryRefresh = true; break; }
       clearUI();
       if (sessionId) setTimeout(function() { fetchSessionHistory(sessionId); }, 100);
       break;
@@ -394,6 +399,7 @@ function handleEvent(data) {
       endStreamTurn();       // 异常终结本轮，卡片不再被后续 done 认领
       showError(data.error);
       setProcessing(false);
+      flushPendingHistoryRefresh(sessionId);  // 异常也要消费挂起的重写刷新
       break;
 
     case 'done':
@@ -425,13 +431,8 @@ function handleEvent(data) {
         sessionId = data.session_id;
         sessionLabel.textContent = '📄 ' + data.session_id;
       }
-      if (_pendingBacktrack) {
-        _pendingBacktrack = false;
-        var curSid = data.session_id || sessionId;
-        if (curSid) {
-          setTimeout(function() { fetchSessionHistory(curSid); }, 100);
-        }
-      }
+      // ── 轮次收尾：消费挂起的「↩ 回溯」或「turn 中被重写」的刷新请求 ──
+      flushPendingHistoryRefresh(data.session_id || sessionId);
       break;
 
     case 'cancelled':
@@ -441,6 +442,7 @@ function handleEvent(data) {
       // 取消 5 秒安全网定时器
       if (window._cancelTimeout) { clearTimeout(window._cancelTimeout); window._cancelTimeout = null; }
       setProcessing(false);
+      flushPendingHistoryRefresh(sessionId);  // 中断也要消费挂起的重写刷新
       addSystemMessage('⏹️ 已中断');
       break;
 
@@ -818,6 +820,19 @@ function newAgent() {
     })
     .catch(function(err) { showError('新建 Agent 失败: ' + err.message); })
     .finally(function() { btn.textContent = originalText; btn.disabled = false; });
+}
+
+// ── 轮次收尾统一刷新：消费「↩ 回溯」与「turn 中被重写」两类挂起请求 ──
+// 两者成因不同：回溯路径已在前端 clearUI 过（本地已清空），而重写路径的卡片
+// 已与后端落盘失配 → 必须先 clearUI 再全量重拉。合并为一次请求避免重复拉取。
+function flushPendingHistoryRefresh(sid) {
+  if (!_pendingBacktrack && !_pendingHistoryRefresh) return;
+  var needClear = _pendingHistoryRefresh;
+  _pendingBacktrack = false;
+  _pendingHistoryRefresh = false;
+  if (!sid) return;
+  if (needClear) clearUI();
+  setTimeout(function() { fetchSessionHistory(sid); }, 100);
 }
 
 function fetchSessionHistory(sid) {

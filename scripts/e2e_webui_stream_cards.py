@@ -387,6 +387,62 @@ def case_empty_deltas_no_fake_think(page, url: str) -> None:
     _check("真正文帧折叠思考栏", last["state"] == "c", str(last))
 
 
+def case_history_changed_midturn(page, url: str) -> None:
+    """轮次中收到 history_changed：不得立刻 clearUI 打断流，等 done 后统一重拉。
+
+    后端在**工具轮中途**也可能广播 history_changed（工具改写了上下文，如
+    shortcircuit 退化历史块）。此刻前端正在流式渲染当前卡片：立刻 clearUI 会
+    把卡片抹掉，而落盘历史尚不含本轮，重拉必失配。故前端只记账
+    （`_pendingHistoryRefresh`），待 done/cancelled/error 收尾后统一刷。
+    """
+    _boot(page, url)
+    # 覆盖 /messages 桩：返回可辨识的历史，用于确认「done 后确实重拉了」
+    page.evaluate(
+        """() => {
+      window.fetch = async (u) => {
+        const s = String(u);
+        let body = {};
+        if (s.indexOf('/api/health') >= 0) body = { agent: 'e2e-model', session: 'sess0001' };
+        else if (s.indexOf('/messages') >= 0) body = { messages: [
+          { role: 'assistant', content: '重写后的历史正文', index: 1 }] };
+        else if (s.indexOf('/api/sessions') >= 0) body = { sessions: [] };
+        else if (s.indexOf('/api/commands') >= 0) body = { commands: [] };
+        return new Response(JSON.stringify(body), { status: 200,
+          headers: { 'Content-Type': 'application/json' } });
+      };
+    }"""
+    )
+    # 注入事件绕过了真实提交路径 → 用 connected 的运行时快照恢复「处理中」状态
+    # （否则前端 processing=false，闸门不生效，等于没测到这个分支）
+    _emit(
+        page,
+        {
+            "type": "connected",
+            "run_id": "r1",
+            "seq": 0,
+            "session_id": "sess0001",
+            "processing": True,
+            "replay": False,
+            "resync": False,
+        },
+    )
+    _emit(page, {"type": "user_message", "content": "跑个会改上下文的工具"})
+    _emit(page, {"type": "llm_start"})
+    _emit(page, {"type": "chunk", "content": "半截正文正在流"})
+    page.wait_for_timeout(220)  # 100ms 正文节流 flush
+    _emit(page, {"type": "history_changed", "msg_count": 3})
+    page.wait_for_timeout(260)  # 若立刻刷新，clearUI + fetch 会在 100ms 内抹掉卡片
+    _check("轮次中收到 history_changed 不打断流（卡片仍在）", "半截正文正在流" in _text(page))
+
+    _emit(
+        page,
+        {"type": "done", "session_id": "sess0001", "final_content": "半截正文正在流", "non_system_count": 3},
+    )
+    page.wait_for_timeout(320)  # done 侧 setTimeout(100) 后重拉
+    txt = _text(page)
+    _check("done 后消费挂起刷新：重拉历史替换失配卡片", "重写后的历史正文" in txt and "半截正文正在流" not in txt)
+
+
 CASES = (
     case_command_after_text,
     case_normal_turn_no_dup,
@@ -397,6 +453,7 @@ CASES = (
     case_empty_deltas_no_fake_think,
     case_think_status_live,
     case_pure_think_tool_call_folds,
+    case_history_changed_midturn,
 )
 
 

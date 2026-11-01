@@ -998,6 +998,9 @@ function addSystemMessage(text) {
 // ── 会话历史 ──
 
 var _pendingBacktrack = false;
+// turn 进行中收到 history_changed → 只记账，等 done/cancelled/error 收尾再重拉。
+// 立刻 clearUI 会抹掉正在流式生成的卡片，且此刻落盘历史不含本轮，重拉必失配。
+var _pendingHistoryRefresh = false;
 var liveMsgIndex = 0;
 
 function renderHistoryMessages(sid, messages) {

@@ -282,7 +282,7 @@ core 内置 `EventBridge` 负责 LLM/工具级事件；WebUI 随
 | `ON_SHUTDOWN` | `shutdown` | 显示关闭通知 |
 | `ON_CTX_APPEND`（op=`user`，WebUIBridge） | `user_message` | 渲染用户气泡——直发 / 排队消费 / ask 回答 / 空闲泵注入的统一显示入口 |
 | `ON_COMMAND`（handled 或有输出，WebUIBridge） | `user_message`（`ephemeral`） | 命令输入回显：不落盘、不计回溯索引；显式让渡（fallthrough）不发，由 `ON_CTX_APPEND` 兜底防双渲染 |
-| `ON_BEFORE_COMMAND` + `ON_COMMAND`（WebUIBridge，消息数前后对比） | `history_changed` | 改写型命令（`/back` `/sc` `/clear` `/fork`…）重写上下文后广播，前端 `clearUI` + 重拉历史 REST 全量重渲染；长度对比为通用判据，不硬编码命令名 |
+| `ON_CTX_APPEND` / `ON_ITERATION` / `ON_TURN_END` / `ON_CONTEXT_UPDATE` / `ON_COMMAND`（WebUIBridge，**msg_count 连续性校验**） | `history_changed` | 上下文被整体重写后广播：改写型**命令**（`/back` `/sc` `/clear` `/fork`…）与改写型**工具**（shortcircuit 退化/合并历史块）都走 `set_messages`/`replace_all`，不经 `add_*` → 前端卡片与落盘失配。判据是连续性而非命令名：桥跟随每条入库后的真实长度，任何绕过 append 的批量改写都会让下一个观察点 `msg_count ≠ 期望值` = 断裂。`ON_CTX_REPAIR` 只同步基线不广播（引擎内部修复不算用户可见改写）。失效模式刻意选「响亮误报」（漏发 append 钩子→多刷一次）而非「静默漏报」 |
 
 #### 4.3 认证中间件
 
@@ -517,7 +517,7 @@ ws://host:port/ws/chat?token=your_token
 | `ask` | `version`, `ask_id`, `prompt`, `options`, `suggest` | 交互式问答（v2 结构化：`options` 渲染一键选择按钮、`suggest` 渲染推荐徽章；v1 旧前端只有 `prompt`） |
 | `user_message` | `content`, `ephemeral?` | **用户消息显示触发源**：直发与环顶注入（排队消费、ask 回答、空闲泵注入）经 `ON_CTX_APPEND` 广播；命令回显带 `ephemeral: true`（不落盘、不计回溯索引）。前端凭此渲染用户气泡 → 多设备单端口同步、与历史 REST 一致 |
 | `queued` | `content` | 运行中 submit 入队回执——**总线广播**（非直发），全设备渲染 ⏳ 气泡；消费落盘时经 `user_message` 就地转正，不重复渲染 |
-| `history_changed` | `msg_count` | 改写型命令重写上下文（命令前后消息数对比触发，WebUIBridge）——前端 `clearUI` + 重拉 `/api/sessions/{sid}/messages` 全量重渲染，消除卡片与后端落盘失配 |
+| `history_changed` | `msg_count` | 上下文被整体重写（改写型命令**或**改写型工具如 shortcircuit，`msg_count` 连续性校验触发，WebUIBridge）——前端 `clearUI` + 重拉 `/api/sessions/{sid}/messages` 全量重渲染，消除卡片与后端落盘失配。**时机闸门**：turn 进行中收到只记账（`_pendingHistoryRefresh`），待 `done`/`cancelled`/`error` 收尾后统一刷——立刻刷会抹掉正在流式生成的卡片，且此刻落盘历史尚不含本轮 |
 | `info` | `content` | IO 通道信息 |
 | `hint` | `content` | 提示信息 |
 | `item` | `content` | 列表项输出 |

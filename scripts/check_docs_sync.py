@@ -139,6 +139,8 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
     ("packages/fp/tests/*.py", ["docs/dev/测试.md"], ["docs/dev/测试.md"]),
     # 终端测试（ask 解析契约等）
     ("packages/fp-terminal/tests/*.py", ["docs/dev/测试.md"], ["docs/dev/测试.md"]),
+    # WebUI 桥/API 测试（WS 事件语义、上下文改写连续性校验；新增测试文件需同步一览表）
+    ("packages/fp-webui/tests/*.py", ["docs/dev/测试.md"], ["docs/dev/测试.md"]),
     # WebUI 前端静态资源（ask 卡片等组件行为随 WebUI 手册走）
     ("packages/fp-webui/src/fp_webui/static/*.js", ["docs/guide/WebUI手册.md"], []),
     ("packages/fp-webui/src/fp_webui/static/*.css", ["docs/guide/WebUI手册.md"], []),
