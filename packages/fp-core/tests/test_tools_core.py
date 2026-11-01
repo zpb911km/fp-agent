@@ -23,6 +23,7 @@ from fp_core.tools.core import (
     _execute_read_file,
     _execute_write_file,
     _file_registry,
+    _mask_heredoc,
     _mask_quoted,
     _suggest_paths,
     execute_core_tool,
@@ -452,6 +453,26 @@ class TestSideEffect:
             R + " ~",
             R + " .",
             R + " ../",
+            # 先前漏报的等价写法：选项插入 / 变量 / 转义通配
+            R + " --no-preserve-root /",
+            R + " --recursive --force /",
+            R + " $HOME",
+            R + " ${HOME}",
+            R + " /*",
+            R + " /\\*",
+            # 其它等价毁灭路径
+            "find / -delete",
+            "find ~ -exec rm {} ;",
+            "echo hi > /dev/sda",
+            "kill -9 1",
+            "kill -9 -1",
+            # 真正执行的是引号里的那段：shell -c / eval 必须穿透
+            "bash -c '" + R + " /'",
+            'sh -lc "' + R + ' $HOME"',
+            "eval '" + R + " /'",
+            # heredoc 正文的接收者是 shell → 会被执行，不剥离，照样命中
+            "bash <<'EOF'\n" + R + " /\nEOF",
+            "sh -s <<EOF\n" + R + " /\nEOF",
             "cd /tmp; " + R + " .",
             "sudo mkfs.ext4 /dev/sdb1",
             "dd if=/dev/zero of=/dev/sda",
@@ -479,6 +500,17 @@ class TestSideEffect:
             "cat notes.md | grep 'dd if='",
             "echo 'rm -rf /tmp/xxx' > cleanup.sh",
             R + " /tmp/build-cache",  # 正常删除 /tmp 子目录
+            R + " ./dist",  # 相对子目录
+            R + " ~/project/build",  # 家目录下的具体子路径
+            R + " a/b/..",  # 路径中间的 .. 不是删除目标
+            "chmod -R 777 /var/www",  # 具体目录属正常运维
+            "chown -R me:me /home/me/proj",
+            "echo 'bash -c \"" + R + " /\"'",  # 引号内的示例命令是字面量
+            # heredoc 正文是喂给接收者的数据（接收者非 shell）→ 纯字面量
+            "cat > x.sh <<'EOF'\n" + R + " /\nEOF",
+            "cat <<EOF\n$HOME\nEOF",
+            "git commit -F - <<'EOF'\nfix: 说明 " + R + " --no-preserve-root / 的漏报\nEOF",
+            "cat <<'EOF'\nbash -c '" + R + " /'\nEOF",
             "dd if=in.img of=out.img",
             "grep -rn 'shutdown|reboot' docs/",
             'grep -rn "rm -rf /" scripts/',
@@ -491,6 +523,31 @@ class TestSideEffect:
         masked = _mask_quoted("echo 'rm -rf /' && ls")
         assert len(masked) == len("echo 'rm -rf /' && ls")
         assert "rm" not in masked
+
+    def test_mask_heredoc_preserves_length(self):
+        cmd = "git commit -F - <<'EOF'\n" + self.R + " /\nEOF"
+        masked = _mask_heredoc(cmd)
+        assert len(masked) == len(cmd)  # 等长 → 不影响 ^ 锚定与嵌套扫描对位
+        assert masked.count("\n") == cmd.count("\n")  # 行数不变 → MULTILINE 锚定不变
+        assert self.R not in masked
+        # 接收者是 shell 时不剥离（正文会被执行）
+        shell_cmd = "bash <<'EOF'\n" + self.R + " /\nEOF"
+        assert self.R in _mask_heredoc(shell_cmd)
+
+    @pytest.mark.asyncio
+    async def test_hit_returns_hint_not_execute(self):
+        """命中规则 → 拒绝本次调用并回提醒；不执行，也不向用户求批（不阻塞）。"""
+        result = await _execute_bash("pkill -f fp-nonexistent-process")
+        assert "未执行" in result
+        assert "force=true" in result  # 明确告知 LLM 的出路
+        assert "y/n" not in result  # 不再弹人类确认门
+        assert "是否执行" not in result
+
+    @pytest.mark.asyncio
+    async def test_force_bypasses_hint(self):
+        """force=true 是唯一出口：带 force 即跳过提醒直接执行。"""
+        result = await _execute_bash("pkill -f fp-nonexistent-process", force=True)
+        assert "未执行" not in result  # 检查已跳过，命令真的跑了
 
 
 # ═══════════════════════════════════════════════════════════

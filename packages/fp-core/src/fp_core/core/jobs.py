@@ -4,7 +4,7 @@
 契约：docs/dev/引擎.md「环顶惰性注入与退出清算」「注入消息身份协议」。
 
 分层说明：本模块是 L1 内核（四层依赖模型禁止 L1 静态 import L2 扩展），
-因此 jobs 服务、环顶注入队列、危险命令确认门、退出清算等**共享基础设施**
+因此 jobs 服务、环顶注入队列、人类确认门、退出清算等**共享基础设施**
 放在这里；面向 LLM 的工具壳（ask_user/wait_job/kill_job/list_jobs）留在
 tools/extensions/background_plugin.py（L2），经 L2→L1 合法引用本模块。
 
@@ -13,8 +13,9 @@ tools/extensions/background_plugin.py（L2），经 L2→L1 合法引用本模�
    agent 环顶 drain_ready() 串行注入（非人类项带 ⁂[kind] 身份标头，见下），
    无锁竞态。状态独立落盘 JOB_DIR（不混进 session context），重启可查、可清算。
 2. 注入队列   — 完成回调/ask 回答只入队；环顶 drain 前不进对话。
-3. 确认门     — human_confirm：危险命令命中 BLOCK 规则时向人求批准
-   （ask_user 的杀手应用），无 io/非交互通道降级 None，不挂死。
+3. 确认门     — human_confirm：需要人类即时裁决时向人求批准（L2 工具可用）；
+   无 io/非交互通道降级 None，不挂死。bash 的危险命令提醒**不经此门**
+   —— 它只拒绝本次调用、把风险回给 LLM 判断，不打断用户。
 
 不变量（见设计文档 §8）：
 - I1 中心性：shutdown_all/确认门独立于 LLM；io.ask 失败/无 io 降级。
@@ -331,7 +332,7 @@ def load_file_job(job_id: str) -> dict[str, Any] | None:
         return None
 
 
-# ── 危险命令确认门（ask_user 的杀手应用 — 设计 §4） ─────
+# ── 人类确认门（通用裁决通道 — 设计 §4） ─────
 
 
 async def human_confirm(prompt: str, suggest: str = "n") -> bool | None:
@@ -356,7 +357,7 @@ async def human_confirm(prompt: str, suggest: str = "n") -> bool | None:
             reply = (
                 await asyncio.wait_for(
                     io.ask(prompt, options=["y", "n"], suggest=suggest),
-                    timeout=120.0,  # 确认门有界等待 — 超时回落原拦截消息
+                    timeout=120.0,  # 有界等待 — 超时回落 None，由调用方定语义
                 )
             ).strip()
         except Exception:  # noqa: BLE001 — 含 TimeoutError/deferred 空答

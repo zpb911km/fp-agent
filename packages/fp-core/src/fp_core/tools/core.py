@@ -185,35 +185,78 @@ def _git_bash_missing_message() -> str:
     )
 
 
-# ── bash 副作用检查 ─────────────────────────────────────────────────────
-# 定位：提醒层而非安全层——防"无意识自伤/毁灭"，不防"有意执行"（force 可绕过）。
-# 来源：反思记录 8/14 的 pkill 自杀坑（同一 bash 调用里 pkill 杀掉执行命令的 shell 自身）。
-# 关键事实：pkill 默认不排除自身进程；bash 工具内 `bash -c <command>` 的 cmdline 含
-# command 全文，因此 pkill -f <任何词> 几乎必然命中执行它的 shell——故 pkill 直接 BLOCK。
-
-# BLOCK：毁灭级（数据/系统级破坏）或极高自伤风险，必须 force=true 才放行
+# ── bash 危险命令提醒 ───────────────────────────────────────────────────
+# 定位：**给 LLM 的提醒**，不是给用户的拦截。命中 → 拒绝本次调用，把危险原因
+# 原样回给 LLM 自判：确认目标无误就 force=true 重试（放行），否则换更安全的做法。
+# 全程不打断用户、不阻塞执行流——判断权在 LLM，工具只负责让它看见风险。
 #
-# 命令位锚定：纯文本正则会误伤引用性内容（grep/文档字符串里写 pkill、echo "rm -rf /"
-# 曾被整体拦截）。改为只匹配"出现在命令位"的命令词——行首、;&| 之后、$(`/反引号
-# 之后，可带 sudo/time/env 类前缀。引号内的字面量不处于命令位 → 放行。
-# 定位是提醒层而非安全层：漏报可由 force 流程兜底，误报却直接阻塞正常工作。
+# 命令位锚定：纯文本正则会误伤引用性内容（grep/文档里写命令示例、echo 的字面量）。
+# 只匹配"出现在命令位"的命令词——行首、;&| 之后、$(`/反引号之后，可带
+# sudo/doas/time/nohup/env/command 前缀；引号内字面量不处于命令位 → 放行。
+# 嵌套 shell（`bash -c '...'`、`eval '...'`）的引号内容才是真正会执行的文本，
+# 故对它单独递归再扫一遍——引号剥离在那层是盲区。
+#
+# 取舍：宁可少报也不多报——误报会打断正常工作，漏报由 LLM 判断力与 force 兜底。
 _CMD_PREFIX = r"(?:^|[;&|`(]|\$\{?[A-Za-z0-9_]*:)[ \t]*(?:(?:sudo|doas|time|nohup|env|command)[ \t]+)*"
+_CMD_END = r"(?=$|[\s;&|)`])"
+# 毁灭性目标：根 / 家 / 当前目录整体（含通配、转义通配、$HOME、~、. 与 ..）
+_BLAST_TARGET = (
+    r"(?:/(?:\*|\\\*)?"
+    r"|~+(?:/(?:\*|\\\*)?)?"
+    r"|\$\{?HOME\}?(?:/(?:\*|\\\*)?)?"
+    r"|\.{1,2}/?)"
+)
 
 _BLOCK_PATTERNS: list[tuple[str, str]] = [
+    # 两个前瞻分别要求 r 与 f 出现在同一命令段内 → -rf / -fr / -r -f /
+    # --recursive --force 等价写法全覆盖；中间夹 --no-preserve-root 等选项不影响。
     (
-        rf"{_CMD_PREFIX}rm[ \t]+(?=\S*[rR])(?=\S*[fF])\S+[ \t]+(?:/(?:\*)?(?=$|[\s;&|`])|~+(?:/)?(?=$|[\s;&|`])|\.{{1,2}}/?(?=$|[\s;&|`]))",  # noqa: E501
-        "rm -rf 根目录/家目录/当前目录",
+        rf"{_CMD_PREFIX}rm[ \t]+"
+        r"(?=[^\n;&|]*?(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive))"
+        r"(?=[^\n;&|]*?(?:-[A-Za-z]*[fF][A-Za-z]*|--force))"
+        rf"[^\n;&|]*?(?<![\w/.-]){_BLAST_TARGET}{_CMD_END}",
+        "rm 递归强制删除根目录/家目录/当前目录（或其全部内容）",
     ),
-    (rf"{_CMD_PREFIX}mkfs(\.\w+)?\b", "磁盘格式化 mkfs"),
-    (rf"{_CMD_PREFIX}fdisk\b", "磁盘分区 fdisk"),
-    (rf"{_CMD_PREFIX}parted\b", "磁盘分区 parted"),
-    (rf"{_CMD_PREFIX}dd\b[^\n]*\bof=/dev/", "dd 直接写 /dev/ 设备"),
+    (rf"{_CMD_PREFIX}mkfs(\.\w+)?\b", "磁盘格式化 mkfs（目标分区数据全毁）"),
+    (rf"{_CMD_PREFIX}fdisk\b", "磁盘分区 fdisk（重写分区表，原分区数据不可恢复）"),
+    (rf"{_CMD_PREFIX}parted\b", "磁盘分区 parted（重写分区表，原分区数据不可恢复）"),
+    (rf"{_CMD_PREFIX}dd\b[^\n]*\bof=/dev/", "dd 直接写 /dev/ 设备（绕过文件系统覆写裸盘）"),
+    (
+        r">>?[ \t]*/dev/(?:sd[a-z]|hd[a-z]|vd[a-z]|nvme\d|disk\d|mmcblk\d)",
+        "重定向写入裸磁盘设备（绕过文件系统覆写盘上数据）",
+    ),
     (rf"{_CMD_PREFIX}(shutdown|reboot|poweroff|halt)\b", "关机/重启/停机"),
-    (r":\(\s*\)\s*\{\s*:\s*\|", "fork 炸弹"),
-    (rf"{_CMD_PREFIX}chmod[ \t]+-R[ \t]+777[ \t]+(/[\s;&|]*|/[*])", "chmod -R 777 根目录"),
-    (rf"{_CMD_PREFIX}chown[ \t]+-R\b[^\n]*\s/[\s;&|]*$", "chown -R 整个根目录"),
-    (rf"{_CMD_PREFIX}pkill\b", "pkill 不排除自身进程，bash 工具内执行极易杀死执行命令的 shell（曾真实发生）"),
+    (r":\(\s*\)\s*\{\s*:\s*\|", "fork 炸弹（耗尽进程表，系统失去响应）"),
+    (
+        rf"{_CMD_PREFIX}chmod[ \t]+(?:-R|--recursive)[ \t]+777[ \t]+/(?:\*|\\\*)?{_CMD_END}",
+        "chmod -R 777 根目录（撤销整机权限边界）",
+    ),
+    (
+        rf"{_CMD_PREFIX}chown[ \t]+(?:-R|--recursive)\b[^\n;&|]*?[ \t]/(?:\*|\\\*)?{_CMD_END}",
+        "chown -R 整个根目录（整机属主被改写）",
+    ),
+    (
+        rf"{_CMD_PREFIX}kill[ \t]+(?:-s(?:ig)?[ \t]+)?(?:-?9|-?(?:SIG)?KILL)[ \t]+-?1{_CMD_END}",
+        "kill -9 作用于 PID 1 或 -1（杀 init / 全部进程，系统当场失去响应）",
+    ),
+    (
+        rf"{_CMD_PREFIX}find[ \t]+(?:/|~|\$\{{?HOME\}}?){_CMD_END}[^\n;&|]*(?:-delete\b|-exec[ \t]+rm\b)",
+        "find 在根/家目录整体上 -delete 或 -exec rm（批量不可逆删除）",
+    ),
+    (
+        rf"{_CMD_PREFIX}pkill\b",
+        "pkill 按名字匹配且默认不排除自身：bash 工具以 `bash -c <命令>` 运行，"
+        "其命令行含命令全文，pkill -f 极易命中的正是执行它的 shell 本身",
+    ),
 ]
+
+# 嵌套 shell：引号内容被 _mask_quoted 抹掉，但它才是真正执行的命令 → 单独递归扫描
+_NESTED_SHELL = re.compile(
+    r"(?:^|[;&|(`]|\bsudo[ \t]+)[ \t]*(?:bash|sh|zsh|dash|ksh)"
+    r"(?:[ \t]+-{1,2}[A-Za-z-]*)*[ \t]+-{1,2}[A-Za-z-]*c[A-Za-z-]*[ \t]+(['\"])(.+?)\1",
+    re.DOTALL | re.MULTILINE,
+)
+_EVAL_ARG = re.compile(r"(?:^|[;&|(`])[ \t]*eval[ \t]+(['\"])(.+?)\1", re.DOTALL | re.MULTILINE)
 
 
 def _mask_quoted(command: str) -> str:
@@ -227,20 +270,92 @@ def _mask_quoted(command: str) -> str:
     return masked
 
 
+_HEREDOC_START = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+# heredoc 的接收者是 shell 时，正文会被当脚本执行，不能剥离
+_HEREDOC_SHELL_READER = re.compile(
+    r"(?:^|[;&|(`\n])[ \t]*(?:(?:sudo|doas|env|nohup|time)[ \t]+)*"
+    r"(?:bash|sh|zsh|dash|ksh|eval|source|\.)(?:[ \t]+-{1,2}[A-Za-z-]+)*[ \t]*$"
+)
+
+
+def _mask_heredoc(command: str) -> str:
+    """把 heredoc 正文替换为等长空格（正文是数据，不处于命令位）。
+
+    `cat > f <<'EOF'`、`git commit -F - <<EOF` 这类正文只是字面量喂给接收者
+    的 stdin，可能整段都是示例文本（含 `rm -rf /` 之类字样）——不剥离就会把
+    文档正文/提交信息误判成要执行的命令。
+
+    例外：接收者本身是 shell（`bash <<EOF`、`sh -s <<EOF`、`eval`）时正文
+    确实会被执行，保持原样交外层规则与嵌套扫描处理。
+
+    长度与行数保持不变（逐行替换为同长空格），不影响 ^ 锚定与嵌套扫描的
+    位置对齐——正文里的 `bash -c '...'` 在 masked 侧是空白，会按「位于字面量
+    内」被正确跳过。
+    """
+    if "<<" not in command:
+        return command
+    lines = command.split("\n")
+    out = list(lines)
+    i = 0
+    while i < len(lines):
+        m = _HEREDOC_START.search(lines[i])
+        if not m:
+            i += 1
+            continue
+        head = lines[i][: m.start()]
+        if _HEREDOC_SHELL_READER.search(head):
+            i += 1
+            continue  # 正文将被 shell 解释 → 不剥离
+        word = m.group(2)
+        strip_tabs = m.group(0).startswith("<<-")
+        j = i + 1
+        while j < len(lines):
+            cand = lines[j].lstrip("\t") if strip_tabs else lines[j]
+            if cand == word:
+                break
+            out[j] = " " * len(lines[j])
+            j += 1
+        i = j + 1
+    return "\n".join(out)
+
+
+def _scan_rules(raw: str, depth: int = 0) -> str:
+    """跑规则表 + 嵌套 shell 递归。返回命中原因或空串。
+
+    规则层跑在 _mask_quoted(raw) 上（引号字面量不参与命令位匹配）；嵌套
+    shell 的定位则必须在 raw 上做——引号正是它的语法，masked 里已被抹平，
+    故用 `_mask_quoted` 保持长度的性质做位置对齐：命中位置在 masked 里是空白、
+    在 raw 里是实词 → 说明它躲在某个引号字面量内部（如 echo 'bash -c ...'），
+    不是真命令，跳过。depth 上限 2 —— 提醒不需要跟到底。
+    """
+    masked = _mask_quoted(_mask_heredoc(raw))
+    for pat, reason in _BLOCK_PATTERNS:
+        if re.search(pat, masked, re.MULTILINE):
+            return reason
+    if depth < 2:
+        for rx in (_NESTED_SHELL, _EVAL_ARG):
+            for m in rx.finditer(raw):
+                head_raw = raw[m.start() : m.start(1)]
+                head_masked = masked[m.start() : m.start(1)]
+                if head_raw.strip() and not head_masked.strip():
+                    continue  # 整个嵌套 shell 位于外层引号字面量内 → 非真命令
+                hit = _scan_rules(m.group(2), depth + 1)
+                if hit:
+                    return f"{hit}〔位于 shell -c / eval 的引号内〕"
+    return ""
+
+
 def _check_side_effect(command: str) -> str:
-    """检查命令是否命中 BLOCK 规则。返回拦截原因；无风险返回空字符串。
+    """检查命令是否命中危险规则。返回提醒原因；无风险返回空字符串。
 
     匹配采用命令位锚定（见 _CMD_PREFIX 注释）+ 引号字面量剥离，
     多行命令用 re.MULTILINE 让 ^ 匹配每行开头（兼容 heredoc/脚本片段写法）。
 
-    设计取舍：只保留执行前拦截（BLOCK）——同步工具协议下事后提示无意义，
-    且工具调用记录本身常驻上下文，透明可审计，故不设 WARN 层。
+    这是**给 LLM 的提醒**：命中只拒绝本次调用并回传原因，由 LLM 判断是否
+    带 force=true 重试。不设 WARN 层——事后提示在同步工具协议下无处落地，
+    而工具调用记录本身常驻上下文、透明可审计。
     """
-    masked = _mask_quoted(command)
-    for pat, reason in _BLOCK_PATTERNS:
-        if re.search(pat, masked, re.MULTILINE):
-            return reason
-    return ""
+    return _scan_rules(command)
 
 
 async def _format_bash_result(
@@ -348,31 +463,22 @@ async def _execute_bash(
     if not command:
         raise ValueError("bash 工具需要 command 参数")
 
-    # ── 副作用检查（force 绕过；危险确认门优先于自授权 force — 设计 §4） ──
+    # ── 危险命令提醒（force 绕过）—— 判断权交给 LLM，不向用户求批、不阻塞 ──
     if not force:
         reason = _check_side_effect(command)
         if reason:
-            # 危险命令 → 向人求批（ask_user 杀手应用，取代 LLM 自授权 force=true）。
-            # headless/问不到人（None）→ 回落原拦截消息，行为不回归。
-            try:
-                from fp_core.core.jobs import human_confirm
-
-                approved = await human_confirm(
-                    f"⛔ 危险命令求批：{reason}\n命令: {command}\n是否执行？(y/n)",
-                    suggest="n",
-                )
-            except Exception:  # noqa: BLE001
-                approved = None
-            if approved is True:
-                pass  # 人类批准 → 本次放行
-            elif approved is False:
-                return f"⛔ 用户拒绝执行该危险命令。\n命令: {command}"
-            else:
-                return (
-                    f"⛔ 命令被安全检查拦截：{reason}\n"
-                    f"命令: {command}\n"
-                    f"若要强制执行，请重新调用并设置 force=true（有风险，请确认后使用）"
-                )
+            return (
+                f"⛔ 本次未执行 —— 危险命令提醒\n"
+                f"命中: {reason}\n"
+                f"命令: {command}\n"
+                f"\n"
+                f"这是执行前的风险提示，由你判断，不是硬性禁令。三条路：\n"
+                f"1. 已确认目标与范围无误（核对过路径/进程/设备）→ 重新调用并带 force=true，本次放行。\n"
+                f"2. 有更安全的等价做法 → 改用窄范围操作（具体子路径、先列目录确认范围、先备份、按 PID 而非名字）。\n"
+                f"3. 无法确认后果 → 不要执行；把风险与影响讲给用户，由其决定。\n"
+                f"\n"
+                f"判据：破坏范围是否「一次误写即不可逆」。不可逆且范围不明 → 先确认再动手。"
+            )
 
     # ── timeout 参数化（clamp 1~3600） ──
     try:
@@ -702,15 +808,15 @@ CORE_TOOLS: list[ToolSpec] = [
     ToolSpec(
         name="bash",
         description="执行 shell 命令。小输出直接返回，大输出(≥3K)自动保存文件+返回预览。"
-        "默认超时 300 秒，可用 timeout 参数调整。危险命令（rm -rf 根目录、pkill、磁盘操作、关机等）"
-        "会被安全检查拦截并当场向用户求批；也可 force=true 放行。"
+        "默认超时 300 秒，可用 timeout 参数调整。危险命令（rm -rf 根/家目录、pkill、磁盘操作、关机等）"
+        "不会被执行：命中时只返回风险提醒、由你判断——确认目标无误后可带 force=true 重试放行。"
         "长任务可 background=true 移交后台执行（立即返回 job_id，"
         "完成后自动注入通知，wait_job 精确拉取，kill_job 终止）；"
         "命令超时也默认自动转后台继续执行并返回 job_id（on_timeout=kill 才杀掉）。",
         params=[
             ParamSpec("command", "string", True, "要执行的 shell 命令"),
             ParamSpec("timeout", "integer", False, "超时秒数（1~3600，默认 300），长任务可调大"),
-            ParamSpec("force", "boolean", False, "设为 true 跳过副作用检查（危险命令放行，确认风险后使用）"),
+            ParamSpec("force", "boolean", False, "跳过危险命令提醒直接执行（仅在你已确认目标与范围后使用）"),
             ParamSpec(
                 "background",
                 "boolean",
