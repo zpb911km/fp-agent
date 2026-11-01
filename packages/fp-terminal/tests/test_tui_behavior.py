@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from typing import Any
 from unittest.mock import patch
@@ -77,6 +78,23 @@ class _FakePortal:
     @property
     def transcript(self) -> list[dict[str, str]]:
         return []
+
+
+async def _wait_until(pilot, predicate, *, timeout: float = 3.0, step: float = 0.02) -> bool:  # noqa: ANN001
+    """等 ``predicate()`` 成立（返回 True），或超时（返回 False）。
+
+    替代「``pause(固定时长)`` 后立即断言」：UI 反应耗时随机器负载浮动，固定短
+    延迟在慢机上必然偶发假失败（CI 曾因此在 ubuntu 3.11 挂过 ``TestThinkCard``
+    的点击开合）。条件等待在快机上立刻返回，慢机上最多等到 ``timeout``；若
+    predicate 永不成立（真 bug）仍会返回 False 让断言失败——不掩盖问题。
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if predicate():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await pilot.pause(step)
 
 
 async def _submit_text(app: FPApp, text: str) -> None:
@@ -724,20 +742,29 @@ class TestThinkCard(unittest.TestCase):
 
         async def _scenario(io, app, pilot):  # noqa: ANN001, ANN202
             io.stream_think("想")
-            await pilot.pause(0.1)
+            await _wait_until(pilot, lambda: len(app.query(ThinkCard)) == 1)
             card = app.query(ThinkCard).first()
+            # 首帧布局未落定时 region 高为 0，此时点击坐标不可靠——等到有尺寸再点
+            await _wait_until(pilot, lambda: card.region.height > 0)
             initial = card.collapsed
             await pilot.click(card.query_one(CollapsibleTitle))
-            await pilot.pause(0.05)
-            folded = card.collapsed
+            folded = await _wait_until(pilot, lambda: card.collapsed)
             await pilot.click(card.query_one(CollapsibleTitle))
-            await pilot.pause(0.05)
-            return {"folded": folded, "reopened": card.collapsed, "initial": initial}
+            reopened = await _wait_until(pilot, lambda: not card.collapsed)
+            return {
+                "initial": initial,
+                "folded": folded,
+                "collapsed": card.collapsed,
+                "reopened": reopened,
+                "same": all(c is card for c in app.query(ThinkCard)),
+            }
 
         out = self._run(_scenario)
         self.assertFalse(out["initial"])  # 流式期初始展开
-        self.assertTrue(out["folded"])  # 点击折叠
-        self.assertFalse(out["reopened"])  # 再点展开，全文可回看
+        self.assertTrue(out["folded"])  # 点击折叠（等到生效，不等固定时长）
+        self.assertFalse(out["collapsed"])  # 再点展开，全文可回看
+        self.assertTrue(out["reopened"])  # 展开确实生效
+        self.assertTrue(out["same"])  # 全程同一张卡：未被上下文对账重画替换
 
     def test_interleaved_think_opens_second_card(self) -> None:
         async def _scenario(io, app, pilot):  # noqa: ANN001, ANN202
