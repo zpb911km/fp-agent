@@ -109,7 +109,7 @@ fp --version
 以信封 `to` 为准重新寻址，默认 dry-run、`--apply` 才动盘）、
 `e2e_webui_stream_cards.py`（WebUI 消息卡片端到端回归：stub 掉 WebSocket，
 用真实 `app.js`/`ui.js` 驱动假事件流并断言实际 DOM 卡片序列——命令轮保卡、
-普通轮不重复、工具轮、中断/重连幽灵卡，只影响实时 DOM 的 bug 靠它兜）。新增脚本时同步此清单，
+普通轮不重复、工具轮、中断/重连幽灵卡、空 delta 不造思考块、思考栏状态行实时刷新与「纯思考+工具调用」轮次自动折叠，只影响实时 DOM 的 bug 靠它兜）。新增脚本时同步此清单，
 并跑 `check_docs_sync.py --audit` 确认被 `DOC_RULES` 覆盖。
 
 ### Commit 规范

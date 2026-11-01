@@ -308,12 +308,15 @@ class LLMService:
 
         async for chunk in self._client.chat.completions.create_stream(**kwargs):
             # ── 文本 token ──
-            if chunk.content is not None:
+            # 空 delta（content=""）不产事件：provider 在流首/工具轮常发空帧，
+            # 下传会被前端当成「正文已到」→ 思考栏提前折叠、空卡片凭空出现
+            if chunk.content:
                 content_chunks.append(chunk.content)
                 yield StreamEvent(type="content", text=chunk.content)
 
             # ── 思考 token ──
-            if chunk.reasoning_content is not None:
+            # 同上：reasoning_content="" 是空帧而非思考内容，不产事件
+            if chunk.reasoning_content:
                 reasoning_chunks.append(chunk.reasoning_content)
                 yield StreamEvent(type="reasoning", text=chunk.reasoning_content)
 

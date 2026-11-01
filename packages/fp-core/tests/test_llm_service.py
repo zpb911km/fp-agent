@@ -207,6 +207,34 @@ class TestChatStream:
         assert usage_events[0].data["total_tokens"] == 5
 
     @pytest.mark.asyncio
+    async def test_stream_skips_empty_deltas(self):
+        """空 delta 不产事件：provider 在流首/工具轮会发 reasoning_content="" 空帧
+
+        空帧若下传，前端会把它当成「思考块已存在 / 正文已到」：
+        无思考的轮次凭空长出「思考 0 字」空块，且有正文时会把思考栏提前折叠
+        （患者主诉：思考栏该展开的时候没展开）。
+        """
+
+        class FakeCompletions:
+            async def create_stream(self, **kwargs):
+                yield StreamChunk({"choices": [{"delta": {"reasoning_content": ""}}]})
+                yield StreamChunk({"choices": [{"delta": {"content": ""}}]})
+                yield StreamChunk({"choices": [{"delta": {"reasoning_content": "想"}}]})
+                yield StreamChunk({"choices": [{"delta": {"content": ""}}]})
+                yield StreamChunk({"choices": [{"delta": {"content": "答"}}]})
+
+        client = _make_fake_client()
+        client.chat.completions = FakeCompletions()
+
+        service = self._make_service(client)
+        events = [e async for e in service.chat_stream([])]
+
+        assert [e.type for e in events] == ["reasoning", "content", "done"]
+        assert [e.text for e in events[:-1]] == ["想", "答"]
+        # 累积结果不受空帧影响
+        assert events[-1].data == {"role": "assistant", "content": "答", "reasoning_content": "想"}
+
+    @pytest.mark.asyncio
     async def test_stream_reasoning_events(self):
         class FakeCompletions:
             async def create_stream(self, **kwargs):

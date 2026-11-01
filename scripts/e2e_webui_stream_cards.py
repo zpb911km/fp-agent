@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import functools
 import http.server
+import re
 import socket
 import sys
 import threading
@@ -232,6 +233,160 @@ def case_resync_midturn(page, url: str) -> None:
     _check("resync 后终稿仍可见（没写进幽灵卡）", "完整终稿在这里" in _text(page))
 
 
+def _think_state(page) -> list[dict]:
+    """每张卡片的思考栏状态：c=折叠 / e=展开 / - 无思考块"""
+    return page.evaluate(
+        """() => Array.from(document.querySelectorAll('.assistant-msg')).map((m, i) => {
+            const t = m.querySelector('.think-msg');
+            const b = t ? t.querySelector('.think-msg-body') : null;
+            return {card: i,
+                    state: t ? (t.classList.contains('collapsed') ? 'c' : 'e') : '-',
+                    h: b ? Math.round(b.getBoundingClientRect().height) : -1,
+                    chars: b ? (b.textContent || '').length : -1};
+        })"""
+    )
+
+
+def _last_think(page) -> dict:
+    """最后一张带思考栏的卡片的状态（工具卡可能追加在新卡上，不能只看末尾卡）"""
+    st = [c for c in _think_state(page) if c["state"] != "-"]
+    return st[-1] if st else {"card": -1, "state": "-", "h": -1, "chars": -1}
+
+
+def _think_status(page) -> str:
+    """最后一张思考栏的状态行文本"""
+    return page.evaluate(
+        "() => { var ts = document.querySelectorAll('.assistant-msg .think-msg');"
+        " if (!ts.length) return '';"
+        " var s = ts[ts.length - 1].querySelector('.think-msg-status');"
+        " return s ? (s.textContent || '') : ''; }"
+    )
+
+
+def _status_secs(txt: str) -> float:
+    m = re.search(r"([\d.]+)s", txt or "")
+    return float(m.group(1)) if m else -1.0
+
+
+def case_think_status_live(page, url: str) -> None:
+    """思考字数/时长随思考逐步走表；折叠后定格，且与块内全文一致。
+
+    旧实现只在折叠那一刻写一次状态行：思考期间状态行是空的（看不到字数在涨），
+    折叠后迟到的思考 token 又把正文块撑大，状态行字数永久小于块内实际字数
+    （实测「思考 482 字」而块内 565 字）。
+    """
+    _boot(page, url)
+    _emit(page, {"type": "user_message", "content": "q"})
+    _emit(page, {"type": "llm_start"})
+    _emit(page, {"type": "thinking_content", "token": "一二三"})
+    page.wait_for_timeout(160)
+    s1 = _think_status(page)
+    _check("思考期：状态行显示正在思考 + 字数", "思考中" in s1 and "3 字" in s1, s1)
+
+    _emit(page, {"type": "thinking_content", "token": "四五六七"})
+    page.wait_for_timeout(160)
+    s2 = _think_status(page)
+    _check("思考期：字数随 token 递增", "7 字" in s2, s2)
+
+    # 模型停顿（无新 token）时时长仍在走
+    page.wait_for_timeout(500)
+    s3 = _think_status(page)
+    _check(
+        "思考期：无新 token 时长仍走表",
+        _status_secs(s3) > _status_secs(s2) + 0.3,
+        f"{_status_secs(s2)} -> {_status_secs(s3)}",
+    )
+
+    # 正文到达 → 折叠，字数定格为全文长度
+    _emit(page, {"type": "chunk", "content": "答案"})
+    page.wait_for_timeout(200)
+    s4 = _think_status(page)
+    _check("折叠后：不再显示「思考中」且字数正确", "思考中" not in s4 and "7 字" in s4, s4)
+    secs_fold = _status_secs(s4)
+    page.wait_for_timeout(450)
+    again = _think_status(page)
+    _check("折叠后：时长定格不再增长", _status_secs(again) == secs_fold, f"{secs_fold} -> {again}")
+
+    # 迟到 token 并入正文块 → 状态行字数必须同步（旧实现会永久停在 7 字）
+    _emit(page, {"type": "thinking_content", "token": "八九"})
+    page.wait_for_timeout(200)
+    lt = _last_think(page)
+    ls = _think_status(page)
+    _check("迟到 token：块内与状态行字数一致", lt["chars"] == 9 and "9 字" in ls, f"{lt} / {ls}")
+
+
+def case_pure_think_tool_call_folds(page, url: str) -> None:
+    """纯思考 + 工具调用（无正文帧）的卡片，思考栏也必须自动折叠。
+
+    折叠原先只由「正文 chunk 到达」触发，这类轮次一个正文帧都没有 → 思考栏一直
+    展开挂着。现在改为「轮次结束」（llm_end / tool_select …）兜底折叠。
+    """
+    _boot(page, url)
+    _emit(page, {"type": "user_message", "content": "查一下目录"})
+    _emit(page, {"type": "llm_start"})
+    _emit(page, {"type": "thinking_content", "token": "我需要调用工具"})  # 7 字
+    page.wait_for_timeout(160)
+    ht = _last_think(page)
+    _check("工具轮：思考期展开", ht["state"] == "e" and ht["h"] > 0, str(ht))
+
+    _emit(page, {"type": "llm_end", "content": "", "has_tool_calls": True})
+    _emit(page, {"type": "tool_select", "tools": ["bash"]})
+    _emit(page, {"type": "tool_call", "name": "bash", "args": '{"command":"ls"}', "tool_call_id": "t1"})
+    page.wait_for_timeout(240)
+    ct = _last_think(page)
+    cs = _think_status(page)
+    _check("纯思考+工具调用：思考栏自动折叠", ct["state"] == "c", str(ct))
+    _check("折叠后正文收起（单行摘要）", ct["h"] == 0, str(ct))
+    _check("折叠摘要含字数与时长", "思考 7 字" in cs and "s" in cs, cs)
+
+    # 折叠只是收起来，全文必须还在：点一下能重新展开
+    page.evaluate(
+        "() => { var t = document.querySelectorAll('.assistant-msg .think-msg'); if (t.length) t[0].click(); }"
+    )
+    page.wait_for_timeout(220)
+    et = _last_think(page)
+    _check("折叠后全文仍可展开", et["state"] == "e" and et["h"] > 0 and et["chars"] == 7, str(et))
+
+
+def case_empty_deltas_no_fake_think(page, url: str) -> None:
+    """空 delta 不得伪造思考块、不得提前折叠思考栏。
+
+    provider 会在流首发 `reasoning_content=""`、在思考中途发 `content=""`。
+    照单全收的后果：无思考的轮次凭空长出「思考 0 字」空块；有思考的轮次在第一
+    个空正文帧就被折叠（用户看到的是「思考栏没展开/提前收起」）。
+    """
+    _boot(page, url)
+    # 轮1：两个空帧 → 不建块、不折叠
+    _emit(page, {"type": "user_message", "content": "q1"})
+    _emit(page, {"type": "llm_start"})
+    _emit(page, {"type": "thinking_content", "token": ""})
+    _emit(page, {"type": "chunk", "content": ""})
+    page.wait_for_timeout(160)
+    st = _think_state(page)
+    _check("空帧不建思考块", all(c["state"] == "-" for c in st), str(st))
+    _emit(page, {"type": "llm_end", "content": "答案1"})
+    _emit(page, {"type": "done", "session_id": "sess0001", "final_content": "答案1", "non_system_count": 2})
+    page.wait_for_timeout(180)
+
+    # 轮2：真思考 → 展开；空 chunk → 保持展开；真 chunk → 折叠
+    _emit(page, {"type": "user_message", "content": "q2"})
+    _emit(page, {"type": "llm_start"})
+    _emit(page, {"type": "thinking_content", "token": "真思考"})
+    page.wait_for_timeout(160)
+    last = _think_state(page)[-1]
+    _check("真思考帧建块且展开", last["state"] == "e" and last["chars"] == 3 and last["h"] > 0, str(last))
+
+    _emit(page, {"type": "chunk", "content": ""})
+    page.wait_for_timeout(160)
+    last = _think_state(page)[-1]
+    _check("空正文帧不折叠思考栏", last["state"] == "e", str(last))
+
+    _emit(page, {"type": "chunk", "content": "答案2"})
+    page.wait_for_timeout(200)
+    last = _think_state(page)[-1]
+    _check("真正文帧折叠思考栏", last["state"] == "c", str(last))
+
+
 CASES = (
     case_command_after_text,
     case_normal_turn_no_dup,
@@ -239,6 +394,9 @@ CASES = (
     case_cancel_then_command,
     case_two_commands,
     case_resync_midturn,
+    case_empty_deltas_no_fake_think,
+    case_think_status_live,
+    case_pure_think_tool_call_folds,
 )
 
 

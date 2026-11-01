@@ -227,6 +227,8 @@ class WebSocketIO(IOChannel):
         self._pub("thinking", status="stop")
 
     def stream_write(self, content: str):
+        if not content:
+            return  # 空帧不入缓冲：免得伪造出「正文已到」（前端据此折叠思考栏）
         self._write_buf.append(content)
         if sum(len(t) for t in self._write_buf) >= self._BATCH_CHARS:
             self._flush_write()
@@ -234,6 +236,8 @@ class WebSocketIO(IOChannel):
             self._schedule_flush()
 
     def stream_think(self, token: str):
+        if not token:
+            return  # 空帧不入缓冲：免得前端凭空长出 0 字思考块
         self._think_buf.append(token)
         if sum(len(t) for t in self._think_buf) >= self._BATCH_CHARS:
             self._flush_think()
@@ -261,13 +265,15 @@ class WebSocketIO(IOChannel):
         if self._think_buf:
             batch = "".join(self._think_buf)
             self._think_buf.clear()
-            self._pub("thinking_content", token=batch)
+            if batch:
+                self._pub("thinking_content", token=batch)
 
     def _flush_write(self):
         if self._write_buf:
             batch = "".join(self._write_buf)
             self._write_buf.clear()
-            self._pub("chunk", content=batch)
+            if batch:
+                self._pub("chunk", content=batch)
 
     def stream_end(self):
         # 冲刷残余 token 再发结束事件——前端凭 stream_end 收尾，

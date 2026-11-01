@@ -876,7 +876,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   color: var(--text-secondary);
   max-height: 40vh;
   overflow-y: auto;
-  transition: opacity 0.15s;
+  /* max-height 也走过渡：思考很短时「展开→折叠」会在一瞬内发生，
+     纯 opacity 过渡看着像「闪一下什么都没发生」；高度渐变能让折叠可感知 */
+  transition: opacity 0.15s, max-height 0.18s ease;
 }
 .think-msg.collapsed .think-msg-body {
   display: block;        /* 覆盖 display:none 以支持过渡 */
@@ -891,6 +893,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   font-size: 0.78em;
   color: var(--text-muted);
   flex-shrink: 0;
+  /* 字数/时长每 200ms 刷一次：等宽数字避免右对齐文本随位数变化左右抖动 */
+  font-variant-numeric: tabular-nums;
 }
 /* 流式思考期：正文未到时隐藏空 .msg-content，避免卡片下方空白占位；
    首个正文块到达即移除该类（见 ui.js streamContentChunk） */

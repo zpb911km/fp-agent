@@ -332,7 +332,7 @@ function handleEvent(data) {
         if (!streamed) addAssistantMessage(data.content);
         _finalContentAlreadyShown = true;
       } else {
-        // 无正文（纯思考后无内容/异常）：流式思考块保留最后一帧
+        // 无正文（纯思考后无内容/异常）：finalizeStreamRound 兜底折叠思考栏（全文可展开）
         finalizeStreamRound();
         _finalContentAlreadyShown = false;
       }

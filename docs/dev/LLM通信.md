@@ -161,6 +161,10 @@ async for chunk in client.chat.completions.create_stream(model="...", messages=[
 
 > 上层消费入口是 `LLMService.chat_stream()`（把 chunk 归一为 `StreamEvent`），
 > 通常不需直接调用 `create_stream`。
+>
+> 空 delta 不产事件：provider 常发 `delta.content == ""` / `delta.reasoning_content == ""`
+> （流首占位、思考中途的空帧），`chat_stream` 只对**非空**文本发 `StreamEvent`——
+> 否则下游会把这帧当成「正文已到」或「思考已开始」。
 
 ### `CompletionResponse` 使用示例
 

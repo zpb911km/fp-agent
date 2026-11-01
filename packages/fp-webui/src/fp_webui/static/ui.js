@@ -609,20 +609,68 @@ function startStreamRound() {
   _toolContainerEl = null; // 新一轮：工具行宿主重置，不复用上一轮卡片
   _stream = {
     turnSeq: _turnSeq,
-    thinkText: '', thinkChars: 0, thinkEl: null, thinkTimer: null,
+    thinkStart: 0,           // 首个思考 token 到达时刻：思考时长的起点
+    thinkText: '', thinkEl: null, thinkTimer: null, thinkTicker: null, foldAt: 0,
     contentText: '', contentEl: null, contentTimer: null,
     closed: false  // llm_end/done 后置 true：迟到 token 并入本轮，不新建块
   };
 }
 
-/** 折叠思考块为单行摘要（保留全文可展开） */
-function foldThinkEl(el, chars, elapsedMs) {
-  if (!el || el.classList.contains('collapsed')) return;
-  var statusEl = el.querySelector('.think-msg-status');
-  if (statusEl) {
-    statusEl.textContent = '思考 ' + chars + ' 字 · ' + (elapsedMs / 1000).toFixed(1) + 's';
+/* ── 思考块状态行 ──
+   展开期「思考中 · N 字 · Xs」随思考逐步走表；折叠后「N 字 · Xs」定格。
+   字数一律取 thinkText.length（真实全文），不做 token 长度累加：累加值在迟到
+   token 并入正文块之后会与块里实际显示的文本失配（曾出现「思考 482 字」而块内
+   实为 565 字）。时长同理——基准取首个思考 token（真正开始思考那刻），不含首字
+   延迟 TTFT：标签写的是「思考 Xs」，把模型还没开口的等待算进去就是不实。 */
+
+/** 思考已进行多久；折叠后冻结在折叠时刻 */
+function thinkElapsedMs(s) {
+  var end = s.foldAt || Date.now();
+  return Math.max(0, end - (s.thinkStart || end));
+}
+
+/** 把字数/时长写进状态行（前缀由折叠态推导，无需另传参）。
+    正文块与状态行同源同刻更新：只刷状态行、正文走 50ms 节流的话，真机上采到过
+    「状态行 175 字 / 块内 68 字」的瞬时脱钩。思考正文是纯 textContent（无 markdown
+    解析），顺手同步的代价可忽略，换来「眼见字数 = 块内字数」的恒定一致。 */
+function renderThinkStatus(s) {
+  if (!s || !s.thinkEl) return;
+  var statusEl = s.thinkEl.querySelector('.think-msg-status');
+  var bodyEl = s.thinkEl.querySelector('.think-msg-body');
+  var text = s.thinkText || '';
+  if (!statusEl) return;
+  if (bodyEl && bodyEl.textContent !== text) {
+    bodyEl.textContent = text;
+    bodyEl.scrollTop = bodyEl.scrollHeight;
   }
-  el.classList.add('collapsed');
+  var folded = s.thinkEl.classList.contains('collapsed');
+  statusEl.textContent =
+    (folded ? '思考 ' : '思考中 · ') +
+    text.length + ' 字 · ' +
+    (thinkElapsedMs(s) / 1000).toFixed(1) + 's';
+}
+
+/** 思考期走表：文本按 50ms 才 flush，但模型停顿时字数不变、时长仍在走 */
+function startThinkTicker(s) {
+  stopThinkTicker(s);
+  s.thinkTicker = setInterval(function() {
+    if (s.foldAt) { stopThinkTicker(s); return; }        // 已折叠：时长定格
+    if (!s.thinkEl || !s.thinkEl.isConnected) { stopThinkTicker(s); return; }
+    renderThinkStatus(s);
+  }, 200);
+}
+
+function stopThinkTicker(s) {
+  if (s && s.thinkTicker) { clearInterval(s.thinkTicker); s.thinkTicker = null; }
+}
+
+/** 折叠思考块为单行摘要（保留全文可展开）。幂等：重复调用只刷新状态行 */
+function foldThinkEl(s) {
+  if (!s || !s.thinkEl) return;
+  if (!s.foldAt) s.foldAt = Date.now();  // 首次折叠定格时长
+  s.thinkEl.classList.add('collapsed');
+  renderThinkStatus(s);
+  stopThinkTicker(s);
 }
 
 function toggleThinkMsg(event) {
@@ -647,6 +695,10 @@ function buildThinkBlock(text) {
 }
 
 function streamThinkToken(token) {
+  // 空 token 不是思考内容：provider 常在流首/无思考轮发空帧（reasoning_content=""）。
+  // 若照单全收，会在没有思考的轮次里凭空长出「思考 0 字」空块——折叠后留一行噪音，
+  // 且把「是否已建块」这个状态误置，后续真实正文到达时折叠的就是这个假块。
+  if (!token) return;
   if (!_stream) startStreamRound();
   if (!_stream.thinkEl) {
     // 首个思考 token：spinner 让位给真内容
@@ -657,18 +709,20 @@ function streamThinkToken(token) {
     // 正文未到：隐藏空的 .msg-content，避免思考期卡片下方出现空白占位
     _stream.contentEl.classList.add('stream-pending');
     _stream.thinkEl = buildThinkBlock('');
-    _stream.thinkEl.dataset.streamStart = String(Date.now());
+    _stream.thinkStart = Date.now();   // 起表：此刻起才算「思考」
     _stream.contentEl.parentNode.insertBefore(_stream.thinkEl, _stream.contentEl);
+    renderThinkStatus(_stream);      // 建块即给「思考中 · 0 字 · 0.0s」，不留空状态行
+    startThinkTicker(_stream);       // 走表：模型停顿时字数不动，时长照走
     scrollToBottom();
   }
   _stream.thinkText += token;
-  _stream.thinkChars += token.length;
   if (_stream.closed) {
     // 迟到 token（llm_end 后 fire-and-forget 排序晚到）：直写终帧，不排定时器
     if (_stream.thinkTimer) { clearTimeout(_stream.thinkTimer); _stream.thinkTimer = null; }
     var lateBody = _stream.thinkEl.querySelector('.think-msg-body');
     lateBody.textContent = _stream.thinkText;
     lateBody.scrollTop = lateBody.scrollHeight; // 内部滚动区（40vh 封顶）跟随到底
+    renderThinkStatus(_stream);      // 字数补进状态行（时长已随折叠定格）
     return;
   }
   if (_stream.thinkTimer) return;
@@ -678,17 +732,19 @@ function streamThinkToken(token) {
     var body = _stream.thinkEl.querySelector('.think-msg-body');
     body.textContent = _stream.thinkText;
     body.scrollTop = body.scrollHeight; // 内部滚动区跟随到底，最新思考始终可见
+    renderThinkStatus(_stream);      // token 到达即刻刷新，不等下一拍走表
     scrollToBottom();
   }, THINK_FLUSH_MS);
 }
 
 function streamContentChunk(chunk) {
+  // 空正文不是「正文已到」：provider 会在思考中途发空 content 帧，照单全收会让
+  // 思考栏在思考仍在进行时就被折叠（用户看到的就是「思考栏没展开/提前收起」）。
+  // 只让步进真实文本的 chunk 承担折叠与建卡。
+  if (!chunk) return;
   if (!_stream) startStreamRound();
   // 正文到达 → 思考块折叠（用户决策：正文前展开，正文流式时折叠）
-  if (_stream.thinkEl) {
-    var t0 = Number(_stream.thinkEl.dataset.streamStart || Date.now());
-    foldThinkEl(_stream.thinkEl, _stream.thinkChars, Date.now() - t0);
-  }
+  if (_stream.thinkEl) foldThinkEl(_stream);
   if (!_stream.contentEl) {
     // 复用 addAssistantMessage 的完整消息结构（头像/时间戳/回溯/复制 + liveMsgIndex 记账）
     _stream.contentEl = addAssistantMessage('');
@@ -721,9 +777,12 @@ function finalizeStreamRound(finalContent) {
   if (s.thinkTimer) { clearTimeout(s.thinkTimer); s.thinkTimer = null; }
   if (s.contentTimer) { clearTimeout(s.contentTimer); s.contentTimer = null; }
   if (s.thinkEl) {
-    // 未被正文折叠（如纯思考后中断/出错）→ 保留展开态最后一帧
     s.thinkEl.querySelector('.think-msg-body').textContent = s.thinkText;
+    // 轮次结束一律折叠：纯思考 + 工具调用的轮次根本没有正文 chunk 来触发折叠，
+    // 少了这一处，这类卡片的思考栏会一直展开着（用户看到的「不自动折叠」）。
+    foldThinkEl(s);
   }
+  stopThinkTicker(s);
   // 卡片可能已随 clearUI 作废（重连 resync / 回溯重拉）：此时再写就是写进
   // 脱离文档的"幽灵卡"——写成功了、用户什么也看不到。判为未显示，交回调用方重渲染。
   var shown = !!s.contentEl && document.body.contains(s.contentEl);

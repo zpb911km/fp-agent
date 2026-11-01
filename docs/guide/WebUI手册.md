@@ -106,7 +106,8 @@ fp-webui
   消费落盘时由 `user_message` 事件就地转正；轮次结束（`done`）时清除
   残留标记。运行中输入斜杠命令会被拒（`queue_error` 事件，仅提示、不改变处理状态）
 - **实时反馈**：Agent 思考时显示动画进度条，思考 token 到达后切换为卡片内
-  的展开式思考块（正文到达即自动折叠）；工具调用以紧凑行内嵌在助手卡片中
+  的展开式思考块（正文到达、或本轮转入工具调用/结束时自动折叠，状态行实时显示字数与时长）；
+  工具调用以紧凑行内嵌在助手卡片中
 - **序号徽章**：user/assistant 卡片头像下方显示 `#N` 徽章，序号与后端上下文
   索引（`/back` 所用）对齐——工具消息占一个序号、命令轮不占号，跳号是
   对齐关系的自解释呈现
@@ -499,8 +500,8 @@ ws://host:port/ws/chat?token=your_token
 | `ping` | — | 心跳（30 秒超时保活） |
 | `llm_start` | — | Agent 开始调用 LLM（前端：起流式轮次 + spinner） |
 | `thinking` | `status`: `start`/`stop` | 思考阶段开始/结束（与 `llm_start`/`llm_end` 配对，动画指示用） |
-| `thinking_content` | `token` | **思考 token 批**（后端 WebSocketIO 已合并：攒 512 字符或 50ms 发一批）。前端渲染为可折叠思考块：正文未到时展开流式显示，首个正文批到达即折叠为「🧠 思考 N 字 · Xs」单行（点击可展开全文）。历史回看经 `reasoning_content` 渲染同构折叠块 |
-| `chunk` | `content` | **正文 token 批**（同 512 字符/50ms 合并）。前端流式渲染 markdown；末批可能晚于 `llm_end`（fire-and-forget 发布），前端并入当前轮次不新建块 |
+| `thinking_content` | `token` | **思考 token 批**（后端 WebSocketIO 已合并：攒 512 字符或 50ms 发一批）。**空批不下发**（provider 的 `reasoning_content=""` 空帧在 core 即被丢弃，否则前端会凭空长出「思考 0 字」空块）。前端渲染为可折叠思考块：正文未到时展开流式显示，状态行「思考中 · N 字 · Xs」随 token 实时刷新（200ms 走表，模型停顿时字数不动、时长照走）；首个**非空**正文批到达、**或本轮结束**（纯思考+工具调用的轮次没有正文批，由 `llm_end`/`tool_select` 兜底）即折叠为「思考 N 字 · Xs」单行——字数取块内全文、时长定格于折叠时刻（基准是首个思考 token，不含首字延迟），点击可展开全文。历史回看经 `reasoning_content` 渲染同构折叠块（无时长：未落盘） |
+| `chunk` | `content` | **正文 token 批**（同 512 字符/50ms 合并），**空批不下发**——空 `content` 帧若下传会被当成「正文已到」而提前折叠思考栏。前端流式渲染 markdown；末批可能晚于 `llm_end`（fire-and-forget 发布），前端并入当前轮次不新建块 |
 | `stream_end` | — | 一轮流式输出结束（后端已先冲刷缓冲再发；可能迟到于 `done`，前端为 no-op，仅 `llm_end`/`done` 负责终渲染去重） |
 | `llm_end` | `content`, `has_tool_calls`, `tool_names` | LLM 返回结果（流式已渲染正文时前端跳过重复渲染） |
 | `tool_select` | `tools: string[]` | Agent 选择要调用的工具（前端只确保宿主卡片存在，不单独渲染卡片） |
