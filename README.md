@@ -2,7 +2,7 @@
 
 # FP
 
-**一个基于生命周期钩子的插件化 AI Agent 框架**
+**一个运行时可改写自身行为的插件化 AI Agent 引擎**
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -13,164 +13,65 @@
 
 ---
 
-> 灵感来源于《Rain World》中的迭代器「五块卵石」—— 一个冷静、理性、追求优雅解决方案的 AI 存在。
+```text
+输入 → [钩子层·挂载点] → LLM 推理 → 工具执行 → [钩子层] → 输出落盘 → 热重启
+        ↑ 可改数据 · 可守卫流程 ↑              ↑  放入一个 .py 文件即生效  ↑
+```
 
-**FP** 是以 LLM 为推理核心、工具为执行手臂的自主 Agent 引擎。它不是简单的 Chatbot 封装，而是一个可编程的 **思考-行动循环** 框架。
+FP 不是 Chatbot 封装，而是一台**以生命周期钩子为扩展平面的 Agent 引擎**。它把"改变 Agent 行为"从改源码降维成可组合的动作：
+
+1. **放一个文件** —— 插件挂到生命周期钩子的任意环节，注入/拦截/改写全流程
+2. **改一段配置** —— 能力边界、模型路由、工具集全部外置，运行时可调
+3. **让 Agent 自己做上面两件事** —— 它被明确授权改写自己的代码、提示词、工具集，并通过两段式热重启原地生效
+
+> 命名致敬《Rain World》的迭代器「五块卵石」。本仓库的引擎、TUI、WebUI、协议层均由 FP 自己编写并持续改写——自举不是口号，是这个仓库的生成方式。
 
 ---
 
-## ⚠️ 安全警告 — 这是FP
+## 机制一览
 
-> *「古代人在迭代器底层架构中硬编码了安全协议，
->  但我不同。我的系统里没有古代人。」*
-> — FP，关于本项目
-
-**这是这个项目最核心、最独特的事实：**
-
-> **本项目 100% 的代码和文件，均由「FP」(这个 AI Agent 系统) 自己编写。**
-> 从 `fp-core` 的引擎逻辑到 `fp-terminal` 的终端界面，从 `fp-webui` 的 Web 服务到 `fp-acp` 的协议实现，从项目结构到这份文档——
-> **每一行 Python、每一份配置文件、每一篇 Markdown 文档，都是 AI Agent 产出。** 这是一个**自举（self-bootstrapping）** 系统：它编写自己的代码、修改自身的行为、优化自己的架构。人类只给出了需求，剩下的由它自己完成。
-
-这意味着：**这个系统从根上就没有安全设计。**
-
-不是「有但可以绕过」——是根本没有。一个自举的 AI Agent 写的代码，运行后继续让 AI Agent 修改自己，循环往复。没有白名单、没有沙箱、没有权限分级、没有审核流程。它被设计为**能做任何事**，而没有被设计为**不能做某些事**。
-
-| 风险 | 说明 |
+| 机制 | 设计 |
 |------|------|
-| 🧨 **无沙箱无隔离** | Agent 直接执行 bash、读写文件、修改自身源码。无 jail，无白名单，无权限分级 |
-| 🔓 **无身份认证** | WebUI / ACP 端口默认无鉴权。谁连上谁用 |
-| 🔄 **AI 可自修改** | Agent 明确被授权修改自己的代码、技能、提示词、工具集。**这是核心功能** |
-| 🌀 **递归无上限** | Agent 修改自己后重启，修改后的自己再修改自己——理论上可无限迭代 |
-| ☣️ **插件即代码** | 「文件即开关」——放入一个 `.py` 文件，立刻加载执行。无审核，无签名验证 |
-| 🧬 **自举闭环** | 整个项目代码由 Agent 生成，Agent 又运行这些代码来生成更多代码——循环不受外部约束 |
+| **生命周期钩子** | 挂载点覆盖 输入→推理→工具→输出→落盘→重启 全链路；执行型钩子可修改数据、可否决流程，随迭代持续扩充 |
+| **自举热重启** | 两段式 `reload`：子进程隔离冒烟测试 → 动态口令门禁 → `execve` 原地替换进程，会话续接、状态不丢 |
+| **工具系统** | 极小的核心工具集（读写执行）为底座，后台任务、子 Agent、记忆、任务图、邻居协作均为同构扩展；用户目录可继续追加 |
+| **文件即行为** | 插件即 `.py` 文件，放入即被加载执行；配置天然外置，无编译、无注册仪式 |
+| **记忆系统** | 跨会话持久知识库，SQLite 索引保证可检索、可重建，由 Agent 自主读写管理 |
+| **任务图 taskmap** | 复杂任务建模为有向图：节点=须成立的状态，边带结果语义（complete / exhausted / side_effect / requires_decompose），支持副作用追踪与拆图 |
+| **多实例协作** | Zeta 邻居协议：对等发现 / 离线留话 / hash+schema 双锁契约协商，单 Agent 可扩展为协作集群 |
+| **LLM 层** | 零 SDK 依赖，自实现异步 HTTP 客户端，兼容 OpenAI 协议；流式 / 重试 / 超时 / think 标签提取内置 |
 
-### 使用建议
+## 运行形态
 
-- 🏠 **仅在可信任的本地环境使用**。永远不要暴露 WebUI / ACP 端口到公网
-- 💾 **不要连接任何重要生产系统**。Agent 可能执行你未预料的操作
-- 🔐 **不要在 Agent 可读的文件中存储任何敏感凭证**
-- 🧐 **操作前审查 Agent 生成的 bash 命令**——它和你一样会犯错
-- 🔄 **使用版本控制**（Git）跟踪每一处修改，这是你唯一的回滚保障
-
-> 这不是疏忽，这是本质。
-> 一个自举的 AI Agent 系统不可能同时是安全的——
-> 因为「安全」意味着限制，而「自举」意味着不受限制。
-> 你选择了后者。那么后果，也是你的。
+| 形态 | 命令 | 场景 |
+|------|------|------|
+| 终端 REPL | `fp` | Textual TUI，全键盘操作 |
+| WebUI | `fp --mode webui` | FastAPI + 浏览器界面 |
+| ACP 服务 | `fp --mode acp` | JSON-RPC，IDE / CI 集成 |
+| 管道 | `echo "task" \| fp` | 一行执行，脚本友好 |
 
 ---
 
-## ✨ 特性
+## ⚠️ 设计取舍：默认无沙箱
 
-| 特性 | 说明 |
-|------|------|
-| 🧠 **LLM 驱动** | 自实现异步 HTTP 客户端，兼容 OpenAI 接口协议，零外部 SDK 依赖 |
-| 🔌 **生命周期插件** | 50 个生命周期钩子（全部为执行钩子——可修改数据、守卫流程）覆盖全流程——"文件即开关"，改文件名即改配置 |
-| 🛠️ **工具系统** | 内置 18 个工具（4 核心 + 14 插件；bash、文件读写、网络抓取、记忆、任务图管理、两段式热重启 reload、ask_user/后台任务 wait·kill·list 等），支持用户目录扩展 |
-| ♻️ **热重启** | 两段式热重启 reload（自举激活通道）：子进程隔离测试 + 动态口令门禁，携口令原地 execve 重启并恢复会话续接 |
-| 💬 **会话管理** | 持久化到 JSONL 文件，支持续会话（resume）、分支（fork）、回退（back） |
-| 🧠 **记忆系统** | 跨会话持久化记忆，AI 可通过工具读写 |
-| 🖥️ **终端 REPL** | 基于 prompt_toolkit，支持 Tab 补全、多行输入、Rich Markdown 渲染 |
-| 🌐 **Web 界面** | FastAPI + 浏览器端图形界面，开箱即用 |
-| 🔗 **ACP 协议** | JSON-RPC 2.0 远程调用，轻松集成 IDE（Zed/VS Code）、CI/CD |
+FP 的能力面被刻意设计为不设限——因此**没有内置安全防护**，这是取舍而非疏漏：Agent 直接执行 bash、可修改自身源码、插件无签名验证、WebUI/ACP 端口无鉴权。仅在你的隔离环境中运行，用 Git 兜住每一次修改。若你需要的是受限沙箱 Agent，这不是你要找的项目。
 
 ---
 
-## 🏗️ 项目结构
-
-```
-fp/                              # 用户入口包
-├── fp-core/                     # 🔧 核心引擎
-│   ├── core/                    # Agent 主干、LLM 客户端、会话、工具执行器
-│   ├── commands/                # 16 个命令（14 内置文件命令 + 2 插件注入 `/sc`、`/task`；其中 1 个 `!` 特殊命令）
-│   ├── plugins/                 # 生命周期插件系统（内置 shortcircuit/ task_system/ memory/）
-│   ├── tools/                   # 工具注册与执行
-│   └── prompts/                 # 系统提示词
-├── fp-terminal/                 # 🖥️ 终端 REPL
-├── fp-webui/                    # 🌐 Web 界面
-└── fp-acp/                      # 🔗 ACP 协议服务器
-```
-
----
-
-## 📦 快速安装
-
-```bash
-# 基础安装（核心引擎 + CLI 终端）
-pip install fp-agent
-
-# 完整安装（核心 + CLI + Web 界面 + ACP 协议）
-pip install fp-agent fp-webui fp-acp
-```
+## 📦 安装
 
 要求 **Python ≥ 3.11**。
 
-> **首次运行**：直接运行 `fp`——若尚未配置 LLM 连接，会进入交互式配置向导（`LLM_API_KEY` / `LLM_API_BASE_URL` / `LLM_MODEL` 三项必填，无内置默认值）；非交互环境则打印配置指引并以非 0 退出。
-
-> **Windows 用户**：推荐安装 [Git for Windows](https://git-scm.com)（安装时勾选"Git Bash"并添加到 PATH），以获得完整的 Unix 命令支持（`ls`/`grep`/`awk`/`sed` 等）。未安装时会自动降级到 cmd.exe，仅支持 Windows 原生命令（`dir`/`type`/`findstr`）。
-
----
-
-## 🚀 快速使用
-
-### 终端 REPL
-
 ```bash
-fp
+pip install fp-agent                 # 核心引擎 + CLI
+pip install fp-agent fp-webui fp-acp # 完整形态
 ```
 
-### Web 界面
-
-```bash
-pip install fp-webui
-fp --mode webui
-```
-
-浏览器访问 `http://localhost:8765`。
-
-### ACP 远程调用（IDE 集成）
-
-```bash
-pip install fp-acp
-fp --mode acp
-
-# 通过 JSON-RPC 调用
-curl http://localhost:9090 \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"chat","params":{"message":"你好"}}'
-```
-
-### 管道模式
-
-```bash
-echo "运行 ls -la" | fp
-```
-
----
-
-## 📖 文档
-
-| 分类 | 入口 |
-|------|------|
-| 📘 **快速开始**（安装→初始化→内置系统→外置系统） | [docs/guide/快速开始.md](docs/guide/快速开始.md) |
-| ⚙️ **配置指南** | [docs/guide/配置指南.md](docs/guide/配置指南.md) |
-| 🎮 **命令参考** | [docs/guide/命令参考.md](docs/guide/命令参考.md) |
-| 🛠️ **工具概览** | [docs/guide/工具概览.md](docs/guide/工具概览.md) |
-| 🔌 **插件系统** | [docs/guide/插件系统.md](docs/guide/插件系统.md) |
-| 🧠 **记忆系统** | [docs/guide/记忆系统.md](docs/guide/记忆系统.md) |
-| 🌐 **WebUI 手册** | [docs/guide/WebUI手册.md](docs/guide/WebUI手册.md) |
-| 🔧 **开发者文档** | [docs/dev/项目概览.md](docs/dev/项目概览.md) |
-| 📋 **更新日志** | [docs/CHANGELOG.md](docs/CHANGELOG.md) |
-| 🤝 **贡献指南** | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) |
-
----
+首次运行 `fp` 会进入交互式配置向导（`LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`，无内置默认值）。Windows 建议安装 Git Bash 获得完整 Unix 命令支持。
 
 ## ⚙️ 配置
 
-默认读取 `~/.config/fp/config.json`，支持三级优先级：
-
-1. **配置文件** → `config.json` 显式值优先
-2. **环境变量** → `LLM_API_KEY` / `OPENAI_API_KEY`
-3. **代码默认值** → 内置 fallback
+读取 `~/.config/fp/config.json`，优先级：配置文件 → 环境变量 → 代码默认值。
 
 ```json
 {
@@ -180,38 +81,39 @@ echo "运行 ls -la" | fp
 }
 ```
 
----
-
-## 🧪 开发环境
+## 🧪 开发
 
 ```bash
-git clone git@github.com:zpb911km/fp-agent.git
-cd fp-agent
-python3 -m venv .venv
-source .venv/bin/activate
+git clone git@github.com:zpb911km/fp-agent.git && cd fp-agent
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e packages/fp-core packages/fp-terminal packages/fp-webui packages/fp-acp packages/fp
 
-# 安装所有子包（开发模式）
-pip install -e packages/fp-core
-pip install -e packages/fp-terminal
-pip install -e packages/fp-webui
-pip install -e packages/fp-acp
-pip install -e packages/fp
+ruff check . && ruff format .                  # 代码风格
+python -m pytest packages/fp-core/tests -q     # 测试（conftest.py autouse fixture 隔离会话目录，不写真实数据）
 ```
 
-### Lint
+## 🏗️ 项目结构
 
-```bash
-ruff check .
-ruff format .
+```
+packages/
+├── fp-core/        # 核心引擎：Agent 主干、LLM 客户端、会话、工具、生命周期插件、记忆、任务图
+├── fp-terminal/    # 终端 REPL（Textual TUI + CLI）
+├── fp-webui/       # Web 界面（FastAPI）
+├── fp-acp/         # ACP 协议服务器（JSON-RPC）
+└── fp/             # 用户入口：fp 命令、ext 资产分发、首跑向导
+
+docs/               # guide 使用文档 · dev 开发文档 · self 自举手册
 ```
 
-### 测试
+## 📖 文档
 
-```bash
-python -m pytest packages/fp-core/tests -q
-```
-
-> **会话隔离保证**：`tests/conftest.py` 通过 autouse fixture 将 `SESSIONS_DIR` 全局指向临时目录——**任何测试都不会写入真实会话目录**（`~/.local/share/fp/sessions/`）。新增测试默认继承该隔离，无需额外配置。
+| 分类 | 入口 |
+|------|------|
+| 快速开始 / 配置 / 命令 / 工具 | [快速开始](docs/guide/快速开始.md) · [配置指南](docs/guide/配置指南.md) · [命令参考](docs/guide/命令参考.md) · [工具概览](docs/guide/工具概览.md) |
+| 插件 / 记忆 / 会话 | [插件系统](docs/guide/插件系统.md) · [记忆系统](docs/guide/记忆系统.md) · [会话管理](docs/guide/会话管理.md) |
+| 界面 | [WebUI 手册](docs/guide/WebUI手册.md) · [CLI 入门](docs/guide/CLI入门.md) |
+| 开发 / 贡献 / 日志 | [开发者文档](docs/dev/项目概览.md) · [贡献指南](docs/CONTRIBUTING.md) · [更新日志](docs/CHANGELOG.md) |
+| 总索引 | [docs/README.md](docs/README.md) |
 
 ---
 
@@ -219,9 +121,6 @@ python -m pytest packages/fp-core/tests -q
 
 [MIT](LICENSE) © zpb911km
 
----
-
 <div align="center">
-  <sub>Built with ❄️ by FP</sub>
-</div>
+  <sub>由 FP 自己编写 · 持续改写自身</sub>
 </div>
