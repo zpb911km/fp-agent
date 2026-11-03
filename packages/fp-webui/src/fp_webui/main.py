@@ -30,6 +30,7 @@ import re
 import secrets
 import socket
 import sys
+import tempfile as _tempfile
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
@@ -41,8 +42,8 @@ from fp_core.platform_utils import get_data_dir, restrict_file_permissions
 # ── FastAPI / WebSocket ─────────────────────────────────
 try:
     import uvicorn
-    from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
-    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi import FastAPI, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
 except ImportError as e:
     print(f"[WebUI] 缺少依赖: {e}")
@@ -174,6 +175,52 @@ _WEBUI_TOKEN: str = _load_or_create_token()
 
 
 # ════════════════════════════════════════════════════════════
+# 1c. 文件集散点（file hub）— inbox/outbox 双向通道
+# ════════════════════════════════════════════════════════════
+# 哑管道设计：hub 是多对多的文件副本集散点，无冲突处理、无清理策略，
+# 删了就删了（都是副本，不丢真身）。智能（找文件/挪文件/决策）在端点侧。
+#
+# 跨平台：默认落在当前平台的临时目录下（Windows=%TEMP%，Termux=...
+# /usr/tmp，POSIX=/tmp），可用环境变量 FP_FILEHUB_DIR 覆盖。
+# 协议约定：消息中的引用一律使用相对格式 [file:inbox/<name>] /
+# [file:outbox/<name>]，物理路径由各端按本机规则解析。
+
+_FILEHUB_DIR: str = os.environ.get("FP_FILEHUB_DIR") or _tempfile.gettempdir()
+_FILEHUB_INBOX: str = os.path.join(_FILEHUB_DIR, "fp_inbox")
+_FILEHUB_OUTBOX: str = os.path.join(_FILEHUB_DIR, "fp_outbox")
+
+# 仅允许出现在引用中的盒子名 → 实际目录（下载端点的唯一合法根）
+_FILEHUB_BOXES: dict[str, str] = {
+    "inbox": _FILEHUB_INBOX,
+    "outbox": _FILEHUB_OUTBOX,
+}
+
+
+def _ensure_filehub() -> None:
+    """确保集散点目录存在（幂等；默认权限，配合多对多集散语义）"""
+    for d in (_FILEHUB_INBOX, _FILEHUB_OUTBOX):
+        os.makedirs(d, exist_ok=True)
+
+
+def _safe_hub_path(box: str, name: str) -> str:
+    """解析 box+name 为集散点内的绝对路径，防路径穿越。
+
+    校验 realpath 严格落在目标盒子目录内（拒绝 ../、符号链接逃逸）。
+    抛 HTTPException(404/400)。
+    """
+    root = _FILEHUB_BOXES.get(box)
+    if root is None:
+        raise HTTPException(status_code=400, detail=f"未知盒子: {box}")
+    if not name or "/" in name or "\\" in name or name in {".", ".."}:
+        raise HTTPException(status_code=400, detail="非法文件名")
+    root_real = os.path.realpath(root)
+    target = os.path.join(root_real, name)
+    if os.path.realpath(target) != target:
+        raise HTTPException(status_code=400, detail="非法文件名")
+    return target
+
+
+# ════════════════════════════════════════════════════════════
 # 3. FastAPI 应用
 # ════════════════════════════════════════════════════════════
 
@@ -266,6 +313,9 @@ async def lifespan(app: FastAPI):
     """FastAPI 生命周期：启动时初始化 Agent，关闭时清理"""
     get_logger().info("[WebUI] 🚀 FP WebUI 启动中...")
 
+    # 文件集散点目录（幂等）
+    _ensure_filehub()
+
     # ── reload handoff：进程重启后续接上一轮对话（不阻塞启动，
     #    任务进后台，事件由环形缓冲 + run_id 重放/resync 兜底） ──
     await _run_reload_continuation()
@@ -302,9 +352,8 @@ async def auth_middleware(request: Request, call_next: Callable[[Request], Await
     """拦截 /api/* 请求，验证 Bearer Token（白名单除外）"""
     path = request.url.path
     if path.startswith("/api/") and path not in _AUTH_WHITELIST:
-        auth = request.headers.get("authorization", "")
         expected = f"Bearer {_WEBUI_TOKEN}"
-        if not auth or auth != expected:
+        if request.headers.get("authorization", "") != expected:
             return JSONResponse(status_code=401, content={"detail": "未授权，请先登录"})
     return await call_next(request)
 
@@ -409,6 +458,77 @@ async def health_check() -> dict[str, Any]:
         "processing": session_runtime.is_running,
         "run_id": event_bus.run_id,
     }
+
+
+@app.post("/api/files")
+async def upload_file(file: UploadFile) -> dict[str, Any]:
+    """上传文件到集散点 inbox（扁平、原名落盘、撞名覆盖）。
+
+    返回落盘绝对路径与协议引用格式，供前端拼进消息。
+    """
+    _ensure_filehub()
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="缺少文件名")
+    # 仅取 basename，拒绝任何路径成分（永不信任客户端路径）
+    name = os.path.basename(file.filename.replace("\\", "/"))
+    if not name or name in {".", ".."}:
+        raise HTTPException(status_code=400, detail="非法文件名")
+    target = os.path.join(_FILEHUB_INBOX, name)
+    size = 0
+    try:
+        with open(target, "wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                f.write(chunk)
+                size += len(chunk)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"落盘失败: {e}") from e
+    finally:
+        await file.close()
+    get_logger().info(f"[WebUI] 📥 上传 {name}（{size} 字节）→ {target}")
+    return {
+        "status": "ok",
+        "name": name,
+        "path": target,
+        "size": size,
+        "ref": f"[file:inbox/{name}]",
+    }
+
+
+@app.get("/api/files/download")
+async def download_file(box: str = "outbox", name: str = "") -> Response:
+    """从集散点盒子取文件（仅 inbox/outbox，realpath 校验防穿越）"""
+    _ensure_filehub()
+    target = _safe_hub_path(box, name)
+    if not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    media_type = _guess_media_type(name)
+    return FileResponse(target, media_type=media_type, filename=name)
+
+
+_MIME_OVERRIDES: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".csv": "text/csv",
+    ".json": "application/json",
+    ".html": "text/html",
+    ".zip": "application/zip",
+    ".mp3": "audio/mpeg",
+    ".mp4": "video/mp4",
+}
+
+
+def _guess_media_type(name: str) -> str:
+    import mimetypes
+
+    ext = os.path.splitext(name)[1].lower()
+    return _MIME_OVERRIDES.get(ext) or (mimetypes.guess_type(name)[0] or "application/octet-stream")
 
 
 @app.post("/api/chat")

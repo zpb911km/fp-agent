@@ -94,6 +94,44 @@ fp-webui --host 0.0.0.0 --port 8080
 
 ---
 
+## 文件集散通道（file hub）
+
+WebUI 内置双向文件通道，位于 `<临时目录>/fp_inbox` 与 `<临时目录>/fp_outbox`
+两个扁平目录。临时目录按当前平台解析（POSIX 为 `/tmp`，Windows 为 `%TEMP%`，
+Termux 为 `.../usr/tmp`），可用环境变量 `FP_FILEHUB_DIR` 覆盖到任意路径。
+
+设计哲学：**hub 是哑的、可丢弃的**——里面都是文件副本，撞名覆盖、删了就删，
+不做冲突处理与清理；找文件、挪文件、决策等智能行为由会话两端的 agent 与用户完成。
+
+### 上传（用户 → agent）
+
+- 输入框 📎 按钮选文件，或直接**粘贴截图/文件**；
+- 选中即后台上传到 `fp_inbox/`，输入框显示可删除的文件标记；
+- 发送时消息正文自动携带 `[file:inbox/<name>]` 引用，agent 据此取用。
+
+### 下载（agent → 用户）
+
+- agent 把产物写入 `fp_outbox/`，并在回复中使用引用格式 `[file:outbox/<name>]`；
+- 前端自动将引用渲染为可点击的下载链接。
+
+### 协议约定（对 agent）
+
+消息中的文件引用一律使用**相对格式** `[file:inbox/<name>]` / `[file:outbox/<name>]`，
+不写绝对路径——物理位置随平台漂移，引用格式跨平台不变。agent 可用
+`python3 -c "import tempfile; print(tempfile.gettempdir())"` 探明本机集散点位置。
+
+### API
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/files` | POST | multipart 上传到 inbox（原名落盘，撞名覆盖） |
+| `/api/files/download?box=outbox&name=x` | GET | 从指定盒子（`inbox`/`outbox`）下载；realpath 校验，拒绝路径穿越 |
+
+多实例共享：多个 fp-webui 实例（同一平台/用户）默认共享同一集散点，
+天然形成跨实例、跨 agent 的多对多文件集散地。
+
+---
+
 ## API 接口（非 Web 页面场景）
 
 fp-webui 同时暴露了 RESTful API，方便集成到其他前端或自动化工具中：

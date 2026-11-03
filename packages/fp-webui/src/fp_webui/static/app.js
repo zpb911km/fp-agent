@@ -502,6 +502,62 @@ function handleEvent(data) {
   }
 }
 
+// ── 文件上传（集散点 inbox） ──
+// 选中即后台上传，输入框显示可删除标记；发送时把 [file:inbox/name]
+// 引用拼进消息正文，agent 收到路径引用即可取用。
+var _pendingFiles = [];  // [{name, path, size}]
+
+function onFileInputChange(ev) {
+  var files = ev.target.files || [];
+  for (var i = 0; i < files.length; i++) uploadFile(files[i]);
+  ev.target.value = '';  // 允许重复选择同一文件
+}
+
+function uploadFile(file) {
+  var fd = new FormData();
+  fd.append('file', file, file.name);
+  // withAuth 只加 Authorization；multipart 不能手动设 content-type
+  authFetch('/api/files', { method: 'POST', body: fd })
+    .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+    .then(function (res) {
+      if (!res.ok) { showError(res.d.detail || '上传失败'); return; }
+      _pendingFiles.push(res.d);
+      renderPendingFiles();
+    })
+    .catch(function (e) { if (e.message !== '未授权') showError('上传失败: ' + e.message); });
+}
+
+function removePendingFile(idx) {
+  // 标记可删，已落盘的副本留在集散点不回收（都是副本，宁可多占不误删）
+  _pendingFiles.splice(idx, 1);
+  renderPendingFiles();
+}
+
+function renderPendingFiles() {
+  var bar = document.getElementById('pendingFiles');
+  if (!_pendingFiles.length) { bar.hidden = true; bar.innerHTML = ''; return; }
+  bar.hidden = false;
+  bar.innerHTML = _pendingFiles.map(function (f, i) {
+    return '<span class="pending-file" title="' + escapeHtml(f.path) + '">' +
+      '📄 ' + escapeHtml(f.name) +
+      ' <button class="pending-file-x" onclick="removePendingFile(' + i + ')" ' +
+      'aria-label="移除 ' + escapeHtml(f.name) + '">×</button></span>';
+  }).join('');
+}
+
+// 粘贴截图/文件直传（截图场景主通道）
+inputEl.addEventListener('paste', function (ev) {
+  var items = (ev.clipboardData && ev.clipboardData.items) || [];
+  var picked = false;
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].kind === 'file') {
+      var f = items[i].getAsFile();
+      if (f) { uploadFile(f); picked = true; }
+    }
+  }
+  if (picked) ev.preventDefault();
+});
+
 // ── 发送消息 ──
 
 // 回溯按钮事件委托
@@ -521,7 +577,14 @@ messagesEl.addEventListener('click', function(e) {
 function sendMessage() {
   closeCmdPalette();
   var text = inputEl.value.trim();
-  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+  // 有待发文件时允许纯文件消息（正文可为空，引用即正文）
+  if ((!text && !_pendingFiles.length) || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (_pendingFiles.length) {
+    text = _pendingFiles.map(function (f) { return f.ref; }).join(' ') +
+           (text ? '\n' + text : '');
+    _pendingFiles = [];
+    renderPendingFiles();
+  }
 
   // ask 答复通道：等待问答时，自由输入同样携带 ask_id 对账
   if (_pendingAsk) {

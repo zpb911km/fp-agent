@@ -2196,3 +2196,87 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   font-size: 12px;
   color: var(--text-dim);
 }
+
+/* ── 文件集散通道（file hub） ── */
+
+.attach-btn {
+  flex-shrink: 0;
+}
+
+/* 待发送文件标记栏 */
+.pending-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px 0;
+}
+
+.pending-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 12px;
+  background: var(--bg-secondary, rgba(128,128,128,.15));
+  font-size: 0.82rem;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-file-x {
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0 2px;
+  opacity: 0.6;
+}
+
+.pending-file-x:hover { opacity: 1; color: var(--red-bright, #f66); }
+
+/* 消息中的文件引用 → 下载链接 */
+.file-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  margin: 1px 2px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color, rgba(128,128,128,.35));
+  color: var(--green-bright, #6c6);
+  text-decoration: none;
+  font-size: 0.88rem;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.file-ref:hover {
+  background: rgba(102, 204, 102, 0.1);
+  border-color: var(--green-bright, #6c6);
+}
+
+/* ── 文件引用：失效/错误态 ── */
+a.file-ref.file-ref-missing {
+  opacity: 0.55;
+  text-decoration: line-through;
+  cursor: not-allowed;
+  border-style: dashed;
+  border-color: #b45309;
+  color: #b45309;
+}
+a.file-ref.file-ref-error {
+  animation: fileRefShake 0.3s ease 2;
+  border-color: #dc2626;
+}
+@keyframes fileRefShake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-3px); }
+  75% { transform: translateX(3px); }
+}

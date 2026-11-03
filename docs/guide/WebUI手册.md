@@ -474,6 +474,28 @@ FastAPI 的 `@app.middleware("http")`，拦截所有 `/api/*` 请求（白名单
 
 ---
 
+## 5.x 文件集散点（file hub）
+
+WebUI 提供双向文件通道（插件内实现，不依赖 core/bridge）：
+
+- **上传**：`POST /api/files`（multipart `files` 字段，多文件）→ 落盘到集散点 `fp_inbox/`，同名**覆盖**（副本语义，不丢真身），响应返回 `[{name, path, size}]`。
+- **下载**：`GET /api/files/{box}/{name}`，`box` 限 `inbox|outbox`，`realpath` 校验严格在对应目录内（防穿越）；支持 HEAD 探测。
+
+物理位置：`tempfile.gettempdir()` 下的 `fp_inbox/` 与 `fp_outbox/`（Windows=`%TEMP%`、Termux=其私有 tmp、POSIX=`/tmp`），可用环境变量 `FP_FILEHUB_DIR` 覆盖；启动时自动创建，`/tmp` 语义即临时集散点，多实例共享、删了不心疼。
+
+**引用协议**（跨平台稳定，物理路径本地解析）：消息文本中的
+`[file:inbox/<name>]` / `[file:outbox/<name>]`（前后端统一由
+`static/ui.js` 的 `FILE_REF_RE` 识别）会被渲染为可点击下载链接——
+用户消息与 agent 消息均渲染；下载经 `fetch` + `Authorization` 头取
+blob（token 不入 URL），404 时链接就地转为「已不存在」失效态，
+其它错误红框抖动提示。上传组件（📎 / 粘贴截图）选中即后台上传，
+输入框显示可删除的文件标记，发送时自动拼引用进消息。
+
+Agent 侧约定：hub 是哑的——收件处理、文件挪放、产物放 `fp_outbox/`
+等决策都在端点（agent / 用户）侧完成。
+
+---
+
 ## 6. WebSocket 协议
 
 ### 6.1 连接
