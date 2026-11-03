@@ -81,7 +81,7 @@ class TestNormalizeProviders:
         assert norm["azure"]["models"]["gpt-4o"]["temperature"] == 0.7
 
     def test_junk_dropped(self):
-        """非 dict / 无 model / 名字含斜杠 → 丢弃"""
+        """非 dict / 无 model / provider 名含斜杠 → 丢弃"""
         raw = {
             "bad1": "not-a-dict",
             "bad2": {"api_key": "no-model"},
@@ -90,6 +90,30 @@ class TestNormalizeProviders:
         }
         norm = config.normalize_providers(raw)
         assert set(norm) == {"good"}
+
+    def test_model_name_with_slash_kept(self):
+        """模型名含斜杠（HuggingFace 风格 org/model）→ 保留，不丢弃。
+
+        silicon-flow 等平台的模型 ID 形如 zai-org/GLM-5.3-Flash；
+        ACTIVE_LLM 按首个 "/" 分隔，provider 名已禁斜杠，故模型斜杠无歧义。
+        """
+        raw = {
+            "silicon-flow": {
+                "api_key": "sk-sf",
+                "base_url": "https://api.siliconflow.cn/v1",
+                "models": {"deepseek-ai/DeepSeek-V4-Flash": {}, "zai-org/GLM-5.3-Flash": {}},
+            }
+        }
+        norm = config.normalize_providers(raw)
+        assert set(norm["silicon-flow"]["models"]) == {
+            "deepseek-ai/DeepSeek-V4-Flash",
+            "zai-org/GLM-5.3-Flash",
+        }
+        # 旧扁平格式的 model 字段同样允许斜杠
+        legacy = config.normalize_providers({
+            "silicon-flow": {"api_key": "k", "base_url": "u", "model": "zai-org/GLM-5.3-Flash"}
+        })
+        assert "zai-org/GLM-5.3-Flash" in legacy["silicon-flow"]["models"]
 
     def test_empty_or_non_dict(self):
         assert config.normalize_providers(None) == {}
@@ -300,6 +324,42 @@ class TestFpModelOverride:
         assert (r["provider"], r["model"]) == ("aliyun", "qwen-max")
         assert config._fp_model_miss == ""
 
+    def test_slash_model_id_resolves(self, monkeypatch):
+        """模型 ID 含斜杠（org/model）→ 按首个 "/" 分隔，精确命中"""
+        _reset(
+            ACTIVE_LLM="deepseek/deepseek-v4-flash",
+            LLM_PROVIDERS={
+                "silicon-flow": {
+                    "api_key": "k",
+                    "base_url": "https://api.siliconflow.cn/v1",
+                    "models": {"zai-org/GLM-5.3-Flash": {}, "deepseek-ai/DeepSeek-V4-Flash": {}},
+                },
+            },
+        )
+        monkeypatch.setenv("FP_MODEL", "silicon-flow/zai-org/GLM-5.3-Flash")
+        r = config.resolve_active_llm()
+        assert r is not None
+        assert (r["provider"], r["model"]) == ("silicon-flow", "zai-org/GLM-5.3-Flash")
+        assert config._fp_model_miss == ""
+
+    def test_bare_slash_model_id_resolves(self, monkeypatch):
+        """裸的含斜杠模型名（不带 provider）→ provider 段未命中后整串查全表唯一命中"""
+        _reset(
+            ACTIVE_LLM="deepseek/deepseek-v4-flash",
+            LLM_PROVIDERS={
+                "silicon-flow": {
+                    "api_key": "k",
+                    "base_url": "https://api.siliconflow.cn/v1",
+                    "models": {"zai-org/GLM-5.3-Flash": {}},
+                },
+            },
+        )
+        monkeypatch.setenv("FP_MODEL", "zai-org/GLM-5.3-Flash")
+        r = config.resolve_active_llm()
+        assert r is not None
+        assert (r["provider"], r["model"]) == ("silicon-flow", "zai-org/GLM-5.3-Flash")
+        assert config._fp_model_miss == ""
+
     def test_bare_model_unique_match(self, monkeypatch):
         """裸模型名全表唯一命中 → 采用"""
         monkeypatch.setenv("FP_MODEL", "qwen-max")
@@ -502,6 +562,61 @@ class TestThinkingNormalization:
         assert eb["chat_template_kwargs"] == {"thinking": False}
         assert "enable_thinking" not in eb
 
+    def test_glm_never_sends_disable_thinking(self):
+        """GLM（bigmodel）：enable_thinking:false → 400 1210，须翻译为 reasoning_effort:low。
+
+        实测（open.bigmodel.cn glm-5.3-flash）：
+          enable_thinking:false      → 400 "该模型始终思考，不支持关闭思考；请使用 low、high 或 max"
+          thinking:{type:disabled}   → 同样 400
+          reasoning_effort:"low"     → 200，0 思考 token（最接近"关"的近似）
+          thinking:{type:"enabled"}  → 200（开思考的原生格式）
+        """
+        _reset(
+            LLM_PROVIDERS={
+                "GLM": {
+                    "api_key": "k",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                    "models": {"glm-5.3-flash": {}},
+                }
+            }
+        )
+        r = config.resolve_llm_params("GLM", "glm-5.3-flash")
+        assert r is not None
+        eb = r["extra_body"]
+        assert eb.get("reasoning_effort") == "low"
+        assert eb.get("enable_thinking") is not False
+        assert "enable_thinking" not in eb
+
+    def test_glm_intent_true_uses_native_thinking(self):
+        """GLM 开思考意图 → thinking:{type:enabled}（原生格式，实测 200）"""
+        _reset(
+            LLM_PROVIDERS={
+                "bigmodel": {
+                    "api_key": "k",
+                    "base_url": "u",
+                    "models": {"glm-5.3-flash": {"extra_body": {"enable_thinking": True}}},
+                }
+            }
+        )
+        r = config.resolve_llm_params("bigmodel", "glm-5.3-flash")
+        assert r is not None
+        assert r["extra_body"] == {"thinking": {"type": "enabled"}}
+
+    def test_glm_user_reasoning_effort_wins(self):
+        """用户显式写了 reasoning_effort → 直接控档位，意图键不再翻译"""
+        _reset(
+            LLM_PROVIDERS={
+                "GLM": {
+                    "api_key": "k",
+                    "base_url": "u",
+                    "models": {"glm-5.3-flash": {"extra_body": {"reasoning_effort": "high"}}},
+                }
+            }
+        )
+        r = config.resolve_llm_params("GLM", "glm-5.3-flash")
+        assert r is not None
+        assert r["extra_body"] == {"reasoning_effort": "high"}
+
     def test_no_thinking_body_by_provider(self):
         _reset(ACTIVE_LLM="deepseek/x", LLM_PROVIDERS={})
         assert config.no_thinking_body() == {"thinking": {"type": "disabled"}}
@@ -509,6 +624,9 @@ class TestThinkingNormalization:
         assert config.no_thinking_body() == {"enable_thinking": False}
         _reset(ACTIVE_LLM="amd-radeon/r")
         assert config.no_thinking_body() == {"chat_template_kwargs": {"thinking": False}}
+        # GLM 关不掉思考 → 最低档近似（enable_thinking:false 会 400 1210）
+        _reset(ACTIVE_LLM="GLM/glm-5.3-flash")
+        assert config.no_thinking_body() == {"reasoning_effort": "low"}
         # 无 ACTIVE_LLM → 由顶层 base_url 推断
         _reset(LLM_API_BASE_URL="https://api.deepseek.com/v1")
         assert config.no_thinking_body() == {"thinking": {"type": "disabled"}}

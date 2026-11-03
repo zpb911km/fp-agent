@@ -155,7 +155,10 @@ def normalize_providers(raw: Any) -> dict[str, dict[str, Any]]:
     - 新格式（value.models 为 dict）→ 原样（坏 models 条目丢弃）
     - 旧格式（value.model 为 str）→ 包装为 {"models": {model: 差异参数}}，
       api_key/base_url/连接参数留在 provider 级，生成参数下沉为模型级差异
-    - 无表 / 非 dict / 无任何有效模型 / 名字含斜杠 → 丢弃
+    - 无表 / 非 dict / 无任何有效模型 / provider 名含斜杠 → 丢弃
+      （模型名允许含 "/"：HuggingFace 风格 org/model，如 silicon-flow 的
+        zai-org/GLM-5.3-Flash；ACTIVE_LLM 只按首个 "/" 分隔，provider 名
+        已在下方禁斜杠，故解析无歧义）
 
     Returns:
         规范化后的 dict[str, dict]；空 dict 表示未配置或全部无效。
@@ -179,8 +182,6 @@ def normalize_providers(raw: Any) -> dict[str, dict[str, Any]]:
             mraw = cast(dict[str, Any], models_raw)
             for mname, mval in mraw.items():
                 mkey = str(mname)
-                if "/" in mkey:
-                    continue
                 models[mkey] = cast(dict[str, Any], mval) if isinstance(mval, dict) else {}
             if not models:
                 continue
@@ -191,8 +192,6 @@ def normalize_providers(raw: Any) -> dict[str, dict[str, Any]]:
             if not isinstance(legacy_model, str) or not legacy_model.strip():
                 continue
             mkey = legacy_model.strip()
-            if "/" in mkey:
-                continue
             legacy_diff = {k: v for k, v in pobj.items() if k in _LLM_MODEL_KEYS}
             p = {k: v for k, v in pobj.items() if k != "model" and k not in _LLM_MODEL_KEYS}
             models = {mkey: legacy_diff}
@@ -231,9 +230,13 @@ def infer_active_from_top(
 
 
 def _split_active(active: str) -> tuple[str, str] | None:
-    """拆分 'provider/model' 为二元组；格式不合法 → None。"""
+    """拆分 'provider/model' 为二元组（按**首个** "/" 分隔）；格式不合法 → None。
+
+    模型名允许含 "/"（HuggingFace 风格 org/model，如 zai-org/GLM-5.3-Flash）：
+    provider 名在 normalize_providers 中已禁斜杠，故首段必为 provider，无歧义。
+    """
     provider, sep, model = active.partition("/")
-    if not sep or not provider or not model or "/" in model:
+    if not sep or not provider or not model:
         return None
     return provider, model
 
@@ -280,6 +283,21 @@ def _normalize_thinking_params(provider: str, extra_body: dict[str, Any]) -> dic
         # 用户已显式写了 chat_template_kwargs → 以原生为准，不覆盖。
         if "chat_template_kwargs" not in out:
             out["chat_template_kwargs"] = {"thinking": bool(intent)}
+    elif "glm" in provider.lower() or "bigmodel" in provider.lower():
+        # bigmodel GLM 实测（glm-5.3-flash，错误码 1210）：
+        #   enable_thinking:false → 400 "该模型始终思考，不支持关闭思考；
+        #     请使用 low、high 或 max"；thinking:{type:disabled} 同样 400。
+        #   故「关思考」在 GLM 上不可表达，最接近的近似是最低思考档：
+        #   reasoning_effort:"low"（实测 0 思考 token）。
+        #   开思考 → thinking:{type:"enabled"}（实测 200）。
+        # 用户显式写了 reasoning_effort → 直接控档位，意图键无需再翻译。
+        if "reasoning_effort" in out:
+            pass
+        elif intent:
+            if "thinking" not in out:
+                out["thinking"] = {"type": "enabled"}
+        else:
+            out["reasoning_effort"] = "low"
     else:
         out["enable_thinking"] = bool(intent)
     return out
@@ -296,12 +314,45 @@ def no_thinking_body() -> dict[str, Any]:
     provider = active.split("/", 1)[0] if "/" in active else ""
     if not provider:
         # 无 ACTIVE_LLM → 退化到顶层 base_url 推断
-        base = str(_value("LLM_API_BASE_URL", "") or "").lower()
-        provider = "deepseek" if "deepseek" in base else ""
+        provider = _provider_hint_from_base(str(_value("LLM_API_BASE_URL", "") or ""))
     if "deepseek" in provider.lower():
         return {"thinking": {"type": "disabled"}}
     if "amd" in provider.lower() or "radeon" in provider.lower():
         # AMD Radeon：enable_thinking 是死参数 → 用唯一有效的 vLLM 模板开关
+        return {"chat_template_kwargs": {"thinking": False}}
+    if "glm" in provider.lower() or "bigmodel" in provider.lower():
+        # GLM 关不掉思考（enable_thinking:false → 400 1210）→ 最低档近似关闭
+        return {"reasoning_effort": "low"}
+    return {"enable_thinking": False}
+
+
+def _provider_hint_from_base(base_url: str) -> str:
+    """从 base_url 粗推 provider 提示词（仅用于无表/无 ACTIVE_LLM 的兜底场景）。
+
+    与 no_thinking_body 的关键词匹配保持一致；不命中返回空串。
+    """
+    low = base_url.lower()
+    if "deepseek" in low:
+        return "deepseek"
+    if "bigmodel" in low or "zhipu" in low:
+        return "glm"
+    if "amd" in low or "radeon" in low:
+        return "radeon"
+    return ""
+
+
+def _default_extra_body_from_top() -> dict[str, Any]:
+    """无 providers 表（顶层三键直连）时的默认思考 extra_body。
+
+    按顶层 base_url 推断 provider 后复用 no_thinking_body 的翻译规则——
+    否则直连 bigmodel 时默认 `enable_thinking:false` 会触发 GLM 400 1210。
+    """
+    hint = _provider_hint_from_base(str(_value("LLM_API_BASE_URL", "") or ""))
+    if "deepseek" in hint:
+        return {"thinking": {"type": "disabled"}}
+    if "glm" in hint:
+        return {"reasoning_effort": "low"}
+    if "radeon" in hint:
         return {"chat_template_kwargs": {"thinking": False}}
     return {"enable_thinking": False}
 
@@ -356,10 +407,19 @@ def _resolve_fp_model(spec: str, providers: dict[str, dict[str, Any]]) -> dict[s
     支持 "provider/model" 精确形式与裸模型名。裸名的消歧次序：
     ① 当前激活 provider 命中 → 用之；② 全表唯一命中 → 用之；
     ③ 查无 / 多义 → None（由调用方回退配置激活项并告警，绝不猜）。
+    含 "/" 的 spec 先按首段 provider 精确解析；未命中再整串当裸模型名
+    查全表（兼容 HuggingFace 风格 org/model 裸名，如 zai-org/GLM-5.3-Flash）。
     """
     if "/" in spec:
         pair = _split_active(spec)
-        return resolve_llm_params(*pair) if pair else None
+        if pair is not None:
+            resolved = resolve_llm_params(*pair)
+            if resolved is not None:
+                return resolved
+        hits = [p for p, pd in providers.items() if spec in pd.get("models", {})]
+        if len(hits) == 1:
+            return resolve_llm_params(hits[0], spec)
+        return None
     active = _split_active(str(_value(ACTIVE_LLM_KEY, "") or ""))
     if active is not None and spec in providers.get(active[0], {}).get("models", {}):
         return resolve_llm_params(active[0], spec)
@@ -444,7 +504,7 @@ def set_active_llm_state(
     globals()["LLM_MODEL"] = model
     globals()["LLM_TEMPERATURE"] = float(temperature)
     globals()["LLM_MAX_TOKENS"] = int(max_tokens)
-    globals()["LLM_EXTRA_BODY"] = dict(extra_body) if extra_body else {"enable_thinking": False}
+    globals()["LLM_EXTRA_BODY"] = dict(extra_body) if extra_body else no_thinking_body()
     if timeout is not None:
         globals()["LLM_TIMEOUT"] = int(timeout)
     if retry_count is not None:
@@ -466,7 +526,7 @@ LLM_ACTIVE_ID: str = (
     f"{_resolved_active['provider']}/{_resolved_active['model']}" if _resolved_active is not None else ""
 )
 LLM_EXTRA_BODY: dict[str, Any] = (
-    dict(_resolved_active["extra_body"]) if _resolved_active is not None else {"enable_thinking": False}
+    dict(_resolved_active["extra_body"]) if _resolved_active is not None else _default_extra_body_from_top()
 )
 LLM_API_KEY: str = _resolved_active["api_key"] if _resolved_active is not None else _value("LLM_API_KEY", "")
 LLM_API_BASE_URL: str = _resolved_active["base_url"] if _resolved_active is not None else _value("LLM_API_BASE_URL", "")
