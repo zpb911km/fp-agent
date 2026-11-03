@@ -479,7 +479,7 @@ FastAPI 的 `@app.middleware("http")`，拦截所有 `/api/*` 请求（白名单
 WebUI 提供双向文件通道（插件内实现，不依赖 core/bridge）：
 
 - **上传**：`POST /api/files`（multipart `files` 字段，多文件）→ 落盘到集散点 `fp_inbox/`，同名**覆盖**（副本语义，不丢真身），响应返回 `[{name, path, size}]`。
-- **下载**：`GET /api/files/{box}/{name}`，`box` 限 `inbox|outbox`，`realpath` 校验严格在对应目录内（防穿越）；支持 HEAD 探测。
+- **下载**：`GET /api/files/{box}/{name}`，`box` 限 `inbox|outbox`，`realpath` 校验严格在对应目录内（防穿越）；支持 HEAD 探测。文本类文件（`text/*`）响应自动追加 `charset=utf-8`，防止浏览器按本地编码解码中文乱码。
 
 物理位置：`tempfile.gettempdir()` 下的 `fp_inbox/` 与 `fp_outbox/`（Windows=`%TEMP%`、Termux=其私有 tmp、POSIX=`/tmp`），可用环境变量 `FP_FILEHUB_DIR` 覆盖；启动时自动创建，`/tmp` 语义即临时集散点，多实例共享、删了不心疼。
 

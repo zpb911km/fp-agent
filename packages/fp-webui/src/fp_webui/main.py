@@ -528,7 +528,11 @@ def _guess_media_type(name: str) -> str:
     import mimetypes
 
     ext = os.path.splitext(name)[1].lower()
-    return _MIME_OVERRIDES.get(ext) or (mimetypes.guess_type(name)[0] or "application/octet-stream")
+    media = _MIME_OVERRIDES.get(ext) or (mimetypes.guess_type(name)[0] or "application/octet-stream")
+    # 文本类 MIME 必须显式声明 charset，否则浏览器按本地编码解码导致中文乱码
+    if media.startswith("text/") and "charset" not in media:
+        media += "; charset=utf-8"
+    return media
 
 
 @app.post("/api/chat")
