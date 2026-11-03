@@ -548,3 +548,51 @@ class TestIsRetryable:
         assert not is_retryable(APIError("x", status_code=401))
         assert not is_retryable(APIError("x", status_code=422))
         assert not is_retryable(ValueError("boom"))
+
+
+class TestRetryDelay429:
+    """429 走更陡的退避阶梯（并发槽位型限流需撑过占用窗口）。
+
+    抖动取 [0.5·d, d]，故各断言用区间而非定值，避免 flaky。
+    base=1.0 / cap=30.0 下：
+      429 → 4^attempt = 1 / 4 / 16  → 抖动后 [0.5,1] / [2,4] / [8,16]
+      其它 → 2^attempt = 1 / 2 / 4  → 抖动后 [0.5,1] / [1,2] / [2,4]
+    两组在 attempt>=1 后区间不重叠 → 断言安全。
+    """
+
+    def _svc(self, *, base=1.0, cap=30.0):
+        cfg = LLMConfig(model="m", retry_base_delay=base, retry_max_delay=cap)
+        return LLMService(client=None, config=cfg)
+
+    def test_429_steeper_than_generic(self):
+        svc = self._svc()
+        for attempt in (1, 2):
+            d429 = svc._retry_delay(attempt, APIError("x", status_code=429))
+            d500 = svc._retry_delay(attempt, APIError("x", status_code=500))
+            assert d429 > d500, f"attempt={attempt}: 429 应更陡 ({d429} vs {d500})"
+        # attempt=2 时下界 8 仍高于通用路径上界 4
+        assert svc._retry_delay(2, APIError("x", status_code=429)) >= 8.0
+        assert svc._retry_delay(2, APIError("x", status_code=500)) <= 4.0
+
+    def test_429_first_attempt_still_short(self):
+        """首跳保持短间隔 —— 429 响应廉价，早探测几乎无成本。"""
+        svc = self._svc()
+        d0 = svc._retry_delay(0, APIError("x", status_code=429))
+        assert 0.5 <= d0 <= 1.0
+
+    def test_429_respects_cap(self):
+        svc = self._svc(cap=2.0)
+        for attempt in (0, 1, 2, 5):
+            assert svc._retry_delay(attempt, APIError("x", status_code=429)) <= 2.0
+
+    def test_generic_and_no_exc_unchanged(self):
+        """非 429 与不传 exc 的旧调用方式保持原 2^attempt 行为。"""
+        svc = self._svc()
+        assert svc._retry_delay(2, APIError("x", status_code=500)) <= 4.0
+        assert svc._retry_delay(2) <= 4.0
+        assert svc._retry_delay(2, ValueError("boom")) <= 4.0
+
+    def test_429_not_applied_to_connect_error(self):
+        """status_code=0（连接失败/超时）不该误入 429 阶梯。"""
+        svc = self._svc()
+        assert svc._retry_delay(2, APIError("x", status_code=0)) <= 4.0

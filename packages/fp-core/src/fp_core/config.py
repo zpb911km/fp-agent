@@ -252,9 +252,12 @@ def _merge_extra_body(*bodies: Any) -> dict[str, Any]:
 # 解析时按目标 provider 翻译为各自的原生请求格式，用户在配置里只需写一种语义：
 #   - deepseek → {"thinking": {"type": "enabled"/"disabled"}}
 #     （reasoning_effort 若用户显式提供则保留并平铺到请求体顶层）
+#   - amd-radeon → {"chat_template_kwargs": {"thinking": bool}}
+#     （AMD Radeon 网关：enable_thinking 静默忽略、顶层 thinking 400，
+#       唯一有效开关是 chat_template_kwargs.thinking —— 实测 vLLM 模板参数）
 #   - 其余（qwen/未知/直连）→ 保持 enable_thinking 布尔
-# 用户直接写的 thinking / reasoning_effort 原生键不受影响，透传。
-_THINKING_NATIVE_KEYS = ("thinking", "reasoning_effort")
+# 用户直接写的 thinking / reasoning_effort / chat_template_kwargs 原生键不受影响，透传。
+_THINKING_NATIVE_KEYS = ("thinking", "reasoning_effort", "chat_template_kwargs")
 
 
 def _normalize_thinking_params(provider: str, extra_body: dict[str, Any]) -> dict[str, Any]:
@@ -268,6 +271,15 @@ def _normalize_thinking_params(provider: str, extra_body: dict[str, Any]) -> dic
         if "thinking" not in out:
             out["thinking"] = {"type": "enabled"} if intent else {"type": "disabled"}
         # reasoning_effort 若存在则原样保留（llm_client body.update 平铺 → 顶层字段）
+    elif "amd" in provider.lower() or "radeon" in provider.lower():
+        # AMD Radeon 网关实测：
+        #   enable_thinking → 静默忽略（死参数）
+        #   thinking:{type} → 400 "thinking is not supported ... Use reasoning_effort"
+        #   reasoning_effort / reasoning.effort → 也无效（DeepSeek 系恒不思考）
+        #   chat_template_kwargs:{thinking} → 唯一有效（vLLM 模板参数）
+        # 用户已显式写了 chat_template_kwargs → 以原生为准，不覆盖。
+        if "chat_template_kwargs" not in out:
+            out["chat_template_kwargs"] = {"thinking": bool(intent)}
     else:
         out["enable_thinking"] = bool(intent)
     return out
@@ -288,6 +300,9 @@ def no_thinking_body() -> dict[str, Any]:
         provider = "deepseek" if "deepseek" in base else ""
     if "deepseek" in provider.lower():
         return {"thinking": {"type": "disabled"}}
+    if "amd" in provider.lower() or "radeon" in provider.lower():
+        # AMD Radeon：enable_thinking 是死参数 → 用唯一有效的 vLLM 模板开关
+        return {"chat_template_kwargs": {"thinking": False}}
     return {"enable_thinking": False}
 
 

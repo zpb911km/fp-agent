@@ -84,6 +84,17 @@ class TestModelClasses:
         assert m.reasoning_content == "原生"
         assert m.content == "<think>x</think>y"
 
+    def test_message_falls_back_to_reasoning_field(self):
+        """AMD 网关：reasoning_content 恒 null、思考在 reasoning 字段 → 兜底取到"""
+        m = Message({"role": "assistant", "content": "答", "reasoning_content": None, "reasoning": "思考过程"})
+        assert m.reasoning_content == "思考过程"
+        assert m.content == "答"
+
+    def test_message_reasoning_content_wins_over_reasoning(self):
+        """两字段都有值时 reasoning_content 优先（DeepSeek 原生语义不被别名抢走）"""
+        m = Message({"role": "assistant", "content": "答", "reasoning_content": "原生", "reasoning": "别名"})
+        assert m.reasoning_content == "原生"
+
     def test_message_choice(self):
         c = MessageChoice({"index": 0, "message": {"content": "hi"}, "finish_reason": "stop"})
         assert c.index == 0
@@ -123,6 +134,16 @@ class TestModelClasses:
         assert c.reasoning_content == "思考"
         assert c.tool_calls == [{"id": "c1"}]
         assert c.finish_reason == "tool_calls"
+
+    def test_stream_chunk_falls_back_to_reasoning_field(self):
+        """AMD 流式：delta.reasoning_content 恒 null、真 token 在 reasoning → 兜底"""
+        c = StreamChunk({"choices": [{"delta": {"content": "", "reasoning_content": None, "reasoning": "We"}}]})
+        assert c.reasoning_content == "We"
+
+    def test_stream_chunk_reasoning_content_wins_over_reasoning(self):
+        """两字段都有值时 reasoning_content 优先"""
+        c = StreamChunk({"choices": [{"delta": {"reasoning_content": "原生", "reasoning": "别名"}}]})
+        assert c.reasoning_content == "原生"
 
     def test_stream_chunk_usage(self):
         c = StreamChunk({"choices": [{"delta": {}}], "usage": {"total_tokens": 5}})

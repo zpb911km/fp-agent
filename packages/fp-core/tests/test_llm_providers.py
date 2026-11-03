@@ -444,11 +444,71 @@ class TestThinkingNormalization:
         assert r is not None
         assert r["extra_body"] == {"enable_thinking": True}
 
+    def test_amd_translates_to_chat_template_kwargs(self):
+        """AMD Radeon 网关：enable_thinking 是死参数，唯一有效开关是 chat_template_kwargs.thinking。
+
+        实测（developer.amd.com.cn/radeon）：
+          enable_thinking  → 静默忽略（DeepSeek 系恒不思考）
+          thinking:{type}  → 400 "thinking is not supported"
+          reasoning_effort → 也无效
+          chat_template_kwargs:{thinking} → 唯一有效
+        """
+        _reset(
+            LLM_PROVIDERS={
+                "amd-radeon": {
+                    "api_key": "k",
+                    "base_url": "u",
+                    "extra_body": {"enable_thinking": True, "top_p": 1.0},
+                    "models": {"DeepSeek-V4-Flash": {}, "Qwen3.8-27B": {}},
+                }
+            }
+        )
+        for m in ("DeepSeek-V4-Flash", "Qwen3.8-27B"):
+            eb = config.resolve_llm_params("amd-radeon", m)["extra_body"]
+            assert eb["chat_template_kwargs"] == {"thinking": True}
+            # 意图键必须被翻译掉，不能残留在请求体（AMD 会忽略它，但语义已失效）
+            assert "enable_thinking" not in eb
+            # 其余原生参数保留
+            assert eb["top_p"] == 1.0
+
+    def test_amd_intent_false_translates(self):
+        """amd 关思考意图 → chat_template_kwargs.thinking=False（虽网关常关不掉，但格式必须正确）"""
+        _reset(
+            LLM_PROVIDERS={
+                "amd-radeon": {
+                    "api_key": "k",
+                    "base_url": "u",
+                    "models": {"m": {"extra_body": {"enable_thinking": False}}},
+                }
+            }
+        )
+        eb = config.resolve_llm_params("amd-radeon", "m")["extra_body"]
+        assert eb == {"chat_template_kwargs": {"thinking": False}}
+
+    def test_amd_native_chat_template_kwargs_wins(self):
+        """用户显式写了原生 chat_template_kwargs → 以原生为准，不被意图键覆盖"""
+        _reset(
+            LLM_PROVIDERS={
+                "amd-radeon": {
+                    "api_key": "k",
+                    "base_url": "u",
+                    "models": {
+                        "m": {"extra_body": {"enable_thinking": True, "chat_template_kwargs": {"thinking": False}}}
+                    },
+                }
+            }
+        )
+        eb = config.resolve_llm_params("amd-radeon", "m")["extra_body"]
+        assert eb["chat_template_kwargs"] == {"thinking": False}
+        assert "enable_thinking" not in eb
+
     def test_no_thinking_body_by_provider(self):
         _reset(ACTIVE_LLM="deepseek/x", LLM_PROVIDERS={})
         assert config.no_thinking_body() == {"thinking": {"type": "disabled"}}
         _reset(ACTIVE_LLM="aliyun-qwen/q")
         assert config.no_thinking_body() == {"enable_thinking": False}
+        _reset(ACTIVE_LLM="amd-radeon/r")
+        assert config.no_thinking_body() == {"chat_template_kwargs": {"thinking": False}}
         # 无 ACTIVE_LLM → 由顶层 base_url 推断
         _reset(LLM_API_BASE_URL="https://api.deepseek.com/v1")
         assert config.no_thinking_body() == {"thinking": {"type": "disabled"}}

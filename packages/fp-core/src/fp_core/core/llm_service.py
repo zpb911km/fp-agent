@@ -125,15 +125,22 @@ class LLMService:
             overrides.get("extra_body", self._config.extra_body),
         )
 
-    def _retry_delay(self, attempt: int) -> float:
+    def _retry_delay(self, attempt: int, exc: BaseException | None = None) -> float:
         """指数退避 + 抖动；attempt 从 0 计（0 = 首次重试）。
 
         抖动取 [0.5·delay, 1.0·delay]：避免多实例同时重试造成惊群，
         同时保证间隔下界不至于过密。
+
+        429 走更陡的阶梯（4^attempt 而非 2^attempt）：限流多半是
+        **并发槽位型**（槽位被占满，不是时间窗口），短退避等不到空槽。
+        首跳仍保持短间隔 —— 429 响应廉价、不消耗 token，早探测几乎无
+        成本，槽位刚释放即可立刻接上；其后急剧拉长以撑过占用窗口。
+        默认 base=1/cap=30 下总窗口约 10.5~21s（常规 2^attempt 仅 3.5~7s）。
         """
         base = max(0.0, self._config.retry_base_delay)
         cap = max(0.0, self._config.retry_max_delay)
-        delay = min(base * (2**attempt), cap)
+        growth = 4 if (isinstance(exc, APIError) and exc.status_code == 429) else 2
+        delay = min(base * (growth**attempt), cap)
         return delay * (0.5 + random.random() * 0.5)
 
     def _notify_retry(self, attempt: int, retries: int, exc: BaseException, delay: float) -> None:
@@ -152,7 +159,7 @@ class LLMService:
             except Exception as e:  # CancelledError 是 BaseException → 不被捕获，用户中断不重试
                 if attempt >= retries or not is_retryable(e):
                     raise
-                delay = self._retry_delay(attempt)
+                delay = self._retry_delay(attempt, e)
                 self._notify_retry(attempt + 1, retries, e, delay)
                 await asyncio.sleep(delay)
                 attempt += 1
@@ -275,7 +282,7 @@ class LLMService:
             except Exception as e:  # CancelledError 是 BaseException → 用户中断不重试
                 if yielded or attempt >= retries or not is_retryable(e):
                     raise
-                delay = self._retry_delay(attempt)
+                delay = self._retry_delay(attempt, e)
                 self._notify_retry(attempt + 1, retries, e, delay)
                 await asyncio.sleep(delay)
                 attempt += 1

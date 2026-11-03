@@ -69,7 +69,10 @@ class Message:
     def __init__(self, data: dict[str, Any]):
         self.role: str = data.get("role", "assistant")
         self.content: str | None = data.get("content")
-        self.reasoning_content: str | None = data.get("reasoning_content")
+        # AMD Radeon 网关等 provider 把思考放在独立 reasoning 字段
+        # （reasoning_content 恒为 null 的诱饵）→ or 兜底；DeepSeek 原生
+        # reasoning_content 有值时仍优先。
+        self.reasoning_content: str | None = data.get("reasoning_content") or data.get("reasoning")
 
         # 非流式场景下的 <think> 标签提取
         # 仅在原生无 reasoning_content 且 content 以 <think> 开头时触发
@@ -130,7 +133,8 @@ class StreamChunk:
         choice: dict[str, Any] = cast(dict[str, Any], (data.get("choices") or [{}])[0])
         delta: dict[str, Any] = cast(dict[str, Any], choice.get("delta", {}))
         self.content: str | None = delta.get("content")
-        self.reasoning_content: str | None = delta.get("reasoning_content")
+        # 同 Message：AMD 网关思考 token 走 reasoning 字段（reasoning_content 恒 null）
+        self.reasoning_content: str | None = delta.get("reasoning_content") or delta.get("reasoning")
         raw_tc = delta.get("tool_calls")
         self.tool_calls: list[dict[str, Any]] | None = None
         if raw_tc:

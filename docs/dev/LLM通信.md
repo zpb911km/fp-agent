@@ -207,6 +207,8 @@ reasoning = message.reasoning_content  # 思考内容（如果有）
 }
 ```
 
+> AMD Radeon 网关等 provider 不返回 `reasoning_content`（恒为 `null` 的诱饵），思考 token 走独立的 `reasoning` 字段——`Message`/`StreamChunk` 用 `data.get("reasoning_content") or data.get("reasoning")` 兜底读取，DeepSeek 原生命名有值时仍优先。
+
 ### 2. `<think>...</think>` 标签嵌入 content（fallback）
 
 当模型不支持原生 `reasoning_content` 时，思考过程可能被嵌入到 `content` 字段中，使用 `<think>...</think>` 包裹。
