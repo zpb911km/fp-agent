@@ -251,56 +251,13 @@ def _merge_extra_body(*bodies: Any) -> dict[str, Any]:
 
 
 # ── 思考开关跨 provider 归一化 ────────────────────────────────
-# fp 的规范意图键是布尔 "enable_thinking"（DashScope/qwen 原生参数名）。
-# 解析时按目标 provider 翻译为各自的原生请求格式，用户在配置里只需写一种语义：
-#   - deepseek → {"thinking": {"type": "enabled"/"disabled"}}
-#     （reasoning_effort 若用户显式提供则保留并平铺到请求体顶层）
-#   - amd-radeon → {"chat_template_kwargs": {"thinking": bool}}
-#     （AMD Radeon 网关：enable_thinking 静默忽略、顶层 thinking 400，
-#       唯一有效开关是 chat_template_kwargs.thinking —— 实测 vLLM 模板参数）
-#   - 其余（qwen/未知/直连）→ 保持 enable_thinking 布尔
-# 用户直接写的 thinking / reasoning_effort / chat_template_kwargs 原生键不受影响，透传。
-_THINKING_NATIVE_KEYS = ("thinking", "reasoning_effort", "chat_template_kwargs")
-
-
-def _normalize_thinking_params(provider: str, extra_body: dict[str, Any]) -> dict[str, Any]:
-    """把规范意图键 enable_thinking 翻译为目标 provider 的原生请求参数。"""
-    out = dict(extra_body)
-    intent = out.pop("enable_thinking", None)
-    if intent is None:
-        return out
-    if "deepseek" in provider.lower():
-        # 用户已显式写了 thinking:{...} 原生格式 → 以原生为准，丢弃意图键
-        if "thinking" not in out:
-            out["thinking"] = {"type": "enabled"} if intent else {"type": "disabled"}
-        # reasoning_effort 若存在则原样保留（llm_client body.update 平铺 → 顶层字段）
-    elif "amd" in provider.lower() or "radeon" in provider.lower():
-        # AMD Radeon 网关实测：
-        #   enable_thinking → 静默忽略（死参数）
-        #   thinking:{type} → 400 "thinking is not supported ... Use reasoning_effort"
-        #   reasoning_effort / reasoning.effort → 也无效（DeepSeek 系恒不思考）
-        #   chat_template_kwargs:{thinking} → 唯一有效（vLLM 模板参数）
-        # 用户已显式写了 chat_template_kwargs → 以原生为准，不覆盖。
-        if "chat_template_kwargs" not in out:
-            out["chat_template_kwargs"] = {"thinking": bool(intent)}
-    elif "glm" in provider.lower() or "bigmodel" in provider.lower():
-        # bigmodel GLM 实测（glm-5.3-flash，错误码 1210）：
-        #   enable_thinking:false → 400 "该模型始终思考，不支持关闭思考；
-        #     请使用 low、high 或 max"；thinking:{type:disabled} 同样 400。
-        #   故「关思考」在 GLM 上不可表达，最接近的近似是最低思考档：
-        #   reasoning_effort:"low"（实测 0 思考 token）。
-        #   开思考 → thinking:{type:"enabled"}（实测 200）。
-        # 用户显式写了 reasoning_effort → 直接控档位，意图键无需再翻译。
-        if "reasoning_effort" in out:
-            pass
-        elif intent:
-            if "thinking" not in out:
-                out["thinking"] = {"type": "enabled"}
-        else:
-            out["reasoning_effort"] = "low"
-    else:
-        out["enable_thinking"] = bool(intent)
-    return out
+# 翻译逻辑已收口到 core/adapters.py（纯函数、无配置依赖，厂商知识唯一落点）。
+# config 只负责读出当前激活 provider / 兜底 base_url 推断，然后委托翻译。
+from fp_core.core.adapters import (  # noqa: E402  # 委托厂商翻译适配层
+    no_thinking_body_for,
+    normalize_thinking_params as _normalize_thinking_params,
+    provider_hint_from_base as _provider_hint_from_base,
+)
 
 
 def no_thinking_body() -> dict[str, Any]:
@@ -315,46 +272,16 @@ def no_thinking_body() -> dict[str, Any]:
     if not provider:
         # 无 ACTIVE_LLM → 退化到顶层 base_url 推断
         provider = _provider_hint_from_base(str(_value("LLM_API_BASE_URL", "") or ""))
-    if "deepseek" in provider.lower():
-        return {"thinking": {"type": "disabled"}}
-    if "amd" in provider.lower() or "radeon" in provider.lower():
-        # AMD Radeon：enable_thinking 是死参数 → 用唯一有效的 vLLM 模板开关
-        return {"chat_template_kwargs": {"thinking": False}}
-    if "glm" in provider.lower() or "bigmodel" in provider.lower():
-        # GLM 关不掉思考（enable_thinking:false → 400 1210）→ 最低档近似关闭
-        return {"reasoning_effort": "low"}
-    return {"enable_thinking": False}
-
-
-def _provider_hint_from_base(base_url: str) -> str:
-    """从 base_url 粗推 provider 提示词（仅用于无表/无 ACTIVE_LLM 的兜底场景）。
-
-    与 no_thinking_body 的关键词匹配保持一致；不命中返回空串。
-    """
-    low = base_url.lower()
-    if "deepseek" in low:
-        return "deepseek"
-    if "bigmodel" in low or "zhipu" in low:
-        return "glm"
-    if "amd" in low or "radeon" in low:
-        return "radeon"
-    return ""
+    return no_thinking_body_for(provider)
 
 
 def _default_extra_body_from_top() -> dict[str, Any]:
     """无 providers 表（顶层三键直连）时的默认思考 extra_body。
 
-    按顶层 base_url 推断 provider 后复用 no_thinking_body 的翻译规则——
+    按顶层 base_url 推断 provider 后复用统一的关思考翻译——
     否则直连 bigmodel 时默认 `enable_thinking:false` 会触发 GLM 400 1210。
     """
-    hint = _provider_hint_from_base(str(_value("LLM_API_BASE_URL", "") or ""))
-    if "deepseek" in hint:
-        return {"thinking": {"type": "disabled"}}
-    if "glm" in hint:
-        return {"reasoning_effort": "low"}
-    if "radeon" in hint:
-        return {"chat_template_kwargs": {"thinking": False}}
-    return {"enable_thinking": False}
+    return no_thinking_body_for(_provider_hint_from_base(str(_value("LLM_API_BASE_URL", "") or "")))
 
 
 def resolve_llm_params(provider: str, model: str) -> dict[str, Any] | None:
