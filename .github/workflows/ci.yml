@@ -98,7 +98,7 @@ jobs:
           python -m pip install --upgrade pip
           # 测试依赖仅登记在 dev 文档（docs/dev/测试.md），不进各包 pyproject
           # 可编辑安装全部子包：依赖由各包 pyproject 的 dependencies 自动跟上，消除手写清单漂移
-          pip install -e packages/fp -e packages/fp-core -e packages/fp-acp -e packages/fp-terminal -e packages/fp-webui
+          pip install -e packages/fp -e 'packages/fp-core[kw]' -e packages/fp-acp -e packages/fp-terminal -e packages/fp-webui
           # 仅测试工具不进包依赖（见 docs/dev/测试.md）
           pip install pytest pytest-asyncio
 
@@ -135,7 +135,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # 可编辑安装全部子包：依赖由各包 pyproject 的 dependencies 自动跟上，消除手写清单漂移
-          pip install -e packages/fp -e packages/fp-core -e packages/fp-acp -e packages/fp-terminal -e packages/fp-webui
+          pip install -e packages/fp -e 'packages/fp-core[kw]' -e packages/fp-acp -e packages/fp-terminal -e packages/fp-webui
           # 仅测试工具不进包依赖（见 docs/dev/测试.md）
           pip install pytest pytest-asyncio
 
@@ -168,7 +168,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # 可编辑安装全部子包：依赖由各包 pyproject 的 dependencies 自动跟上，消除手写清单漂移
-          pip install -e packages/fp -e packages/fp-core -e packages/fp-acp -e packages/fp-terminal -e packages/fp-webui
+          pip install -e packages/fp -e 'packages/fp-core[kw]' -e packages/fp-acp -e packages/fp-terminal -e packages/fp-webui
           # 仅测试工具不进包依赖（见 docs/dev/测试.md）
           pip install pytest pytest-asyncio
 
