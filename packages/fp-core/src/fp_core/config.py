@@ -253,11 +253,9 @@ def _merge_extra_body(*bodies: Any) -> dict[str, Any]:
 # ── 思考开关跨 provider 归一化 ────────────────────────────────
 # 翻译逻辑已收口到 core/adapters.py（纯函数、无配置依赖，厂商知识唯一落点）。
 # config 只负责读出当前激活 provider / 兜底 base_url 推断，然后委托翻译。
-from fp_core.core.adapters import (  # noqa: E402  # 委托厂商翻译适配层
-    no_thinking_body_for,
-    normalize_thinking_params as _normalize_thinking_params,
-    provider_hint_from_base as _provider_hint_from_base,
-)
+from fp_core.core.adapters import no_thinking_body_for  # noqa: E402  # 委托厂商翻译适配层
+from fp_core.core.adapters import normalize_thinking_params as _normalize_thinking_params  # noqa: E402
+from fp_core.core.adapters import provider_hint_from_base as _provider_hint_from_base  # noqa: E402
 
 
 def no_thinking_body() -> dict[str, Any]:
