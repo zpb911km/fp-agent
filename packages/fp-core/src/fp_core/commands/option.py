@@ -79,6 +79,7 @@ class EntryContract(TypedDict, total=False):
     class_name: str
     schema: dict[str, Any]
     core: bool
+    plugin: str
 
 
 @dataclass
@@ -149,7 +150,7 @@ class OptionManager:
                     source=source,
                     source_path=src_path,
                     user_override=user_override,
-                    contract={"aliases": info["aliases"]},
+                    contract={"aliases": info["aliases"], "plugin": self._plugin_origin(src_path) or ""},
                 )
             )
 
@@ -196,7 +197,7 @@ class OptionManager:
                         type="command",
                         description="",
                         status="disabled",
-                        source="user",
+                        source=self._classify_source(os.path.join(directory, fn)),
                         source_path=os.path.join(directory, fn),
                     )
                 )
@@ -407,6 +408,14 @@ class OptionManager:
             desc = defn["function"]["description"]
             plugin_src = pdata.get("source", "")
 
+            # lifecycle 动态注册的工具：registry 的 source 是硬编码占位符
+            # "lifecycle_plugin"，真实宿主从 executor 的模块指纹反查（函数闭包
+            # 定义于宿主插件的 ON_INIT 回调内，__globals__['__file__'] 指向插件文件）
+            if plugin_src == "lifecycle_plugin":
+                host = self._infer_tool_host(pdata.get("executor"))
+                if host:
+                    plugin_src = f"{host} (lifecycle)"
+
             # 找源文件
             src_path = self._find_tool_file(plugin_src)
             source = self._classify_source(src_path) if src_path else "builtin"
@@ -436,7 +445,7 @@ class OptionManager:
                     source=source,
                     source_path=src_path or f"[plugin:{plugin_src}]",
                     user_override=user_override,
-                    contract={"schema": defn["function"], "core": False},
+                    contract={"schema": defn["function"], "core": False, "plugin": plugin_src},
                 )
             )
 
@@ -523,6 +532,55 @@ class OptionManager:
         return ""
 
     # ── 通用 ──────────────────────────────────────────────
+
+    def _plugin_origin(self, filepath: str) -> str | None:
+        """若文件位于某插件目录内，返回宿主插件名（如 shortcircuit），否则 None。
+
+        覆盖两处：内置插件 FP_CORE_DIR/plugins/<name>/ 与三来源 <DATA>/{fetched,public,private}/plugins/<name>/。
+        """
+        if not filepath or filepath.startswith("["):
+            return None
+        norm = os.path.normpath(filepath)
+        candidates = [os.path.join(FP_CORE_DIR, "plugins")]
+        candidates += _user_dirs("plugins")
+        for base in candidates:
+            bnorm = os.path.normpath(base)
+            if norm.startswith(bnorm + os.sep):
+                rel = os.path.relpath(norm, bnorm)
+                top = rel.split(os.sep)[0]
+                if top.endswith(".py"):
+                    continue  # 散置插件文件，非目录型
+                return top or None
+        return None
+
+    def _infer_tool_host(self, executor: Any) -> str | None:
+        """从 executor 闭包的模块指纹反查宿主插件名。
+
+        生命周期插件在 ON_INIT 回调内定义工具执行器，函数的
+        __globals__['__file__']（退化时 __module__）指向宿主插件文件，
+        交给 _plugin_origin 归属到插件目录。
+        """
+        if executor is None:
+            return None
+        g: dict[str, Any] | None = getattr(executor, "__globals__", None)
+        gfile: str | None = g.get("__file__") if g else None
+        if gfile:
+            host = self._plugin_origin(gfile)
+            if host:
+                return host
+        modname = getattr(executor, "__module__", "")
+        if modname:
+            try:
+                import importlib
+
+                m = importlib.import_module(modname)
+            except Exception:
+                return None
+            mfile = getattr(m, "__file__", "")
+            host = self._plugin_origin(mfile) if mfile else None
+            if host:
+                return host
+        return None
 
     def _classify_source(self, filepath: str) -> str:
         if not filepath:
@@ -853,6 +911,15 @@ def _fmt_list(items: list[Entry]) -> str:
 
     lines = [f"### 📦 拓展总览（共 {total} 个" + (f"，{disabled_count} 个已禁用" if disabled_count else "") + "）\n"]
 
+    # 来源标签：core / fetched / public / private / user
+    src_label = {
+        "builtin": "core",
+        "fetched": "fetched",
+        "public": "public",
+        "private": "private",
+        "user": "private",  # 用户三来源之外的散置文件也归 private 档
+    }
+
     idx = 0  # 全局连续编号
     for t in ("command", "plugin", "tool"):
         group = groups.get(t, [])
@@ -861,15 +928,29 @@ def _fmt_list(items: list[Entry]) -> str:
         lines.append(f"**{labels.get(t, t)}**（{len(group)} 个）\n")
         for item in group:
             idx += 1
+            tag = src_label.get(item.source, item.source)
+            # 插件来源：命令看 contract["plugin"]，工具看 "[plugin:x]" 形式的 source_path
+            plg = (item.contract or {}).get("plugin")
+            if plg is None and item.source_path.startswith("[plugin:"):
+                plg = item.source_path[len("[plugin:") :].rstrip("]")
+            plg_sfx = f" ·via plugin:{plg}" if plg else ""
+            alias_sfx = ""
+            aliases = (item.contract or {}).get("aliases") or []
+            if aliases:
+                alias_sfx = f"（{'，'.join(aliases)}）"
             if item.status == "disabled":
-                lines.append(f"- ⛔ `{idx}. {item.name}`")
+                lines.append(f"- ⛔ `{idx}. {item.name}`{alias_sfx}　`{tag}{plg_sfx}`")
             else:
                 marker = " ⚡" if item.user_override else ""
-                lines.append(f"- ✅ `{idx}. {item.name}`{marker}")
+                lines.append(f"- ✅ `{idx}. {item.name}`{alias_sfx}{marker}　`{tag}{plg_sfx}`")
         lines.append("")
 
     lines.append("---\n")
-    lines.append("`✅ 已启用　⛔ 已禁用　⚡ 用户覆盖　复制编号操作: /option info 3`")
+    lines.append(
+        "`✅ 已启用　⛔ 已禁用　⚡ 用户覆盖　"
+        "来源: core/fetched/public/private（·via plugin:X = 由插件 X 注入）"
+        "　复制编号操作: /option info 3`"
+    )
 
     return "\n".join(lines)
 

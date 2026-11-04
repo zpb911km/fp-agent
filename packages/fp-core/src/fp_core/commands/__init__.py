@@ -89,8 +89,13 @@ def _scan_dir(directory: str, package_prefix: str | None = None):
             continue
 
         name = mod.name
-        if name in _commands:
+        old = _commands.get(name)
+        if old is not None and old is not mod:
             get_logger().warning(f"⚠️  命令 [{name}] 重复定义，已覆盖")
+            # 覆盖时旧模块整体让位：移除指向旧模块的全部键（主名+别名），
+            # 否则旧别名仍指向旧模块，导致覆盖版与旧版裂成两条
+            for k in [k for k, m in _commands.items() if m is old]:
+                del _commands[k]
         _commands[name] = mod
 
         # 注册别名
