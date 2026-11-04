@@ -97,7 +97,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # 测试依赖仅登记在 dev 文档（docs/dev/测试.md），不进各包 pyproject
-          pip install pytest pytest-asyncio httpx pyyaml textual rich wcwidth fastapi uvicorn websockets jieba python-multipart
+          # 可编辑安装全部子包：依赖由各包 pyproject 的 dependencies 自动跟上，消除手写清单漂移
+          pip install -e packages/fp -e packages/fp-core -e packages/fp-acp -e packages/fp-terminal -e packages/fp-webui
+          # 仅测试工具不进包依赖（见 docs/dev/测试.md）
+          pip install pytest pytest-asyncio
 
       - name: 🧪 全量 pytest
         shell: bash
@@ -131,7 +134,10 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-asyncio httpx pyyaml textual rich wcwidth fastapi uvicorn websockets jieba python-multipart
+          # 可编辑安装全部子包：依赖由各包 pyproject 的 dependencies 自动跟上，消除手写清单漂移
+          pip install -e packages/fp -e packages/fp-core -e packages/fp-acp -e packages/fp-terminal -e packages/fp-webui
+          # 仅测试工具不进包依赖（见 docs/dev/测试.md）
+          pip install pytest pytest-asyncio
 
       - name: 🧪 全量 pytest
         shell: bash
@@ -161,7 +167,10 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-asyncio httpx pyyaml textual rich wcwidth fastapi uvicorn websockets jieba python-multipart
+          # 可编辑安装全部子包：依赖由各包 pyproject 的 dependencies 自动跟上，消除手写清单漂移
+          pip install -e packages/fp -e packages/fp-core -e packages/fp-acp -e packages/fp-terminal -e packages/fp-webui
+          # 仅测试工具不进包依赖（见 docs/dev/测试.md）
+          pip install pytest pytest-asyncio
 
       - name: 🧪 首跑配置引导 + 跨平台路径（Windows 实证）
         run: python -m pytest packages/fp/tests/test_setup.py packages/fp/tests/test_main_argv.py packages/fp-core/tests/test_config.py packages/fp-terminal/tests/test_appearance.py -q
