@@ -27,6 +27,7 @@ from fp_core.commands import get_all_commands
 from fp_core.core import session
 from fp_core.core.conversation import ConversationState
 from fp_core.core.io import IOChannel
+from fp_core.core.jobs import is_injected
 from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 from fp_core.core.llm_service import LLMConfig, LLMService
 from fp_core.core.prompt_builder import PromptBuilder
@@ -960,6 +961,11 @@ class Agent:
             # 的系统标记消息可由短路作噪声剪除（I2/I3，引擎.md「注入消息身份协议」）。
             for _inject_msg in _drain_background_injects():
                 _inj = self._conv.add_user_message(_inject_msg["content"])
+                # 忙时标记：裸文本注入 = 忙时被排空的人类话语（submit 排队 / ask_user 回答）。
+                # shortcircuit 据此不把它当块边界（它属于当前 run），且压缩时恒保留。
+                # 系统事件（⁂[kind] 标头）靠标头识别，无需标记。
+                if not is_injected(_inject_msg["content"]):
+                    _inj["_drained"] = True
                 await self.lifecycle.emit(
                     LifecycleHook.ON_CTX_APPEND,
                     op="user",

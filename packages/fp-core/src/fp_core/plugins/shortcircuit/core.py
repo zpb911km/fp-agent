@@ -32,7 +32,7 @@ shortcircuit 插件包的核心实现：连通块检测、退化、合并、命�
 from collections.abc import Awaitable, Callable
 from typing import Any, TypedDict
 
-from fp_core.core.jobs import is_injected
+from fp_core.core.jobs import INJECT_MARK, is_injected
 
 Message = dict[str, Any]
 
@@ -84,7 +84,16 @@ def scan_components(messages: list[Message]) -> list[Component]:
     """
     # 边界 = 人类 user 消息（裸文本）。⁂[kind] 标记的系统注入不是人类轮次，不切块
     # （块 = 讨论主题分段；系统事件是主题内到达的信息）—— 见引擎.md「注入消息身份协议」。
-    user_indices = [i for i, m in enumerate(messages) if m["role"] == "user" and not is_injected(m.get("content"))]
+    # 边界 = 真块起点人类 user 消息。两类 user 消息不开新块：
+    # ① ⁂[kind] 系统注入（标头识别）；② _drained 忙时人类插话（submit 排队 /
+    # ask_user 回答，环顶 drain 排空时打标，agent.py「环顶惰性注入」）——它们
+    # 在语义上属于当前 run，切开会把前段 run 劈成不完整块（假"被用户中断"）。
+    # 首条人类消息之前若只有这两类消息，仍游离于所有块之外（保守保留）。
+    user_indices = [
+        i
+        for i, m in enumerate(messages)
+        if m["role"] == "user" and not is_injected(m.get("content")) and not m.get("_drained")
+    ]
 
     components: list[Component] = []
     for pos, user_idx in enumerate(user_indices):
@@ -188,12 +197,20 @@ def degenerate(
             # 回执，按 tool 噪声同级剪除（引擎.md「注入消息身份协议」）。
             is_current_block = terminal_idx == len(messages) - 1
             kept: list[Message] = []
+            user_parts: list[str] = []  # 闭合块：user 类内容抽到块首（身份不塌缩进 AI 叙事）
             for m in block:
                 role = m["role"]
                 if role == "tool":
                     total_changed += 1
                     continue
-                if role == "user" and is_injected(m.get("content")) and not is_current_block:
+                if role == "user":
+                    if is_current_block:
+                        # 当前块：注入可能尚未被 LLM 消费（drain 后、报告前的窗口），原地保留
+                        kept.append(dict(m))
+                        continue
+                    # 闭合块：注入回执与忙时人类插话一并抽出合并到块首 ——
+                    # 不再直接删除：回执删了会留下失去刺激源的 AI 独白（身份塌缩）
+                    user_parts.append(m.get("content") or "")
                     total_changed += 1
                     continue
                 if role == "assistant" and m.get("tool_calls"):
@@ -210,6 +227,12 @@ def degenerate(
                         continue
                 else:
                     kept.append(dict(m))
+
+            if user_parts:
+                merged = "\n\n".join(p for p in user_parts if p)
+                if merged.startswith(INJECT_MARK):
+                    merged = f"(本轮用户请求)\n\n{merged}"
+                kept.insert(0, {"role": "user", "content": merged})
 
             new_sections.append(kept)
             processed_ends.append(eff_terminal)
@@ -253,6 +276,23 @@ def degenerate(
 
     except Exception as e:
         return (False, f"退化失败: {e}", 0, None)
+
+
+def _merge_user_side(messages: list[Message], user_idx: int, terminal_idx: int) -> str:
+    """把块内全部 user 类消息（人类 + ⁂[kind] 系统注入）按时序合并为一段文本。
+
+    用于 crop/退化产物：工具交错结构被删后，AI 中间文本失去时序锚点，把 user
+    侧内容抽到块首是唯一不制造新失真的位置。首条必为块起点人类裸文本
+    （scan_components 保证），因此合并结果不以 ⁂[ 开头 —— 否则下次退化会把它
+    当注入回执整条删除（人类话语恒保留契约，见引擎.md「注入消息身份协议」）。
+    """
+    parts = [
+        messages[j].get("content") or "" for j in range(user_idx, terminal_idx + 1) if messages[j]["role"] == "user"
+    ]
+    merged = "\n\n".join(p for p in parts if p)
+    if merged.startswith(INJECT_MARK):
+        merged = f"(本轮用户请求)\n\n{merged}"
+    return merged
 
 
 async def shortcircuit(
@@ -308,7 +348,7 @@ async def shortcircuit(
                 # msg_count > 2 且 crop/无 refiner：截断中间消息
                 elif (mode == "crop" or refiner is None) and msg_count > 2:
                     new_sections.append([
-                        {"role": "user", "content": user_msg["content"]},
+                        {"role": "user", "content": _merge_user_side(messages, user_idx, terminal_idx)},
                         {"role": "assistant", "content": terminal_msg["content"]},
                     ])
                 # regenerate：调 LLM 提炼
@@ -323,7 +363,7 @@ async def shortcircuit(
             else:
                 if mode == "crop" or refiner is None:
                     new_sections.append([
-                        {"role": "user", "content": user_msg.get("content", "")},
+                        {"role": "user", "content": _merge_user_side(messages, user_idx, terminal_idx)},
                         {"role": "assistant", "content": "被用户中断"},
                     ])
                 else:

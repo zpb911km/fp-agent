@@ -134,7 +134,8 @@ class ConversationState:
             return msgs
         system = msgs[0]
         repaired = self._repair_ordering(msgs[1:])
-        result = [system] + repaired
+        # 下划线前缀 = 进程内协议标记（如 _drained 忙时注入标记），不得出网
+        result = [system] + [{k: v for k, v in m.items() if not k.startswith("_")} for m in repaired]
         if not with_tools:
             result = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in result]
         return result

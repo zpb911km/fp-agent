@@ -287,7 +287,7 @@ class TestDegenerate:
         ok, _, changed, new = degenerate(messages, [(0, 3), (4, 7)], protect_callsite=False)
         assert ok
         assert new is not None
-        assert changed == 4  # 两个块的 tool 删除 + 两个 assistant 转正
+        assert changed == 5  # tool 删除 + assistant 转正 + 块起点并入合并消息
         assert not any(m["role"] == "tool" for m in new)
         assert len([m for m in new if m["role"] == "assistant"]) == 4
 
@@ -326,7 +326,7 @@ class TestShortcircuitMerge:
         assert ok
         assert new is not None
         assert len(new) == 2
-        assert new[0]["content"] == "任务A"
+        assert new[0]["content"] == "任务A\n\n任务B", "range 合并：人类话语恒保留"
         assert new[1]["content"] == "B完成"
 
 
@@ -450,7 +450,7 @@ class TestExecutePlan:
         assert new is not None
         # #1+#2 按 range 合并为一个连通块（user 取首、assistant 取末）
         assert len(new) == 4
-        assert new[0]["content"] == "任务A"
+        assert new[0]["content"] == "任务A\n\n任务B", "range 合并：人类话语恒保留"
         assert new[1]["content"] == "B完成"
         # #3 退化且保护调用点
         assert new[2]["content"] == "任务C"
@@ -579,7 +579,7 @@ class TestExecuteCommand:
         msgs = st.conversation._msgs
         # 整个范围合并为一个块（range 语义），当前块不强制退化
         assert len(msgs) == 2
-        assert msgs[0]["content"] == "任务A"
+        assert msgs[0]["content"] == "任务A\n\n任务B\n\n任务C", "range 合并：人类话语恒保留"
         assert msgs[1]["content"] == "C总结"
 
     def test_command_explicit_degenerate_current(self):
@@ -651,8 +651,9 @@ class TestInjectIdentity:
         assert len(comps) == 1
         assert comps[0]["user_idx"] == 2
 
-    def test_degenerate_drops_injected_in_closed_block(self):
-        """已闭合块内的标记消息 = 已消费回执 → 与 tool 噪声同级剪除"""
+    def test_degenerate_hoists_injected_in_closed_block(self):
+        """已闭合块内的标记消息 = 已消费回执 → 抽到块首合并（不再直接删除：
+        删了会留下失去刺激源的 AI 独白 —— 身份塌缩）。合并消息不以 ⁂[ 开头。"""
         messages: list[Message] = [
             _msg("user", "任务A"),
             _msg("assistant", "", tool_calls=_tc("s1")),
@@ -665,9 +666,11 @@ class TestInjectIdentity:
         ok, _desc, saved, new = degenerate(messages, [(0, 4)], protect_callsite=False)
         assert ok
         assert new is not None
-        contents = [m.get("content", "") for m in new]
-        assert not any("⁂[job_done]" in str(c) for c in contents), "已闭合块标记消息应剪除"
-        assert "回复A" in contents
+        first = new[0]
+        assert first["role"] == "user"
+        assert "任务A" in first["content"] and "⁂[job_done]" in first["content"], "块首人类请求与回执合并"
+        assert not first["content"].startswith("⁂["), "合并消息首行必须是人类裸文本（防下次退化被整条剪除）"
+        assert any(m.get("content") == "回复A" for m in new), "AI 产出保留"
         assert saved >= 2, "tool + 标记消息均计入清理数"
 
     def test_degenerate_keeps_injected_in_current_block(self):
@@ -705,3 +708,86 @@ class TestInjectIdentity:
         assert "[用户]: 任务" in captured["ctx"]
         assert "[系统]: ⁂[job_done] 完成" in captured["ctx"]
         assert new is not None and len(new) == 2
+
+
+# ═══════════════════════════════════════════════════════
+# 忙时人类插话（_drained）：不开新块；压缩时合并保留
+# ═══════════════════════════════════════════════════════
+
+
+def _drained(content: str) -> Message:
+    m = _msg("user", content)
+    m["_drained"] = True
+    return m
+
+
+class TestBusyHumanInject:
+    """忙时被排空的人类话语（_drained 标记）：属于当前 run，不切块、压缩恒保留"""
+
+    def test_scan_does_not_split_at_drained_human(self):
+        """_drained 人类消息不是块边界 —— 不把前段 run 劈成假'被用户中断'"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "", tool_calls=_tc("s1")),
+            _msg("tool", "结果1"),
+            _drained("顺便看下X"),
+            _msg("assistant", "完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "回复B"),
+        ]
+        comps = scan_components(messages)
+        assert len(comps) == 2, "_drained 人类消息不产生新块"
+        assert comps[0]["user_preview"] == "任务A"
+        assert comps[0]["complete"], "块终点是真收尾 assistant，不再误判中断"
+        assert comps[0]["message_count"] == 5
+
+    def test_crop_merges_user_side_into_single_message(self):
+        """crop：块内人类请求 + 系统注入 + 忙时插话按时序合并为一条放开头"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "中间想了一步"),
+            _msg("user", "⁂[job_done] 后台完成"),
+            _drained("顺便看下X"),
+            _msg("assistant", "最终结论"),
+        ]
+        ok, _desc, _saved, new = await_result(shortcircuit(messages, None, [(0, 4)], "crop"))
+        assert ok and new is not None
+        assert len(new) == 2
+        merged = new[0]
+        assert merged["role"] == "user"
+        assert not merged["content"].startswith("⁂["), "首行必须是人类裸文本"
+        for part in ("任务A", "⁂[job_done] 后台完成", "顺便看下X"):
+            assert part in merged["content"], f"crop 后 user 类内容必须保留: {part}"
+        assert new[1]["content"] == "最终结论"
+
+    def test_degenerate_hoists_drained_human(self):
+        """degenerate 闭合块：忙时人类插话抽到块首，不塌缩进 AI 叙事"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "", tool_calls=_tc("s1")),
+            _msg("tool", "结果"),
+            _drained("顺便看下X"),
+            _msg("assistant", "回复A"),
+            _msg("user", "任务B"),
+            _msg("assistant", "回复B"),
+        ]
+        ok, _desc, _saved, new = degenerate(messages, [(0, 4)], protect_callsite=False)
+        assert ok and new is not None
+        first = new[0]
+        assert first["role"] == "user"
+        assert "任务A" in first["content"] and "顺便看下X" in first["content"]
+        assert not first["content"].startswith("⁂[")
+        assert any(m.get("content") == "回复A" for m in new)
+
+    def test_degenerate_current_block_keeps_drained_in_place(self):
+        """当前块：_drained 人类消息原地保留（与注入同一窗口逻辑）"""
+        messages: list[Message] = [
+            _msg("user", "任务"),
+            _msg("assistant", "", tool_calls=_tc("s1")),
+            _msg("tool", "结果"),
+            _drained("插话"),
+            _msg("assistant", "回复"),
+        ]
+        ok, _desc, _saved, new = degenerate(messages, [(0, 4)], protect_callsite=False)
+        assert ok and new is not None
+        assert any(m.get("content") == "插话" and m.get("_drained") for m in new)
