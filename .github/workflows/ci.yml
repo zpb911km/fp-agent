@@ -79,7 +79,7 @@ jobs:
         include:
           # macOS 只跑一个 Python 版本——POSIX 同源，版本矩阵交给 ubuntu；
           # macOS 的职责是捕捉「平台差异」，不是「版本差异」。
-          - os: macos-14
+          - os: macos-15
             python-version: "3.12"
     runs-on: ${{ matrix.os }}
 

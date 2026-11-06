@@ -25,12 +25,14 @@ TOOL_DEFINITION = {
     "function": {
         "name": "shortcircuit",
         "description": (
-            "管理对话历史的连通块。硬性策略：当前块（最后一个连通块）只能退化(degenerate)——"
-            "删除块内的工具调用与工具返回消息，保留 AI 每一步输出的文本记录，"
-            "把工具调用链退化为纯文本消息链，保持上下文简短且语义完整；"
-            "其他块（历史块）默认合并压缩(crop)，未显式指定 mode 时按 crop 处理；"
-            "若指定/范围涉及当前块，其他块按指定行为、当前块强制退化。"
-            "先用 action=list 查看概览，再按需处理。"
+            "修剪对话历史的连通块（块=一条用户消息到下一次用户消息之间的记录）。"
+            "mode：degenerate=删工具调用/返回、留 AI 文本链；"
+            "crop=只留首条 user 与末条 assistant、中间全丢；regenerate=LLM 提炼。"
+            "硬性：当前块（最后一个）只能 degenerate；其他块未指定 mode 时按 crop。"
+            "选块：count=最近 N 个可处理块；block_ids=[2,5]=逐个处理 #2 #5；"
+            "range=[1,4]=把 #1~#4 当一个跨度（crop 即首块请求+末块回复，非逐块）。"
+            "返回的「消息 A→B 条」是实测对账：A=B 即没剪到东西，要换块或换 mode；"
+            "action=list 看各块编号/状态/条数。"
         ),
         "parameters": {
             "type": "object",
@@ -38,35 +40,30 @@ TOOL_DEFINITION = {
                 "action": {
                     "type": "string",
                     "enum": ["compress", "list"],
-                    "description": "list=列出所有连通块, compress=执行退化或合并（默认）",
+                    "description": "list=列出连通块（编号/状态/条数）, compress=执行修剪（默认）",
                     "default": "compress",
                 },
                 "count": {
                     "type": "integer",
-                    "description": "从最晚的连通块开始处理 N 个。默认 1。互斥于 block_ids/range",
+                    "description": "最近 N 个可处理块，默认 1。互斥于 block_ids/range",
                     "default": 1,
                 },
                 "block_ids": {
                     "type": "array",
                     "items": {"type": "integer"},
-                    "description": "指定编号处理，如 [2,5] 表示 #2 和 #5。互斥于 count/range",
+                    "description": "逐个处理这些编号，如 [2,5] → #2、#5 各处理一次。互斥于 count/range",
                 },
                 "range": {
                     "type": "array",
                     "items": {"type": "integer"},
                     "minItems": 2,
                     "maxItems": 2,
-                    "description": "处理一个范围，如 [1,4] 表示 #1~#4 合并为一个块。互斥于 count/block_ids",
+                    "description": "把 #start~#end 当作一个跨度处理（非逐块）。互斥于 count/block_ids",
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["degenerate", "crop", "regenerate"],
-                    "description": (
-                        "不传时：当前块强制退化，其他块默认 crop。"
-                        "显式指定时：其他块按此处理，当前块仍强制退化。"
-                        "degenerate=退化：删除工具调用/返回消息，保留 AI 文本记录，当前进行中的块永远安全; "
-                        "crop=合并删除工具消息; regenerate=合并并调 LLM 提炼"
-                    ),
+                    "description": ("不传=当前块退化+其他块 crop；显式指定只作用于其他块（当前块永远退化）"),
                 },
             },
         },
@@ -154,7 +151,7 @@ class ShortcircuitPlugin(Plugin):
                 plan_action = "count"
                 plan_value = count
 
-            success, msg, saved, new_messages = await execute_plan(
+            success, msg, _saved, new_messages = await execute_plan(
                 messages, st, plan_action, plan_value, mode, usable_key, True
             )
 
@@ -165,7 +162,8 @@ class ShortcircuitPlugin(Plugin):
             assert new_messages is not None
             conv.set_messages(conv.system_prompt, new_messages)
             st.session.save_context(conv.to_serializable())
-            return f"✅ {msg}，清理/节省 {saved} 条消息"
+            # execute_plan 已返回完整对账行（动作+编号+条数变化+剩余结构），不再二次包装
+            return msg
 
         registry.register_tool("shortcircuit", cast(OpenAISchema, TOOL_DEFINITION), execute)
         self._registered = True
