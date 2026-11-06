@@ -103,3 +103,6 @@ packages/fp/src/fp/docs
 .coverage.*
 htmlcov/
 .pytest_cache/
+
+# uv 本地锁定文件（库包发布，不跟踪 lock）
+uv.lock

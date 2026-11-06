@@ -1,9 +1,12 @@
 """shortcircuit 核心 — 连通块扫描 / 退化（degenerate）/ 裁剪（crop）/ 提炼（regenerate）
 
-工具 `shortcircuit` 与命令 `/sc` 共用本模块，**语义完全一致**（详见 apply_action）：
+工具 `shortcircuit` 与命令 `/sc` 共用本模块，**编号语义完全一致**（详见 apply_action）：
 
   action 缺省 = list（只列不改，最安全）
   action = degenerate | crop | regenerate 时必须给 target
+
+命令层独有：纯数字参数 = 「最近 N 个可处理块」（/sc 3、/sc -d 2），
+这是给人类省事的语法；工具层不提供——模型必须点名，选中哪块是它自己的责任。
 
   target 语法（宽松解析，见 parse_target）:
     "#7"        单个块
@@ -32,7 +35,7 @@
 
 import re
 from collections.abc import Awaitable, Callable
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from fp_core.core.jobs import is_injected
 
@@ -584,32 +587,83 @@ _ACTION_FLAGS = {
 }
 
 
-def parse_command(arg: str) -> tuple[str, str]:
-    """解析 /sc 参数 → (action, target)。
+def parse_command(arg: str) -> tuple[str, str, int | None]:
+    """解析 /sc 参数 → (action, target, count)。
 
-    与工具语义一致：action 缺省 = list（只读）；target 语法同 parse_target。
-      /sc                       → (list, "")
-      /sc #3-9                  → (list, "#3-9")（附提示，不执行）
-      /sc -d #3-9               → (degenerate, "#3-9")
-      /sc -c #7                 → (crop, "#7")
-      /sc -r #1-3               → (regenerate, "#1-3")
+    action: list | degenerate | crop | regenerate（缺省 crop）
+    target: 块编号表达式，语法与工具层完全一致（#7 / #3-9 / #3,#7-9）
+    count : 纯数字 = 「最近 N 个可处理块」——**命令层独有**的便利语法，
+            工具层没有（模型点名即处理，不猜）。
+
+      /sc                → (crop, "", 1)          最近 1 个可压缩块
+      /sc 3              → (crop, "", 3)          最近 3 个可压缩块
+      /sc -d 2           → (degenerate, "", 2)    最近 2 个有工具往返的块
+      /sc #3-9           → (crop, "#3-9", None)   整段一对
+      /sc -r #1-3        → (regenerate, "#1-3", None)
+      /sc list           → (list, "", None)
     """
-    action = "list"
-    targets: list[str] = []
+    action: str | None = None
+    target_parts: list[str] = []
+    count: int | None = None
     for token in (arg or "").split():
         flag = _ACTION_FLAGS.get(token.lower())
         if flag is not None:
             action = flag
+            continue
+        # 纯数字 = 计数；带 # / 连字符 / 逗号的 = 编号表达式；其余交给 parse_target 报错
+        if token.isdigit():
+            count = int(token)
         else:
-            targets.append(token)
-    return (action, " ".join(targets))
+            target_parts.append(token)
+    if action is None:
+        action = "crop"
+    if action == "list":
+        return ("list", "", None)
+    if count is None and not target_parts:
+        count = 1
+    return (action, " ".join(target_parts), count)
+
+
+async def apply_count(
+    messages: list[Message],
+    state: Any,
+    action: str,
+    n: int,
+    protect_callsite: bool = False,
+) -> tuple[bool, str]:
+    """命令层专用：「最近 N 个可处理块」逐个处理（N 对）。
+
+    可处理 = degenerate 看 `degenerable`（有工具往返），crop/regenerate 看
+    `compressible`（条数 >2 且结构非最简）——这是命令层保留的便利语法；
+    工具层不提供（模型点名即处理，选中什么是它自己的责任）。
+    """
+    if n < 1:
+        return (True, f"❌ 数量必须 ≥1（收到 {n}）")
+    components = scan_components(messages)
+    usable_key: Literal["degenerable", "compressible"] = "degenerable" if action == "degenerate" else "compressible"
+    usable = [c for c in components if c[usable_key]]
+    if not usable:
+        what = "可退化" if action == "degenerate" else "可压缩"
+        return (True, f"没有{what}的连通块｜改用编号点名\n{format_components_display(components)}")
+    segments = [(c["idx"], c["idx"]) for c in usable[-n:]]
+    ok, msg, _saved, new_messages = await run_plan(messages, state, action, segments, protect_callsite)
+    if not ok or new_messages is None:
+        return (False, msg)
+    state.conversation.set_messages(state.conversation.system_prompt, new_messages)
+    state.session.save_context(state.conversation.to_serializable())
+    return (True, msg)
 
 
 async def execute(state: Any, arg: str) -> tuple[bool, str]:
-    """命令层入口：与工具层走同一个 apply_action（语义完全一致）。"""
-    action, target = parse_command(arg)
+    """命令层入口：计数语法走 apply_count，编号语法走 apply_action（与工具同源）。"""
+    action, target, count = parse_command(arg)
     messages = state.conversation.get_non_system_messages()
     # 命令到达时新块刚开、无进行中循环 → 不保护调用点
+    if count is not None and target.strip():
+        return (True, "❌ 计数与编号不能同时给：/sc 3 或 /sc #3-9，二选一")
+    if count is not None:
+        _ok, msg = await apply_count(messages, state, action, count, protect_callsite=False)
+        return (True, msg)
     _ok, msg = await apply_action(messages, state, action, target, protect_callsite=False)
     return (True, msg)
 

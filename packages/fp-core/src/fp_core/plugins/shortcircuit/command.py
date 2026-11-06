@@ -9,9 +9,9 @@ from .core import execute
 
 name = "sc"
 description = (
-    "修剪对话历史连通块。用法: /sc [list] 查看（缺省）; "
+    "修剪对话历史连通块。用法: /sc list 查看; /sc N 修剪最近 N 个可压缩块（缺省 N=1）; "
     "/sc -d #3-9 退化（合成一对，文字全留）; /sc -c #7 裁剪（只留首问末答）; "
-    "/sc -r #1-3 提炼（LLM）; target 支持 #7 / #3-9 / #3,#7-9"
+    "/sc -r #1-3 提炼（LLM）; 编号支持 #7 / #3-9（整体）/ #3,#7-9（分别）"
 )
 
 __all__ = ["name", "description", "execute"]

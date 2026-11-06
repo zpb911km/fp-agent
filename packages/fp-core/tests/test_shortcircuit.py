@@ -756,27 +756,71 @@ class TestParseCommand:
     @pytest.mark.parametrize(
         ("arg", "expected"),
         [
-            ("", ("list", "")),
-            ("list", ("list", "")),
-            ("#3-9", ("list", "#3-9")),
-            ("-d #3-9", ("degenerate", "#3-9")),
-            ("-c #7", ("crop", "#7")),
-            ("-r #1-3", ("regenerate", "#1-3")),
-            ("--degenerate #7", ("degenerate", "#7")),
+            # 缺省：不带参数 = 修剪最近 1 个可压缩块
+            ("", ("crop", "", 1)),
+            ("list", ("list", "", None)),
+            ("#3-9", ("crop", "#3-9", None)),
+            ("-d #3-9", ("degenerate", "#3-9", None)),
+            ("-c #7", ("crop", "#7", None)),
+            ("-r #1-3", ("regenerate", "#1-3", None)),
+            ("--degenerate #7", ("degenerate", "#7", None)),
+            # 纯数字 = 计数（命令层独有语法）
+            ("3", ("crop", "", 3)),
+            ("-d 2", ("degenerate", "", 2)),
+            ("-r 4", ("regenerate", "", 4)),
+            # 计数与编号同时给：都解析出来，由 execute 报错
+            ("2 #7", ("crop", "#7", 2)),
         ],
     )
-    def test_parse(self, arg: str, expected: tuple[str, str]):
+    def test_parse(self, arg: str, expected: tuple[str, str, int | None]):
         assert parse_command(arg) == expected
 
 
 class TestExecuteCommand:
-    def test_plain_sc_lists_without_write_back(self):
-        """契约 14：命令层走同一 apply_action；/sc 缺省 = list，不写回"""
+    def test_sc_list_without_write_back(self):
+        """契约 14：/sc list 只列不改，不写回"""
+        messages = _one_tool_block()
+        st = _FakeState(messages)
+        ok, text = _run(execute(st, "list"))
+        assert ok
+        assert text.startswith("## 📦 连通块 共1")
+        assert st.write_backs == 0
+
+    def test_sc_default_crops_recent_one_block(self):
+        """契约 15：/sc 缺省 = 最近 1 个可压缩块 crop（人类便利语法）"""
         messages = _one_tool_block()
         st = _FakeState(messages)
         ok, text = _run(execute(st, ""))
         assert ok
-        assert text.startswith("## 📦 连通块 共1")
+        assert text.startswith("✅ crop #1")
+        assert st.write_backs == 1
+
+    def test_sc_count_processes_n_blocks(self):
+        """契约 15：/sc 2 = 最近 2 个可压缩块，各一对"""
+        messages = _one_tool_block() + _one_tool_block()
+        st = _FakeState(messages)
+        ok, text = _run(execute(st, "-d 2"))
+        assert ok
+        assert "#1" in text and "#2" in text
+        assert st.write_backs == 1
+
+    def test_sc_count_without_usable_blocks_reports_and_lists(self):
+        """契约 15：没有可处理块时明确说明，并附 list（不写回）"""
+        messages = [_msg("user", "只有一问"), _msg("assistant", "只有一答")]
+        st = _FakeState(messages)
+        ok, text = _run(execute(st, "3"))
+        assert ok
+        assert "没有可压缩的连通块" in text
+        assert "## 📦" in text
+        assert st.write_backs == 0
+
+    def test_sc_count_and_target_conflict(self):
+        """契约 15：计数与编号互斥，同时给 → 报错不执行"""
+        messages = _one_tool_block()
+        st = _FakeState(messages)
+        ok, text = _run(execute(st, "2 #1"))
+        assert ok
+        assert text.startswith("❌")
         assert st.write_backs == 0
 
     def test_degenerate_returns_reconciliation_line_and_writes_back(self):
