@@ -8,6 +8,10 @@
 from .core import execute
 
 name = "sc"
-description = "短路(shortcircuit)已完成的连通块。用法: /sc list 查看, /sc 或 /sc N 短路最近的, /sc #N 短路指定编号的"
+description = (
+    "修剪对话历史连通块。用法: /sc [list] 查看（缺省）; "
+    "/sc -d #3-9 退化（合成一对，文字全留）; /sc -c #7 裁剪（只留首问末答）; "
+    "/sc -r #1-3 提炼（LLM）; target 支持 #7 / #3-9 / #3,#7-9"
+)
 
 __all__ = ["name", "description", "execute"]

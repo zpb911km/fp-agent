@@ -1,19 +1,44 @@
-"""测试 shortcircuit 插件（core.py）— 连通块扫描、退化（degenerate）、合并（crop/regenerate）"""
+"""测试 shortcircuit 插件（core.py）— v2 API：target(str) + action，工具层与命令层共用 apply_action
 
+契约速查（本文件逐条对应）:
+  1. degenerate 每个 target 恒产出至多两条：user=段内全部人类话语合并，assistant=段内全部叙事合并
+  2. ⁂[kind] 注入（role=user）是工具异步输出 → 丢弃，不并进第一条 user
+  3. tool 消息、assistant 的 tool_calls 壳 → 丢弃
+  4. 段内没有人类话语 → 产物只剩一条 assistant
+  5. protect_callsite=True 且段终点是进行中的调用点 → 该调用点保留 tool_calls，叙事并入其 content
+  6/7. run_plan：段内整体 vs 段间分别；目标含当前块 → 该块强制 degenerate
+  8. crop：首 user 原文 + 末 assistant 原文；不完整块 → "被用户中断"；msg_count==2 原样保留
+  9~11. apply_action：list 只列不改；解析失败 ❌ + list；对账行 ✅/⚠️
+  12~15. parse_target / parse_command / execute / format_components_display
+"""
+
+import asyncio
 from collections.abc import Coroutine
+from typing import Any, TypeVar
 
 import pytest
 
+from fp_core.core.jobs import INJECT_MARK
 from fp_core.plugins.shortcircuit.core import (
     Message,
+    apply_action,
     degenerate,
     execute,
-    execute_plan,
+    fmt_segments,
     format_components_display,
-    parse_args,
+    parse_command,
+    parse_target,
+    run_plan,
     scan_components,
     shortcircuit,
 )
+
+_T = TypeVar("_T")
+
+
+def _run(coro: Coroutine[Any, Any, _T]) -> _T:
+    """同步跑一个协程（仓内约定：不引 pytest-asyncio，直接 asyncio.run）"""
+    return asyncio.run(coro)
 
 
 def _msg(
@@ -36,8 +61,80 @@ def _tc(name: str) -> list[dict[str, object]]:
     return [{"id": f"call_{name}", "type": "function", "function": {"name": name, "arguments": "{}"}}]
 
 
+def _drained(content: str) -> Message:
+    """忙时人类插话（环顶 drain 排空置位）：属于当前 run，不是块边界"""
+    m = _msg("user", content)
+    m["_drained"] = True
+    return m
+
+
+def _inj(kind: str, text: str) -> Message:
+    """⁂[kind] 标记的系统注入（角色仍是 user，语义是工具异步输出）"""
+    return _msg("user", f"{INJECT_MARK}{kind}] {text}")
+
+
 # ═══════════════════════════════════════════════════════
-# _scan_components
+# 假 state（apply_action / run_plan / execute 的副作用记录器）
+# ═══════════════════════════════════════════════════════
+
+
+class _FakeConversation:
+    def __init__(self, messages: list[Message]) -> None:
+        self._messages = list(messages)
+        self.system_prompt: object = {"role": "system", "content": "sys"}
+        self.set_messages_calls = 0
+
+    def get_non_system_messages(self) -> list[Message]:
+        return list(self._messages)
+
+    def set_messages(self, system_prompt: object, messages: list[Message]) -> None:
+        self.system_prompt = system_prompt
+        self._messages = list(messages)
+        self.set_messages_calls += 1
+
+    def to_serializable(self) -> dict[str, object]:
+        return {"messages": self._messages}
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.saved: list[dict[str, object]] = []
+
+    def save_context(self, data: dict[str, object]) -> None:
+        self.saved.append(data)
+
+
+class _FakeLLM:
+    """可注入假返回 —— build_regenerate_refiner 走 state.llm.summarize"""
+
+    def __init__(self, reply: str = "REFINED") -> None:
+        self.reply = reply
+        self.calls: list[dict[str, object]] = []
+
+    async def summarize(self, text: str, **kwargs: object) -> str:
+        self.calls.append({"text": text, **kwargs})
+        return self.reply
+
+
+class _FakeState:
+    def __init__(self, messages: list[Message], llm_reply: str = "REFINED") -> None:
+        self.conversation = _FakeConversation(messages)
+        self.session = _FakeSession()
+        self.llm = _FakeLLM(llm_reply)
+
+    @property
+    def messages(self) -> list[Message]:
+        # 测试替身有意镜像真实 Conversation 的私有字段 _messages（两者同为本文件内的协作替身），
+        # 类型层面无可标注的写法，此处按最小范围抑制
+        return self.conversation._messages  # pyright: ignore[reportPrivateUsage]
+
+    @property
+    def write_backs(self) -> int:
+        return self.conversation.set_messages_calls
+
+
+# ═══════════════════════════════════════════════════════
+# scan_components — 连通块边界与标记
 # ═══════════════════════════════════════════════════════
 
 
@@ -50,625 +147,58 @@ class TestScanComponents:
             _msg("assistant", "回复B"),
         ]
         comps = scan_components(messages)
-        assert len(comps) == 2
-        assert comps[0]["idx"] == 1 and comps[0]["message_count"] == 2
-        assert comps[1]["idx"] == 2 and comps[1]["message_count"] == 2
+        assert [(c["idx"], c["user_idx"], c["terminal_idx"], c["message_count"]) for c in comps] == [
+            (1, 0, 1, 2),
+            (2, 2, 3, 2),
+        ]
+        assert comps[0]["user_preview"] == "任务A"
+        assert comps[0]["assistant_preview"] == "回复A"
 
-    def test_degenerable_flag(self):
+    def test_degenerable_and_compressible_flags(self):
         messages: list[Message] = [
             _msg("user", "任务"),
             _msg("assistant", "", tool_calls=_tc("s1")),
-            _msg("tool", "结果1"),
+            _msg("tool", "结果"),
             _msg("assistant", "总结"),
         ]
-        comps = scan_components(messages)
-        assert comps[0]["degenerable"] is True
-        assert comps[0]["compressible"] is True
-        assert comps[0]["complete"] is True
+        comp = scan_components(messages)[0]
+        assert comp["degenerable"] is True, "块内有工具往返"
+        assert comp["compressible"] is True, "4 条 > 2，有压缩空间"
+        assert comp["complete"] is True, "终点是纯文本 assistant"
 
-    def test_degenerable_false_when_plain(self):
-        messages: list[Message] = [
-            _msg("user", "任务"),
-            _msg("assistant", "回复"),
-        ]
-        comps = scan_components(messages)
-        assert comps[0]["degenerable"] is False
-        assert comps[0]["compressible"] is False
+    def test_plain_block_not_degenerable(self):
+        messages: list[Message] = [_msg("user", "任务"), _msg("assistant", "回复")]
+        comp = scan_components(messages)[0]
+        assert comp["degenerable"] is False
+        assert comp["compressible"] is False
 
-    def test_incomplete_marked(self):
-        messages: list[Message] = [
-            _msg("user", "任务"),
-            _msg("assistant", "", tool_calls=_tc("s1")),
-        ]
-        comps = scan_components(messages)
-        assert comps[0]["complete"] is False
-        assert comps[0]["degenerable"] is True
+    def test_incomplete_block_marked(self):
+        messages: list[Message] = [_msg("user", "任务"), _msg("assistant", "", tool_calls=_tc("s1"))]
+        comp = scan_components(messages)[0]
+        assert comp["complete"] is False, "终点是进行中的调用点"
+        assert comp["degenerable"] is True
 
-
-# ═══════════════════════════════════════════════════════
-# _degenerate
-# ═══════════════════════════════════════════════════════
-
-
-class TestDegenerate:
-    def test_removes_tool_chain_keeps_text(self):
-        """基本退化：工具调用链 → 纯文本 assistant 链"""
-        messages: list[Message] = [
-            _msg("user", "任务"),
-            _msg("assistant", "开始做", tool_calls=_tc("s1")),
-            _msg("tool", "结果1"),
-            _msg("assistant", "第1步完成"),
-        ]
-        ok, _, changed, new = degenerate(messages, [(0, 3)], protect_callsite=False)
-        assert ok
-        assert new is not None
-        assert changed == 2  # 1 条 tool 删除 + 1 条 assistant 转正
-        roles = [m["role"] for m in new]
-        assert roles == ["user", "assistant", "assistant"]
-        # 有 content 的 tool_calls assistant 转正：保留 content、删除 tool_calls
-        assert new[1]["content"] == "开始做"
-        assert "tool_calls" not in new[1]
-        assert new[2]["content"] == "第1步完成"
-
-    def test_empty_content_toolcalls_removed(self):
-        """只有 tool_calls 没有 content 的 assistant → 整条删除"""
-        messages: list[Message] = [
-            _msg("user", "任务"),
-            _msg("assistant", "", tool_calls=_tc("s1")),
-            _msg("tool", "结果1"),
-            _msg("assistant", "完成"),
-        ]
-        ok, _, changed, new = degenerate(messages, [(0, 3)], protect_callsite=False)
-        assert ok
-        assert new is not None
-        assert changed == 2  # 空 content assistant + tool 删除
-        assert len(new) == 2
-        assert new[0]["role"] == "user"
-        assert new[1]["role"] == "assistant"
-        assert new[1]["content"] == "完成"
-
-    def test_no_tool_noise_no_change(self):
-        messages: list[Message] = [
-            _msg("user", "任务"),
-            _msg("assistant", "回复"),
-        ]
-        ok, _, changed, new = degenerate(messages, [(0, 1)], protect_callsite=False)
-        assert ok
-        assert new is not None
-        assert changed == 0
-        assert new == messages
-
-    def test_protect_callsite_keeps_calling_point(self):
-        """工具情境：进行中块的调用点（最后一条 assistant+tool_calls）本轮不动，
-        其前的纯文本 assistant 逆序并入调用点 content（多条合并一条）"""
-        messages: list[Message] = [
-            _msg("user", "任务"),
-            _msg("assistant", "开始", tool_calls=_tc("s1")),
-            _msg("tool", "结果1"),
-            _msg("assistant", "第1步完成", tool_calls=_tc("shortcircuit")),  # 调用点
-        ]
-        ok, _, changed, new = degenerate(messages, [(0, 3)], protect_callsite=True)
-        assert ok
-        assert new is not None
-        assert changed == 2  # s1 的 assistant 转正 + tool 删除
-        # 调用点原样保留（含 tool_calls），其前的纯文本 assistant 已逆序并入调用点 content
-        assert len(new) == 2  # user + 调用点（合并后不残留独立 assistant）
-        assert new[-1]["role"] == "assistant"
-        assert new[-1]["tool_calls"][0]["function"]["name"] == "shortcircuit"
-        # 调用点 content = 前文文本（时间在前） + 调用点原文（时间在后）
-        assert new[-1]["content"] == "开始\n第1步完成"
-
-    def test_protect_callsite_only_block_of_user_and_callsite(self):
-        """块内只有 user + 调用点 → 无可退化内容，整块原样保留"""
-        messages: list[Message] = [
-            _msg("user", "任务"),
-            _msg("assistant", "回复中", tool_calls=_tc("shortcircuit")),
-        ]
-        ok, _, changed, new = degenerate(messages, [(0, 1)], protect_callsite=True)
-        assert ok
-        assert new is not None
-        assert changed == 0
-        assert len(new) == 2
-        assert new[1]["tool_calls"][0]["function"]["name"] == "shortcircuit"
-
-    def test_degenerate_merges_consecutive_assistant_into_callsite(self):
-        """退化哲学：受保护调用点前的连续纯文本 assistant 逆序并入调用点 content
-        （多条合并一条，消除连续 assistant 结构）。"""
-        cases: list[tuple[list[Message], str]] = [
-            # 调用点前是纯文本 assistant（阶段回复）
-            (
-                [
-                    _msg("user", "任务"),
-                    _msg("assistant", "第1步开始", tool_calls=_tc("s1")),
-                    _msg("tool", "T1"),
-                    _msg("assistant", "阶段总结", tool_calls=_tc("sc")),
-                ],
-                "第1步开始\n阶段总结",
-            ),
-            # 调用点前有多个纯文本 assistant（多步转正，逆序保持时间顺序）
-            (
-                [
-                    _msg("user", "任务"),
-                    _msg("assistant", "第1步", tool_calls=_tc("s1")),
-                    _msg("tool", "T1"),
-                    _msg("assistant", "第2步", tool_calls=_tc("s2")),
-                    _msg("tool", "T2"),
-                    _msg("assistant", "总结", tool_calls=_tc("sc")),
-                ],
-                "第1步\n第2步\n总结",
-            ),
-            # 连续两次 sc：上次调用点残骸（转正文本 + tool）在退化块内被清理
-            (
-                [
-                    _msg("user", "任务"),
-                    _msg("assistant", "第1步文本", tool_calls=_tc("sc1")),
-                    _msg("tool", "上次sc结果"),
-                    _msg("assistant", "第2步总结", tool_calls=_tc("sc")),
-                ],
-                "第1步文本\n第2步总结",
-            ),
-        ]
-        for messages, expected_content in cases:
-            ok, _, _, new = degenerate(messages, [(0, len(messages) - 1)], protect_callsite=True)
-            assert ok
-            assert new is not None
-            # 调用点（最后一条带 tool_calls）本身保留 tool_calls
-            assert new[-1]["role"] == "assistant"
-            assert new[-1]["tool_calls"][0]["function"]["name"] == "sc"
-            # 多条合并一条：调用点前不残留纯文本 assistant（只有 user 在它前面）
-            assert len(new) == 2, f"应合并为 user + 调用点: {new}"
-            assert new[0]["role"] == "user"
-            # 调用点 content = 前文文本（时间在前） + 调用点原文（时间在后）
-            assert new[-1]["content"] == expected_content, f"期望 {expected_content!r}, 实际 {new[-1]['content']!r}"
-            # 所有工具噪音已清理
-            assert not any(m["role"] == "tool" for m in new)
-
-    def test_three_step_merge_into_callsite(self):
-        """核心场景：三步任务连续退化，前文文本逆序全部合并进调用点 content
-        （多条合并一条），无信息丢失、无连续 assistant 结构"""
-        # 第1步
-        msgs: list[Message] = [
-            _msg("user", "分3步做X"),
-            _msg("assistant", "第一步开始", tool_calls=_tc("step1")),
-            _msg("tool", "T1"),
-            _msg("assistant", "第1步完成：结果A", tool_calls=_tc("shortcircuit")),
-        ]
-        ok, _, _, result = degenerate(msgs, [(0, 3)], protect_callsite=True)
-        assert ok
-        assert result is not None
-        msgs = result
-        # 追加 sc 的 tool 结果 + 第2步
-        msgs.append(_msg("tool", "sc已处理"))
-        msgs.append(_msg("assistant", "第二步开始", tool_calls=_tc("step2")))
-        msgs.append(_msg("tool", "T2"))
-        msgs.append(_msg("assistant", "第2步完成：结果B", tool_calls=_tc("shortcircuit")))
-        # 第2次退化：第1步文本合并进新的调用点 content，不丢失
-        ok, _, _, result = degenerate(msgs, [(0, len(msgs) - 1)], protect_callsite=True)
-        assert ok
-        assert result is not None
-        msgs = result
-        assert msgs[-1]["role"] == "assistant"
-        assert msgs[-1]["tool_calls"][0]["function"]["name"] == "shortcircuit"
-        assert "第1步完成：结果A" in msgs[-1]["content"]  # 第1步结果未被吞
-        assert "第2步完成：结果B" in msgs[-1]["content"]  # 第2步结果在调用点原文
-        # 多条合并一条：调用点前只残留 user，无独立纯文本 assistant
-        assert len(msgs) == 2 and msgs[0]["role"] == "user"
-        # 第2步的工具噪音（step2/T2/sc 结果）已清理
-        assert not any(m["role"] == "tool" for m in msgs)
-        # 第3步：继续退化，第1/2步文本仍保留（合并进最终调用点 content）
-        step3_start = msgs + [
-            _msg("assistant", "第三步开始", tool_calls=_tc("step3")),
-            _msg("tool", "T3"),
-            _msg("assistant", "第3步完成：结果C", tool_calls=_tc("shortcircuit")),
-        ]
-        ok, _, _, final = degenerate(step3_start, [(0, len(step3_start) - 1)], protect_callsite=True)
-        assert ok
-        assert final is not None
-        assert len(final) == 2  # user + 调用点（所有文本合并）
-        assert "第1步完成：结果A" in final[1]["content"]
-        assert "第2步完成：结果B" in final[1]["content"]
-        assert "第三步开始" in final[1]["content"]
-        assert "第3步完成：结果C" in final[1]["content"]
-        # 文本按时间顺序排列（最早在前，调用点原文最后）
-        c = final[1]["content"]
-        assert c.index("第1步完成：结果A") < c.index("第2步完成：结果B") < c.index("第3步完成：结果C")
-
-    def test_multi_target(self):
-        """多个目标块分别退化（对应 block_ids / range 选择）"""
-        messages: list[Message] = [
-            _msg("user", "任务A"),
-            _msg("assistant", "A开始", tool_calls=_tc("a")),
-            _msg("tool", "A结果"),
-            _msg("assistant", "A完成"),
-            _msg("user", "任务B"),
-            _msg("assistant", "B开始", tool_calls=_tc("b")),
-            _msg("tool", "B结果"),
-            _msg("assistant", "B完成"),
-        ]
-        ok, _, changed, new = degenerate(messages, [(0, 3), (4, 7)], protect_callsite=False)
-        assert ok
-        assert new is not None
-        assert changed == 4  # 2 个 tool 删除 + 2 个 assistant 转正（user 原地保留，不计入）
-        assert not any(m["role"] == "tool" for m in new)
-        assert len([m for m in new if m["role"] == "assistant"]) == 4
-        # 结构：每块的 user 原位在前，调用点转正紧随其后，尾随叙事保持独立
-        assert [m["role"] for m in new] == ["user", "assistant", "assistant", "user", "assistant", "assistant"]
-        assert new[0]["content"] == "任务A" and new[3]["content"] == "任务B"
-        assert not any(m.get("tool_calls") for m in new)
-
-    def test_callsite_absorbs_preceding_texts_in_closed_block(self):
-        """块内同构：每个调用点吸收其前紧邻的连续纯文本（时间正序拼接）再剥壳转正，
-        消除「纯文本 assistant → assistant(tool_calls)」连续结构（部分 API 拒绝）。"""
-        messages: list[Message] = [
-            _msg("user", "任务"),
-            _msg("assistant", "先看第1步"),
-            _msg("assistant", "再看第2步", tool_calls=_tc("s1")),
-            _msg("tool", "结果1"),
-            _msg("assistant", "中间结论"),
-            _msg("assistant", "调用第2步", tool_calls=_tc("s2")),
-            _msg("tool", "结果2"),
-            _msg("assistant", "收尾"),
-        ]
-        ok, _desc, _changed, new = degenerate(messages, [(0, 7)], protect_callsite=False)
-        assert ok and new is not None
-        assert [m["role"] for m in new] == ["user", "assistant", "assistant", "assistant"]
-        assert new[1]["content"] == "先看第1步\n再看第2步", "吸收后按时间正序拼接"
-        assert new[2]["content"] == "中间结论\n调用第2步"
-        assert not any(m.get("tool_calls") for m in new), "调用点壳全部剥除"
-        assert new[3]["content"] == "收尾", "块尾叙事保持独立"
-
-
-# ═══════════════════════════════════════════════════════
-# _shortcircuit（合并模式照旧）
-# ═══════════════════════════════════════════════════════
-
-
-class TestShortcircuitMerge:
-    def test_crop_merge_unchanged_behavior(self):
-        """crop 合并：历史完整块压缩为 user + terminal 两条"""
-        messages: list[Message] = [
-            _msg("user", "任务"),
-            _msg("assistant", "", tool_calls=_tc("s1")),
-            _msg("tool", "结果1"),
-            _msg("assistant", "总结"),
-        ]
-        ok, _, saved, new = await_result(shortcircuit(messages, None, [(0, 3)], "crop"))
-        assert ok
-        assert new is not None
-        assert saved == 2
-        assert len(new) == 2
-        assert new[0]["content"] == "任务"
-        assert new[1]["content"] == "总结"
-
-    def test_range_crop_takes_first_user_last_reply(self):
-        """crop 跨多个 run：取首 run 的 user + 末 run 的回复，中间（含中间 user）全丢"""
-        messages: list[Message] = [
-            _msg("user", "任务A"),
-            _msg("assistant", "A完成"),
-            _msg("user", "任务B"),
-            _msg("assistant", "B完成"),
-        ]
-        ok, _, _, new = await_result(shortcircuit(messages, None, [(0, 3)], "crop"))
-        assert ok
-        assert new is not None
-        assert len(new) == 2
-        assert new[0]["content"] == "任务A", "crop 只取首 run 的请求，不拼接中间 user"
-        assert new[1]["content"] == "B完成", "crop 取末 run 的回复"
-
-
-# ═══════════════════════════════════════════════════════
-# _parse_args
-# ═══════════════════════════════════════════════════════
-
-
-class TestParseArgs:
-    def test_default_crop(self):
-        assert parse_args("") == ("default", 1, "crop")
-
-    def test_d_flag(self):
-        assert parse_args("-d") == ("default", 1, "degenerate")
-        assert parse_args("#2 -d") == ("index", 2, "degenerate")
-        assert parse_args("3 -d") == ("count", 3, "degenerate")
-        assert parse_args("#1-#3 -d") == ("range", (1, 3), "degenerate")
-
-    def test_mode_flags_override(self):
-        # 最后一个模式修饰生效
-        assert parse_args("-d -c") == ("default", 1, "crop")
-        assert parse_args("-r") == ("default", 1, "regenerate")
-
-    def test_list(self):
-        assert parse_args("list") == ("list", None, "crop")
-        assert parse_args("list -d") == ("list", None, "degenerate")
-
-
-# ═══════════════════════════════════════════════════════
-# execute_plan（统一策略：当前块只能 -d，其他块默认 crop）
-# ═══════════════════════════════════════════════════════
-
-
-class TestExecutePlan:
-    def test_mixed_others_crop_currentdegenerate(self):
-        """工具层典型场景（count=2, mode=None）：历史块默认 crop，
-        当前块（含调用点）强制退化并保护调用点"""
-        messages: list[Message] = [
-            _msg("user", "任务A"),
-            _msg("assistant", "A开始", tool_calls=_tc("a")),
-            _msg("tool", "A结果"),
-            _msg("assistant", "A完成"),
-            _msg("user", "任务B"),
-            _msg("assistant", "B开始", tool_calls=_tc("b")),
-            _msg("tool", "B结果"),
-            _msg("assistant", "B完成", tool_calls=_tc("shortcircuit")),  # 调用点
-        ]
-        ok, msg, saved, new = await_result(execute_plan(messages, None, "count", 2, None, "degenerable", True))
-        assert ok
-        assert "crop #" in msg and "degenerate #" in msg and "(当前块)" in msg
-        assert new is not None
-        assert saved == 4  # #1 crop 省 2 + #2 退化清 2
-        # #1 被 crop：压缩为 user + terminal 两条
-        assert new[0]["content"] == "任务A"
-        assert new[1]["content"] == "A完成"
-        # #2 被退化且保护调用点：调用点保留 tool_calls，其前文本合并进 content
-        assert len(new) == 4
-        assert new[2]["role"] == "user" and new[2]["content"] == "任务B"
-        assert new[3]["role"] == "assistant"
-        assert new[3]["tool_calls"][0]["function"]["name"] == "shortcircuit"
-        assert new[3]["content"] == "B开始\nB完成"
-        assert not any(m["role"] == "tool" for m in new)
-
-    def test_current_forced_degenerate_even_if_crop(self):
-        """当前块强制 -d：显式 crop 指定当前块 → 实际执行退化（保留 AI 文本）"""
-        messages: list[Message] = [
-            _msg("user", "任务A"),
-            _msg("assistant", "A完成"),
-            _msg("user", "任务B"),
-            _msg("assistant", "B开始", tool_calls=_tc("b")),
-            _msg("tool", "B结果"),
-            _msg("assistant", "B完成"),
-        ]
-        ok, msg, _, new = await_result(execute_plan(messages, None, "index", 2, "crop", "compressible", False))
-        assert ok
-        assert "degenerate #" in msg and "(当前块)" in msg
-        assert new is not None
-        # 退化而非 crop：B开始 转正为独立 assistant（crop 则会压缩为 2 条）
-        assert [m["role"] for m in new] == ["user", "assistant", "user", "assistant", "assistant"]
-        assert new[3]["content"] == "B开始"
-        assert new[4]["content"] == "B完成"
-        assert not any(m["role"] == "tool" for m in new)
-
-    def test_others_default_crop_when_mode_none(self):
-        """其他块默认 crop：未指定 mode 处理历史块 → 压缩而非退化"""
-        messages: list[Message] = [
-            _msg("user", "任务A"),
-            _msg("assistant", "A开始", tool_calls=_tc("a")),
-            _msg("tool", "A结果"),
-            _msg("assistant", "A完成"),
-            _msg("user", "任务B"),
-            _msg("assistant", "B完成"),
-        ]
-        ok, msg, saved, new = await_result(execute_plan(messages, None, "index", 1, None, "compressible", False))
-        assert ok
-        assert "crop #1" in msg
-        assert new is not None
-        assert saved == 2
-        # #1 被 crop（压缩为2条），#2 原样保留
-        assert len(new) == 4
-        assert new[0]["content"] == "任务A"
-        assert new[1]["content"] == "A完成"
-        assert new[2]["content"] == "任务B"
-        assert new[3]["content"] == "B完成"
-
-    def test_range_crop_others_currentdegenerate(self):
-        """范围指定涉及当前块：其他块按指定行为（crop 首尾截取），当前块强制 -d"""
-        messages: list[Message] = [
-            _msg("user", "任务A"),
-            _msg("assistant", "A完成"),
-            _msg("user", "任务B"),
-            _msg("assistant", "B完成"),
-            _msg("user", "任务C"),
-            _msg("assistant", "C开始", tool_calls=_tc("c")),
-            _msg("tool", "C结果"),
-            _msg("assistant", "C总结", tool_calls=_tc("shortcircuit")),
-        ]
-        ok, msg, _, new = await_result(execute_plan(messages, None, "range", (1, 3), "crop", "compressible", True))
-        assert ok
-        assert "crop #1,#2" in msg and "(当前块)" in msg
-        assert new is not None
-        # #1+#2 按 range 压成一问一答（user 取首、assistant 取末，中间全丢）
-        assert len(new) == 4
-        assert new[0]["content"] == "任务A", "crop 只取首 run 的请求，不拼接中间 user"
-        assert new[1]["content"] == "B完成"
-        # #3 退化且保护调用点
-        assert new[2]["content"] == "任务C"
-        assert new[3]["role"] == "assistant"
-        assert new[3]["tool_calls"][0]["function"]["name"] == "shortcircuit"
-        assert new[3]["content"] == "C开始\nC总结"
-        assert not any(m["role"] == "tool" for m in new)
-
-    def test_all_degenerate_when_mode_explicit(self):
-        """显式 -d 且目标含当前块：全部退化（其他块也按指定行为 -d），保持原全退化语义"""
-        messages: list[Message] = [
-            _msg("user", "任务A"),
-            _msg("assistant", "A开始", tool_calls=_tc("a")),
-            _msg("tool", "A结果"),
-            _msg("assistant", "A完成"),
-            _msg("user", "任务B"),
-            _msg("assistant", "B开始", tool_calls=_tc("b")),
-            _msg("tool", "B结果"),
-            _msg("assistant", "B完成", tool_calls=_tc("shortcircuit")),
-        ]
-        ok, msg, _, new = await_result(execute_plan(messages, None, "count", 2, "degenerate", "degenerable", True))
-        assert ok
-        assert "degenerate #" in msg
-        assert new is not None
-        # #1 退化保留转正文本（非 crop 压缩）；#2 调用点保护 + 文本合并
-        assert new[0]["content"] == "任务A"
-        assert new[1]["content"] == "A开始"
-        assert new[2]["content"] == "A完成"
-        assert new[3]["content"] == "任务B"
-        assert new[4]["role"] == "assistant"
-        assert new[4]["tool_calls"][0]["function"]["name"] == "shortcircuit"
-        assert new[4]["content"] == "B开始\nB完成"
-        assert not any(m["role"] == "tool" for m in new)
-
-    def test_default_targets_current_block(self):
-        """默认（未指定 mode/编号）：目标为最晚可退化块（当前块）→ 强制 -d"""
-        messages: list[Message] = [
-            _msg("user", "任务A"),
-            _msg("assistant", "A完成"),
-            _msg("user", "任务B"),
-            _msg("assistant", "B开始", tool_calls=_tc("b")),
-            _msg("tool", "B结果"),
-            _msg("assistant", "B完成"),
-        ]
-        ok, msg, _, new = await_result(execute_plan(messages, None, "default", None, None, "degenerable", True))
-        assert ok
-        assert "degenerate #" in msg and "(当前块)" in msg
-        assert new is not None
-        assert [m["role"] for m in new] == ["user", "assistant", "user", "assistant", "assistant"]
-        assert new[3]["content"] == "B开始"
-        assert not any(m["role"] == "tool" for m in new)
-
-
-# ═══════════════════════════════════════════════════════
-# execute（命令层 /sc —— 无硬性约束，可自由处理任意块含当前块）
-# ═══════════════════════════════════════════════════════
-
-
-class _FakeConversation:
-    def __init__(self, messages: list[Message]) -> None:
-        self._msgs = list(messages)
-        self.system_prompt = {"role": "system", "content": "sys"}
-
-    def get_non_system_messages(self) -> list[Message]:
-        return list(self._msgs)
-
-    def set_messages(self, system_prompt: object, messages: list[Message]) -> None:
-        self._msgs = list(messages)
-
-    def to_serializable(self) -> dict[str, object]:
-        return {"messages": self._msgs}
-
-
-class _FakeSession:
-    def __init__(self) -> None:
-        self.saved: list[dict[str, object]] = []
-
-    def save_context(self, data: dict[str, object]) -> None:
-        self.saved.append(data)
-
-
-class _FakeState:
-    def __init__(self, messages: list[Message]) -> None:
-        self.conversation = _FakeConversation(messages)
-        self.session = _FakeSession()
-
-
-class TestExecuteCommand:
-    @pytest.mark.parametrize("arg", ["#2 -c", ""], ids=["explicit_-c", "default_no_modifier"])
-    def test_command_crop_current_block(self, arg):
-        """命令层无硬性约束：`/sc #2 -c` 与默认（无修饰）都能 crop 当前块（不强制退化）——
-        两种入参走同一命令语义，断言逐字相同，参数化合并"""
-        st = _FakeState([
-            _msg("user", "任务A"),
-            _msg("assistant", "A完成"),
-            _msg("user", "任务B"),
-            _msg("assistant", "B开始", tool_calls=_tc("b")),
-            _msg("tool", "B结果"),
-            _msg("assistant", "B完成"),
-        ])
-        ok, text = run_cmd(st, arg)
-        assert ok
-        assert "crop #" in text
-        msgs = st.conversation._msgs
-        # 当前块 #2 被 crop：压缩为 2 条（而非强制退化保留文本）
-        assert len(msgs) == 4
-        assert msgs[2]["content"] == "任务B"
-        assert msgs[3]["content"] == "B完成"
-        assert not any(m["role"] == "tool" for m in msgs)
-
-    def test_command_range_crop_current_block(self):
-        """命令层无硬性约束：/sc #1-#3 默认 crop（首 run 请求 + 末 run 回复）含当前块"""
-        st = _FakeState([
-            _msg("user", "任务A"),
-            _msg("assistant", "A完成"),
-            _msg("user", "任务B"),
-            _msg("assistant", "B完成"),
-            _msg("user", "任务C"),
-            _msg("assistant", "C开始", tool_calls=_tc("c")),
-            _msg("tool", "C结果"),
-            _msg("assistant", "C总结"),
-        ])
-        ok, text = run_cmd(st, "#1-#3")
-        assert ok
-        assert "crop #" in text
-        msgs = st.conversation._msgs
-        # 整个范围压成一问一答：首 run 的请求 + 末 run 的回复，中间全丢
-        assert len(msgs) == 2
-        assert msgs[0]["content"] == "任务A", "crop 只取首 run 的请求，不拼接中间 user"
-        assert msgs[1]["content"] == "C总结", "crop 取末 run 的回复"
-
-    def test_command_explicit_degenerate_current(self):
-        """命令层显式 -d 处理当前块：正常退化（本就允许）"""
-        st = _FakeState([
-            _msg("user", "任务A"),
-            _msg("assistant", "A完成"),
-            _msg("user", "任务B"),
-            _msg("assistant", "B开始", tool_calls=_tc("b")),
-            _msg("tool", "B结果"),
-            _msg("assistant", "B完成"),
-        ])
-        ok, text = run_cmd(st, "#2 -d")
-        assert ok
-        assert "degenerate #2" in text
-        msgs = st.conversation._msgs
-        assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant", "assistant"]
-        assert msgs[3]["content"] == "B开始"
-        assert not any(m["role"] == "tool" for m in msgs)
-
-
-def run_cmd(state: _FakeState, arg: str) -> tuple[bool, str]:
-    import asyncio
-
-    return asyncio.run(execute(state, arg))
-
-
-def await_result(
-    coro: Coroutine[None, None, tuple[bool, str, int, list[Message] | None]],
-) -> tuple[bool, str, int, list[Message] | None]:
-    import asyncio
-
-    return asyncio.run(coro)
-
-
-# ═══════════════════════════════════════════════════════
-# 注入身份协议（docs/dev/引擎.md「注入消息身份协议」）
-# ═══════════════════════════════════════════════════════
-
-
-class TestInjectIdentity:
-    """⁂[kind] 标记的系统注入：不开新块；已闭合块内可剪除；当前块绝不删；行标注=系统"""
-
-    def test_scan_does_not_split_at_injected(self):
-        """系统注入不是人类轮次 → 不切块，并入前一个连通块"""
+    def test_injected_does_not_open_new_block(self):
+        """⁂[kind] 注入不是人类轮次 → 不开新块，并入前一个连通块"""
         messages: list[Message] = [
             _msg("user", "任务A"),
             _msg("assistant", "回复A"),
-            _msg("user", "⁂[job_done] 后台任务完成"),
+            _inj("job_done", "后台任务完成"),
             _msg("assistant", "已报告"),
             _msg("user", "任务B"),
             _msg("assistant", "回复B"),
         ]
         comps = scan_components(messages)
-        assert len(comps) == 2, "标记消息不产生新块"
+        assert len(comps) == 2, "注入消息不产生新块"
         assert comps[0]["user_preview"] == "任务A"
-        assert comps[0]["message_count"] == 4, "标记消息应并入前块（并回上一人类轮次）"
+        assert comps[0]["message_count"] == 4, "注入消息并回上一人类轮次"
+        assert comps[0]["user_idx"] == 0 and comps[0]["terminal_idx"] == 3
         assert comps[1]["user_preview"] == "任务B"
 
-    def test_scan_leading_injected_outside_blocks(self):
-        """首条人类消息之前的标记消息游离于所有块之外（保守保留）"""
+    def test_leading_injected_floats_before_all_blocks(self):
+        """首条人类消息之前的注入游离于所有块之外（保守保留，不参与压缩）"""
         messages: list[Message] = [
-            _msg("user", "⁂[peer_ring] 铃声"),
+            _inj("peer_ring", "铃声"),
             _msg("assistant", "已接听"),
             _msg("user", "任务"),
             _msg("assistant", "回复"),
@@ -676,83 +206,10 @@ class TestInjectIdentity:
         comps = scan_components(messages)
         assert len(comps) == 1
         assert comps[0]["user_idx"] == 2
+        assert comps[0]["terminal_idx"] == 3
 
-    def test_degenerate_keeps_injected_in_place(self):
-        """闭合块内的 user 类消息（人类话语与 ⁂[kind] 回执）一律原地保留（块内块外同构）：
-        抽到块首会伪造对话结构，直接删则让 AI 独白失去刺激源 —— 身份塌缩。"""
-        messages: list[Message] = [
-            _msg("user", "任务A"),
-            _msg("assistant", "", tool_calls=_tc("s1")),
-            _msg("tool", "结果"),
-            _msg("user", "⁂[job_done] 完成"),
-            _msg("assistant", "回复A"),
-            _msg("user", "任务B"),
-            _msg("assistant", "回复B"),
-        ]
-        ok, _desc, changed, new = degenerate(messages, [(0, 4)], protect_callsite=False)
-        assert ok
-        assert new is not None
-        # 空 content 的一串调用点整条删除；tool 删除；user 全部原位保留
-        assert [m["role"] for m in new] == ["user", "user", "assistant", "user", "assistant"]
-        assert new[0]["content"] == "任务A"
-        assert new[1]["content"] == "⁂[job_done] 完成", "回执原地保留，不抽到块首"
-        assert new[2]["content"] == "回复A", "AI 产出保留"
-        assert new[3]["content"] == "任务B", "块外消息不受影响"
-        assert changed == 2  # 空调用点 + tool
-
-    def test_degenerate_keeps_injected_in_current_block(self):
-        """当前块（延伸到消息末尾）内的标记消息绝不删 —— 可能尚未被 LLM 消费"""
-        messages: list[Message] = [
-            _msg("user", "任务"),
-            _msg("assistant", "", tool_calls=_tc("s1")),
-            _msg("tool", "结果"),
-            _msg("assistant", "回复"),
-            _msg("user", "⁂[job_done] 完成"),
-        ]
-        ok, _desc, _saved, new = degenerate(messages, [(0, 4)], protect_callsite=False)
-        assert ok
-        assert new is not None
-        contents = [m.get("content", "") for m in new]
-        assert any("⁂[job_done]" in str(c) for c in contents), "当前块标记消息必须保留"
-
-    def test_regenerate_labels_injected_as_system(self):
-        """regenerate 上下文里标记消息标注为 [系统]，人类消息才是 [用户]"""
-        captured: dict[str, str] = {}
-
-        async def refiner(user_text: str, assistant_text: str, context_text: str) -> tuple[str, str]:
-            captured["ctx"] = context_text
-            return ("新用户", "新回复")
-
-        messages: list[Message] = [
-            _msg("user", "任务"),
-            _msg("assistant", "", tool_calls=_tc("s1")),
-            _msg("tool", "结果"),
-            _msg("user", "⁂[job_done] 完成"),
-            _msg("assistant", "回复"),
-        ]
-        ok, _desc, _saved, new = await_result(shortcircuit(messages, refiner, [(0, 4)], "regenerate"))
-        assert ok
-        assert "[用户]: 任务" in captured["ctx"]
-        assert "[系统]: ⁂[job_done] 完成" in captured["ctx"]
-        assert new is not None and len(new) == 2
-
-
-# ═══════════════════════════════════════════════════════
-# 忙时人类插话（_drained）：不开新块；压缩时合并保留
-# ═══════════════════════════════════════════════════════
-
-
-def _drained(content: str) -> Message:
-    m = _msg("user", content)
-    m["_drained"] = True
-    return m
-
-
-class TestBusyHumanInject:
-    """忙时被排空的人类话语（_drained 标记）：属于当前 run，不切块、压缩恒保留"""
-
-    def test_scan_does_not_split_at_drained_human(self):
-        """_drained 人类消息不是块边界 —— 不把前段 run 劈成假'被用户中断'"""
+    def test_drained_human_does_not_open_new_block(self):
+        """_drained 忙时插话属于当前 run → 不切块（否则前段 run 成假『被用户中断』）"""
         messages: list[Message] = [
             _msg("user", "任务A"),
             _msg("assistant", "", tool_calls=_tc("s1")),
@@ -764,80 +221,504 @@ class TestBusyHumanInject:
         ]
         comps = scan_components(messages)
         assert len(comps) == 2, "_drained 人类消息不产生新块"
-        assert comps[0]["user_preview"] == "任务A"
-        assert comps[0]["complete"], "块终点是真收尾 assistant，不再误判中断"
         assert comps[0]["message_count"] == 5
+        assert comps[0]["complete"] is True, "块终点是真收尾 assistant"
 
-    def test_crop_keeps_first_user_drops_intermediate(self):
-        """crop：只要首 user + 末回复；中间 user 类（注入回执、忙时插话）随过程一并丢弃"""
+
+# ═══════════════════════════════════════════════════════
+# degenerate — 无损塌结构：人类话语一条、叙事一条
+# ═══════════════════════════════════════════════════════
+
+
+class TestDegenerate:
+    def test_merges_human_and_narrative_drops_noise(self):
+        """契约 1+3：一段 → 两条；叙事合并（含被剥壳的调用点 content）；tool 与壳丢弃"""
         messages: list[Message] = [
             _msg("user", "任务A"),
-            _msg("assistant", "中间想了一步"),
-            _msg("user", "⁂[job_done] 后台完成"),
-            _drained("顺便看下X"),
-            _msg("assistant", "最终结论"),
+            _msg("assistant", "A开始", tool_calls=_tc("s1")),
+            _msg("tool", "A结果"),
+            _msg("assistant", "A完成"),
         ]
-        ok, _desc, _saved, new = await_result(shortcircuit(messages, None, [(0, 4)], "crop"))
-        assert ok and new is not None
-        assert len(new) == 2
-        assert new[0] == {"role": "user", "content": "任务A"}, "crop 首条 = 首 run 的裸人类请求"
-        assert new[1]["content"] == "最终结论"
-        assert "⁂[job_done]" not in new[0]["content"], "注入回执随中间过程丢弃，不拼进请求"
-        assert "顺便看下X" not in new[0]["content"], "忙时插话随中间过程丢弃"
+        ok, _desc, changed, new = degenerate(messages, [(0, 3)])
+        assert ok
+        assert new is not None
+        assert [m["role"] for m in new] == ["user", "assistant"]
+        assert new[0] == {"role": "user", "content": "任务A"}
+        assert new[1] == {"role": "assistant", "content": "A开始\nA完成"}, "调用点壳剥掉但 content 并入叙事"
+        assert changed == 2, "1 条 tool 丢弃 + 1 条调用点剥壳"
 
-    def test_degenerate_hoists_drained_human(self):
-        """degenerate 闭合块：忙时人类插话原地保留（与块内同构，不塌缩进 AI 叙事）"""
+    def test_injected_is_discarded(self):
+        """契约 2：⁂[kind] 虽是 user 角色，属工具异步输出 → 丢弃，不并进第一条 user"""
         messages: list[Message] = [
             _msg("user", "任务A"),
             _msg("assistant", "", tool_calls=_tc("s1")),
-            _msg("tool", "结果"),
-            _drained("顺便看下X"),
+            _msg("tool", "A结果"),
+            _inj("job_done", "后台完成"),
             _msg("assistant", "回复A"),
-            _msg("user", "任务B"),
-            _msg("assistant", "回复B"),
         ]
-        ok, _desc, _saved, new = degenerate(messages, [(0, 4)], protect_callsite=False)
-        assert ok and new is not None
-        assert [m["role"] for m in new] == ["user", "user", "assistant", "user", "assistant"]
-        assert new[0]["content"] == "任务A"
-        assert new[1]["content"] == "顺便看下X" and new[1].get("_drained")
-        assert new[2]["content"] == "回复A"
+        ok, _desc, changed, new = degenerate(messages, [(0, 4)])
+        assert ok
+        assert new is not None
+        assert [m["role"] for m in new] == ["user", "assistant"]
+        assert new[0] == {"role": "user", "content": "任务A"}, "注入不能并进人类话语"
+        assert new[1] == {"role": "assistant", "content": "回复A"}, "注入是工具输出，不是我的叙事"
+        assert all(INJECT_MARK not in (m.get("content") or "") for m in new)
+        assert changed == 3, "tool + 空调用点 + 注入各一"
 
-    def test_degenerate_current_block_keeps_drained_in_place(self):
-        """当前块：_drained 人类消息原地保留（与注入同一窗口逻辑）"""
+    def test_drained_human_merged_into_first_user(self):
+        """契约 1：忙时插话也是人类话语，按时间正序 "\n" 并入第一条 user"""
         messages: list[Message] = [
-            _msg("user", "任务"),
-            _msg("assistant", "", tool_calls=_tc("s1")),
-            _msg("tool", "结果"),
-            _drained("插话"),
-            _msg("assistant", "回复"),
+            _msg("user", "任务A"),
+            _msg("assistant", "A开始", tool_calls=_tc("s1")),
+            _msg("tool", "A结果"),
+            _drained("顺便看下X"),
+            _msg("assistant", "A完成"),
         ]
-        ok, _desc, _saved, new = degenerate(messages, [(0, 4)], protect_callsite=False)
-        assert ok and new is not None
-        assert any(m.get("content") == "插话" and m.get("_drained") for m in new)
+        ok, _desc, _changed, new = degenerate(messages, [(0, 4)])
+        assert ok
+        assert new is not None
+        assert [m["role"] for m in new] == ["user", "assistant"]
+        assert new[0]["content"] == "任务A\n顺便看下X"
+        assert new[1]["content"] == "A开始\nA完成"
 
-
-# ═══════════════════════════════════════════════════════
-# 返回值的「对账」契约：模型靠它判断有没有真的剪到东西
-# ═══════════════════════════════════════════════════════
-
-
-class TestResultFeedback:
-    def test_zero_saved_warns_instead_of_ok(self):
-        """crop 一个已成一问一答的块：0 变化 → ⚠️ 开头 + 明说没剪到 + 下一步"""
+    def test_segment_without_human_turns_yields_single_assistant(self):
+        """契约 4：段内只有注入 + 我的叙事 → 产物只剩一条 assistant"""
         messages: list[Message] = [
             _msg("user", "任务A"),
             _msg("assistant", "A完成"),
+            _inj("peer_ring", "铃声"),
+            _msg("assistant", "已接听"),
         ]
-        ok, msg, saved, _ = await_result(execute_plan(messages, None, "index", 1, "crop", "compressible", False))
-        assert ok and saved == 0
-        assert msg.startswith("⚠️"), "0 变化不能给 ✅——模型会把成功信号读成已完成"
-        assert "消息 2→2 条（省 0）" in msg
-        assert "未剪到任何消息" in msg
-        assert "换 mode" in msg
+        ok, _desc, _changed, new = degenerate(messages, [(2, 3)])
+        assert ok
+        assert new is not None
+        assert [m["role"] for m in new] == ["user", "assistant", "assistant"]
+        assert new[1]["content"] == "A完成"
+        assert new[2] == {"role": "assistant", "content": "已接听"}, "无人类话语 → 不产 user"
+        assert all(INJECT_MARK not in (m.get("content") or "") for m in new)
 
-    def test_reports_before_after_and_remaining(self):
-        """对账行：动作 + 块编号 + 消息 A→B + 剩余可退化编号（不含进行中的当前块）"""
+    def test_protect_callsite_keeps_in_flight_call(self):
+        """契约 5：段终点是进行中的调用点 → 原样保留 tool_calls，叙事并入其 content（叙事在前）"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A开始", tool_calls=_tc("s1")),
+            _msg("tool", "A结果"),
+            _msg("assistant", "A完成", tool_calls=_tc("sc")),
+        ]
+        ok, _desc, _changed, new = degenerate(messages, [(0, 3)], protect_callsite=True)
+        assert ok
+        assert new is not None
+        assert len(new) == 2, "调用点并入后仍只有 user + 调用点"
+        assert new[0] == {"role": "user", "content": "任务A"}
+        assert new[1]["role"] == "assistant"
+        assert new[1]["tool_calls"][0]["function"]["name"] == "sc", "进行中的调用点本轮不动"
+        assert new[1]["content"] == "A开始\nA完成", "叙事在前、原标题在后"
+        assert not any(m["role"] == "tool" for m in new)
+
+    def test_protect_callsite_false_strips_in_flight_call(self):
+        """契约 3/5 对照：命令情境不保护 → 调用点也剥壳成纯文本叙事"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A开始", tool_calls=_tc("s1")),
+            _msg("tool", "A结果"),
+            _msg("assistant", "A完成", tool_calls=_tc("sc")),
+        ]
+        ok, _desc, _changed, new = degenerate(messages, [(0, 3)], protect_callsite=False)
+        assert ok
+        assert new is not None
+        assert new == [
+            {"role": "user", "content": "任务A"},
+            {"role": "assistant", "content": "A开始\nA完成"},
+        ]
+
+    def test_multiple_targets_yield_one_pair_each(self):
+        """契约 1：每个 target 各产一对 → 多 target = 多对（段粒度决定产物对数）"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A开始", tool_calls=_tc("s1")),
+            _msg("tool", "A结果"),
+            _drained("顺便看下X"),
+            _inj("job_done", "后台完成"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B完成"),
+        ]
+        ok, _desc, _changed, new = degenerate(messages, [(0, 5), (6, 7)])
+        assert ok
+        assert new is not None
+        assert [m["role"] for m in new] == ["user", "assistant", "user", "assistant"]
+        assert new[0]["content"] == "任务A\n顺便看下X"
+        assert new[1]["content"] == "A开始\nA完成"
+        assert new[2]["content"] == "任务B"
+        assert new[3]["content"] == "B完成"
+
+    def test_single_target_spanning_blocks_yields_one_pair(self):
+        """契约 6（原语层）：一个 target 跨多块 → 一对；文字全留，只塌结构"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A开始", tool_calls=_tc("s1")),
+            _msg("tool", "A结果"),
+            _drained("顺便看下X"),
+            _inj("job_done", "后台完成"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B完成"),
+        ]
+        ok, _desc, _changed, new = degenerate(messages, [(0, 7)])
+        assert ok
+        assert new is not None
+        assert [m["role"] for m in new] == ["user", "assistant"], "整段合成一问一答"
+        assert new[0]["content"] == "任务A\n顺便看下X\n任务B"
+        assert new[1]["content"] == "A开始\nA完成\nB完成"
+
+
+# ═══════════════════════════════════════════════════════
+# shortcircuit — crop（只要首尾）/ regenerate（LLM 提炼）
+# ═══════════════════════════════════════════════════════
+
+
+class TestCrop:
+    def test_complete_block_takes_first_user_and_last_assistant(self):
+        """契约 8：完整块 → 首 user 原文 + 末 assistant 原文，中间一切全丢"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "中间想了一步"),
+            _inj("job_done", "后台完成"),
+            _msg("assistant", "最终结论"),
+        ]
+        ok, _desc, saved, new = _run(shortcircuit(messages, None, [(0, 3)], "crop"))
+        assert ok
+        assert new == [
+            {"role": "user", "content": "任务A"},
+            {"role": "assistant", "content": "最终结论"},
+        ]
+        assert saved == 2
+
+    def test_range_across_blocks_is_one_pair(self):
+        """契约 6/8：target 跨块 → 首块 user + 末块 assistant，中间的人类插话也丢"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _drained("顺便看下X"),
+            _msg("assistant", "B完成"),
+        ]
+        ok, _desc, saved, new = _run(shortcircuit(messages, None, [(0, 4)], "crop"))
+        assert ok
+        assert new == [
+            {"role": "user", "content": "任务A"},
+            {"role": "assistant", "content": "B完成"},
+        ], "crop 是机械的首尾取值，不拼中间 user"
+        assert saved == 3
+
+    def test_incomplete_block_marked_interrupted(self):
+        """契约 8：不完整块 → user + 『被用户中断』"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A进行中", tool_calls=_tc("s1")),
+            _msg("tool", "A结果"),
+        ]
+        ok, _desc, saved, new = _run(shortcircuit(messages, None, [(0, 2)], "crop"))
+        assert ok
+        assert new == [
+            {"role": "user", "content": "任务A"},
+            {"role": "assistant", "content": "被用户中断"},
+        ]
+        assert saved == 1
+
+    def test_two_message_block_preserved_verbatim(self):
+        """契约 8：msg_count==2 原样保留（含额外字段），不重建 dict"""
+        messages: list[Message] = [
+            {"role": "user", "content": "任务A", "id": "u1"},
+            {"role": "assistant", "content": "A完成", "id": "a1"},
+        ]
+        ok, _desc, saved, new = _run(shortcircuit(messages, None, [(0, 1)], "crop"))
+        assert ok
+        assert new == messages
+        assert new is not None and new[0].get("id") == "u1", "原消息原样保留"
+        assert saved == 0
+
+    def test_regenerate_uses_refiner_and_labels_injected_as_system(self):
+        """regenerate：整段交 LLM 提炼成一对；上下文里注入标注 [系统]、人类标注 [用户]"""
+        captured: dict[str, str] = {}
+
+        async def refiner(user_text: str, assistant_text: str, context_text: str) -> tuple[str, str]:
+            captured["user"] = user_text
+            captured["assistant"] = assistant_text
+            captured["ctx"] = context_text
+            return ("提炼后的问题", "提炼后的回复")
+
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "", tool_calls=_tc("s1")),
+            _msg("tool", "A结果"),
+            _inj("job_done", "后台完成"),
+            _msg("assistant", "A完成"),
+        ]
+        ok, _desc, _saved, new = _run(shortcircuit(messages, refiner, [(0, 4)], "regenerate"))
+        assert ok
+        assert new == [
+            {"role": "user", "content": "提炼后的问题"},
+            {"role": "assistant", "content": "提炼后的回复"},
+        ]
+        assert captured["user"] == "任务A" and captured["assistant"] == "A完成", "首尾原文交给 refiner"
+        assert "[用户]: 任务A" in captured["ctx"]
+        assert "[系统]: " in captured["ctx"] and "后台完成" in captured["ctx"]
+
+
+# ═══════════════════════════════════════════════════════
+# parse_target / fmt_segments — target 语法（宽松解析）
+# ═══════════════════════════════════════════════════════
+
+
+class TestParseTarget:
+    @pytest.mark.parametrize(
+        ("spec", "expected"),
+        [
+            ("7", [(7, 7)]),
+            ("#7", [(7, 7)]),
+            ("＃7", [(7, 7)]),
+            ("#3-9", [(3, 9)]),
+            ("#3-#9", [(3, 9)]),
+            ("＃3~9", [(3, 9)]),
+            ("#3 — 9", [(3, 9)]),
+            ("3, 7-9", [(3, 3), (7, 9)]),
+            ("#3，7", [(3, 3), (7, 7)]),
+        ],
+    )
+    def test_valid_forms(self, spec: str, expected: list[tuple[int, int]]):
+        segments, err = parse_target(spec)
+        assert err is None
+        assert segments == expected
+
+    @pytest.mark.parametrize(
+        ("spec", "keyword"),
+        [
+            ("", "空"),
+            ("abc", "解析"),
+            ("#9-3", "大于"),
+            ("#0", "≥ 1"),
+        ],
+    )
+    def test_invalid_forms(self, spec: str, keyword: str):
+        segments, err = parse_target(spec)
+        assert segments is None
+        assert err is not None and keyword in err
+
+
+class TestFmtSegments:
+    @pytest.mark.parametrize(
+        ("segments", "expected"),
+        [
+            ([(7, 7)], "#7"),
+            ([(3, 9)], "#3-9"),
+            ([(3, 3), (7, 9)], "#3,#7-9"),
+        ],
+    )
+    def test_render(self, segments: list[tuple[int, int]], expected: str):
+        assert fmt_segments(segments) == expected
+
+
+# ═══════════════════════════════════════════════════════
+# run_plan — 段粒度 / 当前块强制 degenerate / regenerate
+# ═══════════════════════════════════════════════════════
+
+
+def _three_tool_blocks() -> list[Message]:
+    """3 个各含一次工具往返的连通块（每块 4 条）"""
+    messages: list[Message] = []
+    for name in ("A", "B", "C"):
+        messages.extend([
+            _msg("user", f"任务{name}"),
+            _msg("assistant", f"{name}开始", tool_calls=_tc(name)),
+            _msg("tool", f"{name}结果"),
+            _msg("assistant", f"{name}完成"),
+        ])
+    return messages
+
+
+class TestRunPlan:
+    def test_segment_spanning_blocks_collapses_to_one_pair(self):
+        """契约 6：[(1,3)] → 1 对；[(1,1),(2,3)] → 2 对（差别只在 target 粒度）"""
+        messages = _three_tool_blocks()
+        ok, msg, saved, new = _run(run_plan(messages, _FakeState(messages), "degenerate", [(1, 3)], True))
+        assert ok
+        assert msg.startswith("✅ degenerate #1-3 · 消息 12→2 条（省 10）")
+        assert new is not None
+        assert [m["role"] for m in new] == ["user", "assistant"], "整段应合成一对"
+        assert new[0]["content"] == "任务A\n任务B\n任务C"
+        assert saved == 10
+
+        ok, _desc, _saved, new2 = _run(run_plan(messages, _FakeState(messages), "degenerate", [(1, 1), (2, 3)], True))
+        assert ok
+        assert new2 is not None
+        assert [m["role"] for m in new2] == ["user", "assistant", "user", "assistant"], "两段各一对"
+
+    def test_multi_segment_processed_separately(self):
+        """契约 6 段间语义：多段各处理各的，未命中的块原样保留"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A开始", tool_calls=_tc("a")),
+            _msg("tool", "A结果"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B1"),
+            _msg("assistant", "B2"),
+            _msg("user", "任务C"),
+            _msg("assistant", "C开始", tool_calls=_tc("c")),
+            _msg("tool", "C结果"),
+            _msg("assistant", "C完成"),
+        ]
+        ok, msg, saved, new = _run(run_plan(messages, _FakeState(messages), "degenerate", [(1, 1), (3, 3)], True))
+        assert ok
+        assert msg == "✅ degenerate #1,#3 · 消息 11→7 条（省 4）｜剩余可退化 无", "块编号用 fmt_segments 形式"
+        assert saved == 4
+        assert new is not None
+        assert [m["role"] for m in new] == ["user", "assistant", "user", "assistant", "assistant", "user", "assistant"]
+        assert new[0]["content"] == "任务A" and new[1]["content"] == "A开始\nA完成"
+        assert [m["content"] for m in new[2:5]] == ["任务B", "B1", "B2"], "未命中的 #2 原样保留"
+        assert new[5]["content"] == "任务C" and new[6]["content"] == "C开始\nC完成"
+
+    def test_current_block_forced_degenerate_even_for_crop(self):
+        """契约 7：目标含当前块 → 该块强制 degenerate；其他块按请求的 crop 处理"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A中间"),
+            _drained("A插话"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B开始", tool_calls=_tc("b")),
+            _msg("tool", "B结果"),
+            _drained("B插话"),
+            _msg("assistant", "B完成"),
+        ]
+        ok, msg, saved, new = _run(run_plan(messages, _FakeState(messages), "crop", [(1, 2)], True))
+        assert ok
+        assert msg == "✅ crop #1-2 · 消息 9→4 条（省 5）｜剩余可退化 无"
+        assert saved == 5
+        assert new is not None
+        assert [m["role"] for m in new] == ["user", "assistant", "user", "assistant"]
+        # #1 按 crop：中间叙事与中间人类插话全丢
+        assert new[0] == {"role": "user", "content": "任务A"}
+        assert new[1] == {"role": "assistant", "content": "A完成"}
+        # #2 当前块强制 degenerate：中间人类插话保留、工具往返清掉
+        assert new[2]["content"] == "任务B\nB插话", "degenerate 不丢中间 user —— 这就是 crop 覆盖不到的形态"
+        assert new[3]["content"] == "B开始\nB完成"
+        assert not any(m["role"] == "tool" for m in new)
+
+    def test_regenerate_builds_refiner_from_state_llm(self):
+        """regenerate 段：refiner 由 state.llm.summarize 驱动，user 原文保留、assistant 用提炼结果"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A中间"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B完成"),
+        ]
+        st = _FakeState(messages, llm_reply="我做了A并得出结论")
+        ok, msg, saved, new = _run(run_plan(messages, st, "regenerate", [(1, 1)], True))
+        assert ok
+        assert msg == "✅ regenerate #1 · 消息 5→4 条（省 1）｜剩余可退化 无"
+        assert saved == 1
+        assert len(st.llm.calls) == 1
+        assert "[用户]: 任务A" in str(st.llm.calls[0]["text"])
+        assert "instruction" in st.llm.calls[0]
+        assert new == [
+            {"role": "user", "content": "任务A"},
+            {"role": "assistant", "content": "我做了A并得出结论"},
+            {"role": "user", "content": "任务B"},
+            {"role": "assistant", "content": "B完成"},
+        ]
+
+    def test_protect_callsite_forwarded_to_current_block(self):
+        """契约 5/14：protect_callsite 只作用于当前块 —— 工具情境保留进行中的调用点"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B开始", tool_calls=_tc("b")),
+        ]
+        ok, _desc, _saved, protected = _run(run_plan(messages, _FakeState(messages), "degenerate", [(2, 2)], True))
+        assert ok
+        assert protected is not None
+        assert protected[-1]["tool_calls"][0]["function"]["name"] == "b", "调用点要留给 loop"
+
+        ok, _desc, _saved, stripped = _run(run_plan(messages, _FakeState(messages), "degenerate", [(2, 2)], False))
+        assert ok
+        assert stripped is not None
+        assert "tool_calls" not in stripped[-1]
+        assert stripped[-1]["content"] == "B开始"
+
+
+# ═══════════════════════════════════════════════════════
+# apply_action — 工具层/命令层唯一执行入口（list / 解析失败 / 写回）
+# ═══════════════════════════════════════════════════════
+
+
+def _one_tool_block() -> list[Message]:
+    return [
+        _msg("user", "任务A"),
+        _msg("assistant", "A开始", tool_calls=_tc("a")),
+        _msg("tool", "A结果"),
+        _msg("assistant", "A完成"),
+    ]
+
+
+class TestApplyAction:
+    def test_list_only_reads(self):
+        """契约 9：action=list 只返回列表，不写回"""
+        messages = _one_tool_block()
+        st = _FakeState(messages)
+        ok, text = _run(apply_action(st.messages, st, "list", "", True))
+        assert ok
+        assert text.startswith("## 📦 连通块 共1 · 可退化1 · 当前块#1（只能退化）")
+        assert st.write_backs == 0
+        assert st.session.saved == []
+
+    def test_list_with_target_appends_hint(self):
+        """契约 9：list 同时给了 target → 末尾提示『只列不改』"""
+        messages = _one_tool_block()
+        st = _FakeState(messages)
+        ok, text = _run(apply_action(st.messages, st, "list", "#1", True))
+        assert ok
+        assert "## 📦" in text
+        assert text.splitlines()[-1].startswith("（action=list 只列不改")
+        assert st.write_backs == 0
+
+    def test_invalid_target_returns_error_with_listing(self):
+        """契约 10：解析失败 → (True, ❌ 开头 + 当前 list)，不写回"""
+        messages = _one_tool_block()
+        st = _FakeState(messages)
+        ok, text = _run(apply_action(st.messages, st, "degenerate", "abc", True))
+        assert ok is True, "解析失败不是异常路径，回文本让模型一次改对"
+        assert text.startswith("❌")
+        assert "## 📦" in text
+        assert st.write_backs == 0
+        assert st.session.saved == []
+
+    def test_success_writes_back_conversation_and_session(self):
+        """契约 11：成功 → 写回 conversation.set_messages + session.save_context，回对账行"""
+        messages = _one_tool_block()
+        st = _FakeState(messages)
+        ok, text = _run(apply_action(st.messages, st, "degenerate", "#1", True))
+        assert ok
+        assert text == "✅ degenerate #1 · 消息 4→2 条（省 2）｜剩余可退化 无"
+        assert st.write_backs == 1
+        assert len(st.session.saved) == 1
+        assert st.messages == [
+            {"role": "user", "content": "任务A"},
+            {"role": "assistant", "content": "A开始\nA完成"},
+        ]
+
+
+# ═══════════════════════════════════════════════════════
+# 对账行 —— 模型靠它判断有没有真的剪到东西（契约 11）
+# ═══════════════════════════════════════════════════════
+
+
+class TestReconciliationLine:
+    def test_reports_exact_counts_and_remaining(self):
+        """✅ 动作 + 块编号 · 消息 A→B 条（省 N）｜剩余可退化 #M"""
         messages: list[Message] = [
             _msg("user", "任务A"),
             _msg("assistant", "A开始", tool_calls=_tc("a")),
@@ -848,32 +729,123 @@ class TestResultFeedback:
             _msg("tool", "B结果"),
             _msg("assistant", "B完成"),
             _msg("user", "任务C"),
-            _msg("assistant", "C开始", tool_calls=_tc("c")),
-            _msg("tool", "C结果"),
             _msg("assistant", "C完成"),
         ]
-        ok, msg, saved, _ = await_result(execute_plan(messages, None, "index", 1, "degenerate", "degenerable", False))
-        # 省 = 实测条数差（旧口径「变更数」会把转正也算进去，报 3）
-        assert ok and saved == 1
-        assert msg.startswith("✅ degenerate #1")
-        assert "消息 12→11 条（省 1）" in msg
-        assert "剩余可退化 #2" in msg, "剩余结构要给出编号，模型才知道还剩哪些块"
+        _ok, text = _run(apply_action(messages, _FakeState(messages), "degenerate", "#1", True))
+        assert text == "✅ degenerate #1 · 消息 10→8 条（省 2）｜剩余可退化 #2"
 
-
-class TestListDisplay:
-    def test_structure_is_machine_readable(self):
-        """list 一行一块：编号 / 状态 / 条数 固定前置，摘要保留以锚定内容"""
+    def test_zero_saved_warns_instead_of_ok(self):
+        """契约 11：saved==0 → ⚠️ 开头 + 明说没剪到任何消息"""
         messages: list[Message] = [
-            _msg("user", "第一个任务"),
+            _msg("user", "任务A"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B完成"),
+        ]
+        _ok, text = _run(apply_action(messages, _FakeState(messages), "crop", "#1", True))
+        assert text.startswith("⚠️ crop #1 · 消息 4→4 条（省 0）"), "0 变化不能给 ✅"
+        assert "未剪到任何消息" in text
+
+
+# ═══════════════════════════════════════════════════════
+# parse_command / execute —— 命令层 /sc（与工具层同一 apply_action）
+# ═══════════════════════════════════════════════════════
+
+
+class TestParseCommand:
+    @pytest.mark.parametrize(
+        ("arg", "expected"),
+        [
+            ("", ("list", "")),
+            ("list", ("list", "")),
+            ("#3-9", ("list", "#3-9")),
+            ("-d #3-9", ("degenerate", "#3-9")),
+            ("-c #7", ("crop", "#7")),
+            ("-r #1-3", ("regenerate", "#1-3")),
+            ("--degenerate #7", ("degenerate", "#7")),
+        ],
+    )
+    def test_parse(self, arg: str, expected: tuple[str, str]):
+        assert parse_command(arg) == expected
+
+
+class TestExecuteCommand:
+    def test_plain_sc_lists_without_write_back(self):
+        """契约 14：命令层走同一 apply_action；/sc 缺省 = list，不写回"""
+        messages = _one_tool_block()
+        st = _FakeState(messages)
+        ok, text = _run(execute(st, ""))
+        assert ok
+        assert text.startswith("## 📦 连通块 共1")
+        assert st.write_backs == 0
+
+    def test_degenerate_returns_reconciliation_line_and_writes_back(self):
+        """契约 14：/sc -d #N → 与工具层同一形态的对账行 + 写回"""
+        messages = [
+            _msg("user", "任务A"),
             _msg("assistant", "A开始", tool_calls=_tc("a")),
             _msg("tool", "A结果"),
             _msg("assistant", "A完成"),
-            _msg("user", "第二个任务"),
+            _msg("user", "任务B"),
             _msg("assistant", "B完成"),
         ]
-        lines = format_components_display(scan_components(messages)).splitlines()
-        assert "共2" in lines[0] and "可退化1" in lines[0] and "当前块#2" in lines[0]
-        assert lines[2].startswith("- **#1** `D` 4条")
-        assert lines[3].startswith("- **#2** `~` 2条")
-        # 摘要必须保留：模型靠它把编号对上真实内容
-        assert "第一个任务" in lines[2] and "第二个任务" in lines[3]
+        st = _FakeState(messages)
+        ok, text = _run(execute(st, "-d #1"))
+        assert ok
+        assert text == "✅ degenerate #1 · 消息 6→4 条（省 2）｜剩余可退化 无"
+        assert st.write_backs == 1
+        assert [m["role"] for m in st.messages] == ["user", "assistant", "user", "assistant"]
+
+    def test_command_layer_does_not_protect_callsite(self):
+        """契约 14：两层唯一差别 —— 命令层 protect_callsite=False，进行中的调用点也剥壳"""
+        messages: list[Message] = [
+            _msg("user", "任务A"),
+            _msg("assistant", "A完成"),
+            _msg("user", "任务B"),
+            _msg("assistant", "B开始", tool_calls=_tc("b")),
+        ]
+        cmd_state = _FakeState(messages)
+        _ok, cmd_text = _run(execute(cmd_state, "-d #2"))
+        assert cmd_text.startswith("⚠️ degenerate #2"), "进行中调用点剥壳不减少条数"
+        assert "tool_calls" not in cmd_state.messages[-1]
+
+        tool_state = _FakeState(messages)
+        _run(apply_action(messages, tool_state, "degenerate", "#2", True))
+        assert tool_state.messages[-1]["tool_calls"][0]["function"]["name"] == "b", "工具情境保留调用点"
+
+
+# ═══════════════════════════════════════════════════════
+# format_components_display —— 一行一块，结构优先（契约 15）
+# ═══════════════════════════════════════════════════════
+
+
+class TestFormatComponentsDisplay:
+    def _four_state_messages(self) -> list[Message]:
+        return [
+            # #1 D：有工具往返
+            _msg("user", "D块"),
+            _msg("assistant", "开始", tool_calls=_tc("a")),
+            _msg("tool", "T"),
+            _msg("assistant", "完成"),
+            # #2 C：可压缩、无工具往返
+            _msg("user", "C块"),
+            _msg("assistant", "中"),
+            _msg("assistant", "尾"),
+            # #3 ~：已压缩
+            _msg("user", "~块"),
+            _msg("assistant", "完"),
+            # #4 *：未完成（当前块）
+            _msg("user", "未完成块"),
+        ]
+
+    def test_first_line_structure(self):
+        lines = format_components_display(scan_components(self._four_state_messages())).splitlines()
+        assert lines[0] == "## 📦 连通块 共4 · 可退化1 · 当前块#4（只能退化）"
+
+    def test_single_line_per_block_with_four_states(self):
+        lines = format_components_display(scan_components(self._four_state_messages())).splitlines()
+        assert lines[2].startswith("- **#1** `D` 4条 · D块 ｜ AI: 完成")
+        assert lines[3].startswith("- **#2** `C` 3条 · C块 ｜ AI: 尾")
+        assert lines[4].startswith("- **#3** `~` 2条 · ~块 ｜ AI: 完")
+        assert lines[5].startswith("- **#4** `*` 1条 · 未完成块")
+        assert len(lines) == 6, "每块一行，摘要不能占第二行"

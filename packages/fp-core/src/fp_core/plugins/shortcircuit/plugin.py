@@ -2,8 +2,8 @@
 ShortcircuitPlugin — 自我上下文修剪插件
 
 通过 ON_INIT 钩子：
-  1. 注册 shortcircuit 工具（工具层硬性策略：当前块强制退化、其他块默认 crop）
-  2. 注入 /sc 命令（命令层无硬性约束，自由处理任意块）
+  1. 注册 shortcircuit 工具（action 缺省 list；当前块强制 degenerate）
+  2. 注入 /sc 命令（与工具同一 apply_action，语义完全一致）
 
 全部逻辑位于同包 core.py（纯函数），本模块只做注册与装配。
 """
@@ -18,52 +18,32 @@ from fp_core.tools import ToolRegistry
 from fp_core.tools.core import OpenAISchema
 
 from . import command as sc_command
-from .core import execute_plan, format_components_display, scan_components
+from .core import apply_action
 
 TOOL_DEFINITION = {
     "type": "function",
     "function": {
         "name": "shortcircuit",
         "description": (
-            "修剪对话历史的连通块（块=一条用户消息到下一次用户消息之间的记录）。"
-            "mode：degenerate=删工具调用/返回、留 AI 文本链；"
-            "crop=只留首条 user 与末条 assistant、中间全丢；regenerate=LLM 提炼。"
-            "硬性：当前块（最后一个）只能 degenerate；其他块未指定 mode 时按 crop。"
-            "选块：count=最近 N 个可处理块；block_ids=[2,5]=逐个处理 #2 #5；"
-            "range=[1,4]=把 #1~#4 当一个跨度（crop 即首块请求+末块回复，非逐块）。"
-            "返回的「消息 A→B 条」是实测对账：A=B 即没剪到东西，要换块或换 mode；"
-            "action=list 看各块编号/状态/条数。"
+            "修剪对话历史以省上下文。块=一条用户消息到下一次用户消息之间的记录。"
+            "action：list(默认，只看不改)｜degenerate(文字全留，段内汇成一对)｜"
+            "crop(只留首问+末答，中间全丢)｜regenerate(LLM 提炼)。"
+            'target（action≠list 时必填）："#7" 单块；"#3-9" 当一个整体合成一对；'
+            '"#3,#7-9" 逗号分段，各段分别处理。当前块（最后一个）只能 degenerate。'
+            "返回「消息 A→B 条」是实测对账：A==B 即没剪到东西。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "target": {
+                    "type": "string",
+                    "description": '"#7" 单块｜"#3-9" 一个整体｜"#3,#7-9" 多段分别处理',
+                },
                 "action": {
                     "type": "string",
-                    "enum": ["compress", "list"],
-                    "description": "list=列出连通块（编号/状态/条数）, compress=执行修剪（默认）",
-                    "default": "compress",
-                },
-                "count": {
-                    "type": "integer",
-                    "description": "最近 N 个可处理块，默认 1。互斥于 block_ids/range",
-                    "default": 1,
-                },
-                "block_ids": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    "description": "逐个处理这些编号，如 [2,5] → #2、#5 各处理一次。互斥于 count/range",
-                },
-                "range": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    "minItems": 2,
-                    "maxItems": 2,
-                    "description": "把 #start~#end 当作一个跨度处理（非逐块）。互斥于 count/block_ids",
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["degenerate", "crop", "regenerate"],
-                    "description": ("不传=当前块退化+其他块 crop；显式指定只作用于其他块（当前块永远退化）"),
+                    "enum": ["list", "degenerate", "crop", "regenerate"],
+                    "description": "默认 list（只列不改）",
+                    "default": "list",
                 },
             },
         },
@@ -118,51 +98,12 @@ class ShortcircuitPlugin(Plugin):
         self._tool_registry = registry
 
         async def execute(params: dict[str, Any]) -> str:
-            action: str = params.get("action", "compress")
+            action: str = params.get("action", "list")
+            target: str = params.get("target") or ""
             conv: ConversationState = st.conversation
-
-            # ── 通过公共 API 获取非 system 消息 ──
             messages: list[dict[str, Any]] = conv.get_non_system_messages()
-
-            # ── list：查看连通块概览 ──
-            if action == "list":
-                components = scan_components(messages)
-                return format_components_display(components)
-
-            # ── compress：执行退化或合并（统一策略：当前块强制退化，其他块默认 crop） ──
-            mode: str | None = params.get("mode")
-            mode_explicit = "mode" in params
-            block_ids: list[int] | None = params.get("block_ids")
-            range_param: list[int] | None = params.get("range")
-            count: int = params.get("count", 1)
-
-            # 目标选择过滤字段：显式 crop/regenerate 看内容量（compressible），
-            # 其余（未指定或显式 degenerate）看工具噪音（degenerable）——保持工具层
-            # 默认意图「优先处理含工具噪音的块（通常是当前进行中的块）」。
-            usable_key: str = "degenerable" if (not mode_explicit or mode == "degenerate") else "compressible"
-
-            if range_param is not None:
-                plan_action: str = "range"
-                plan_value: Any = (range_param[0], range_param[1])
-            elif block_ids is not None:
-                plan_action = "indices"
-                plan_value = block_ids
-            else:
-                plan_action = "count"
-                plan_value = count
-
-            success, msg, _saved, new_messages = await execute_plan(
-                messages, st, plan_action, plan_value, mode, usable_key, True
-            )
-
-            if not success:
-                return f"处理失败: {msg}"
-
-            # 通过公共 API 写回
-            assert new_messages is not None
-            conv.set_messages(conv.system_prompt, new_messages)
-            st.session.save_context(conv.to_serializable())
-            # execute_plan 已返回完整对账行（动作+编号+条数变化+剩余结构），不再二次包装
+            # 工具与命令共用 apply_action：语义唯一，写回也在其中完成
+            _ok, msg = await apply_action(messages, st, action, target, protect_callsite=True)
             return msg
 
         registry.register_tool("shortcircuit", cast(OpenAISchema, TOOL_DEFINITION), execute)
