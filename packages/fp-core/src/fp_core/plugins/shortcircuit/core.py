@@ -20,11 +20,16 @@
   crop        只要首尾：该段首条 user 原文 + 末条 assistant 原文，中间全丢。
   regenerate  该段交 LLM 提炼成一对。
 
-硬性策略（两层一致，只有「进行中调用点」因情境不同）:
-  - 目标含当前块（最后一个连通块）时，该块**强制 degenerate**；
-  - 工具情境（agent loop 进行中）protect_callsite=True：当前块终点若是进行中的
-    调用点，该调用点本轮不动（tool_calls 要留给 loop），段内叙事并入它的 content；
-  - 命令情境（/sc 到达时新块刚开、无进行中循环）protect_callsite=False。
+两个语境（context = "tool" | "command"，两层语义唯一差异的来源）:
+  - "tool"    工具层：agent loop 正跑到本工具调用。此时**存在当前块**——最后一个
+              连通块属于正在跑的 run，它可能正被 loop 使用，故：
+              ① 目标含当前块时，该块**强制 degenerate**（crop/regenerate 会拆掉
+                 进行中的结构，让 loop 下一轮拿到非法消息序列）；
+              ② 当前块终点若是进行中的调用点，该调用点本轮不动（tool_calls 要留给
+                 loop），段内叙事并入它的 content。
+  - "command" 命令层：/sc 到达时上一轮已结束、无进行中循环，**没有当前块**——
+              一切块都是历史块，点哪块就按哪个 action 执行。这是 /sc -c #N（N 恰为
+              最后一块）必须真做 crop 的原因，不许被静默改成 degenerate。
 
 状态标记（list）:
   D = 可退化（块内存在工具往返）
@@ -40,6 +45,11 @@ from typing import Any, Literal, TypedDict
 from fp_core.core.jobs import is_injected
 
 Message = dict[str, Any]
+
+# 语境：两层语义唯一差异的来源（见模块文档「两个语境」）
+#   "tool"    — agent loop 进行中调用本工具：存在「当前块」，需保护进行中的结构
+#   "command" — /sc 命令：上一轮已结束，一切块都是历史块，无当前块
+Context = Literal["tool", "command"]
 
 
 class Component(TypedDict):
@@ -420,6 +430,23 @@ def fmt_segments(segments: list[tuple[int, int]]) -> str:
     return ",".join(f"#{s}" if s == e else f"#{s}-{e}" for s, e in segments)
 
 
+def _fmt_id_runs(ids: list[int]) -> str:
+    """块编号列表 → `#1-3` / `#1,#3`（连续编号压成区间，对账行用）"""
+    if not ids:
+        return "无"
+    ordered = sorted(ids)
+    runs: list[tuple[int, int]] = []
+    start = prev = ordered[0]
+    for i in ordered[1:]:
+        if i == prev + 1:
+            prev = i
+        else:
+            runs.append((start, prev))
+            start = prev = i
+    runs.append((start, prev))
+    return fmt_segments(runs)
+
+
 # ═══════════════════════════════════════════════════════
 # 执行（工具层 / 命令层共用）
 # ═══════════════════════════════════════════════════════
@@ -430,23 +457,26 @@ async def run_plan(
     state: Any,
     action: str,
     segments: list[tuple[int, int]],
-    protect_callsite: bool,
+    context: Context,
 ) -> tuple[bool, str, int, list[Message] | None]:
     """按段执行：每段一个 target（段内整体处理），段间分别处理。
 
     Args:
-        action:           "degenerate" | "crop" | "regenerate"
-        segments:         [(start, end), ...]（1-based 块编号区间）
-        protect_callsite: 工具情境 True（当前块进行中的调用点不剥离）；
-                          命令情境 False
+        action:   "degenerate" | "crop" | "regenerate"
+        segments: [(start, end), ...]（1-based 块编号区间）
+        context:  "tool" | "command" —— 决定「当前块」是否存在（见模块文档）：
+                  tool 有当前块（强制 degenerate + 保护进行中调用点）；
+                  command 没有当前块（一切块都是历史块，按点名的 action 执行）
 
-    当前块（最后一个连通块）恒走 degenerate —— 它可能正被 loop 使用，
-    crop/regenerate 会破坏进行中的结构。
+    当前块（最后一个连通块，**仅工具语境存在**）恒走 degenerate —— 它可能正被
+    loop 使用，crop/regenerate 会破坏进行中的结构。命令语境下最后一块也是历史块，
+    必须真的按用户点名的 action 执行，不许静默替换。
     """
     components = scan_components(messages)
     if not components:
         return (False, "没有连通块需要处理", 0, None)
-    current_idx = components[-1]["idx"]
+    # 关键：当前块是「正在跑的 run」，只在工具语境成立。命令到达时上一轮已结束。
+    current_idx: int | None = components[-1]["idx"] if context == "tool" else None
 
     # 每段 → (action, 块编号列表, 是否为当前块那一段)
     plans: list[tuple[str, list[int], bool]] = []
@@ -456,15 +486,16 @@ async def run_plan(
             return (False, f"未找到编号 #{start}-#{end} 的连通块", 0, None)
         # 当前块恒走 degenerate。请求的动作本来就是 degenerate 时不拆段——
         # 拆开会把 range 的整体合成一对拆成多对（违背段粒度语义）。
-        if action != "degenerate" and current_idx in ids:
+        if action != "degenerate" and current_idx is not None and current_idx in ids:
             others = [i for i in ids if i != current_idx]
             if others:
                 plans.append((action, others, False))
             plans.append(("degenerate", [current_idx], True))
         else:
-            plans.append((action, ids, current_idx in ids))
+            plans.append((action, ids, current_idx is not None and current_idx in ids))
 
     cur: list[Message] = list(messages)
+    executed: list[tuple[str, list[int]]] = []
     # 倒序执行：段合并会减少块数，先处理靠后的段才不会让前面段的块编号前移失效
     for pmode, ids, is_current in reversed(plans):
         by_idx = {c["idx"]: c for c in scan_components(cur)}
@@ -476,19 +507,30 @@ async def run_plan(
         spans = [(sel[0]["user_idx"], sel[-1]["terminal_idx"])]
 
         if pmode == "degenerate":
-            ok, msg, _n, new_messages = degenerate(cur, spans, protect_callsite and is_current)
+            ok, msg, _n, new_messages = degenerate(cur, spans, is_current)
         else:
             refiner: Refiner | None = None if pmode == "crop" else build_regenerate_refiner(state)
             ok, msg, _n, new_messages = await shortcircuit(cur, refiner, spans, pmode)
 
         if not ok or new_messages is None:
             return (False, msg, 0, None)
+        executed.append((pmode, ids))
         cur = new_messages
 
-    desc = f"{action} {fmt_segments(segments)}"
+    # 对账行只说真话：动作名取自**实际执行**的 plans，不是请求的 action。
+    # （否则被强制 degenerate 的块挂着 crop 的名，读的人无从发现「我要的没执行」。）
+    executed.reverse()
+    executed_actions = {a for a, _ in executed}
+    if executed_actions == {action}:
+        desc = f"{action} {fmt_segments(segments)}"
+    else:
+        desc = " · ".join(f"{a} {_fmt_id_runs(ids)}" for a, ids in executed)
+
     after = len(cur)
-    # 剩余结构：排除最后一块（进行中的当前块，工具往返随调用持续产生，报它没有信息量）
-    remaining = [c["idx"] for c in scan_components(cur)[:-1] if c["degenerable"]]
+    # 剩余结构：工具语境排除最后一块（进行中的当前块，工具往返随调用持续产生，
+    # 报它没有信息量）；命令语境一切皆历史块，全量统计。
+    rest = scan_components(cur)[:-1] if context == "tool" else scan_components(cur)
+    remaining = [c["idx"] for c in rest if c["degenerable"]]
     return (True, format_result(desc, len(messages), after, remaining), len(messages) - after, cur)
 
 
@@ -497,7 +539,7 @@ async def apply_action(
     state: Any,
     action: str,
     target: str,
-    protect_callsite: bool,
+    context: Context,
 ) -> tuple[bool, str]:
     """工具层与命令层**唯一**执行入口 —— 两层语义在此对齐。
 
@@ -505,10 +547,13 @@ async def apply_action(
     其余 action       → target 必填；解析失败时返回错误 + 当前 list，
                        让模型一次调用就能改对（不必再花一次 list）
 
+    context 是两层唯一差异：工具层 "tool"（存在当前块）、命令层 "command"
+    （一切块都是历史块）。除此之外，target 语法与三种动作的产物完全一致。
+
     成功时写回会话并返回对账行。
     """
     if action == "list":
-        listing = format_components_display(scan_components(messages))
+        listing = format_components_display(scan_components(messages), context=context)
         if (target or "").strip():
             listing += "\n（action=list 只列不改；要修剪请显式指定 action=degenerate/crop/regenerate）"
         return (True, listing)
@@ -516,9 +561,12 @@ async def apply_action(
     segments, err = parse_target(target)
     if err is not None or segments is None:
         reason = err or "target 为空"
-        return (True, f"❌ {reason}｜{_TARGET_HINT}\n{format_components_display(scan_components(messages))}")
+        return (
+            True,
+            f"❌ {reason}｜{_TARGET_HINT}\n{format_components_display(scan_components(messages), context=context)}",
+        )
 
-    ok, msg, _saved, new_messages = await run_plan(messages, state, action, segments, protect_callsite)
+    ok, msg, _saved, new_messages = await run_plan(messages, state, action, segments, context)
     if not ok or new_messages is None:
         return (False, msg)
 
@@ -629,13 +677,16 @@ async def apply_count(
     state: Any,
     action: str,
     n: int,
-    protect_callsite: bool = False,
+    context: Context = "command",
 ) -> tuple[bool, str]:
     """命令层专用：「最近 N 个可处理块」逐个处理（N 对）。
 
     可处理 = degenerate 看 `degenerable`（有工具往返），crop/regenerate 看
-    `compressible`（条数 >2 且结构非最简）——这是命令层保留的便利语法；
+    `compressible`（条数 >2 且结构最简之外）——这是命令层保留的便利语法；
     工具层不提供（模型点名即处理，选中什么是它自己的责任）。
+
+    context 缺省 "command"：命令到达时上一轮已结束，被选中的「最近 N 块」
+    即使包含最后一块，也按 action 真做（crop 就是 crop）。
     """
     if n < 1:
         return (True, f"❌ 数量必须 ≥1（收到 {n}）")
@@ -644,9 +695,12 @@ async def apply_count(
     usable = [c for c in components if c[usable_key]]
     if not usable:
         what = "可退化" if action == "degenerate" else "可压缩"
-        return (True, f"没有{what}的连通块｜改用编号点名\n{format_components_display(components)}")
+        return (
+            True,
+            f"没有{what}的连通块｜改用编号点名\n{format_components_display(components, context=context)}",
+        )
     segments = [(c["idx"], c["idx"]) for c in usable[-n:]]
-    ok, msg, _saved, new_messages = await run_plan(messages, state, action, segments, protect_callsite)
+    ok, msg, _saved, new_messages = await run_plan(messages, state, action, segments, context)
     if not ok or new_messages is None:
         return (False, msg)
     state.conversation.set_messages(state.conversation.system_prompt, new_messages)
@@ -655,25 +709,32 @@ async def apply_count(
 
 
 async def execute(state: Any, arg: str) -> tuple[bool, str]:
-    """命令层入口：计数语法走 apply_count，编号语法走 apply_action（与工具同源）。"""
+    """命令层入口：计数语法走 apply_count，编号语法走 apply_action（与工具同源）。
+
+    命令层语境恒为 "command"：/sc 到达时上一轮已结束、循环不在跑，因此**不存在
+    当前块**——最后一块也只是历史块，点名的 action 原样执行（crop 不被改成
+    degenerate），进行中的调用点也照常剥壳。
+    """
     action, target, count = parse_command(arg)
     messages = state.conversation.get_non_system_messages()
-    # 命令到达时新块刚开、无进行中循环 → 不保护调用点
     if count is not None and target.strip():
         return (True, "❌ 计数与编号不能同时给：/sc 3 或 /sc #3-9，二选一")
     if count is not None:
-        _ok, msg = await apply_count(messages, state, action, count, protect_callsite=False)
+        _ok, msg = await apply_count(messages, state, action, count, context="command")
         return (True, msg)
-    _ok, msg = await apply_action(messages, state, action, target, protect_callsite=False)
+    _ok, msg = await apply_action(messages, state, action, target, context="command")
     return (True, msg)
 
 
-def format_components_display(components: list[Component]) -> str:
+def format_components_display(components: list[Component], context: Context = "command") -> str:
     """格式化连通块列表（markdown，结构优先）。
 
     一行一块：编号 / 状态 / 条数在前（固定字段，便于模型定位与选择），
     后接 80 字内容摘要——摘要必须保留，模型靠它把编号对上真实内容，
     砍太短就失去锚定作用；省 token 靠单行化（原先是每块两行 80+80 字）。
+
+    表头的「当前块」标记只在工具语境出现（那里最后一块正处于进行中、只能退化）；
+    命令语境一切块都是历史块，不带此标记，免得用户以为末块碰不得。
     """
     if not components:
         return "没有已完成的连通块"
@@ -694,8 +755,12 @@ def format_components_display(components: list[Component]) -> str:
         return flat[:n] + "…" if len(flat) > n else flat
 
     degenerable_ids = [c["idx"] for c in components if c["degenerable"]]
+    header = f"## 📦 连通块 共{len(components)} · 可退化{len(degenerable_ids)}"
+    if context == "tool":
+        # 只有工具语境存在「当前块」：最后一块正在跑，只能退化
+        header += f" · 当前块#{components[-1]['idx']}（只能退化）"
     lines: list[str] = [
-        f"## 📦 连通块 共{len(components)} · 可退化{len(degenerable_ids)} · 当前块#{components[-1]['idx']}（只能退化）",
+        header,
         "`D`=可退化 `C`=可压缩 `~`=已压缩 `*`=未完成｜条数=该块消息数（含工具往返）",
     ]
     for comp in components:

@@ -2,8 +2,8 @@
 ShortcircuitPlugin — 自我上下文修剪插件
 
 通过 ON_INIT 钩子：
-  1. 注册 shortcircuit 工具（action 缺省 list；当前块强制 degenerate）
-  2. 注入 /sc 命令（与工具同一 apply_action，语义完全一致）
+  1. 注册 shortcircuit 工具（action 缺省 list；工具语境下当前块强制 degenerate）
+  2. 注入 /sc 命令（与工具同一 apply_action；命令语境无当前块，一切块都是历史块）
 
 全部逻辑位于同包 core.py（纯函数），本模块只做注册与装配。
 """
@@ -102,8 +102,10 @@ class ShortcircuitPlugin(Plugin):
             target: str = params.get("target") or ""
             conv: ConversationState = st.conversation
             messages: list[dict[str, Any]] = conv.get_non_system_messages()
-            # 工具与命令共用 apply_action：语义唯一，写回也在其中完成
-            _ok, msg = await apply_action(messages, st, action, target, protect_callsite=True)
+            # 工具与命令共用 apply_action：target 语法与产物语义唯一。
+            # 差异只在 context：工具层 "tool"（loop 进行中 → 有当前块、保护调用点），
+            # 命令层 "command"（一切块都是历史块）。
+            _ok, msg = await apply_action(messages, st, action, target, context="tool")
             return msg
 
         registry.register_tool("shortcircuit", cast(OpenAISchema, TOOL_DEFINITION), execute)

@@ -6,10 +6,11 @@
   3. tool 消息、assistant 的 tool_calls 壳 → 丢弃
   4. 段内没有人类话语 → 产物只剩一条 assistant
   5. protect_callsite=True 且段终点是进行中的调用点 → 该调用点保留 tool_calls，叙事并入其 content
-  6/7. run_plan：段内整体 vs 段间分别；目标含当前块 → 该块强制 degenerate
+  6/7. run_plan：段内整体 vs 段间分别；工具语境下目标含当前块 → 该块强制 degenerate
   8. crop：首 user 原文 + 末 assistant 原文；不完整块 → "被用户中断"；msg_count==2 原样保留
   9~11. apply_action：list 只列不改；解析失败 ❌ + list；对账行 ✅/⚠️
   12~15. parse_target / parse_command / execute / format_components_display
+  16. context（"tool"/"command"）是两层唯一差异：命令层无当前块（末块也是历史块）
 """
 
 import asyncio
@@ -541,7 +542,7 @@ class TestRunPlan:
     def test_segment_spanning_blocks_collapses_to_one_pair(self):
         """契约 6：[(1,3)] → 1 对；[(1,1),(2,3)] → 2 对（差别只在 target 粒度）"""
         messages = _three_tool_blocks()
-        ok, msg, saved, new = _run(run_plan(messages, _FakeState(messages), "degenerate", [(1, 3)], True))
+        ok, msg, saved, new = _run(run_plan(messages, _FakeState(messages), "degenerate", [(1, 3)], "tool"))
         assert ok
         assert msg.startswith("✅ degenerate #1-3 · 消息 12→2 条（省 10）")
         assert new is not None
@@ -549,7 +550,7 @@ class TestRunPlan:
         assert new[0]["content"] == "任务A\n任务B\n任务C"
         assert saved == 10
 
-        ok, _desc, _saved, new2 = _run(run_plan(messages, _FakeState(messages), "degenerate", [(1, 1), (2, 3)], True))
+        ok, _desc, _saved, new2 = _run(run_plan(messages, _FakeState(messages), "degenerate", [(1, 1), (2, 3)], "tool"))
         assert ok
         assert new2 is not None
         assert [m["role"] for m in new2] == ["user", "assistant", "user", "assistant"], "两段各一对"
@@ -569,7 +570,7 @@ class TestRunPlan:
             _msg("tool", "C结果"),
             _msg("assistant", "C完成"),
         ]
-        ok, msg, saved, new = _run(run_plan(messages, _FakeState(messages), "degenerate", [(1, 1), (3, 3)], True))
+        ok, msg, saved, new = _run(run_plan(messages, _FakeState(messages), "degenerate", [(1, 1), (3, 3)], "tool"))
         assert ok
         assert msg == "✅ degenerate #1,#3 · 消息 11→7 条（省 4）｜剩余可退化 无", "块编号用 fmt_segments 形式"
         assert saved == 4
@@ -592,9 +593,10 @@ class TestRunPlan:
             _drained("B插话"),
             _msg("assistant", "B完成"),
         ]
-        ok, msg, saved, new = _run(run_plan(messages, _FakeState(messages), "crop", [(1, 2)], True))
+        ok, msg, saved, new = _run(run_plan(messages, _FakeState(messages), "crop", [(1, 2)], "tool"))
         assert ok
-        assert msg == "✅ crop #1-2 · 消息 9→4 条（省 5）｜剩余可退化 无"
+        # 对账行只说真话：请求 crop #1-2，实际 #2 被强制 degenerate → 分行报
+        assert msg == "✅ crop #1 · degenerate #2 · 消息 9→4 条（省 5）｜剩余可退化 无"
         assert saved == 5
         assert new is not None
         assert [m["role"] for m in new] == ["user", "assistant", "user", "assistant"]
@@ -616,7 +618,7 @@ class TestRunPlan:
             _msg("assistant", "B完成"),
         ]
         st = _FakeState(messages, llm_reply="我做了A并得出结论")
-        ok, msg, saved, new = _run(run_plan(messages, st, "regenerate", [(1, 1)], True))
+        ok, msg, saved, new = _run(run_plan(messages, st, "regenerate", [(1, 1)], "tool"))
         assert ok
         assert msg == "✅ regenerate #1 · 消息 5→4 条（省 1）｜剩余可退化 无"
         assert saved == 1
@@ -638,12 +640,12 @@ class TestRunPlan:
             _msg("user", "任务B"),
             _msg("assistant", "B开始", tool_calls=_tc("b")),
         ]
-        ok, _desc, _saved, protected = _run(run_plan(messages, _FakeState(messages), "degenerate", [(2, 2)], True))
+        ok, _desc, _saved, protected = _run(run_plan(messages, _FakeState(messages), "degenerate", [(2, 2)], "tool"))
         assert ok
         assert protected is not None
         assert protected[-1]["tool_calls"][0]["function"]["name"] == "b", "调用点要留给 loop"
 
-        ok, _desc, _saved, stripped = _run(run_plan(messages, _FakeState(messages), "degenerate", [(2, 2)], False))
+        ok, _desc, _saved, stripped = _run(run_plan(messages, _FakeState(messages), "degenerate", [(2, 2)], "command"))
         assert ok
         assert stripped is not None
         assert "tool_calls" not in stripped[-1]
@@ -669,7 +671,7 @@ class TestApplyAction:
         """契约 9：action=list 只返回列表，不写回"""
         messages = _one_tool_block()
         st = _FakeState(messages)
-        ok, text = _run(apply_action(st.messages, st, "list", "", True))
+        ok, text = _run(apply_action(st.messages, st, "list", "", "tool"))
         assert ok
         assert text.startswith("## 📦 连通块 共1 · 可退化1 · 当前块#1（只能退化）")
         assert st.write_backs == 0
@@ -679,7 +681,7 @@ class TestApplyAction:
         """契约 9：list 同时给了 target → 末尾提示『只列不改』"""
         messages = _one_tool_block()
         st = _FakeState(messages)
-        ok, text = _run(apply_action(st.messages, st, "list", "#1", True))
+        ok, text = _run(apply_action(st.messages, st, "list", "#1", "tool"))
         assert ok
         assert "## 📦" in text
         assert text.splitlines()[-1].startswith("（action=list 只列不改")
@@ -689,7 +691,7 @@ class TestApplyAction:
         """契约 10：解析失败 → (True, ❌ 开头 + 当前 list)，不写回"""
         messages = _one_tool_block()
         st = _FakeState(messages)
-        ok, text = _run(apply_action(st.messages, st, "degenerate", "abc", True))
+        ok, text = _run(apply_action(st.messages, st, "degenerate", "abc", "tool"))
         assert ok is True, "解析失败不是异常路径，回文本让模型一次改对"
         assert text.startswith("❌")
         assert "## 📦" in text
@@ -700,7 +702,7 @@ class TestApplyAction:
         """契约 11：成功 → 写回 conversation.set_messages + session.save_context，回对账行"""
         messages = _one_tool_block()
         st = _FakeState(messages)
-        ok, text = _run(apply_action(st.messages, st, "degenerate", "#1", True))
+        ok, text = _run(apply_action(st.messages, st, "degenerate", "#1", "tool"))
         assert ok
         assert text == "✅ degenerate #1 · 消息 4→2 条（省 2）｜剩余可退化 无"
         assert st.write_backs == 1
@@ -731,7 +733,7 @@ class TestReconciliationLine:
             _msg("user", "任务C"),
             _msg("assistant", "C完成"),
         ]
-        _ok, text = _run(apply_action(messages, _FakeState(messages), "degenerate", "#1", True))
+        _ok, text = _run(apply_action(messages, _FakeState(messages), "degenerate", "#1", "tool"))
         assert text == "✅ degenerate #1 · 消息 10→8 条（省 2）｜剩余可退化 #2"
 
     def test_zero_saved_warns_instead_of_ok(self):
@@ -742,7 +744,7 @@ class TestReconciliationLine:
             _msg("user", "任务B"),
             _msg("assistant", "B完成"),
         ]
-        _ok, text = _run(apply_action(messages, _FakeState(messages), "crop", "#1", True))
+        _ok, text = _run(apply_action(messages, _FakeState(messages), "crop", "#1", "tool"))
         assert text.startswith("⚠️ crop #1 · 消息 4→4 条（省 0）"), "0 变化不能给 ✅"
         assert "未剪到任何消息" in text
 
@@ -794,6 +796,46 @@ class TestExecuteCommand:
         assert ok
         assert text.startswith("✅ crop #1")
         assert st.write_backs == 1
+
+    def test_command_layer_really_crops_the_last_block(self):
+        """契约 16：命令语境没有「当前块」——最后一块也是历史块，-c 就是 crop
+
+        回归：曾经把工具层的「当前块恒走 degenerate」照搬到命令层，导致 /sc -c #1
+        在 #1 恰为最后一块时被静默改成 degenerate（中间叙事全留）。
+        """
+        messages = _one_tool_block()  # 唯一块 = 最后一块，块内含一次工具往返
+        st = _FakeState(messages)
+        ok, text = _run(execute(st, "-c #1"))
+        assert ok
+        assert text.startswith("✅ crop #1"), "对账行报的动作必须是真做的动作"
+        assert st.write_backs == 1
+        assert st.messages == [
+            {"role": "user", "content": "任务A"},
+            {"role": "assistant", "content": "A完成"},
+        ], "crop 只要首问末答：中间叙事与工具往返全丢（degenerate 才会保留「A开始」）"
+
+    def test_command_layer_count_syntax_also_crops(self):
+        """契约 16：/sc 2 命中的块即使含最后一块，也按 crop 处理"""
+        messages = _one_tool_block() + _one_tool_block()
+        st = _FakeState(messages)
+        ok, _text = _run(execute(st, "2"))
+        assert ok
+        assert [m["role"] for m in st.messages] == ["user", "assistant", "user", "assistant"]
+        assert st.messages[1]["content"] == "A完成", "crop 后只剩末条 assistant 原文"
+        assert st.messages[3]["content"] == "A完成", "末块（#2）也必须真 crop —— degenerate 会留「A开始\nA完成」"
+
+    def test_tool_context_still_forces_current_block_degenerate(self):
+        """契约 16：同一批消息，工具层照旧强制 degenerate —— context 是唯一差异"""
+        messages = _one_tool_block()
+        tool_state = _FakeState(messages)
+        _ok, tool_text = _run(apply_action(messages, tool_state, "crop", "#1", "tool"))
+        assert tool_text.startswith("✅ degenerate #1"), "工具语境当前块只能退化"
+        assert tool_state.messages[1]["content"] == "A开始\nA完成", "degenerate 文字全留"
+
+        cmd_state = _FakeState(messages)
+        _ok, cmd_text = _run(apply_action(messages, cmd_state, "crop", "#1", "command"))
+        assert cmd_text.startswith("✅ crop #1")
+        assert cmd_state.messages[1]["content"] == "A完成"
 
     def test_sc_count_processes_n_blocks(self):
         """契约 15：/sc 2 = 最近 2 个可压缩块，各一对"""
@@ -854,7 +896,7 @@ class TestExecuteCommand:
         assert "tool_calls" not in cmd_state.messages[-1]
 
         tool_state = _FakeState(messages)
-        _run(apply_action(messages, tool_state, "degenerate", "#2", True))
+        _run(apply_action(messages, tool_state, "degenerate", "#2", "tool"))
         assert tool_state.messages[-1]["tool_calls"][0]["function"]["name"] == "b", "工具情境保留调用点"
 
 
@@ -882,9 +924,14 @@ class TestFormatComponentsDisplay:
             _msg("user", "未完成块"),
         ]
 
-    def test_first_line_structure(self):
-        lines = format_components_display(scan_components(self._four_state_messages())).splitlines()
-        assert lines[0] == "## 📦 连通块 共4 · 可退化1 · 当前块#4（只能退化）"
+    def test_first_line_marks_current_block_only_in_tool_context(self):
+        """表头「当前块」只在工具语境出现：命令语境一切块都是历史块"""
+        comps = scan_components(self._four_state_messages())
+        tool_lines = format_components_display(comps, context="tool").splitlines()
+        assert tool_lines[0] == "## 📦 连通块 共4 · 可退化1 · 当前块#4（只能退化）"
+        cmd_lines = format_components_display(comps, context="command").splitlines()
+        assert cmd_lines[0] == "## 📦 连通块 共4 · 可退化1"
+        assert "当前块" not in cmd_lines[0], "命令层不该声称末块碰不得"
 
     def test_single_line_per_block_with_four_states(self):
         lines = format_components_display(scan_components(self._four_state_messages())).splitlines()
