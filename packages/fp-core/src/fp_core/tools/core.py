@@ -657,7 +657,7 @@ async def _execute_read_file(file_path: str, offset: int | None = None, limit: i
             _file_registry[file_hash] = file_path
 
             lines = all_lines[offset:] if offset else list(all_lines)
-            effective_limit = limit if limit is not None else 200
+            effective_limit = limit if limit is not None else 500
             if effective_limit > 500:
                 effective_limit = 500
 
@@ -666,9 +666,12 @@ async def _execute_read_file(file_path: str, offset: int | None = None, limit: i
             lines_returned = len(content_lines)
 
             char_cut = False
-            if len(content) > 10000:
-                content = content[:10000]
+            if len(content) > 20000:
+                content = content[:20000]
                 char_cut = True
+                # 字符截断后实际完整返回的行数可能少于 lines_returned；
+                # 按截断点重算，避免 next_offset 跳过未展示的内容
+                lines_returned = content.count("\n")
 
             remainder = total_lines - (offset or 0) - lines_returned
             if offset and offset > total_lines:
@@ -680,10 +683,10 @@ async def _execute_read_file(file_path: str, offset: int | None = None, limit: i
                 if remainder > 0:
                     hints.append(f"共 {total_lines} 行，已读 {lines_returned} 行，剩余 {remainder} 行")
                 if char_cut:
-                    hints.append("已截断至 10000 字符")
+                    hints.append("已截断至 20000 字符")
                 content += (
                     f"\n--- 文件已截断（{'；'.join(hints)}）"
-                    f"\n继续读取：read_file(file_path={file_path!r}, offset={next_offset}, limit=200)"
+                    f"\n继续读取：read_file(file_path={file_path!r}, offset={next_offset}, limit=500)"
                 )
 
             content += f"\n\n【文件哈希】{file_hash}"
@@ -835,12 +838,12 @@ CORE_TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         name="read_file",
-        description="读取文件内容。默认返回前 200 行（limit=200），超出提示继续读取。"
+        description="读取文件内容。默认返回前 500 行（limit=500，内容超 20000 字符则截断），超出提示继续读取。"
         "末尾附带文件哈希，供 edit_file 的 file_hash 参数做陈旧检测。",
         params=[
             ParamSpec("file_path", "string", True, "文件绝对路径"),
             ParamSpec("offset", "integer", False, "起始行号（从 0 开始，不传则从头）"),
-            ParamSpec("limit", "integer", False, "最多读取行数（默认 200，上限 500）"),
+            ParamSpec("limit", "integer", False, "最多读取行数（默认 500，上限 500）"),
         ],
         handler=_execute_read_file,
     ),
