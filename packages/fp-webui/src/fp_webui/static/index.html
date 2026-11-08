@@ -10,8 +10,11 @@
 
 <link rel="icon" type="image/png" href="/static/favicon.png">
 
-<!-- 样式 -->
-<link rel="stylesheet" href="/static/style.css?_t=20261101v1">
+<!-- 样式（@layer 分层：tokens < base < components；overrides 不分层压 CDN） -->
+<link rel="stylesheet" href="/static/tokens.css?_t=1">
+<link rel="stylesheet" href="/static/base.css?_t=1">
+<link rel="stylesheet" href="/static/components.css?_t=1">
+<link rel="stylesheet" href="/static/overrides.css?_t=1">
 
 <!-- Markdown 渲染 -->
 <script src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js" defer></script>
@@ -166,11 +169,12 @@
   <canvas id="proj-layer" aria-hidden="true"></canvas>
 
   <!-- ════════════════════════════════════════
-       脚本加载（顺序重要：ui.js → halo.js → proj.js → app.js）
+       单一 ESM 入口。原为 4 个同步 <script> 按序加载
+       （ui → halo → proj → app），顺序耦合只靠一行注释维系，
+       且 halo 用猴补丁依赖 ui 先执行。
+       现由 main.js 的 import 图显式表达同一顺序；
+       type="module" 天然 defer，DOM 已解析的前提仍成立。
        ════════════════════════════════════════ -->
-  <script src="/static/ui.js?_t=20261101v1"></script>
-  <script src="/static/halo.js?_t=20261021v1"></script>
-  <script src="/static/proj.js?_t=20261030v2"></script>
-  <script src="/static/app.js?_t=20261020v13"></script>
+  <script type="module" src="/static/main.js"></script>
 </body>
 </html>

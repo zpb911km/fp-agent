@@ -730,7 +730,7 @@ core 内置 `reload` 工具为两段式：先调用获得隔离测试告示与�
 ```
 └── static/
     ├── index.html         # 前端页面骨架（单页应用，仅容器 + 脚本挂载）
-    ├── style.css          # 全部样式（深/浅主题变量、光环层与投影层尺寸）
+    ├── tokens.css/base.css/components.css/overrides.css  # @layer 分层样式
     ├── ui.js              # 消息渲染、历史回看、输入框交互
     ├── app.js             # WS 连接、认证、顶栏动作、主题/光环开关
     ├── halo.js            # 光环（Canvas 2D 状态机仿真，见 3.5）
@@ -740,7 +740,7 @@ core 内置 `reload` 工具为两段式：先调用获得隔离测试告示与�
 ```
 
 > 缓存失效：服务 index 时 `_stamp_cache()` 自动把 `?_t=` 改写为对应静态文件 mtime，
-> 并下发 `Cache-Control: no-cache` —— 改 ui.js/app.js/halo.js/proj.js/style.css 即自动生效，
+> 并下发 `Cache-Control: no-cache` —— 改 ui.js/app.js/halo.js/proj.js/tokens.css 等即自动生效，
 > **无需**人肉同步 index.html 里的版本串（2026-10-08 起）。
 
 ### 10.2 启动开发模式

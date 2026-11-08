@@ -4,23 +4,34 @@
    包含: 认证 / WebSocket / 会话管理 / 初始化 / 键盘事件
    ═══════════════════════════════════════════════════════════ */
 // @ts-nocheck
+import { ws, sessionId, processing, reconnectTimer, lastGroupEl, _sbData, updateStatusBar, messagesEl, inputEl, sendBtn, sessionLabel, modelBadge, statusEl, escapeHtml, scrollToBottom, autoResize, getOrCreateMsgGroup, addUserMessage, addQueuedMessage, consumeQueuedBubble, addAssistantMessage, ensureToolContainer, addToolCall, addToolResult, showThinking, removeThinking, endStreamTurn, startStreamRound, streamThinkToken, streamContentChunk, finalizeStreamRound, finalizeStreamRoundForDone, showError, setProcessing, clearUI, toggleCmdPalette, closeCmdPalette, navigateCmdList, confirmCmdSelection, addSystemMessage, _pendingBacktrack, _pendingHistoryRefresh, liveMsgIndex, renderHistoryMessages, setWs, setSessionId, setReconnectTimer, setLastGroupEl, setPendingBacktrack, setPendingHistoryRefresh, setLiveMsgIndex } from './ui.js';
+import { getToken, setToken, clearToken, isAuthed, withAuth, authFetch, setOnUnauthorized } from './core/http.js';
+import { fetchToolMeta, toolCardCount } from './core/toolmeta.js';
+import { handlers } from './core/handlers.js';
+import { store } from './core/store.js';
+
+/* ── 注册跨层 handler（消除 ui → app 反向依赖，见 core/handlers.js）── */
+handlers.send = sendMessage;
+handlers.cancel = cancelMessage;
+setOnUnauthorized(showLogin);
+
 
 // ── 避免 done.final_content 与 llm_end.content 重复渲染 ──
 var _finalContentAlreadyShown = false;
 
 // ── ask 卡片（契约 v2）：等待中的结构化问答状态 ──
 // replyAsk() 发送时携带 ask_id → 后端精确对账（幂等防重放）
-var _pendingAsk = null;
+// ── ask 卡片（契约 v2）：等待中的结构化问答状态 ──
+// 状态归一化进 store.pendingAsk，渲染由订阅者幂等执行：同一状态渲染 N 次
+// 结果一致。修掉实测 bug——旧实现无条件 addAssistantMessage，重连收到
+// pending_ask 时会叠出第二张卡（且 liveMsgIndex 被推高两位）。
+var _askContentEl = null;   // ask 卡片所在消息体（幂等渲染落点）
+var _askSig = null;         // 上次渲染签名（幂等闸门：状态未变则整段跳过）
 
-function showAskCard(data) {
+function buildAskCard(card, data) {
   var options = data.options || [];
   var suggest = data.suggest || '';
-  _pendingAsk = { ask_id: data.ask_id || '', prompt: data.prompt || '' };
-
-  var contentEl = addAssistantMessage('❓ ' + (data.prompt || ''));
-  var card = document.createElement('div');
-  card.className = 'ask-card';
-  card.id = 'askCard';
+  while (card.firstChild) card.removeChild(card.firstChild);
 
   if (options.length) {
     var optWrap = document.createElement('div');
@@ -42,24 +53,65 @@ function showAskCard(data) {
     ? '💡 推荐：' + suggest + '（直接回车采纳）'
     : '输入你的回答后回车';
   card.appendChild(foot);
-  contentEl.appendChild(card);
+}
 
-  inputEl.placeholder = suggest ? ('回车采纳「' + suggest + '」，或输入回答...') : '输入回答... (Enter 发送)';
+// 纯渲染：只读状态，按状态画/撤卡片
+function renderAskCard(state) {
+  var data = state.pendingAsk;
+  var card = document.getElementById('askCard');
+
+  if (!data) {
+    if (card) card.remove();
+    _askContentEl = null;
+    _askSig = null;
+    inputEl.placeholder = '输入消息... (Enter 发送)';
+    return;
+  }
+
+  // 幂等闸门：同一 ask 状态重复到达 → 不重建、不重复聚焦滚动
+  var sig = [data.ask_id, data.prompt, data.suggest, (data.options || []).join('\u0000')].join('\u0001');
+  if (card && sig === _askSig) return;
+  _askSig = sig;
+
+  if (!card) {
+    // 整个流程里唯一一次建消息——之后只原地重建卡片内容
+    _askContentEl = addAssistantMessage('❓ ' + (data.prompt || ''));
+    card = document.createElement('div');
+    card.className = 'ask-card';
+    card.id = 'askCard';
+    _askContentEl.appendChild(card);
+  }
+  buildAskCard(card, data);
+
+  inputEl.placeholder = data.suggest
+    ? ('回车采纳「' + data.suggest + '」，或输入回答...')
+    : '输入回答... (Enter 发送)';
   inputEl.focus();
   scrollToBottom(true);
 }
 
-function clearAskCard() {
-  var el = document.getElementById('askCard');
-  if (el) { el.remove(); }
-  _pendingAsk = null;
-  inputEl.placeholder = '输入消息... (Enter 发送)';
+// 入口只改状态，渲染交给订阅者
+function showAskCard(data) {
+  store.setState({ pendingAsk: {
+    ask_id: data.ask_id || '',
+    prompt: data.prompt || '',
+    options: data.options || [],
+    suggest: data.suggest || ''
+  } });
 }
+
+function clearAskCard() {
+  store.setState({ pendingAsk: null });
+}
+
+// 状态 → 视图的唯一通道：状态变即重画（幂等）。subscribe 会立即以
+// 当前状态回调一次，完成初始渲染。
+store.subscribe(renderAskCard);
 
 // 选项按钮/自由输入统一出口：发送 ask 答复（携带 ask_id 对账）
 function replyAsk(text) {
   if (!ws || ws.readyState !== WebSocket.OPEN) { showError('未连接'); return; }
-  var askId = _pendingAsk ? _pendingAsk.ask_id : '';
+  var askId = (store.getState().pendingAsk || {}).ask_id || '';
   clearAskCard();
   // 不本地渲染：回答经 ask_user 环顶注入落盘 → ON_CTX_APPEND → user_message 事件渲染
   setProcessing(true);
@@ -77,23 +129,6 @@ var _lastSeq = 0;   // 已消费的最大事件 seq（重连时回传给后端�
 var _runId = '';    // 服务端 run_id（重启后变化 → 旧 seq 作废，对齐新序号空间）
 var _wakeProbe = null;  // 唤醒存活探测定时器
 
-function withAuth(opts) {
-  opts = opts || {};
-  opts.headers = opts.headers || {};
-  opts.headers['Authorization'] = 'Bearer ' + getToken();
-  return opts;
-}
-
-async function authFetch(url, opts) {
-  var res = await fetch(url, withAuth(opts));
-  if (res.status === 401) {
-    clearToken();
-    showLogin();
-    throw new Error('未授权');
-  }
-  return res;
-}
-
 // ── 登录 ──
 function showLogin() {
   document.getElementById('authOverlay').style.display = 'flex';
@@ -107,7 +142,7 @@ function hideLogin() {
   document.getElementById('authOverlay').style.display = 'none';
 }
 
-async function doLogin() {
+export async function doLogin() {
   var token = document.getElementById('authInput').value.trim();
   if (!token) return;
   var btn = document.getElementById('authBtn');
@@ -167,14 +202,14 @@ function connectWebSocket() {
   var wsUrl = protocol + '//' + host + '/ws/chat?token=' + encodeURIComponent(token) +
     '&seq=' + _lastSeq + '&run_id=' + encodeURIComponent(_runId);
 
-  ws = new WebSocket(wsUrl);
+  setWs(new WebSocket(wsUrl));
 
   ws.onopen = function() {
     statusEl.textContent = '🟢 已连接';
     setProcessing(false);
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
-      reconnectTimer = null;
+      setReconnectTimer(null);
     }
     // 启动延迟探测（每 10 秒 ping）
     if (_pingInterval) clearInterval(_pingInterval);
@@ -194,10 +229,10 @@ function connectWebSocket() {
     updateStatusBar();
     if (_pingInterval) { clearInterval(_pingInterval); _pingInterval = null; }
     if (!reconnectTimer) {
-      reconnectTimer = setTimeout(function() {
-        reconnectTimer = null;
+      setReconnectTimer(setTimeout(function() {
+        setReconnectTimer(null);
         connectWebSocket();
-      }, 3000);
+      }, 3000));
     }
   };
 
@@ -236,7 +271,7 @@ function handleEvent(data) {
       if (!canReplay) _lastSeq = data.seq || 0;
 
       if (data.session_id) {
-        sessionId = data.session_id;
+        setSessionId(data.session_id);
         sessionLabel.textContent = '📄 ' + data.session_id;
       }
       statusEl.textContent = '🟢 已连接';
@@ -274,7 +309,7 @@ function handleEvent(data) {
         .then(function(h) {
           modelBadge.textContent = h.agent || '—';
           sessionLabel.textContent = '📄 ' + (h.session || '—');
-          if (h.session) sessionId = h.session;
+          if (h.session) setSessionId(h.session);
         })
         .catch(function() {});
       break;
@@ -369,7 +404,7 @@ function handleEvent(data) {
       // 不再乐观本地渲染 → 多设备单端口看到同一份消息流，且与历史 REST 一致。
       if (!consumeQueuedBubble(data.content, !!data.ephemeral)) {
         addUserMessage(data.content, !!data.ephemeral);
-        lastGroupEl = null;
+        setLastGroupEl(null);
       }
       break;
 
@@ -378,11 +413,11 @@ function handleEvent(data) {
       // 如 shortcircuit 退化历史块）——后端 msg_count 连续性校验触发。
       // clearUI + 全量重渲染，消除卡片与后端落盘的失配。
       // 与「↩ 回溯」按钮路径互斥：此处接管渲染后取消 done 侧的冗余拉取。
-      _pendingBacktrack = false;
+      setPendingBacktrack(false);
       // ── 时机闸门：turn 进行中禁止立刻刷新 ──
       // 此刻前端正在流式渲染当前卡片，clearUI 会把它抹掉；且本轮尚未落盘，
       // 重拉回来的历史里没有它 → 必须等 done/cancelled/error 收尾后再刷。
-      if (processing) { _pendingHistoryRefresh = true; break; }
+      if (processing) { setPendingHistoryRefresh(true); break; }
       clearUI();
       if (sessionId) setTimeout(function() { fetchSessionHistory(sessionId); }, 100);
       break;
@@ -425,10 +460,10 @@ function handleEvent(data) {
       // 每次 done 事件都校准 liveMsgIndex，之后新的消息从正确起点继续累加。
       // 这样即使某条消息在保存过程中被跳过/压缩，索引也不会错位。
       if (data.non_system_count != null) {
-        liveMsgIndex = data.non_system_count;
+        setLiveMsgIndex(data.non_system_count);
       }
       if (data.session_id) {
-        sessionId = data.session_id;
+        setSessionId(data.session_id);
         sessionLabel.textContent = '📄 ' + data.session_id;
       }
       // ── 轮次收尾：消费挂起的「↩ 回溯」或「turn 中被重写」的刷新请求 ──
@@ -461,7 +496,7 @@ function handleEvent(data) {
       statusEl.textContent = '🟢 已连接（已重载）';
       setProcessing(false);
       if (data.session_id) {
-        sessionId = data.session_id;
+        setSessionId(data.session_id);
         sessionLabel.textContent = '📄 ' + data.session_id;
       }
       if (data.model) { modelBadge.textContent = data.model; }
@@ -476,6 +511,12 @@ function handleEvent(data) {
 
     case 'info':
       addAssistantMessage('ℹ️ ' + data.content);
+      break;
+
+    // 警告此前无 case → 后端发了也静默丢弃，插件抑制 / LLM 重试 / 工具拦截
+    // 等提示全部看不见。走系统消息通道（与 info 的助手气泡区分开）。
+    case 'warning':
+      addSystemMessage('⚠️ ' + data.content);
       break;
 
     case 'hint':
@@ -502,12 +543,18 @@ function handleEvent(data) {
   }
 }
 
+// ── e2e 测试接缝 ────────────────────────────────────────
+// Playwright 用它注入事件，绕开"必须真跑一轮 LLM"才能产生 WS 事件的限制。
+// 刻意挂在 window 上并保持此名字：改成 ESM 后 handleEvent 变模块局部，
+// 但 main.js 会继续导出 __fp_dispatch，测试因此跨重构稳定。
+if (typeof window !== 'undefined') window.__fp_dispatch = handleEvent;
+
 // ── 文件上传（集散点 inbox） ──
 // 选中即后台上传，输入框显示可删除标记；发送时把 [file:inbox/name]
 // 引用拼进消息正文，agent 收到路径引用即可取用。
 var _pendingFiles = [];  // [{name, path, size}]
 
-function onFileInputChange(ev) {
+export function onFileInputChange(ev) {
   var files = ev.target.files || [];
   for (var i = 0; i < files.length; i++) uploadFile(files[i]);
   ev.target.value = '';  // 允许重复选择同一文件
@@ -568,13 +615,13 @@ messagesEl.addEventListener('click', function(e) {
   if (isNaN(idx)) return;
   var sid = sessionId;
   if (!sid) { showError('未指定当前会话'); return; }
-  _pendingBacktrack = true;
+  setPendingBacktrack(true);
   clearUI();
   setProcessing(true);
   try { ws.send(JSON.stringify({ type: 'message', content: '/back ' + idx + ' 2' })); } catch(e) { showError('发送失败'); }
 });
 
-function sendMessage() {
+export function sendMessage() {
   closeCmdPalette();
   var text = inputEl.value.trim();
   // 有待发文件时允许纯文件消息（正文可为空，引用即正文）
@@ -587,7 +634,7 @@ function sendMessage() {
   }
 
   // ask 答复通道：等待问答时，自由输入同样携带 ask_id 对账
-  if (_pendingAsk) {
+  if (store.getState().pendingAsk) {
     inputEl.value = '';
     autoResize(inputEl);
     replyAsk(text);
@@ -633,7 +680,7 @@ function sendMessage() {
 }
 
 // ── 快捷命令面板 ──
-function handleKeyDown(event) {
+export function handleKeyDown(event) {
   var palette = document.getElementById('cmdPalette');
 
   // Ctrl+/ 切换快捷命令面板
@@ -681,7 +728,7 @@ function handleKeyDown(event) {
 
 // ── 会话管理 ──
 
-function openSessions() {
+export function openSessions() {
   var modal = document.getElementById('sessionsModal');
   modal.classList.add('active');
   document.body.style.overflow = 'hidden';
@@ -690,7 +737,7 @@ function openSessions() {
   loadSessionsList();
 }
 
-function closeSessions() {
+export function closeSessions() {
   document.getElementById('sessionsModal').classList.remove('active');
   document.body.style.overflow = '';
 }
@@ -729,7 +776,7 @@ function renderSessionItem(s, withSnippets) {
 
 var _sessionsSearchTimer = null;
 
-function onSessionsSearchInput() {
+export function onSessionsSearchInput() {
   var el = document.getElementById('sessionsSearchInput');
   var q = (el && el.value ? el.value : '').trim();
   clearTimeout(_sessionsSearchTimer);
@@ -832,7 +879,7 @@ function deleteSession(sid, btnEl) {
 // ── 重载 Agent（统一走命令面 /reload：进程级 execve 热重启，
 //    落盘 → 重启 → 自动重连 → reload_done 提示，见 core/handoff 契约）──
 
-function reloadAgent() {
+export function reloadAgent() {
   if (processing) { showError('正在处理中，请等待完成'); return; }
   if (!ws || ws.readyState !== WebSocket.OPEN) { showError('连接未就绪，请稍后重试'); return; }
 
@@ -841,7 +888,7 @@ function reloadAgent() {
   sendMessage();
 }
 
-function clearSession() {
+export function clearSession() {
   if (!confirm('确定要清空当前会话吗？')) return;
   authFetch('/api/sessions/clear', { method: 'POST' })
     .then(function(r) { return r.json(); })
@@ -855,7 +902,7 @@ function clearSession() {
     .catch(function(err) { showError('清空失败: ' + err.message); });
 }
 
-function newAgent() {
+export function newAgent() {
   if (processing) { showError('正在处理中，请等待完成'); return; }
 
   var btn = document.querySelector('.topbar-btn[onclick*="newAgent"]');
@@ -891,8 +938,8 @@ function newAgent() {
 function flushPendingHistoryRefresh(sid) {
   if (!_pendingBacktrack && !_pendingHistoryRefresh) return;
   var needClear = _pendingHistoryRefresh;
-  _pendingBacktrack = false;
-  _pendingHistoryRefresh = false;
+  setPendingBacktrack(false);
+  setPendingHistoryRefresh(false);
   if (!sid) return;
   if (needClear) clearUI();
   setTimeout(function() { fetchSessionHistory(sid); }, 100);
@@ -908,10 +955,10 @@ function fetchSessionHistory(sid) {
       var msgs = data.messages || [];
       if (msgs.length > 0) {
         // 从尾部找最后一个有效 index（跳过 system 消息的 null index）
-        liveMsgIndex = 0;
+        setLiveMsgIndex(0);
         for (var i = msgs.length - 1; i >= 0; i--) {
           if (msgs[i].index != null) {
-            liveMsgIndex = msgs[i].index;
+            setLiveMsgIndex(msgs[i].index);
             break;
           }
         }
@@ -926,7 +973,7 @@ function fetchSessionHistory(sid) {
 function backtrackTo(sid, index) {
   if (!ws || ws.readyState !== WebSocket.OPEN) { showError('WebSocket 未连接'); return; }
   if (processing) { showError('正在处理中，请等待完成'); return; }
-  _pendingBacktrack = true;
+  setPendingBacktrack(true);
   clearUI();
   setProcessing(true);
   try { ws.send(JSON.stringify({ type: 'message', content: '/back ' + index + ' 2' })); } catch(e) { showError('发送失败'); }
@@ -970,7 +1017,7 @@ function applyTheme(isLight) {
   }
 }
 
-function toggleTheme() {
+export function toggleTheme() {
   var root = document.documentElement;
   applyTheme(!root.classList.contains('light-theme'));
 }
@@ -997,7 +1044,7 @@ function applyHalo(on) {
   return on;
 }
 
-function toggleHalo() {
+export function toggleHalo() {
   var on = (typeof window.isHaloEnabled === 'function')
     ? window.isHaloEnabled()
     : (localStorage.getItem('webui_halo') === 'on');
@@ -1007,7 +1054,7 @@ function toggleHalo() {
 // ── 初始化与登录流程 ──
 
 function initApp() {
-  // 遮罩默认 display:flex（style.css .auth-overlay）：自动登录路径
+  // 遮罩默认 display:flex（base.css .auth-overlay）：自动登录路径
   // （DOMContentLoaded → isAuthed → initApp）此前从不隐藏它 → 带 token
   // 刷新页面后登录遮罩盖满全页、拦截一切点击。启动即应用 = 总是隐藏。
   hideLogin();
@@ -1019,6 +1066,11 @@ function initApp() {
     ? window.isHaloEnabled()
     : (localStorage.getItem('webui_halo') === 'on'));
   connectWebSocket();
+  // 工具卡元信息：必须在登录后拉（/api/ui/schema 需鉴权，启动时
+  // 尚无 token 会 401）。成功后参数区由后端元信息驱动渲染。
+  fetchToolMeta().then(function (ok) {
+    if (ok) console.info('[ToolMeta] 工具卡元信息已加载:', toolCardCount(), '个');
+  });
   inputEl.focus();
 }
 
@@ -1069,7 +1121,7 @@ document.addEventListener('DOMContentLoaded', function() {
   document.addEventListener('visibilitychange', function() {
     if (document.visibilityState !== 'visible') return;
     if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      if (reconnectTimer) { clearTimeout(reconnectTimer); setReconnectTimer(null); }
       connectWebSocket();
       return;
     }

@@ -55,6 +55,7 @@ except ImportError as e:
 from fp_core.api import ExitReason, RestIO, WebSocketIO, portal
 from fp_core.logger import get_logger
 from fp_webui.bridge import WebUIBridge
+from fp_webui.protocol import SCHEMA
 
 # EventBus 类已下沉至 core（fp_core.api.EventBus），webui 直接用 portal.events
 # （transport 层的 seq/run_id 断连续传语义原样保留）。
@@ -122,12 +123,22 @@ class SessionRuntime:
         self.active_task = None
 
     def snapshot(self) -> dict[str, Any]:
-        """供重连 connected 事件携带的运行时状态快照"""
-        pending_reply = getattr(self.current_io, "_pending_reply", None)
-        pending_ask = pending_reply is not None and not pending_reply.done()
+        """供重连 connected 事件携带的运行时状态快照
+
+        pending_ask 直接问 IOChannel（`pending_ask_snapshot()`），拿回等待中
+        ask 的**元数据 dict** —— 前端 v2 据此重建整张 ask 卡片。
+        旧实现读 `getattr(io, "_pending_reply")`（单数旧字段），而 io 早已重构为
+        `_pending_replies: dict`，恒返 None → 恒 False → 重连后 ask 卡片只能
+        降级成 placeholder。见 fp_webui/protocol.py 协议契约。
+        """
+        io = self.current_io
+        pending: Any = None
+        if io is not None and hasattr(io, "pending_ask_snapshot"):
+            pending = io.pending_ask_snapshot()
         return {
             "processing": self.is_running,
-            "pending_ask": bool(pending_ask),
+            # dict = 等待中的 ask 元数据（v2 对象恢复）；无则 False 保持旧布尔语义
+            "pending_ask": pending if pending is not None else False,
         }
 
 
@@ -612,6 +623,75 @@ async def list_commands():
     return {"commands": [{"name": f"/{name}", "desc": desc} for name, desc in cmds.items()]}
 
 
+def _tool_cards() -> list[dict[str, Any]]:
+    """工具卡元信息（动态，源自工具注册表）—— 自举的关键。
+
+    旧实现：每个工具怎么展示写死在 ui.js 里，新增工具必须改前端源码。
+    现在：后端把元信息下发，前端退化为解释器 —— 新增工具的卡片展示
+    只需后端（插件）提供元信息，前端源码零改动。
+
+    与 /api/commands 同一模式：动态读注册表，自动适配新增工具。
+    """
+    # 真实来源是 fp_core.tools.registry（ToolRegistry），**不是**
+    # portal.run —— RunPlane 只暴露 commands，没有工具定义。
+    # 曾误调 portal.run.definitions()，AttributeError 被 except 静默
+    # 吞成 []，表现为"端点 200 但 tool_cards 恒空"。故此处只捕获
+    # 注册表本身的异常，且必须记日志 —— 静默降级会掩盖真实故障。
+    try:
+        from fp_core.tools import registry
+
+        defs = registry.get_all_definitions()
+    except Exception as e:
+        logging.warning("tool_cards 生成失败（回退空表，参数区将走 JSON 兜底）: %s", e)
+        return []
+    cards: list[dict[str, Any]] = []
+    for d in defs:  # defs: list[OpenAISchema]（TypedDict），无需 isinstance
+        fn = d.get("function") or {}
+        name = fn.get("name")
+        if not name:
+            continue
+        params = fn.get("parameters") or {}
+        props = params.get("properties") or {}
+        required = params.get("required") or []
+        cards.append({
+            "name": name,
+            "desc": (fn.get("description") or "").strip(),
+            # 参数摘要：前端据此渲染参数区（有元信息画结构化，没有退回 JSON）
+            "params": [
+                {
+                    "name": pn,
+                    "required": pn in required,
+                    "type": (props.get(pn) or {}).get("type", ""),
+                    "desc": ((props.get(pn) or {}).get("description") or "")[:120],
+                }
+                for pn in props
+            ],
+        })
+    return cards
+
+
+@app.get("/api/ui/schema")
+async def ui_schema():
+    """WS 协议契约 + UI 描述 —— 前端的单一事实源。
+
+    前端启动时拉取本接口，据此建立事件分发表与工具卡渲染；
+    未知 type / 未知工具一律走通用卡而非静默丢弃。
+    契约定义在 `fp_webui/protocol.py`，新增事件只做加法。
+    `ui` 段为后端驱动的 UI 描述（工具卡元信息等），动态生成。
+    """
+    schema = dict(SCHEMA)
+    schema["ui"] = {
+        "tool_cards": _tool_cards(),
+        # 面板清单：前端据此后端驱动地决定挂载哪些面板
+        "panels": [
+            {"id": "sessions", "label": "会话"},
+            {"id": "cmdPalette", "label": "命令面板"},
+            {"id": "halo", "label": "光环"},
+        ],
+    }
+    return JSONResponse(content=schema)
+
+
 # ════════════════════════════════════════════════════════════
 # 4a. 实例替换核心逻辑（新建 / 重载共享）
 # ════════════════════════════════════════════════════════════
@@ -729,7 +809,17 @@ async def get_session_messages(session_id: str) -> dict[str, Any]:
     """
     path = portal.ctl.sessions.path(session_id)
     if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+        # 会话可能只存在于内存、尚未落盘（首登 / 刚新建 / 尚无消息）。此时
+        # `connected` 已把 session_id 告诉前端，前端据此回拉历史——对它而言
+        # "还没有消息"是**合法状态**而非错误，返 404 只会在浏览器控制台留一条
+        # 无法抑制的 Failed to load resource。故返空列表，语义为
+        # "该会话当前没有消息"。
+        return {
+            "session_id": session_id,
+            "total": 0,
+            "non_system_count": 0,
+            "messages": [],
+        }
 
     messages: list[dict[str, Any]] = []
     with open(path, encoding="utf-8") as f:
@@ -1205,7 +1295,7 @@ def _stamp_cache(html: str) -> str:
     """把静态引用的 ?_t= 缓存戳改写为对应文件的 mtime（改动即失效）。
 
     取代人肉 bump index.html 里的版本号——浏览器缓存永远按最新 mtime 失效，
-    谁改了 ui.js/app.js/style.css 都自动生效，无需记得同步版本串。
+    谁改了 ui.js/app.js/tokens.css 等都自动生效，无需记得同步版本串。
     """
 
     def _sub(m: re.Match[str]) -> str:

@@ -19,6 +19,8 @@
    时间基准是**固定步长累加器**，不是 rAF 的 dt —— 掉帧只补 tick，
    不改变每个 tick 的推进量，因此行为与帧率无关。
    ═══════════════════════════════════════════════════════════════════════ */
+import { hooks } from './core/hooks.js';
+
 (function () {
   'use strict';
 
@@ -542,18 +544,13 @@
     }
   }
 
-  function wrap(name, after) {
-    var orig = window[name];
-    if (typeof orig !== 'function') return;
-    window[name] = function () {
-      orig.apply(window, arguments);
-      if (after) after.apply(null, arguments);
-      syncFromSbData();
-    };
-  }
-  wrap('setProcessing');
-  wrap('showThinking');
-  wrap('removeThinking', function () { setTimeout(syncFromSbData, 0); });
+  /* 原猴补丁 wrap() 已移除。ESM 下它必然静默失效：
+     · 模块函数不再挂 window → window.setProcessing 不存在
+     · 同步 <script> 必先于 defer 的 module 执行 → halo 求值时
+       ui.js 尚未运行，typeof orig !== 'function' 直接 return
+     改为 ui.js 主动通知（core/hooks.js），语义等价：原函数执行完
+     再 syncFromSbData()，此处延迟一帧以等 DOM 落定。 */
+  hooks.uiStateChanged = function () { setTimeout(syncFromSbData, 0); };
 
   new MutationObserver(function () {
     if (running) render(halo, 0, W, H, currentRgb(), zoom);

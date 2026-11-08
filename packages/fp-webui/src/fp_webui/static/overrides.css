@@ -1,0 +1,81 @@
+/* CDN 覆盖区——不分层：katex.css 与 mermaid 运行时注入样式均为非分层，
+   分层规则会被非分层无条件压过，此处必须保持与 CDN 同级竞争 */
+
+.katex { font-size: 1.1em; }
+.katex-display { margin: 0.6em 0; overflow-x: auto; overflow-y: hidden; }
+
+
+/* ═══ Mermaid 图（任务图 /task view） ═══ */
+.mermaid {
+  margin: 8px 0;
+  padding: 10px;
+  background: #fbfbfb;              /* 图自带浅色主题，需浅底保证可读 */
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: 8px;
+  overflow: hidden;                 /* 缩放/平移后裁剪（原 overflow-x:auto 因 svg max-width 永不触发） */
+  text-align: center;
+}
+.mermaid svg { max-width: 100%; height: auto; display: block; margin: 0 auto; cursor: zoom-in; }
+.mermaid.mz-zoomed { cursor: grab; touch-action: none; }
+.mermaid.mz-zoomed svg { cursor: grab; }
+.mermaid.mz-dragging { cursor: grabbing; user-select: none; }
+.mermaid.mz-dragging svg { cursor: grabbing; }
+.mermaid[data-processed="error"] {
+  color: #c92a2a;
+  font-size: 12px;
+  text-align: left;
+  white-space: pre-wrap;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ── Mermaid 预览浮层（单击点开 · 滚轮缩放 · 拖拽平移 · 双击复位 · Esc/✕/空白关闭） ── */
+.mz-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(15, 17, 21, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overscroll-behavior: contain;    /* 滚轮不穿透滚动背景页 */
+}
+.mz-overlay[hidden] { display: none; }
+.mz-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  touch-action: none;
+  overscroll-behavior: contain;
+}
+.mz-stage .mermaid {
+  margin: 0;
+  background: #fbfbfb;             /* 与内联卡片同底色（非纯白），贴合 webui 统一风格 */
+  border-color: var(--border);
+  box-shadow: var(--shadow-brutal);
+  max-width: calc(100vw - 48px);
+  overflow: visible;               /* 整卡是变换目标：底/边框/阴影随内容平移缩放 */
+  cursor: grab;
+}
+.mz-stage .mermaid svg { cursor: grab; }
+.mz-stage .mermaid.mz-dragging, .mz-stage .mermaid.mz-dragging svg { cursor: grabbing; }
+.mz-close {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  z-index: 1;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.mz-close:hover { background: rgba(255, 255, 255, 0.3); }
+

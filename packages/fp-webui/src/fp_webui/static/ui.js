@@ -5,16 +5,21 @@
    ═══════════════════════════════════════════════════════════ */
 // @ts-nocheck
 
+import { AUTH_KEY, getToken, setToken, clearToken, isAuthed, authFetch } from './core/http.js';
+import { handlers } from './core/handlers.js';
+import { hooks } from './core/hooks.js';
+import { getRenderer, fallbackArgsHtml, fallbackResultHtml, metaArgsHtml } from './core/renderers.js';
+
 /* ═══════════════════════════════════════════════════════════
    FP WebUI — 前端逻辑
    ═══════════════════════════════════════════════════════════ */
 
 // ── 状态 ──
-let ws = null;
-let sessionId = null;
-let processing = false;
-let reconnectTimer = null;
-let lastGroupEl = null;
+export let ws = null;
+export let sessionId = null;
+export let processing = false;
+export let reconnectTimer = null;
+export let lastGroupEl = null;
 let thinkingEl = null;
 let progressEl = null;
 
@@ -27,8 +32,31 @@ var toolCardMap = {};
 // 纯 tool_calls 轮（无正文）懒建空卡片承载。
 var _toolContainerEl = null;
 
+/* ── 状态变更通知（替代 halo.js 原猴补丁 wrap()）──
+   halo 需要在 setProcessing/showThinking/removeThinking 后重新
+   同步光环状态。ESM 下猴补丁失效（模块函数不挂 window），改为主动通知。 */
+function notifyUiStateChanged() {
+  if (hooks.uiStateChanged) hooks.uiStateChanged();
+}
+
+/* ── 跨模块写入 setter ──────────────────────────────────────
+   ESM 的 import 绑定是只读的（活绑定可读、不可赋值）。
+   这 7 个状态 app.js 也写，故提供 setter；读取仍直接 import。 */
+export function setWs(v) { ws = v; }
+/* 测试接缝：真实关闭 WebSocket（e2e 用它模拟断线以验证重连）。
+   ws 已收敛为模块局部，测试不能再从全局词法环境读它，
+   故提供显式探针（与 app.js 的 window.__fp_dispatch 同一模式）。 */
+export function closeSocket() { if (ws) ws.close(); }
+export function setSessionId(v) { sessionId = v; }
+export function setReconnectTimer(v) { reconnectTimer = v; }
+export function setLastGroupEl(v) { lastGroupEl = v; }
+export function setPendingBacktrack(v) { _pendingBacktrack = v; }
+export function setPendingHistoryRefresh(v) { _pendingHistoryRefresh = v; }
+export function setLiveMsgIndex(v) { liveMsgIndex = v; }
+
+
 // ── 状态栏数据 ──
-var _sbData = {
+export var _sbData = {
   latency: null,
   toolsActive: 0,
   toolsTotal: 0,
@@ -36,7 +64,7 @@ var _sbData = {
   state: 'idle'   // idle | thinking | processing
 };
 
-function updateStatusBar() {
+export function updateStatusBar() {
   var latEl = document.getElementById('sbLatency');
   var toolsEl = document.getElementById('sbTools');
   var msgsEl = document.getElementById('sbMsgs');
@@ -67,24 +95,20 @@ function updateStatusBar() {
   stateEl.textContent = icon + ' ' + s;
   stateEl.className = 'status-item state';
   if (s !== 'idle') stateEl.classList.add(s);
+  notifyUiStateChanged();
 }
 
 // ── DOM 引用 ──
-const messagesEl = document.getElementById('messagesContainer');
-const inputEl = document.getElementById('inputField');
-const sendBtn = document.getElementById('sendBtn');
-const sessionLabel = document.getElementById('sessionLabel');
-const modelBadge = document.getElementById('modelBadge');
-const statusEl = document.getElementById('connectionStatus');
+export const messagesEl = document.getElementById('messagesContainer');
+export const inputEl = document.getElementById('inputField');
+export const sendBtn = document.getElementById('sendBtn');
+export const sessionLabel = document.getElementById('sessionLabel');
+export const modelBadge = document.getElementById('modelBadge');
+export const statusEl = document.getElementById('connectionStatus');
 
 // ── 认证 ──
-const AUTH_KEY = 'webui_token';
-function getToken() { return sessionStorage.getItem(AUTH_KEY) || ''; }
-function setToken(t) { sessionStorage.setItem(AUTH_KEY, t); }
-function clearToken() { sessionStorage.removeItem(AUTH_KEY); }
-function isAuthed() { return !!getToken(); }
 
-function escapeHtml(text) {
+export function escapeHtml(text) {
   var div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
@@ -110,20 +134,20 @@ messagesEl.addEventListener('scroll', function() {
   _followBottom = _isNearBottom();
 });
 
-function scrollToBottom(force) {
+export function scrollToBottom(force) {
   if (!force && !_followBottom) return;
   requestAnimationFrame(function() {
     messagesEl.scrollTop = messagesEl.scrollHeight;
   });
 }
 
-function autoResize(el) {
+export function autoResize(el) {
   el.style.height = 'auto';
   el.style.height = Math.min(el.scrollHeight, 160) + 'px';
 }
 
 // iOS 输入框 focus 时不自动缩放（已在 meta 中 user-scalable=no）
-function handleInputFocus() {
+export function handleInputFocus() {
   // 某些 Android 浏览器需要额外处理
 }
 
@@ -227,7 +251,7 @@ function renderMath(root) {
   } catch (e) {}
 }
 
-function getOrCreateMsgGroup(forcedRhythm) {
+export function getOrCreateMsgGroup(forcedRhythm) {
   if (!lastGroupEl || !document.body.contains(lastGroupEl) || forcedRhythm === 'loose') {
     lastGroupEl = document.createElement('div');
     lastGroupEl.className = 'msg-group';
@@ -305,7 +329,7 @@ function toggleToolRow(event) {
  * @param {boolean} [ephemeral] true = 命令回显等不落盘消息：
  *   不计入回溯索引（liveMsgIndex）、不渲染回溯按钮（历史里没有这个位置）
  */
-function addUserMessage(content, ephemeral) {
+export function addUserMessage(content, ephemeral) {
   var group = getOrCreateMsgGroup('loose');
   if (!ephemeral) { liveMsgIndex++; }
   var idx = liveMsgIndex;
@@ -347,7 +371,7 @@ var _queuedPending = [];
 
 /** 运行中排队消息：先按 ephemeral 渲染（排队内容可能是命令——不落盘、不占号），
  *  消费时经 user_message.ephemeral 判定真实身份再决定是否转正 */
-function addQueuedMessage(content) {
+export function addQueuedMessage(content) {
   var msg = addUserMessage(content, true);
   if (msg) {
     var flag = document.createElement('span');
@@ -390,7 +414,7 @@ function promoteQueuedBubble(msgEl) {
  * @param {boolean} [ephemeral] 命令回显 = true：气泡保持无索引无按钮
  * @returns {boolean} true = 命中队首排队气泡已转正；false = 应新建气泡
  */
-function consumeQueuedBubble(content, ephemeral) {
+export function consumeQueuedBubble(content, ephemeral) {
   if (_queuedPending.length && _queuedPending[0].content === content) {
     var q = _queuedPending.shift();
     if (q.el) {
@@ -413,7 +437,7 @@ function clearQueuedFlags() {
  * @param {boolean} [ephemeral] true = 命令输出等不落盘消息：
  *   不计入回溯索引（liveMsgIndex）、不渲染回溯按钮/徽章、不登记为工具行宿主
  */
-function addAssistantMessage(content, ephemeral) {
+export function addAssistantMessage(content, ephemeral) {
   var group = getOrCreateMsgGroup();
   if (!ephemeral) { liveMsgIndex++; }
   var idx = liveMsgIndex;
@@ -462,7 +486,7 @@ function addAssistantMessage(content, ephemeral) {
 // 方案C：紫卡已移除。tool_select 不再建卡，只确保当前轮有承载工具行的
 // 助手卡片。有正文的轮次复用正文卡片；纯 tool_calls 轮懒建空卡片
 //（空 .msg-content 挂 stream-pending 隐藏，只留 header + 工具行）。
-function ensureToolContainer() {
+export function ensureToolContainer() {
   if (_toolContainerEl && document.body.contains(_toolContainerEl)) return _toolContainerEl;
   var contentEl = addAssistantMessage('');
   contentEl.classList.add('stream-pending');
@@ -472,7 +496,7 @@ function ensureToolContainer() {
 // ── 工具行（tool_call_id 驱动匹配，解决并行调用同名工具错乱）──
 // 方案C：降级为嵌在助手卡片内的紧凑行（一轮 = 一张卡）。
 // 运行中展开（实时看参数），完成/失败自动折叠为单行，点击行可再展开。
-function addToolCall(name, args, tool_call_id) {
+export function addToolCall(name, args, tool_call_id) {
   // 无 tool_call_id 的事件是重复源（WebSocketIO 直发），跳过
   if (!tool_call_id) return;
 
@@ -493,10 +517,12 @@ function addToolCall(name, args, tool_call_id) {
   var idx = liveMsgIndex;
 
   var prettyArgs = '';
+  var parsed = null;
   try {
-    var parsed = typeof args === 'string' ? JSON.parse(args) : args;
+    parsed = typeof args === 'string' ? JSON.parse(args) : args;
     prettyArgs = JSON.stringify(parsed, null, 2);
   } catch(e) {
+    parsed = (typeof args === 'string') ? args : null;  // 解析失败 → 交付原始字符串（兑现 ctx 契约）
     prettyArgs = args || '{}';
   }
   // 折叠态单行的参数预览：紧凑 JSON 截断
@@ -504,6 +530,26 @@ function addToolCall(name, args, tool_call_id) {
   if (argsPreview.length > 80) argsPreview = argsPreview.slice(0, 80) + '…';
 
   var container = ensureToolContainer();
+
+  // ── 参数块：三层链 —— 手写渲染器 → 后端元信息 → JSON 兜底 ──
+  //   ① 手写渲染器：某工具需要特殊可视化时才写（registerRenderer）
+  //   ② 后端元信息：数据驱动，新增工具无需改前端源码
+  //   ③ JSON 兜底：两者都没有时的最后防线，绝不丢数据
+  var _renderedArgs = null;
+  var _argsRenderer = getRenderer(name, 'args');
+  if (_argsRenderer) {
+    try {
+      _renderedArgs = _argsRenderer({ name: name, args: parsed, rawArgs: String(args || ''), result: null, isError: false });
+    } catch (e) { _renderedArgs = null; }  // 渲染器抛错 → 回落兜底，不拖垮工具行
+  }
+  if (_renderedArgs == null) {
+    try {
+      _renderedArgs = metaArgsHtml({ name: name, args: parsed, rawArgs: prettyArgs, escaped: escapeHtml });
+    } catch (e) { _renderedArgs = null; }
+  }
+  var argsBlockHtml = _renderedArgs != null
+    ? _renderedArgs
+    : fallbackArgsHtml(prettyArgs, escapeHtml);
 
   var row = document.createElement('div');
   row.className = 'tool-row';
@@ -527,10 +573,7 @@ function addToolCall(name, args, tool_call_id) {
         '<span class="msg-index-badge standalone">#' + idx + '</span>' +
         '<button class="backtrack-btn" title="回溯到此位置" data-index="' + idx + '" aria-label="回溯到位置 ' + idx + '">↩ 回溯</button>' +
       '</div>' +
-      '<div class="tool-args-block">' +
-        '<div class="tool-args-label">参数:</div>' +
-        '<pre class="tool-args-json">' + escapeHtml(prettyArgs) + '</pre>' +
-      '</div>' +
+      '<div class="tool-args-block">' + argsBlockHtml + '</div>' +
     '</div>';
 
   container.appendChild(row);
@@ -542,7 +585,7 @@ function addToolCall(name, args, tool_call_id) {
 }
 
 // ── 更新工具行结果（tool_call_id 精确匹配）──
-function addToolResult(name, result, isError, tool_call_id) {
+export function addToolResult(name, result, isError, tool_call_id) {
   // 无 tool_call_id 的事件无法精确匹配，跳过
   if (!tool_call_id) return;
 
@@ -593,11 +636,23 @@ function addToolResult(name, result, isError, tool_call_id) {
 
     var oldBlock = bodyEl.querySelector('.tool-result-block');
     if (oldBlock) oldBlock.remove();  // 重复 tool_result 事件 → 幂等
+
+    // ── 结果块：注册表优先，未注册走通用兜底（绝不丢弃）──
+    var _renderedResult = null;
+    var _resRenderer = getRenderer(name, 'result');
+    if (_resRenderer) {
+      try {
+        _renderedResult = _resRenderer({ name: name, args: null, rawArgs: '', result: displayResult, isError: !!isError });
+      } catch (e) { _renderedResult = null; }  // 渲染器抛错 → 回落兜底
+    }
+    var resultHtml = _renderedResult != null
+      ? _renderedResult
+      : '<div class="tool-result-label">' + (isError ? '错误:' : '返回:') + '</div>' +
+        '<pre class="tool-result-body">' + escapeHtml(displayResult) + '</pre>';
+
     var resBlock = document.createElement('div');
     resBlock.className = 'tool-result-block';
-    resBlock.innerHTML =
-      '<div class="tool-result-label">' + (isError ? '错误:' : '返回:') + '</div>' +
-      '<pre class="tool-result-body">' + escapeHtml(displayResult) + '</pre>';
+    resBlock.innerHTML = resultHtml;
     bodyEl.appendChild(resBlock);
   }
 
@@ -607,7 +662,7 @@ function addToolResult(name, result, isError, tool_call_id) {
   scrollToBottom();
 }
 
-function showThinking() {
+export function showThinking() {
   removeThinking();
   _sbData.state = 'thinking';
   updateStatusBar();
@@ -630,9 +685,10 @@ function showThinking() {
   scrollToBottom();
 }
 
-function removeThinking() {
+export function removeThinking() {
   if (thinkingEl && document.body.contains(thinkingEl)) { thinkingEl.remove(); thinkingEl = null; }
   if (progressEl && document.body.contains(progressEl)) { progressEl.remove(); progressEl = null; }
+  notifyUiStateChanged();
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -655,12 +711,12 @@ var THINK_FLUSH_MS = 50;    // 思考文本 DOM flush 节流
 var CONTENT_FLUSH_MS = 100; // 正文 markdown 重渲染节流
 
 /** 终结当前轮：此后新建的流式轮才算「下一轮」，旧轮卡片不再被终渲染认领 */
-function endStreamTurn() { _turnSeq++; }
+export function endStreamTurn() { _turnSeq++; }
 
 /** 现存流式轮是否属于当前这一轮（命令轮没有 llm_start，会撞上上一轮的残留） */
 function isCurrentTurnRound() { return !!_stream && _stream.turnSeq === _turnSeq; }
 
-function startStreamRound() {
+export function startStreamRound() {
   finalizeStreamRound(); // 上一轮残留兜底（flush + 终渲染）
   _toolContainerEl = null; // 新一轮：工具行宿主重置，不复用上一轮卡片
   _stream = {
@@ -750,7 +806,7 @@ function buildThinkBlock(text) {
   return el;
 }
 
-function streamThinkToken(token) {
+export function streamThinkToken(token) {
   // 空 token 不是思考内容：provider 常在流首/无思考轮发空帧（reasoning_content=""）。
   // 若照单全收，会在没有思考的轮次里凭空长出「思考 0 字」空块——折叠后留一行噪音，
   // 且把「是否已建块」这个状态误置，后续真实正文到达时折叠的就是这个假块。
@@ -793,7 +849,7 @@ function streamThinkToken(token) {
   }, THINK_FLUSH_MS);
 }
 
-function streamContentChunk(chunk) {
+export function streamContentChunk(chunk) {
   // 空正文不是「正文已到」：provider 会在思考中途发空 content 帧，照单全收会让
   // 思考栏在思考仍在进行时就被折叠（用户看到的就是「思考栏没展开/提前收起」）。
   // 只让步进真实文本的 chunk 承担折叠与建卡。
@@ -826,7 +882,7 @@ function streamContentChunk(chunk) {
 /** 终渲染：flush 残余 + 用权威全文重渲染。
     轮次置 closed 但不销毁——迟到 token（后端 _pub fire-and-forget 排在
     llm_end 之后的末批）并入本轮元素，避免开孤儿思考块。返回是否已显示正文 */
-function finalizeStreamRound(finalContent) {
+export function finalizeStreamRound(finalContent) {
   if (!_stream) return false;
   var s = _stream;
   s.closed = true;
@@ -862,14 +918,14 @@ function finalizeStreamRound(finalContent) {
     故：跨轮不写，交回调用方 addAssistantMessage 另起卡片。
 
     返回 true 表示「本轮正文已由流式卡片承载」（调用方跳过重复渲染）。*/
-function finalizeStreamRoundForDone(finalContent) {
+export function finalizeStreamRoundForDone(finalContent) {
   var sameTurn = isCurrentTurnRound();
   var shown = sameTurn ? finalizeStreamRound(finalContent) : false;
   endStreamTurn();  // 本轮到此终结：下一轮的卡片必须换序号
   return shown;
 }
 
-function showError(msg) {
+export function showError(msg) {
   var group = getOrCreateMsgGroup();
   var err = document.createElement('div');
   err.className = 'error-msg';
@@ -879,7 +935,7 @@ function showError(msg) {
   scrollToBottom();
 }
 
-function setProcessing(state) {
+export function setProcessing(state) {
   processing = state;
   // 运行中输入框保持可用（#158 排队发送），仅在结束时清除 ⏳ 标记
   if (!state) { clearQueuedFlags(); }
@@ -891,7 +947,7 @@ function setProcessing(state) {
     sendBtn.textContent = '⏹️';
     sendBtn.style.background = '#8b3a3a';
     sendBtn.style.borderLeftColor = '#5a2a2a';
-    sendBtn.onclick = cancelMessage;
+    sendBtn.onclick = function () { if (handlers.cancel) handlers.cancel(); };
     sendBtn.title = '中断 (Ctrl+Shift+C)';
     sendBtn.setAttribute('aria-label', '中断');
   } else {
@@ -901,7 +957,7 @@ function setProcessing(state) {
     sendBtn.textContent = '➤';
     sendBtn.style.background = '';
     sendBtn.style.borderLeftColor = '';
-    sendBtn.onclick = sendMessage;
+    sendBtn.onclick = function () { if (handlers.send) handlers.send(); };
     sendBtn.title = '发送 (Enter)';
     sendBtn.setAttribute('aria-label', '发送消息');
     inputEl.focus();
@@ -909,7 +965,7 @@ function setProcessing(state) {
   updateStatusBar();
 }
 
-function clearUI() {
+export function clearUI() {
   messagesEl.innerHTML = '';
   lastGroupEl = null;
   liveMsgIndex = 0;  // 重置索引计数器，后续由 fetchSessionHistory 重新设置
@@ -929,7 +985,7 @@ function clearUI() {
 var commandsCache = [];
 var cmdHighlightIdx = -1;
 
-function toggleCmdPalette() {
+export function toggleCmdPalette() {
   var palette = document.getElementById('cmdPalette');
   if (palette.hidden) {
     palette.hidden = false;
@@ -950,7 +1006,7 @@ function toggleCmdPalette() {
   }
 }
 
-function closeCmdPalette() {
+export function closeCmdPalette() {
   document.getElementById('cmdPalette').hidden = true;
   cmdHighlightIdx = -1;
 }
@@ -1028,7 +1084,7 @@ function selectCmd(index) {
   inputEl.focus();
 }
 
-function navigateCmdList(direction) {
+export function navigateCmdList(direction) {
   if (!commandsCache || commandsCache.length === 0) return;
   var total = commandsCache.length;
   cmdHighlightIdx += direction;
@@ -1037,12 +1093,12 @@ function navigateCmdList(direction) {
   renderCmdList();
 }
 
-function confirmCmdSelection() {
+export function confirmCmdSelection() {
   if (cmdHighlightIdx < 0) return;
   selectCmd(cmdHighlightIdx);
 }
 
-function addSystemMessage(text) {
+export function addSystemMessage(text) {
   var group = getOrCreateMsgGroup();
   var el = document.createElement('div');
   el.className = 'sys-msg';
@@ -1053,13 +1109,13 @@ function addSystemMessage(text) {
 
 // ── 会话历史 ──
 
-var _pendingBacktrack = false;
+export var _pendingBacktrack = false;
 // turn 进行中收到 history_changed → 只记账，等 done/cancelled/error 收尾再重拉。
 // 立刻 clearUI 会抹掉正在流式生成的卡片，且此刻落盘历史不含本轮，重拉必失配。
-var _pendingHistoryRefresh = false;
-var liveMsgIndex = 0;
+export var _pendingHistoryRefresh = false;
+export var liveMsgIndex = 0;
 
-function renderHistoryMessages(sid, messages) {
+export function renderHistoryMessages(sid, messages) {
   var container = document.getElementById('messagesContainer');
   var sep = document.createElement('div');
   sep.className = 'history-separator';
