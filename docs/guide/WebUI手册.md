@@ -177,8 +177,9 @@ fp-webui
   因此行为与帧率无关
 - **双色**：空闲冷青 / 处理中暖橙。思考态只换色、不干预状态机——激发仍由
   随机事件驱动；配色随深/浅主题切换（观察 `documentElement` 的 class）
-- **状态同步**：`halo.js` 包住 `ui.js` 的 `setProcessing`/`showThinking`/
-  `removeThinking`，从状态栏数据推出 `idle`/`thinking`，不需要 ui.js 反向依赖
+- **状态同步**：`halo.js` 注册 `core/hooks.js` 的 `uiStateChanged` 回调，
+  由 `components/state.js` 的 `notifyUiStateChanged` 在状态变更后主动通知，
+  从状态栏数据推出 `idle`/`thinking`，不需要反向依赖
 - **省电**：关闭时 `cancelAnimationFrame` 并清屏；页面不可见（`visibilitychange`）
   时暂停 tick，回到前台重跑预热，避免长时间空转后状态跳变
 - **高分屏**：CSS 只负责让 canvas 铺满 `#halo-bg`，backing store 的像素比
@@ -484,8 +485,8 @@ WebUI 提供双向文件通道（插件内实现，不依赖 core/bridge）：
 物理位置：`tempfile.gettempdir()` 下的 `fp_inbox/` 与 `fp_outbox/`（Windows=`%TEMP%`、Termux=其私有 tmp、POSIX=系统 /tmp 目录），可用环境变量 `FP_FILEHUB_DIR` 覆盖；启动时自动创建，临时目录语义即集散点，多实例共享、删了不心疼。
 
 **引用协议**（跨平台稳定，物理路径本地解析）：消息文本中的
-`[file:inbox/<name>]` / `[file:outbox/<name>]`（前后端统一由
-`static/ui.js` 的 `FILE_REF_RE` 识别）会被渲染为可点击下载链接——
+`[file:inbox/<name>]` / `[file:outbox/<name>]`（由
+`static/components/markdown.js` 的 `renderFileRefs` 正则识别）会被渲染为可点击下载链接——
 用户消息与 agent 消息均渲染；下载经 `fetch` + `Authorization` 头取
 blob（token 不入 URL），404 时链接就地转为「已不存在」失效态，
 其它错误红框抖动提示。上传组件（📎 / 粘贴截图）选中即后台上传，
@@ -731,7 +732,9 @@ core 内置 `reload` 工具为两段式：先调用获得隔离测试告示与�
 └── static/
     ├── index.html         # 前端页面骨架（单页应用，仅容器 + 脚本挂载）
     ├── tokens.css/base.css/components.css/overrides.css  # @layer 分层样式
-    ├── ui.js              # 消息渲染、历史回看、输入框交互
+    ├── ui.js              # barrel：聚合导出 components/，外部 import 面不变
+    ├── components/        # ui.js 拆出的 14 个组件模块（state/messages/stream/tools/…）
+    ├── main.js            # ESM 入口：import 图装配 + 内联事件属性全局挂载
     ├── app.js             # WS 连接、认证、顶栏动作、主题/光环开关
     ├── halo.js            # 光环（Canvas 2D 状态机仿真，见 3.5）
     ├── proj.js            # 光环投影（平行光投到各深度 UI 表面，见 3.5）
