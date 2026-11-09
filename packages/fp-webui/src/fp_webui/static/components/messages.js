@@ -6,7 +6,7 @@
 // @ts-nocheck
 
 import { messagesEl, lastGroupEl, setLastGroupEl, liveMsgIndex, setLiveMsgIndex, setToolContainerEl } from './state.js';
-import { _sbData, updateStatusBar } from './statusbar.js';
+import { getSb, setSb, updateStatusBar } from './statusbar.js';
 import { scrollToBottom } from './scroll.js';
 import { renderFileRefs, renderMarkdown, renderMath } from './markdown.js';
 import { escapeHtml, formatTime } from './util.js';
@@ -117,7 +117,7 @@ export function addUserMessage(content, ephemeral) {
   msg.querySelector('.copy-btn').onclick = function(e) { e.stopPropagation(); copyMsgContent(this); };
 
   // 状态栏
-  _sbData.msgs++;
+  setSb({ msgs: getSb().msgs + 1 });
   updateStatusBar();
 
   scrollToBottom(true);  // 用户主动发送 → 强制滚底展示自己的消息

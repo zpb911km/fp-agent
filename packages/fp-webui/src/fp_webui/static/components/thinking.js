@@ -6,7 +6,7 @@
 // @ts-nocheck
 
 import { notifyUiStateChanged } from './state.js';
-import { _sbData, updateStatusBar } from './statusbar.js';
+import { setSb, updateStatusBar } from './statusbar.js';
 import { scrollToBottom } from './scroll.js';
 import { getOrCreateMsgGroup } from './messages.js';
 
@@ -15,7 +15,7 @@ let progressEl = null;
 
 export function showThinking() {
   removeThinking();
-  _sbData.state = 'thinking';
+  setSb({ state: 'thinking' });
   updateStatusBar();
   var group = getOrCreateMsgGroup();
 

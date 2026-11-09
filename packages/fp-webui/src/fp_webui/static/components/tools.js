@@ -6,7 +6,7 @@
 // @ts-nocheck
 
 import { liveMsgIndex, setLiveMsgIndex, _toolContainerEl } from './state.js';
-import { _sbData, updateStatusBar } from './statusbar.js';
+import { getSb, setSb, updateStatusBar } from './statusbar.js';
 import { scrollToBottom } from './scroll.js';
 import { addAssistantMessage, toggleToolRow } from './messages.js';
 import { removeThinking } from './thinking.js';
@@ -40,8 +40,8 @@ export function addToolCall(name, args, tool_call_id) {
   removeThinking();
 
   // 状态栏
-  _sbData.toolsActive++;
-  _sbData.toolsTotal++;
+  var _sb = getSb();
+  setSb({ toolsActive: _sb.toolsActive + 1, toolsTotal: _sb.toolsTotal + 1 });
   updateStatusBar();
 
   // ⚠️ 关键修复：tool 消息在后端文件中也占一个索引位置，
@@ -132,7 +132,7 @@ export function addToolResult(name, result, isError, tool_call_id) {
   }
 
   // ── 状态栏 ──
-  _sbData.toolsActive = Math.max(0, _sbData.toolsActive - 1);
+  setSb({ toolsActive: Math.max(0, getSb().toolsActive - 1) });
   updateStatusBar();
 
   // ── 更新状态 ──

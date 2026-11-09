@@ -25,7 +25,7 @@
 | `halo.js` | 589 | **IIFE**（`halo.js:22`）+ `'use strict'` | 迭代器光环 #2139 状态机移植 | 内部 23 fn（不外泄），仅 3 个 window 暴露 |
 | `proj.js` | 403 | **IIFE**（`proj.js:20`）+ `'use strict'` | 投影层（屏幕前方投影仪影像） | 内部 18 fn，仅 `window.__proj` 暴露 |
 
-**app.js 分段**：ask 卡片 `9-70` / WS 延迟与断连续传 `71-96` / 登录 `97-137` / 工具函数+WS 事件分发 `138-504`（`handleEvent` 巨型 `225-504`）/ 文件上传 `505-560` / 发送 `561-634` / 命令面板入口 `635-681` / 会话管理 `682-934` / **switchSession 重写 `935-957`** / 主题 `958-977` / 光环开关 `978-1006` / 初始化 `1007-1093`
+**app.js 分段**：ask 卡片 `9-70` / WS 延迟与断连续传 `71-96` / 登录 `97-137` / 工具函数+WS 事件分发 `138-504`（原 `handleEvent` 巨型 switch 已迁 27 个 `on()` 注册，分发中枢在 `core/events.js`）/ 文件上传 `505-560` / 发送 `561-634` / 命令面板入口 `635-681` / 会话管理 `682-934` / **switchSession 重写 `935-957`** / 主题 `958-977` / 光环开关 `978-1006` / 初始化 `1007-1093`
 
 **ui.js 分段**：状态 `12-71` / DOM 引用 `72-79` / 认证 `80-97` / 滚底 `98-129` / 消息渲染 `130-460` / 工具行 `461-637` / **流式渲染 `638-926`** / 命令面板 `927-1053` / 会话历史 `1054-1260` / Mermaid `1261-1290` / **Mermaid 缩放预览 `1291-1513`**
 
@@ -67,7 +67,7 @@
 
 ### app.js — 37 fn
 - **被跨文件共用（4）**：`authFetch, cancelMessage, sendMessage, fetchSessionHistory`（后者仅被 ui.js 注释提及）
-- **仅本文件（33）**：`showAskCard, clearAskCard, replyAsk, withAuth, showLogin, hideLogin, doLogin, connectWebSocket, handleEvent, onFileInputChange, uploadFile, removePendingFile, renderPendingFiles, handleKeyDown, openSessions, closeSessions, renderSessionItem, onSessionsSearchInput, runSessionsSearch, loadSessionsList, switchSession, deleteSession, reloadAgent, clearSession, newAgent, flushPendingHistoryRefresh, backtrackTo, applyTheme, toggleTheme, syncHaloBtn, applyHalo, toggleHalo, initApp`
+- **仅本文件（33）**：`showAskCard, clearAskCard, replyAsk, withAuth, showLogin, hideLogin, doLogin, connectWebSocket, onFileInputChange, uploadFile, removePendingFile, renderPendingFiles, handleKeyDown, openSessions, closeSessions, renderSessionItem, onSessionsSearchInput, runSessionsSearch, loadSessionsList, switchSession, deleteSession, reloadAgent, clearSession, newAgent, flushPendingHistoryRefresh, backtrackTo, applyTheme, toggleTheme, syncHaloBtn, applyHalo, toggleHalo, initApp`
 - **10 var**：`_finalContentAlreadyShown@9, _pendingAsk@13, _lastPingTime@72, _pingInterval@73, _lastSeq@76, _runId@77, _wakeProbe@78, _pendingFiles@508, _sessionsSearchTimer@730, _origSwitchSession@936`
 
 ### ui.js — 76 fn

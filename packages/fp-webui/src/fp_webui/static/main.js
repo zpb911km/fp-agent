@@ -47,6 +47,11 @@ Object.assign(window, {
    registerRenderer 暴露于此是为了验证自举能力：e2e 在运行时
    注册定制渲染器，证明"新增工具卡无需改 ui.js 源码"。 */
 import { registerRenderer, registeredTools } from './core/renderers.js';
+import { store } from './core/store.js';
+
+/* 状态树接缝：halo.js（IIFE，经 import 图先于本文件求值）需读
+   store.sb 驱动光环双色；e2e 也经此断言状态树。与 __fp_dispatch 同模式。 */
+window.__fp_store = store;
 import { fetchToolMeta, toolCardCount, toolCardNames, isLoaded, getToolCard } from './core/toolmeta.js';
 
 /* ── 工具卡元信息的拉取时机 ───────────────────────────────────

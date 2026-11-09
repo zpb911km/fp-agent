@@ -51,14 +51,17 @@ def server():
         env = dict(os.environ, PYTHONPATH=":".join(str(p) for p in SRCS))
         with tempfile.NamedTemporaryFile(delete=False, suffix=".log", prefix="fp_e2e_server_") as log:
             log_path = log.name
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "fp_webui.main", "--port", str(PORT)],
-            cwd=str(REPO_ROOT),
-            env=env,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        # 注意：stdout 传路径而非文件句柄——with 退出即关闭句柄，传句柄会
+        # 触发 "ValueError: I/O operation on closed file"（曾致 12 个 e2e 全 ERROR）。
+        with open(log_path, "ab") as log_fp:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "fp_webui.main", "--port", str(PORT)],
+                cwd=str(REPO_ROOT),
+                env=env,
+                stdout=log_fp,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
         deadline = time.time() + 90
         while time.time() < deadline:
             if proc.poll() is not None:

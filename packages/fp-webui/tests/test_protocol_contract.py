@@ -6,7 +6,7 @@
 
   A. `fp_core.core.events.EVENT_TYPES`  —— core 发布的事件（只读引用，webui 不改 core）
   B. `fp_webui.protocol.EVENTS`         —— 本模块的完整契约（单一事实源）
-  C. `static/app.js` 的 `handleEvent`   —— 前端实际分发的 case
+  C. `static/app.js` 的 `on(...)` 注册   —— 前端实际分发的事件处理器
 
 对应关系（详见 protocol.py docstring）：
   A ⊆ B              core 事件必须登记进契约
@@ -26,29 +26,19 @@ _STATIC = Path(__file__).resolve().parents[1] / "src" / "fp_webui" / "static"
 _APP_JS = _STATIC / "app.js"
 
 
-def _frontend_cases() -> set[str]:
-    """抽出 `handleEvent` 函数体内的所有 case 标签。
+def _frontend_case_list() -> list[str]:
+    """抽出 app.js 里所有 `on('type', ...)` 注册的事件名（保序，供查重）。
 
-    按花括号配对截取函数体，避免误吞 app.js 里其他 switch。
+    分发表已从 handleEvent 的 switch 迁为 core/events.js 注册表
+    （app.js 顶层逐个 on(...) 注册）。抽取整个文件：注册均在顶层，
+    且 on(' 名字唯一可辨（不会误配 addEventListener 等）。
     """
     src = _APP_JS.read_text(encoding="utf-8")
-    start = src.index("function handleEvent")
-    open_brace = src.index("{", start)
+    return re.findall(r"(?<![A-Za-z0-9_.])on\('([A-Za-z0-9_]+)'", src)
 
-    depth = 0
-    end = open_brace
-    for i in range(open_brace, len(src)):
-        ch = src[i]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                end = i
-                break
 
-    body = src[start:end]
-    return set(re.findall(r"case\s+'([A-Za-z0-9_]+)'", body))
+def _frontend_cases() -> set[str]:
+    return set(_frontend_case_list())
 
 
 def _core_event_types() -> set[str]:
@@ -87,7 +77,7 @@ def test_schema_is_json_serializable():
 
 
 def test_c2s_events_are_not_expected_as_cases():
-    """client→server 的事件由前端**发送**，不该出现在分发表里。"""
+    """client→server 的事件由前端**发送**，不该出现在分发表（on 注册）里。"""
     c2s = {e["type"] for e in EVENTS if e["direction"] == C2S}
     assert c2s, "契约里没有 c2s 事件，测试前提失效"
     assert c2s == {"message", "cancel"}
@@ -114,7 +104,7 @@ def test_active_s2c_events_have_frontend_case():
     missing = active_s2c - cases
     assert not missing, (
         f"后端会发、前端无 case（会被静默丢弃）: {sorted(missing)} "
-        f"→ 在 app.js handleEvent 补 case，或把 protocol.py 的 status 改成 unhandled"
+        f"→ 在 app.js 补 on(...) 注册，或把 protocol.py 的 status 改成 unhandled"
     )
 
 
@@ -133,24 +123,11 @@ def test_no_undocumented_frontend_cases():
     cases = _frontend_cases()
     contract = {e["type"] for e in EVENTS}
     stray = cases - contract
-    assert not stray, f"前端处理了契约外的事件: {sorted(stray)} → 要么是野事件（删掉 case），要么在 protocol.py 登记"
+    assert not stray, f"前端处理了契约外的事件: {sorted(stray)} → 要么是野事件（删掉注册），要么在 protocol.py 登记"
 
 
 def test_frontend_covers_every_declared_event_at_most_once():
-    """每个事件在分发表里至多一个 case（双 case 会掩盖优先级 bug）。"""
-    src = _APP_JS.read_text(encoding="utf-8")
-    start = src.index("function handleEvent")
-    depth, end = 0, start
-    open_brace = src.index("{", start)
-    for i in range(open_brace, len(src)):
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-            if depth == 0:
-                end = i
-                break
-    body = src[start:end]
-    found = re.findall(r"case\s+'([A-Za-z0-9_]+)'", body)
+    """每个事件至多注册一次（双注册会掩盖优先级 bug，后者静默覆盖前者）。"""
+    found = _frontend_case_list()
     dupes = {n for n in found if found.count(n) > 1}
-    assert not dupes, f"handleEvent 里重复 case: {dupes}"
+    assert not dupes, f"app.js 重复 on() 注册: {dupes}"

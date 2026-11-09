@@ -6,21 +6,23 @@
 // @ts-nocheck
 
 import { messagesEl, inputEl, sendBtn, setLastGroupEl, setLiveMsgIndex, setToolContainerEl } from './state.js';
-import { _sbData, updateStatusBar } from './statusbar.js';
+import { setSb, updateStatusBar } from './statusbar.js';
 import { clearQueuedFlags, resetQueue } from './messages.js';
 import { removeThinking } from './thinking.js';
 import { resetToolCards } from './tools.js';
 import { handlers } from '../core/handlers.js';
+import { store } from '../core/store.js';
 
-export let processing = false;
+// processing 已迁 store.processing（读点走 store.getState().processing），
+// 本模块只保留写入器 setProcessing。
 export function setProcessing(state) {
-  processing = state;
+  store.setState({ processing: state });
   // 运行中输入框保持可用（#158 排队发送），仅在结束时清除 ⏳ 标记
   if (!state) { clearQueuedFlags(); }
 
   if (state) {
     // 处理中 → 按钮变为中断按钮 ⏹️
-    _sbData.state = 'processing';
+    setSb({ state: 'processing' });
     sendBtn.disabled = false;
     sendBtn.textContent = '⏹️';
     sendBtn.style.background = '#8b3a3a';
@@ -30,7 +32,7 @@ export function setProcessing(state) {
     sendBtn.setAttribute('aria-label', '中断');
   } else {
     // 空闲 → 恢复为发送按钮 ➤
-    _sbData.state = 'idle';
+    setSb({ state: 'idle' });
     sendBtn.disabled = false;
     sendBtn.textContent = '➤';
     sendBtn.style.background = '';
@@ -52,9 +54,7 @@ export function clearUI() {
   resetQueue();  // 排队对账表随气泡一起作废（重拉/回溯后从新渲染）
   removeThinking();
   // 重置状态栏
-  _sbData.toolsActive = 0;
-  _sbData.toolsTotal = 0;
-  _sbData.msgs = 0;
+  setSb({ toolsActive: 0, toolsTotal: 0, msgs: 0 });
   updateStatusBar();
 }
 

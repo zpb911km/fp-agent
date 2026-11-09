@@ -4,17 +4,18 @@
    包含: 认证 / WebSocket / 会话管理 / 初始化 / 键盘事件
    ═══════════════════════════════════════════════════════════ */
 // @ts-nocheck
-import { ws, sessionId, processing, reconnectTimer, lastGroupEl, _sbData, updateStatusBar, messagesEl, inputEl, sendBtn, sessionLabel, modelBadge, statusEl, escapeHtml, scrollToBottom, autoResize, getOrCreateMsgGroup, addUserMessage, addQueuedMessage, consumeQueuedBubble, addAssistantMessage, ensureToolContainer, addToolCall, addToolResult, showThinking, removeThinking, endStreamTurn, startStreamRound, streamThinkToken, streamContentChunk, finalizeStreamRound, finalizeStreamRoundForDone, showError, setProcessing, clearUI, toggleCmdPalette, closeCmdPalette, navigateCmdList, confirmCmdSelection, addSystemMessage, _pendingBacktrack, _pendingHistoryRefresh, liveMsgIndex, renderHistoryMessages, setWs, setSessionId, setReconnectTimer, setLastGroupEl, setPendingBacktrack, setPendingHistoryRefresh, setLiveMsgIndex } from './ui.js';
+import { ws, sessionId, reconnectTimer, lastGroupEl, updateStatusBar, messagesEl, inputEl, sendBtn, sessionLabel, modelBadge, statusEl, escapeHtml, scrollToBottom, autoResize, getOrCreateMsgGroup, addUserMessage, addQueuedMessage, consumeQueuedBubble, addAssistantMessage, ensureToolContainer, addToolCall, addToolResult, showThinking, removeThinking, endStreamTurn, startStreamRound, streamThinkToken, streamContentChunk, finalizeStreamRound, finalizeStreamRoundForDone, showError, setProcessing, clearUI, toggleCmdPalette, closeCmdPalette, navigateCmdList, confirmCmdSelection, addSystemMessage, _pendingBacktrack, _pendingHistoryRefresh, liveMsgIndex, renderHistoryMessages, setWs, setSessionId, setReconnectTimer, setLastGroupEl, setPendingBacktrack, setPendingHistoryRefresh, setLiveMsgIndex } from './ui.js';
+import { setSb } from './ui.js';
 import { getToken, setToken, clearToken, isAuthed, withAuth, authFetch, setOnUnauthorized } from './core/http.js';
 import { fetchToolMeta, toolCardCount } from './core/toolmeta.js';
 import { handlers } from './core/handlers.js';
 import { store } from './core/store.js';
+import { on, dispatch } from './core/events.js';
 
 /* ── 注册跨层 handler（消除 ui → app 反向依赖，见 core/handlers.js）── */
 handlers.send = sendMessage;
 handlers.cancel = cancelMessage;
 setOnUnauthorized(showLogin);
-
 
 // ── 避免 done.final_content 与 llm_end.content 重复渲染 ──
 var _finalContentAlreadyShown = false;
@@ -173,7 +174,7 @@ export async function doLogin() {
 // ── 工具函数 ──
 function cancelMessage() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  if (!processing) return;
+  if (!store.getState().processing) return;
 
   // 发送取消请求 → 后端 task.cancel() 注入 CancelledError
   ws.send(JSON.stringify({ type: 'cancel' }));
@@ -186,7 +187,7 @@ function cancelMessage() {
 
   // 安全网：5 秒后如果后端没响应，强制恢复
   var cancelTimeout = setTimeout(function() {
-    if (processing) setProcessing(false);
+    if (store.getState().processing) setProcessing(false);
   }, 5000);
   // 存储 timeout id 以便 cancelled 事件到达时清理
   window._cancelTimeout = cancelTimeout;
@@ -225,7 +226,7 @@ function connectWebSocket() {
   ws.onclose = function() {
     statusEl.textContent = '🔴 已断开';
     setProcessing(false);
-    _sbData.latency = null;
+    setSb({ latency: null });
     updateStatusBar();
     if (_pingInterval) { clearInterval(_pingInterval); _pingInterval = null; }
     if (!reconnectTimer) {
@@ -250,304 +251,337 @@ function connectWebSocket() {
         if (data.seq <= _lastSeq) return;
         _lastSeq = data.seq;
       }
-      handleEvent(data);
+      dispatch(data);
     } catch (e) {
       console.error('[WS] 解析失败:', e);
     }
   };
 }
 
-function handleEvent(data) {
-  var type = data.type;
+// ── WS 事件分发：on() 注册表（原 27-case switch，2026 迁移）──────────
+// 每事件一个独立注册，顺序无关；未知类型由 core/events.js 兜底 warn。
+// 契约测试从本文件抽取注册，三方不变量保持不变。
 
-  switch (type) {
-    case 'connected': {
-      // run_id：服务端重启后变化 → 旧 seq 作废，对齐新序号空间
-      var wasConnected = !!_runId;
-      var canReplay = !!data.replay && data.run_id === _runId;
-      if (data.run_id) _runId = data.run_id;
-      // 无法重放时把本地序号对齐服务端当前值（对齐放在重放事件到达前，
-      // 重放分支保持 _lastSeq 不动，让随后到达的重放事件通过去重器）
-      if (!canReplay) _lastSeq = data.seq || 0;
+on('connected', function (data) {
+  // run_id：服务端重启后变化 → 旧 seq 作废，对齐新序号空间
+  var wasConnected = !!_runId;
+  var canReplay = !!data.replay && data.run_id === _runId;
+  if (data.run_id) _runId = data.run_id;
+  // 无法重放时把本地序号对齐服务端当前值（对齐放在重放事件到达前，
+  // 重放分支保持 _lastSeq 不动，让随后到达的重放事件通过去重器）
+  if (!canReplay) _lastSeq = data.seq || 0;
 
-      if (data.session_id) {
-        setSessionId(data.session_id);
-        sessionLabel.textContent = '📄 ' + data.session_id;
-      }
-      statusEl.textContent = '🟢 已连接';
-
-      // ── 全量重拉：缓冲溢出或服务端重启，事件流不可续 ──
-      var needHistory = false;
-      if (data.resync) {
-        clearUI();
-        needHistory = true;
-        addSystemMessage('🔄 已重新连接，会话已重新同步');
-      }
-      // DOM 为空（首屏/重开页/刚清空）且无进行中任务 → 补一次权威历史
-      if (!data.processing && sessionId && (needHistory || messagesEl.children.length === 0)) {
-        fetchSessionHistory(sessionId);
-      }
-
-      // ── 运行时快照：任务没死，恢复"处理中"状态机 ──
-      if (data.processing) {
-        setProcessing(true);
-        if (wasConnected) addSystemMessage('🔁 已重连，后台任务继续运行中');
-      } else {
-        setProcessing(false);
-      }
-      // ask 等待回复跨连接存续：v2 携带完整元数据 → 恢复整个问答卡片
-      // （v2 之前只有布尔，降级为仅恢复输入提示）
-      if (data.pending_ask && typeof data.pending_ask === 'object') {
-        showAskCard(data.pending_ask);
-      } else if (data.pending_ask) {
-        inputEl.placeholder = '输入回复... (Enter 发送)';
-        inputEl.focus();
-      }
-
-      fetch('/api/health')
-        .then(function(r) { return r.json(); })
-        .then(function(h) {
-          modelBadge.textContent = h.agent || '—';
-          sessionLabel.textContent = '📄 ' + (h.session || '—');
-          if (h.session) setSessionId(h.session);
-        })
-        .catch(function() {});
-      break;
-    }
-
-    case 'ping':
-      try { ws.send(JSON.stringify({ type: 'pong' })); } catch(e) {}
-      break;
-
-    case 'pong':
-      if (_lastPingTime) {
-        _sbData.latency = Date.now() - _lastPingTime;
-        _lastPingTime = null;
-        updateStatusBar();
-        // 闪烁动画
-        var latEl = document.getElementById('sbLatency');
-        if (latEl) { latEl.classList.remove('flash'); void latEl.offsetWidth; latEl.classList.add('flash'); }
-      }
-      break;
-
-    case 'llm_start':
-      startStreamRound();
-      showThinking();
-      break;
-
-    case 'thinking_content':
-      // 思考 token（后端已批量合并）→ 思考块懒建 + 流式累积
-      streamThinkToken(data.token || '');
-      break;
-
-    case 'chunk':
-      // 正文 token（后端已批量合并）→ 首块折叠思考块 + 正文流式
-      streamContentChunk(data.content || '');
-      break;
-
-    case 'stream_end':
-      // 无操作：llm_end 走 finalizeStreamRound 终渲染（后端发 stream_end 前已冲刷缓冲）
-      break;
-
-    case 'llm_end':
-      removeThinking();
-      // 流式已渲染正文 → 终渲染（权威全文），跳过 addAssistantMessage 双渲染
-      var streamed = finalizeStreamRound(data.content);
-      if (data.has_tool_calls) {
-        if (data.content && !streamed) {
-          // LLM 有推理文本 + 工具调用 → 显示文本，后续 tool_select 显示工具选择
-          addAssistantMessage(data.content);
-        }
-        // 纯 tool_calls 无文本 → 由 tool_select 显示选择记录，此处不输出
-        // done.final_content 是最终答案，与 llm_end.content 不同 → 标记 false
-        _finalContentAlreadyShown = false;
-      } else if (data.content) {
-        // 纯文本回复，无工具调用
-        // done.final_content 与 data.content 相同 → 标记 true，避免 done 重复渲染
-        if (!streamed) addAssistantMessage(data.content);
-        _finalContentAlreadyShown = true;
-      } else {
-        // 无正文（纯思考后无内容/异常）：finalizeStreamRound 兜底折叠思考栏（全文可展开）
-        finalizeStreamRound();
-        _finalContentAlreadyShown = false;
-      }
-      break;
-
-    case 'tool_select':
-      removeThinking();
-      finalizeStreamRound(); // 工具轮可能无 llm_end 正文 → 兜底收尾
-      // 方案C：紫卡已移除。工具意图由后续 tool_call 紧凑行表达，
-      // 此处只确保本轮有承载工具行的助手卡片
-      if (data.tools && data.tools.length > 0) {
-        ensureToolContainer();
-      }
-      break;
-
-    case 'tool_call':
-      removeThinking();
-      finalizeStreamRound();
-      addToolCall(data.name, data.args, data.tool_call_id);
-      break;
-
-    case 'tool_result':
-      addToolResult(data.name, data.result, false, data.tool_call_id);
-      break;
-
-    case 'queued':
-      // 运行中排队回执（总线广播）：全设备渲染用户气泡 + ⏳ 已排队标记
-      addQueuedMessage(data.content);
-      break;
-
-    case 'user_message':
-      // 一切用户消息的显示触发源：直发 / 空闲泵注入（ask 回答、任务终态、
-      // 邻居消息）/ 排队消费 / 命令回显（ephemeral 不计入回溯索引）。
-      // 不再乐观本地渲染 → 多设备单端口看到同一份消息流，且与历史 REST 一致。
-      if (!consumeQueuedBubble(data.content, !!data.ephemeral)) {
-        addUserMessage(data.content, !!data.ephemeral);
-        setLastGroupEl(null);
-      }
-      break;
-
-    case 'history_changed': {
-      // 上下文被整体重写（改写型命令 /back /sc /clear /fork…，或改写型工具
-      // 如 shortcircuit 退化历史块）——后端 msg_count 连续性校验触发。
-      // clearUI + 全量重渲染，消除卡片与后端落盘的失配。
-      // 与「↩ 回溯」按钮路径互斥：此处接管渲染后取消 done 侧的冗余拉取。
-      setPendingBacktrack(false);
-      // ── 时机闸门：turn 进行中禁止立刻刷新 ──
-      // 此刻前端正在流式渲染当前卡片，clearUI 会把它抹掉；且本轮尚未落盘，
-      // 重拉回来的历史里没有它 → 必须等 done/cancelled/error 收尾后再刷。
-      if (processing) { setPendingHistoryRefresh(true); break; }
-      clearUI();
-      if (sessionId) setTimeout(function() { fetchSessionHistory(sessionId); }, 100);
-      break;
-    }
-
-    case 'queue_error':
-      // 排队被拒（如运行中斜杠）：只提示，不动 processing 状态
-      showError(data.error);
-      break;
-
-    case 'error':
-      removeThinking();
-      finalizeStreamRound(); // 异常：保留思考/已流式正文最后一帧
-      endStreamTurn();       // 异常终结本轮，卡片不再被后续 done 认领
-      showError(data.error);
-      setProcessing(false);
-      flushPendingHistoryRefresh(sessionId);  // 异常也要消费挂起的重写刷新
-      break;
-
-    case 'done':
-      removeThinking();
-      setProcessing(false);
-      clearAskCard(); // 轮次结束时清掉未答复的问答卡片（答复/超时由后端判定）
-      // ── 渲染最终回复内容 ──
-      // 命令和 LLM 回复统一通过 done.final_content 传递，
-      // 不再走独立的 response 事件（参见 commits 71927ab）
-      // 去重：纯文本回复（无工具调用）时 llm_end 已渲染过，跳过
-      // 命令轮无 llm_start → 这里只承接**本轮**卡片，跨轮走 addAssistantMessage，
-      // 否则命令输出会覆盖上一轮答案（吞卡 bug，见 ui.js finalizeStreamRoundForDone）
-      // from_command：命令输出不落盘 → ephemeral 渲染（不占索引、无回溯按钮）
-      var streamedDone = finalizeStreamRoundForDone(data.final_content);
-      if (data.final_content && data.final_content !== '' && !_finalContentAlreadyShown && !streamedDone) {
-        addAssistantMessage(data.final_content, !!data.from_command);
-      }
-      // 流式已渲染正文（极端：llm_end 缺失但 done 有终稿）→ 视为已显示
-      if (streamedDone) _finalContentAlreadyShown = true;
-      // 重置标志，避免影响下一次
-      _finalContentAlreadyShown = false;
-      // ── 从后端获取权威索引计数，消除前端自增漂移 ──
-      // 每次 done 事件都校准 liveMsgIndex，之后新的消息从正确起点继续累加。
-      // 这样即使某条消息在保存过程中被跳过/压缩，索引也不会错位。
-      if (data.non_system_count != null) {
-        setLiveMsgIndex(data.non_system_count);
-      }
-      if (data.session_id) {
-        setSessionId(data.session_id);
-        sessionLabel.textContent = '📄 ' + data.session_id;
-      }
-      // ── 轮次收尾：消费挂起的「↩ 回溯」或「turn 中被重写」的刷新请求 ──
-      flushPendingHistoryRefresh(data.session_id || sessionId);
-      break;
-
-    case 'cancelled':
-      removeThinking();
-      finalizeStreamRound(); // 中断：保留思考最后一帧/已流式正文
-      endStreamTurn();       // 中断终结本轮，卡片不再被后续 done 认领
-      // 取消 5 秒安全网定时器
-      if (window._cancelTimeout) { clearTimeout(window._cancelTimeout); window._cancelTimeout = null; }
-      setProcessing(false);
-      flushPendingHistoryRefresh(sessionId);  // 中断也要消费挂起的重写刷新
-      addSystemMessage('⏹️ 已中断');
-      break;
-
-    case 'shutdown':
-      statusEl.textContent = '🟠 服务器关闭中';
-      setProcessing(false);
-      break;
-
-    case 'reload':
-      statusEl.textContent = '🟠 Agent 重建中...';
-      setProcessing(false);
-      addSystemMessage('🔄 Agent 正在新建，连接即将断开...');
-      break;
-
-    case 'reload_done':
-      statusEl.textContent = '🟢 已连接（已重载）';
-      setProcessing(false);
-      if (data.session_id) {
-        setSessionId(data.session_id);
-        sessionLabel.textContent = '📄 ' + data.session_id;
-      }
-      if (data.model) { modelBadge.textContent = data.model; }
-      addSystemMessage('🔄 Agent 重载完成，新代码已生效');
-      break;
-
-    case 'ask':
-      removeThinking();
-      showAskCard(data);
-      setProcessing(false);
-      break;
-
-    case 'info':
-      addAssistantMessage('ℹ️ ' + data.content);
-      break;
-
-    // 警告此前无 case → 后端发了也静默丢弃，插件抑制 / LLM 重试 / 工具拦截
-    // 等提示全部看不见。走系统消息通道（与 info 的助手气泡区分开）。
-    case 'warning':
-      addSystemMessage('⚠️ ' + data.content);
-      break;
-
-    case 'hint':
-      var hintGroup = getOrCreateMsgGroup();
-      var hintEl = document.createElement('div');
-      hintEl.style.cssText = 'font-size:12px;color:var(--text-dim);padding:3px 0 3px calc(clamp(28px, 3vw, 36px) + clamp(8px, 1.5vw, 14px));font-style:italic;';
-      hintEl.textContent = '💡 ' + data.content;
-      hintGroup.appendChild(hintEl);
-      scrollToBottom();
-      break;
-
-    case 'item':
-      var itemGroup = getOrCreateMsgGroup();
-      var itemEl = document.createElement('div');
-      itemEl.style.cssText = 'font-size:13px;color:var(--text-secondary);padding:2px 0 2px calc(clamp(28px, 3vw, 36px) + clamp(8px, 1.5vw, 14px));font-family:var(--font-mono);';
-      itemEl.textContent = data.content;
-      itemGroup.appendChild(itemEl);
-      scrollToBottom();
-      break;
-
-    case 'say':
-      addAssistantMessage(data.content);
-      break;
+  if (data.session_id) {
+    setSessionId(data.session_id);
+    sessionLabel.textContent = '📄 ' + data.session_id;
   }
-}
+  statusEl.textContent = '🟢 已连接';
+
+  // ── 全量重拉：缓冲溢出或服务端重启，事件流不可续 ──
+  var needHistory = false;
+  if (data.resync) {
+    clearUI();
+    needHistory = true;
+    addSystemMessage('🔄 已重新连接，会话已重新同步');
+  }
+  // DOM 为空（首屏/重开页/刚清空）且无进行中任务 → 补一次权威历史
+  if (!data.processing && sessionId && (needHistory || messagesEl.children.length === 0)) {
+    fetchSessionHistory(sessionId);
+  }
+
+  // ── 运行时快照：任务没死，恢复"处理中"状态机 ──
+  if (data.processing) {
+    setProcessing(true);
+    if (wasConnected) addSystemMessage('🔁 已重连，后台任务继续运行中');
+  } else {
+    setProcessing(false);
+  }
+  // ask 等待回复跨连接存续：v2 携带完整元数据 → 恢复整个问答卡片
+  // （v2 之前只有布尔，降级为仅恢复输入提示）
+  if (data.pending_ask && typeof data.pending_ask === 'object') {
+    showAskCard(data.pending_ask);
+  } else if (data.pending_ask) {
+    inputEl.placeholder = '输入回复... (Enter 发送)';
+    inputEl.focus();
+  }
+
+  fetch('/api/health')
+    .then(function(r) { return r.json(); })
+    .then(function(h) {
+      modelBadge.textContent = h.agent || '—';
+      sessionLabel.textContent = '📄 ' + (h.session || '—');
+      if (h.session) setSessionId(h.session);
+    })
+    .catch(function() {});
+});
+
+on('ping', function (data) {
+
+  try { ws.send(JSON.stringify({ type: 'pong' })); } catch(e) {}
+});
+
+on('pong', function (data) {
+
+  if (_lastPingTime) {
+    setSb({ latency: Date.now() - _lastPingTime });
+    _lastPingTime = null;
+    updateStatusBar();
+    // 闪烁动画
+    var latEl = document.getElementById('sbLatency');
+    if (latEl) { latEl.classList.remove('flash'); void latEl.offsetWidth; latEl.classList.add('flash'); }
+  }
+});
+
+on('llm_start', function (data) {
+
+  startStreamRound();
+  showThinking();
+});
+
+on('thinking_content', function (data) {
+
+  // 思考 token（后端已批量合并）→ 思考块懒建 + 流式累积
+  streamThinkToken(data.token || '');
+});
+
+on('chunk', function (data) {
+
+  // 正文 token（后端已批量合并）→ 首块折叠思考块 + 正文流式
+  streamContentChunk(data.content || '');
+});
+
+on('stream_end', function (data) {
+
+  // 无操作：llm_end 走 finalizeStreamRound 终渲染（后端发 stream_end 前已冲刷缓冲）
+});
+
+on('llm_end', function (data) {
+
+  removeThinking();
+  // 流式已渲染正文 → 终渲染（权威全文），跳过 addAssistantMessage 双渲染
+  var streamed = finalizeStreamRound(data.content);
+  if (data.has_tool_calls) {
+    if (data.content && !streamed) {
+      // LLM 有推理文本 + 工具调用 → 显示文本，后续 tool_select 显示工具选择
+      addAssistantMessage(data.content);
+    }
+    // 纯 tool_calls 无文本 → 由 tool_select 显示选择记录，此处不输出
+    // done.final_content 是最终答案，与 llm_end.content 不同 → 标记 false
+    _finalContentAlreadyShown = false;
+  } else if (data.content) {
+    // 纯文本回复，无工具调用
+    // done.final_content 与 data.content 相同 → 标记 true，避免 done 重复渲染
+    if (!streamed) addAssistantMessage(data.content);
+    _finalContentAlreadyShown = true;
+  } else {
+    // 无正文（纯思考后无内容/异常）：finalizeStreamRound 兜底折叠思考栏（全文可展开）
+    finalizeStreamRound();
+    _finalContentAlreadyShown = false;
+  }
+});
+
+on('tool_select', function (data) {
+
+  removeThinking();
+  finalizeStreamRound(); // 工具轮可能无 llm_end 正文 → 兜底收尾
+  // 方案C：紫卡已移除。工具意图由后续 tool_call 紧凑行表达，
+  // 此处只确保本轮有承载工具行的助手卡片
+  if (data.tools && data.tools.length > 0) {
+    ensureToolContainer();
+  }
+});
+
+on('tool_call', function (data) {
+
+  removeThinking();
+  finalizeStreamRound();
+  addToolCall(data.name, data.args, data.tool_call_id);
+});
+
+on('tool_result', function (data) {
+
+  addToolResult(data.name, data.result, false, data.tool_call_id);
+});
+
+on('queued', function (data) {
+
+  // 运行中排队回执（总线广播）：全设备渲染用户气泡 + ⏳ 已排队标记
+  addQueuedMessage(data.content);
+});
+
+on('user_message', function (data) {
+
+  // 一切用户消息的显示触发源：直发 / 空闲泵注入（ask 回答、任务终态、
+  // 邻居消息）/ 排队消费 / 命令回显（ephemeral 不计入回溯索引）。
+  // 不再乐观本地渲染 → 多设备单端口看到同一份消息流，且与历史 REST 一致。
+  if (!consumeQueuedBubble(data.content, !!data.ephemeral)) {
+    addUserMessage(data.content, !!data.ephemeral);
+    setLastGroupEl(null);
+  }
+});
+
+on('history_changed', function (data) {
+
+  // 上下文被整体重写（改写型命令 /back /sc /clear /fork…，或改写型工具
+  // 如 shortcircuit 退化历史块）——后端 msg_count 连续性校验触发。
+  // clearUI + 全量重渲染，消除卡片与后端落盘的失配。
+  // 与「↩ 回溯」按钮路径互斥：此处接管渲染后取消 done 侧的冗余拉取。
+  setPendingBacktrack(false);
+  // ── 时机闸门：turn 进行中禁止立刻刷新 ──
+  // 此刻前端正在流式渲染当前卡片，clearUI 会把它抹掉；且本轮尚未落盘，
+  // 重拉回来的历史里没有它 → 必须等 done/cancelled/error 收尾后再刷。
+  if (store.getState().processing) { setPendingHistoryRefresh(true); return; }
+  clearUI();
+  if (sessionId) setTimeout(function() { fetchSessionHistory(sessionId); }, 100);
+});
+
+on('queue_error', function (data) {
+
+  // 排队被拒（如运行中斜杠）：只提示，不动 processing 状态
+  showError(data.error);
+});
+
+on('error', function (data) {
+
+  removeThinking();
+  finalizeStreamRound(); // 异常：保留思考/已流式正文最后一帧
+  endStreamTurn();       // 异常终结本轮，卡片不再被后续 done 认领
+  showError(data.error);
+  setProcessing(false);
+  flushPendingHistoryRefresh(sessionId);  // 异常也要消费挂起的重写刷新
+});
+
+on('done', function (data) {
+
+  removeThinking();
+  setProcessing(false);
+  clearAskCard(); // 轮次结束时清掉未答复的问答卡片（答复/超时由后端判定）
+  // ── 渲染最终回复内容 ──
+  // 命令和 LLM 回复统一通过 done.final_content 传递，
+  // 不再走独立的 response 事件（参见 commits 71927ab）
+  // 去重：纯文本回复（无工具调用）时 llm_end 已渲染过，跳过
+  // 命令轮无 llm_start → 这里只承接**本轮**卡片，跨轮走 addAssistantMessage，
+  // 否则命令输出会覆盖上一轮答案（吞卡 bug，见 ui.js finalizeStreamRoundForDone）
+  // from_command：命令输出不落盘 → ephemeral 渲染（不占索引、无回溯按钮）
+  var streamedDone = finalizeStreamRoundForDone(data.final_content);
+  if (data.final_content && data.final_content !== '' && !_finalContentAlreadyShown && !streamedDone) {
+    addAssistantMessage(data.final_content, !!data.from_command);
+  }
+  // 流式已渲染正文（极端：llm_end 缺失但 done 有终稿）→ 视为已显示
+  if (streamedDone) _finalContentAlreadyShown = true;
+  // 重置标志，避免影响下一次
+  _finalContentAlreadyShown = false;
+  // ── 从后端获取权威索引计数，消除前端自增漂移 ──
+  // 每次 done 事件都校准 liveMsgIndex，之后新的消息从正确起点继续累加。
+  // 这样即使某条消息在保存过程中被跳过/压缩，索引也不会错位。
+  if (data.non_system_count != null) {
+    setLiveMsgIndex(data.non_system_count);
+  }
+  if (data.session_id) {
+    setSessionId(data.session_id);
+    sessionLabel.textContent = '📄 ' + data.session_id;
+  }
+  // ── 轮次收尾：消费挂起的「↩ 回溯」或「turn 中被重写」的刷新请求 ──
+  flushPendingHistoryRefresh(data.session_id || sessionId);
+});
+
+on('cancelled', function (data) {
+
+  removeThinking();
+  finalizeStreamRound(); // 中断：保留思考最后一帧/已流式正文
+  endStreamTurn();       // 中断终结本轮，卡片不再被后续 done 认领
+  // 取消 5 秒安全网定时器
+  if (window._cancelTimeout) { clearTimeout(window._cancelTimeout); window._cancelTimeout = null; }
+  setProcessing(false);
+  flushPendingHistoryRefresh(sessionId);  // 中断也要消费挂起的重写刷新
+  addSystemMessage('⏹️ 已中断');
+});
+
+on('shutdown', function (data) {
+
+  statusEl.textContent = '🟠 服务器关闭中';
+  setProcessing(false);
+});
+
+on('reload', function (data) {
+
+  statusEl.textContent = '🟠 Agent 重建中...';
+  setProcessing(false);
+  addSystemMessage('🔄 Agent 正在新建，连接即将断开...');
+});
+
+on('reload_done', function (data) {
+
+  statusEl.textContent = '🟢 已连接（已重载）';
+  setProcessing(false);
+  if (data.session_id) {
+    setSessionId(data.session_id);
+    sessionLabel.textContent = '📄 ' + data.session_id;
+  }
+  if (data.model) { modelBadge.textContent = data.model; }
+  addSystemMessage('🔄 Agent 重载完成，新代码已生效');
+});
+
+on('ask', function (data) {
+
+  removeThinking();
+  showAskCard(data);
+  setProcessing(false);
+});
+
+on('info', function (data) {
+
+// 警告此前无 case → 后端发了也静默丢弃，插件抑制 / LLM 重试 / 工具拦截
+// 等提示全部看不见。走系统消息通道（与 info 的助手气泡区分开）。
+  addAssistantMessage('ℹ️ ' + data.content);
+});
+
+on('warning', function (data) {
+
+// 警告此前无 case → 后端发了也静默丢弃，插件抑制 / LLM 重试 / 工具拦截
+// 等提示全部看不见。走系统消息通道（与 info 的助手气泡区分开）。
+
+  addSystemMessage('⚠️ ' + data.content);
+});
+
+on('hint', function (data) {
+
+// 警告此前无 case → 后端发了也静默丢弃，插件抑制 / LLM 重试 / 工具拦截
+// 等提示全部看不见。走系统消息通道（与 info 的助手气泡区分开）。
+
+  var hintGroup = getOrCreateMsgGroup();
+  var hintEl = document.createElement('div');
+  hintEl.style.cssText = 'font-size:12px;color:var(--text-dim);padding:3px 0 3px calc(clamp(28px, 3vw, 36px) + clamp(8px, 1.5vw, 14px));font-style:italic;';
+  hintEl.textContent = '💡 ' + data.content;
+  hintGroup.appendChild(hintEl);
+  scrollToBottom();
+});
+
+on('item', function (data) {
+
+// 警告此前无 case → 后端发了也静默丢弃，插件抑制 / LLM 重试 / 工具拦截
+// 等提示全部看不见。走系统消息通道（与 info 的助手气泡区分开）。
+
+  var itemGroup = getOrCreateMsgGroup();
+  var itemEl = document.createElement('div');
+  itemEl.style.cssText = 'font-size:13px;color:var(--text-secondary);padding:2px 0 2px calc(clamp(28px, 3vw, 36px) + clamp(8px, 1.5vw, 14px));font-family:var(--font-mono);';
+  itemEl.textContent = data.content;
+  itemGroup.appendChild(itemEl);
+  scrollToBottom();
+});
+
+on('say', function (data) {
+
+// 警告此前无 case → 后端发了也静默丢弃，插件抑制 / LLM 重试 / 工具拦截
+// 等提示全部看不见。走系统消息通道（与 info 的助手气泡区分开）。
+
+  addAssistantMessage(data.content);
+});
 
 // ── e2e 测试接缝 ────────────────────────────────────────
-// Playwright 用它注入事件，绕开"必须真跑一轮 LLM"才能产生 WS 事件的限制。
-// 刻意挂在 window 上并保持此名字：改成 ESM 后 handleEvent 变模块局部，
-// 但 main.js 会继续导出 __fp_dispatch，测试因此跨重构稳定。
-if (typeof window !== 'undefined') window.__fp_dispatch = handleEvent;
+// Playwright 经 window.__fp_dispatch 注入事件（test_webui_e2e._dispatch）。
+// 分发实现已迁 core/events.js 的 dispatch，接缝名不变 → 测试跨重构稳定。
+if (typeof window !== 'undefined') window.__fp_dispatch = dispatch;
 
 // ── 文件上传（集散点 inbox） ──
 // 选中即后台上传，输入框显示可删除标记；发送时把 [file:inbox/name]
@@ -643,7 +677,7 @@ export function sendMessage() {
 
   // 运行中排队：输入框不禁用（#158），后端 submit() 入队、
   // 环顶穿插消费；回执 'queued' 渲染气泡 + ⏳ 标记，斜杠被拒回 'error'
-  if (processing) {
+  if (store.getState().processing) {
     inputEl.value = '';
     autoResize(inputEl);
     try { ws.send(JSON.stringify({ type: 'message', content: text })); } catch (e) { showError('发送失败'); }
@@ -722,7 +756,7 @@ export function handleKeyDown(event) {
   // Ctrl+Shift+C 中断
   if (event.ctrlKey && event.shiftKey && (event.key === 'C' || event.key === 'c')) {
     event.preventDefault();
-    if (processing) cancelMessage();
+    if (store.getState().processing) cancelMessage();
   }
 }
 
@@ -880,7 +914,7 @@ function deleteSession(sid, btnEl) {
 //    落盘 → 重启 → 自动重连 → reload_done 提示，见 core/handoff 契约）──
 
 export function reloadAgent() {
-  if (processing) { showError('正在处理中，请等待完成'); return; }
+  if (store.getState().processing) { showError('正在处理中，请等待完成'); return; }
   if (!ws || ws.readyState !== WebSocket.OPEN) { showError('连接未就绪，请稍后重试'); return; }
 
   inputEl.value = '/reload';
@@ -903,7 +937,7 @@ export function clearSession() {
 }
 
 export function newAgent() {
-  if (processing) { showError('正在处理中，请等待完成'); return; }
+  if (store.getState().processing) { showError('正在处理中，请等待完成'); return; }
 
   var btn = document.querySelector('.topbar-btn[onclick*="newAgent"]');
   var originalText = btn.textContent;
@@ -972,7 +1006,7 @@ function fetchSessionHistory(sid) {
 
 function backtrackTo(sid, index) {
   if (!ws || ws.readyState !== WebSocket.OPEN) { showError('WebSocket 未连接'); return; }
-  if (processing) { showError('正在处理中，请等待完成'); return; }
+  if (store.getState().processing) { showError('正在处理中，请等待完成'); return; }
   setPendingBacktrack(true);
   clearUI();
   setProcessing(true);
@@ -1110,7 +1144,7 @@ document.addEventListener('DOMContentLoaded', function() {
   window.addEventListener('resize', function() {
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(function() {
-      if (!processing) scrollToBottom(true);
+      if (!store.getState().processing) scrollToBottom(true);
     }, 150);
   });
 

@@ -1,20 +1,26 @@
 /* ═══════════════════════════════════════════════════════════
    FP WebUI — 状态栏
-   _sbData + updateStatusBar（各组件改属性，引用不变）
-   从 ui.js 按职责拆分（组件模块化），2026-11-08
+   状态源 = store.sb（setSb 归一写入，updateStatusBar 只读渲染）
+   原 _sbData 就地改属性（引用不变、10 处写点散落 5 组件）已迁状态树，
+   视图不再持有可变状态。从 ui.js 按职责拆分（组件模块化），2026-11-08
    ═══════════════════════════════════════════════════════════ */
 // @ts-nocheck
 
 import { notifyUiStateChanged } from './state.js';
+import { store } from '../core/store.js';
 
-// ── 状态栏数据 ──
-export var _sbData = {
-  latency: null,
-  toolsActive: 0,
-  toolsTotal: 0,
-  msgs: 0,
-  state: 'idle'   // idle | thinking | processing
-};
+/**
+ * 状态栏数据归一写入：patch 与 store.sb 浅合并。
+ * @param {object} patch 如 {latency: 12}、{msgs: n}
+ */
+export function setSb(patch) {
+  store.setState({ sb: Object.assign({}, store.getState().sb, patch) });
+}
+
+/** 读状态栏数据（只读快照，勿改）。 */
+export function getSb() {
+  return store.getState().sb;
+}
 
 export function updateStatusBar() {
   var latEl = document.getElementById('sbLatency');
@@ -22,6 +28,8 @@ export function updateStatusBar() {
   var msgsEl = document.getElementById('sbMsgs');
   var stateEl = document.getElementById('sbState');
   if (!latEl || !toolsEl || !msgsEl || !stateEl) return;
+
+  var _sbData = store.getState().sb;
 
   // 延迟
   if (_sbData.latency != null) {
@@ -49,4 +57,3 @@ export function updateStatusBar() {
   if (s !== 'idle') stateEl.classList.add(s);
   notifyUiStateChanged();
 }
-

@@ -61,7 +61,19 @@ export function createStore(initial) {
 /* ── 全局状态树 ────────────────────────────────────────────
    pendingAsk: 待回复的 ask 卡片元数据 {ask_id, prompt, options, suggest}
                null = 无待回复。归一化进状态后，渲染函数据它幂等建/撤卡，
-               修掉"重连收到 pending_ask 就叠一张新卡"的实测 bug。            */
+               修掉"重连收到 pending_ask 就叠一张新卡"的实测 bug。
+   processing: 本轮是否在运行（原 components/control.js 的 export let，
+               读点 8 处散落 app.js → 收进状态树，读走 getState()）。
+   sb:         状态栏数据（原 statusbar.js 的 _sbData 对象就地改，
+               写点 10 处散落 5 个组件 → setSb 归一写入）。            */
 export const store = createStore({
-  pendingAsk: null
+  pendingAsk: null,
+  processing: false,
+  sb: {
+    latency: null,
+    toolsActive: 0,
+    toolsTotal: 0,
+    msgs: 0,
+    state: 'idle'   // idle | thinking | processing
+  }
 });

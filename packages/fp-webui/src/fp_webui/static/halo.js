@@ -539,9 +539,10 @@ import { hooks } from './core/hooks.js';
 
   /* ── 外部状态同步：拦截 ui.js 的三个状态函数 + 主题变更 */
   function syncFromSbData() {
-    if (typeof _sbData !== 'undefined' && _sbData && _sbData.state) {
-      setHaloState(_sbData.state);
-    }
+    // 状态源 = store.sb（原 typeof _sbData 守卫是死代码：halo.js 从未
+    // import _sbData，ESM 下该分支恒不执行 → halo 状态同步一直静默失效）
+    var sb = (window.__fp_store && window.__fp_store.getState().sb) || null;
+    if (sb && sb.state) setHaloState(sb.state);
   }
 
   /* 原猴补丁 wrap() 已移除。ESM 下它必然静默失效：

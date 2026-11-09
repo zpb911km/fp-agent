@@ -788,7 +788,9 @@ uvicorn.run(app, host='0.0.0.0', port=8765, reload=True)
 
 1. **消息级**事件在 `bridge.py`（`WebUIBridge`）添加生命周期钩子监听；
    **LLM/工具级**事件在 core 的 `EventBridge`（core 变更须走 core 流程）
-2. 在 `handleEvent()` 中添加事件处理
+2. 在 `app.js` 用 `on('事件名', function (data) {…})` 注册处理器
+   （分发走 `core/events.js` 注册表；未知类型由 `dispatch()` 兜底 warn，
+   契约测试从 `on(...)` 注册抽取分发表）
 3. 如需前端 UI 元素，添加对应的 DOM 渲染逻辑
 4. 更新本文档的 WebSocket 协议表（§6.3）
 
