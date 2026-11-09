@@ -6,7 +6,7 @@
 
   A. `fp_core.core.events.EVENT_TYPES`  —— core 发布的事件（只读引用，webui 不改 core）
   B. `fp_webui.protocol.EVENTS`         —— 本模块的完整契约（单一事实源）
-  C. `static/app.js` 的 `on(...)` 注册   —— 前端实际分发的事件处理器
+  C. `static/features/wire.js` 的 `on(...)` 注册   —— 前端实际分发的事件处理器
 
 对应关系（详见 protocol.py docstring）：
   A ⊆ B              core 事件必须登记进契约
@@ -23,14 +23,14 @@ from pathlib import Path
 from fp_webui.protocol import BIDIR, C2S, EVENTS, S2C, SCHEMA
 
 _STATIC = Path(__file__).resolve().parents[1] / "src" / "fp_webui" / "static"
-_APP_JS = _STATIC / "app.js"
+_APP_JS = _STATIC / "features" / "wire.js"
 
 
 def _frontend_case_list() -> list[str]:
-    """抽出 app.js 里所有 `on('type', ...)` 注册的事件名（保序，供查重）。
+    """抽出 wire.js 里所有 `on('type', ...)` 注册的事件名（保序，供查重）。
 
     分发表已从 handleEvent 的 switch 迁为 core/events.js 注册表
-    （app.js 顶层逐个 on(...) 注册）。抽取整个文件：注册均在顶层，
+    （features/wire.js 顶层逐个 on(...) 注册）。抽取整个文件：注册均在顶层，
     且 on(' 名字唯一可辨（不会误配 addEventListener 等）。
     """
     src = _APP_JS.read_text(encoding="utf-8")
@@ -104,7 +104,7 @@ def test_active_s2c_events_have_frontend_case():
     missing = active_s2c - cases
     assert not missing, (
         f"后端会发、前端无 case（会被静默丢弃）: {sorted(missing)} "
-        f"→ 在 app.js 补 on(...) 注册，或把 protocol.py 的 status 改成 unhandled"
+        f"→ 在 features/wire.js 补 on(...) 注册，或把 protocol.py 的 status 改成 unhandled"
     )
 
 
@@ -130,4 +130,4 @@ def test_frontend_covers_every_declared_event_at_most_once():
     """每个事件至多注册一次（双注册会掩盖优先级 bug，后者静默覆盖前者）。"""
     found = _frontend_case_list()
     dupes = {n for n in found if found.count(n) > 1}
-    assert not dupes, f"app.js 重复 on() 注册: {dupes}"
+    assert not dupes, f"wire.js 重复 on() 注册: {dupes}"

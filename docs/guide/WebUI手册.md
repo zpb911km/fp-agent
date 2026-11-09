@@ -735,7 +735,13 @@ core 内置 `reload` 工具为两段式：先调用获得隔离测试告示与�
     ├── ui.js              # barrel：聚合导出 components/，外部 import 面不变
     ├── components/        # ui.js 拆出的 14 个组件模块（state/messages/stream/tools/…）
     ├── main.js            # ESM 入口：import 图装配 + 内联事件属性全局挂载
-    ├── app.js             # WS 连接、认证、顶栏动作、主题/光环开关
+    ├── app.js             # 装配层（~105 行）：handlers 注册 + 启动分支 + 对 main.js re-export
+    ├── features/          # app.js 按职责拆分（2026-10 拆，原 1179 行/9 职责）
+    │   ├── wire.js        #   27 个 on() 事件接线（契约测试从此抽取分发表）
+    │   ├── ws.js          #   连接生命周期 + conn 共享状态（seq/runId/ping）
+    │   ├── compose.js     #   发送/键盘/回溯委托
+    │   ├── sessions.js    #   会话列表/搜索/切换/删除（事件委托，非内联 onclick）
+    │   └── ask/auth/upload/agent/history/appearance/bootstrap.js
     ├── halo.js            # 光环（Canvas 2D 状态机仿真，见 3.5）
     ├── proj.js            # 光环投影（平行光投到各深度 UI 表面，见 3.5）
     ├── live-symbol.svg    # 顶栏「运行中」动画符号
@@ -788,9 +794,9 @@ uvicorn.run(app, host='0.0.0.0', port=8765, reload=True)
 
 1. **消息级**事件在 `bridge.py`（`WebUIBridge`）添加生命周期钩子监听；
    **LLM/工具级**事件在 core 的 `EventBridge`（core 变更须走 core 流程）
-2. 在 `app.js` 用 `on('事件名', function (data) {…})` 注册处理器
+2. 在 `features/wire.js` 用 `on('事件名', function (data) {…})` 注册处理器
    （分发走 `core/events.js` 注册表；未知类型由 `dispatch()` 兜底 warn，
-   契约测试从 `on(...)` 注册抽取分发表）
+   契约测试从 `features/wire.js` 的 `on(...)` 注册抽取分发表）
 3. 如需前端 UI 元素，添加对应的 DOM 渲染逻辑
 4. 更新本文档的 WebSocket 协议表（§6.3）
 
