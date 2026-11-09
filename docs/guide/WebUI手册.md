@@ -729,23 +729,26 @@ core 内置 `reload` 工具为两段式：先调用获得隔离测试告示与�
 ### 10.1 目录结构
 
 ```
-└── static/
+└── static/               # 根只留 4 项：index.html + css/ + js/ + assets/
     ├── index.html         # 前端页面骨架（单页应用，仅容器 + 脚本挂载）
-    ├── tokens.css/base.css/components.css/overrides.css  # @layer 分层样式
-    ├── ui.js              # barrel：聚合导出 components/，外部 import 面不变
-    ├── components/        # ui.js 拆出的 14 个组件模块（state/messages/stream/tools/…）
-    ├── main.js            # ESM 入口：import 图装配 + 内联事件属性全局挂载
-    ├── app.js             # 装配层（~105 行）：handlers 注册 + 启动分支 + 对 main.js re-export
-    ├── features/          # app.js 按职责拆分（2026-10 拆，原 1179 行/9 职责）
-    │   ├── wire.js        #   27 个 on() 事件接线（契约测试从此抽取分发表）
-    │   ├── ws.js          #   连接生命周期 + conn 共享状态（seq/runId/ping）
-    │   ├── compose.js     #   发送/键盘/回溯委托
-    │   ├── sessions.js    #   会话列表/搜索/切换/删除（事件委托，非内联 onclick）
-    │   └── ask/auth/upload/agent/history/appearance/bootstrap.js
-    ├── halo.js            # 光环（Canvas 2D 状态机仿真，见 3.5）
-    ├── proj.js            # 光环投影（平行光投到各深度 UI 表面，见 3.5）
-    ├── live-symbol.svg    # 顶栏「运行中」动画符号
-    └── favicon.png        # 网站图标
+    ├── css/
+    │   └── tokens/base/components/overrides.css  # @layer 分层样式
+    ├── js/                # 全部 JS 整包（相对 import 同层不变）
+    │   ├── main.js        # ESM 入口：import 图装配 + 内联事件属性全局挂载
+    │   ├── app.js         # 装配层（~105 行）：handlers 注册 + 启动分支 + 对 main.js re-export
+    │   ├── ui.js          # barrel：聚合导出 components/ + 尾部副作用聚合 halo/proj
+    │   ├── halo.js        # 光环（Canvas 2D 状态机仿真，见 3.5）
+    │   ├── proj.js        # 光环投影（平行光投到各深度 UI 表面，见 3.5）
+    │   ├── components/    # ui.js 拆出的 14 个组件模块（state/messages/stream/tools/…）
+    │   ├── features/      # app.js 按职责拆分（2026-10 拆，原 1179 行/9 职责）
+    │   │   ├── wire.js    #   27 个 on() 事件接线（契约测试从此抽取分发表）
+    │   │   ├── ws.js      #   连接生命周期 + conn 共享状态（seq/runId/ping）
+    │   │   ├── compose.js #   发送/键盘/回溯委托
+    │   │   ├── sessions.js #  会话列表/搜索/切换/删除（事件委托，非内联 onclick）
+    │   │   └── ask/auth/upload/agent/history/appearance/bootstrap.js
+    │   └── core/          # 事件注册表 / store / 工具卡元信息 / HTTP 封装
+    └── assets/
+        └── favicon.png    # 网站图标（消息头像亦引用 /static/assets/favicon.png）
 ```
 
 > 缓存失效：服务 index 时 `_stamp_cache()` 自动把 `?_t=` 改写为对应静态文件 mtime，

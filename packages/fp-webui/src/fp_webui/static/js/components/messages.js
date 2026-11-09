@@ -207,7 +207,7 @@ export function addAssistantMessage(content, ephemeral) {
   msg.innerHTML =
     '<div class="msg-side">' +
       '<div class="msg-avatar assistant" aria-hidden="true">' +
-        '<img src="/static/favicon.png" width="18" height="19" alt="" style="vertical-align:middle">' +
+        '<img src="/static/assets/favicon.png" width="18" height="19" alt="" style="vertical-align:middle">' +
       '</div>' +
       (ephemeral ? '' : '<div class="msg-index-badge">#' + idx + '</div>') +
     '</div>' +

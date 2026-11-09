@@ -147,7 +147,7 @@ export function renderHistoryMessages(sid, messages) {
       if (msg.role === 'user') {
         roleConfig = { avatar: '👤', author: 'OPERATOR', cls: 'user' };
       } else {
-        roleConfig = { avatar: '<img src=\"/static/favicon.png\" width=\"18\" height=\"19\" alt=\"\" style=\"vertical-align:middle\">', author: 'FP', cls: 'assistant' };
+        roleConfig = { avatar: '<img src=\"/static/assets/favicon.png\" width=\"18\" height=\"19\" alt=\"\" style=\"vertical-align:middle\">', author: 'FP', cls: 'assistant' };
       }
 
       var avatarHtml = '<div class="msg-side">' +

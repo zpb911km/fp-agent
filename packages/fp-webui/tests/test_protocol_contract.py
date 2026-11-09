@@ -23,7 +23,7 @@ from pathlib import Path
 from fp_webui.protocol import BIDIR, C2S, EVENTS, S2C, SCHEMA
 
 _STATIC = Path(__file__).resolve().parents[1] / "src" / "fp_webui" / "static"
-_APP_JS = _STATIC / "features" / "wire.js"
+_APP_JS = _STATIC / "js" / "features" / "wire.js"
 
 
 def _frontend_case_list() -> list[str]:

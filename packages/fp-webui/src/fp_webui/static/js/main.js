@@ -7,13 +7,14 @@
    靠猴补丁依赖 ui 先执行。改为 module 后由 import 图显式表达，
    module 天然 defer，DOM 已解析的前提仍然成立。
 
+   halo.js / proj.js 是渲染层组件，已归入 ui.js 聚合（其尾部
+   副作用 import），本入口顶层只面对 ui / app 两个入口。
+
    import 顺序 = 原加载顺序，保持语义等价。
    ═══════════════════════════════════════════════════════════ */
 // @ts-nocheck
 
 import './ui.js';
-import './halo.js';
-import './proj.js';
 import './app.js';
 
 import { autoResize, handleInputFocus, toggleCmdPalette, closeSocket } from './ui.js';
