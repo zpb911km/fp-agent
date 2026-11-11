@@ -37,6 +37,43 @@ ACP 的 `ask_user` 按**客户端能力协商**分两条路径（实现：`packa
 > 已修复（测试：`test_ask_user.py::test_ask_deferred_no_injection`）。
 > elicit 路径测试：`packages/fp-acp/tests/test_elicitation.py`。
 
+## ✅ 协议合规基线（ACP v1）
+
+**版本**：本端声明并支持 **v1**（`_SUPPORTED_PROTOCOL_VERSIONS = (1,)`）。
+v2 目前是 Draft，客户端请求 v2 时按协商规则回退到 v1（客户端自行决定是否继续），
+不在未实现的情况下假装支持。
+
+**已实现（有测试守护，`tests/test_acp_wire.py`）**：
+
+| 能力 | 说明 |
+|---|---|
+| 版本协商 | `initialize` 回显可支持版本，`agentInfo.version` 取包元数据 |
+| `session/new` + `cwd` | `cwd` 为 required，作为会话根生效（`chdir`），缺失 → `-32602` |
+| `session/load` 历史回放 | 响应**之前**用 `user_message_chunk`/`agent_message_chunk` 回放全量历史；会话不存在 → `-32602`；已 `session/new` 但未落盘的内存态空会话可正常 load（回放为空） |
+| `resource_link` | baseline MUST，转为「仅引用未附带内容」提示，不再静默丢弃 |
+| `ToolKind` | 只发 schema 枚举内取值（`bash→execute`、未知→`other`） |
+| `ToolCallContent` | 统一 `{"type":"content"/"diff"/"terminal"}` union 包装，`diff.path` 绝对化 |
+| `rawInput` | 传 object（原始参数），不再传格式化字符串；不填 `rawOutput`（工具结果是字符串） |
+| `toolCallId` | 按 fp-core 传入的真实 call id 配对，并行同名工具不错配 |
+| `messageId` | 整轮共享一个 id（id 变化 = 新消息开始） |
+| `plan` 生命周期 | `pending/in_progress/completed` 三态，结束时发空 `entries` 收尾 |
+| 错误语义 | 并发 prompt → `-32600`（不用 `stopReason:"cancelled"`，那是 `session/cancel` 专属） |
+
+**未实现（已知缺口，二期）**：
+
+- 多会话模型：`_session_id` 仍是单例，第二個 `session/new` 会顶掉第一个；
+  `session/prompt` 已校验 `sessionId` 防串话，但并行会话尚不支持。
+- `session/request_permission`：IDE 的「危险命令确认」UI 不生效。
+- `usage_update`（上下文用量/费用）、`session/set_config_option`、`session/delete|resume|close`、
+  `elicitation` 之外的 `logout`。
+- `session/list` 的 `cwd` **过滤**与 `cursor` 分页：会话 meta 尚未持久化 `cwd`，
+  目前只接受参数并回填，返回全量会话。
+- `session/set_mode`：未声明 `modes/availableModes`，故**不提供**伪实现（调用回 `-32601`）。
+
+> 纪律：这些是「线上形状」硬约束，改动 `server.py` 的相关分支必须同步
+> `tests/test_acp_wire.py`，否则接口漂移不可观测（历史上同类修复曾被一次重复的
+> `def send` 静默抵消）。规范：https://agentclientprotocol.com/protocol/v1
+
 ## 🔗 快速链接
 
 - [安装与使用](../../packages/fp-acp/README.md#快速使用)

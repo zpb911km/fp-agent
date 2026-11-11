@@ -32,7 +32,10 @@ import os
 import re
 import sys
 import traceback
+import uuid
 from collections.abc import Awaitable, Callable
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from typing import Any, cast
 
 from fp_core.api import ExitReason, HookContext, IOChannel, LifecycleHook, portal
@@ -41,6 +44,48 @@ from fp_core.api import ExitReason, HookContext, IOChannel, LifecycleHook, porta
 # ACP v1 常量
 # ═══════════════════════════════════════════════════════════
 ACP_PROTOCOL_VERSION = 1
+# 本端支持的协议版本（v2 仍为 Draft，客户端请求 v2 时回退到 v1）
+_SUPPORTED_PROTOCOL_VERSIONS = (1,)
+
+# JSON-RPC 错误码（ACP v1 ErrorCode）
+_RPC_METHOD_NOT_FOUND = -32601
+_RPC_INVALID_PARAMS = -32602
+_RPC_INVALID_REQUEST = -32600
+_RPC_INTERNAL_ERROR = -32603
+
+
+class _ACPRPCError(Exception):
+    """带 JSON-RPC 错误码的协议层异常（由 _dispatch 统一转为 error 响应）。"""
+
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _agent_version() -> str:
+    """agentInfo.version：取包元数据（避免与 pyproject 版本漂移）。"""
+    try:
+        return _pkg_version("fp-acp")
+    except PackageNotFoundError:  # 源码树直跑（未安装）时的兜底
+        return "0.0.0+source"
+
+
+# ── ACP v1 ToolKind 枚举（schema 强约束，只允许这 10 个值）──
+# read/edit/delete/move/search/execute/think/fetch/switch_mode/other
+# 注意：早期实现返回 "bash"/"analyze" 属非法值，会让客户端 schema 校验失败。
+_TOOL_KIND: dict[str, str] = {
+    "read_file": "read",
+    "write_file": "edit",
+    "edit_file": "edit",
+    "bash": "execute",
+    "python": "execute",
+    "file_fingerprint": "read",
+    "elf_analysis": "read",
+    "web_search": "search",
+    "web_fetch": "fetch",
+    "subagent": "think",
+}
 
 # ── ACP 模式下禁止暴露给 IDE 的毁灭性命令 ──
 # 这些命令（exit/exit!/quit）会 raise SystemExit() 终止整个进程，
@@ -257,6 +302,8 @@ class ACPServer:
         self._stdout = sys.stdout
 
         self._session_id: str | None = None
+        # 会话根目录（ACP params.cwd）：相对路径解析基准，与进程 cwd 概念上无关
+        self._session_cwd: str | None = None
 
         # ── 工具调用追踪（配对 call ↔ result 通知） ──
         self._tool_call_counter = 0
@@ -358,29 +405,21 @@ class ACPServer:
         return None
 
     def _get_tool_kind(self, tool_name: str) -> str:
-        """返回工具类型分类，供 IDE 显示"""
-        if tool_name in ("read_file",):
-            return "read"
-        elif tool_name in ("write_file", "edit_file"):
-            return "edit"
-        elif tool_name in ("bash",):
-            return "bash"
-        elif tool_name in ("file_fingerprint", "elf_analysis"):
-            return "analyze"
-        else:
-            return "other"
+        """返回 ACP v1 合法 ToolKind（read/edit/delete/move/search/execute/think/fetch/switch_mode/other）。"""
+        return _TOOL_KIND.get(tool_name, "other")
 
     async def _on_tool_call(
         self,
         context: HookContext,
         tool_name: str = "",
         tool_args: str = "",
+        tool_call_id: str = "",
         **kwargs: Any,
     ) -> None:
         """工具调用前 — 发送 tool_call 通知
 
-        ACP v1 规范使用 rawInput 传递原始工具参数。
-        content 用于富内容展示（如文件预览 resource）。
+        tool_call_id 由 fp-core 传入（LLM 生成的 call id，与 ON_TOOL_RESULT 同值），
+        直接用作 ACP 的 toolCallId → call/result 天然配对，并行同名工具不会互相错配。
         """
         # ── 会话未就绪时跳过（start() 之前触发的钩子） ──
         if self._session_id is None:
@@ -407,42 +446,53 @@ class ACPServer:
         kind = self._get_tool_kind(tool_name)
         file_path = self._extract_file_path(tool_name, args_dict)
         title = self._build_tool_title(tool_name, args_dict, kind)
-
-        notification: dict[str, Any] = {
-            "sessionId": self._session_id,
-            "update": {
-                "sessionUpdate": "tool_call",
-                "toolCallId": self._tool_call_id(tool_name),
-                "title": title,
-                "kind": kind,
-                "status": "in_progress",
-                # ACP v1 规范: rawInput = 格式化字符串展示工具参数
-                "rawInput": self._build_human_description(tool_name, args_dict),
-            },
-        }
-
-        # 有文件路径就加上 content (resource) 供 IDE 预览
+        # ── 构建 ToolCall（ACP v1 schema）──
+        # content 是 ToolCallContent 数组，元素必须是 union 变体：
+        #   {"type":"content","content":<ContentBlock>} / {"type":"diff",...} / {"type":"terminal",...}
+        # 旧实现直塞 {"type":"resource",...}（ContentBlock）属于层级错误，严格客户端会丢弃整条 update。
+        content: list[dict[str, Any]] = [
+            {
+                "type": "content",
+                "content": {"type": "text", "text": self._build_human_description(tool_name, args_dict)},
+            }
+        ]
+        # follow-along：locations 才是规范的「文件位置」通道（绝对路径）
+        locations: list[dict[str, Any]] = []
         if file_path and os.path.isfile(file_path):
-            notification["update"]["content"] = [
-                {
+            locations.append({"path": file_path})
+            content.append({
+                "type": "content",
+                "content": {
                     "type": "resource",
-                    "resource": {
-                        "uri": f"file://{file_path}",
-                        "mimeType": self._guess_mime(file_path),
-                    },
-                }
-            ]
+                    "resource": {"uri": f"file://{file_path}", "mimeType": self._guess_mime(file_path)},
+                },
+            })
 
-        self._send_notification("session/update", notification)
+        update: dict[str, Any] = {
+            "sessionUpdate": "tool_call",
+            "toolCallId": self._tool_call_id(tool_name, tool_call_id),
+            "title": title,
+            "kind": kind,
+            "status": "in_progress",
+            # rawInput 的 schema 类型是 object = 工具原始参数（不是格式化字符串）
+            "rawInput": args_dict,
+            "content": content,
+        }
+        if locations:
+            update["locations"] = locations
+
+        self._send_notification("session/update", {"sessionId": self._session_id, "update": update})
 
     # ── 工具标题和 input 构建 ────────────────────────────
 
-    # Emoji 分类，让 IDE 的 tool_call 面板一目了然
+    # Emoji 分类，让 IDE 的 tool_call 面板一目了然（键为 ACP v1 合法 ToolKind）
     _TOOL_EMOJI: dict[str, str] = {
         "read": "📖",
         "edit": "✏️",
-        "bash": "🖥️",
-        "analyze": "🔍",
+        "execute": "🖥️",
+        "search": "🔍",
+        "fetch": "🌐",
+        "think": "🧠",
         "other": "🔧",
     }
 
@@ -552,13 +602,15 @@ class ACPServer:
         context: HookContext,
         tool_name: str = "",
         result: Any = "",
+        tool_call_id: str = "",
         **kwargs: Any,
     ) -> None:
         """工具完成后 — 发送 tool_call_update
 
-        ACP v1 规范使用 rawOutput 传递原始工具结果。
-        content 用于富内容渲染（resource 代码块 / write_file 内容 / diff 差异视图）。
+        rawOutput 在 schema 里是 object（原始返回值），工具结果是字符串 →
+        一律不填 rawOutput，展示内容走 content（ToolCallContent union 的正规通道）。
         """
+
         # ── 会话未就绪时跳过 ──
         if self._session_id is None:
             return
@@ -569,42 +621,33 @@ class ACPServer:
         # ── 清理结果：subagent 抽取 result 字段 ──
         display_str = self._extract_display_result(tool_name, result_str)
 
-        notification: dict[str, Any] = {
-            "sessionId": self._session_id,
-            "update": {
-                "sessionUpdate": "tool_call_update",
-                "toolCallId": self._tool_call_id_for_result(tool_name),
-                "status": status,
-                # ACP v1 规范: rawOutput = 展示用的文本（subagent 已去 JSON 包裹）
-                "rawOutput": display_str if display_str else None,
-            },
-        }
+        # ── content：ToolCallContent union 数组（元素 type ∈ content/diff/terminal）──
+        def _text_block(text: str) -> dict[str, Any]:
+            """标准 ContentBlock 包装成 ToolCallContent（resource 保留换行，text 会塌成单行）。"""
+            return {
+                "type": "content",
+                "content": {
+                    "type": "resource",
+                    "resource": {"uri": "inline://tool-output", "mimeType": "text/plain", "text": text},
+                },
+            }
 
-        # ── content：富内容块 ──
         content_blocks: list[dict[str, Any]] = []
 
-        # 所有工具的结果用 resource/text/plain 展示（保留换行和缩进）
-        # text 类型会吞掉换行变为单行，resource 才能正确保留格式
+        # 所有工具的结果统一用 resource/text/plain 展示（保留换行和缩进）
         # read_file 跳过——它用专用 resource 代码块展示文件内容
         if display_str and tool_name not in ("read_file",):
-            content_blocks.append({
-                "type": "resource",
-                "resource": {
-                    "uri": "inline://tool-output",
-                    "mimeType": "text/plain",
-                    "text": display_str,
-                },
-            })
+            content_blocks.append(_text_block(display_str))
 
         # read_file 额外加 resource 代码块
         if tool_name == "read_file" and status != "failed":
             read_path = self._last_read_path or "(inline)"
+            mime = self._guess_mime(read_path) if read_path != "(inline)" else "text/plain"
             content_blocks.append({
-                "type": "resource",
-                "resource": {
-                    "uri": f"file://{read_path}",
-                    "mimeType": self._guess_mime(read_path) if read_path != "(inline)" else "text/plain",
-                    "text": result_str,
+                "type": "content",
+                "content": {
+                    "type": "resource",
+                    "resource": {"uri": f"file://{read_path}", "mimeType": mime, "text": result_str},
                 },
             })
 
@@ -615,15 +658,18 @@ class ACPServer:
                 with open(write_path, encoding="utf-8", errors="replace") as f:
                     file_content = f.read()
                 content_blocks.append({
-                    "type": "resource",
-                    "resource": {
-                        "uri": f"file://{write_path}",
-                        "mimeType": self._guess_mime(write_path),
-                        "text": file_content,
+                    "type": "content",
+                    "content": {
+                        "type": "resource",
+                        "resource": {
+                            "uri": f"file://{write_path}",
+                            "mimeType": self._guess_mime(write_path),
+                            "text": file_content,
+                        },
                     },
                 })
 
-        # edit_file 加 diff 块
+        # edit_file 加 diff 块（ToolCallContent.diff；path 必须是绝对路径）
         if tool_name == "edit_file" and status == "completed" and self._last_edit_args:
             args = self._last_edit_args
             old_text = args.get("old_string", "")
@@ -632,25 +678,38 @@ class ACPServer:
             if old_text and new_text and file_path:
                 content_blocks.append({
                     "type": "diff",
-                    "path": file_path,
+                    "path": os.path.abspath(str(file_path)),
                     "oldText": old_text,
                     "newText": new_text,
                 })
 
+        update: dict[str, Any] = {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": self._tool_call_id_for_result(tool_name, tool_call_id),
+            "status": status,
+        }
         if content_blocks:
-            notification["update"]["content"] = content_blocks
+            update["content"] = content_blocks
 
-        self._send_notification("session/update", notification)
+        self._send_notification("session/update", {"sessionId": self._session_id, "update": update})
 
-    def _tool_call_id(self, tool_name: str) -> str:
-        """生成唯一的 toolCallId，并记录到活跃表供 result 阶段回查"""
+    def _tool_call_id(self, tool_name: str, tool_call_id: str = "") -> str:
+        """toolCallId：优先用 fp-core 传入的真实 call id（与 ON_TOOL_RESULT 同值）→ 天然配对。
+
+        旧实现以 tool_name 为键缓存，并行同名调用（如两个 bash）会互相覆盖，
+        导致第一条的 result 更新到第二条 tool_call 上。现按真实 id 配对。
+        """
+        if tool_call_id:
+            return tool_call_id
         self._tool_call_counter += 1
         call_id = f"fp_{tool_name}_{self._tool_call_counter}"
         self._active_tool_call_ids[tool_name] = call_id
         return call_id
 
-    def _tool_call_id_for_result(self, tool_name: str) -> str:
-        """取最近一次同名 tool_call 的 ID，用于配对 tool_call_update"""
+    def _tool_call_id_for_result(self, tool_name: str, tool_call_id: str = "") -> str:
+        """result 阶段取配对 id（与 call 阶段同一来源；缺失时退回同名最近一次）。"""
+        if tool_call_id:
+            return tool_call_id
         return self._active_tool_call_ids.get(tool_name, f"fp_{tool_name}_unknown")
 
     @staticmethod
@@ -852,7 +911,15 @@ class ACPServer:
                 await asyncio.sleep(0.05)
                 self._send_available_commands()
         except asyncio.CancelledError:
-            self._send_result(req_id, None)
+            # session/prompt 的 result 必须含 stopReason（null 非法）；其余方法
+            # （如 reload handoff 探针）无合法 result 定义，保留 null 语义。
+            if method == "session/prompt":
+                self._send_result(req_id, {"stopReason": "cancelled"})
+            else:
+                self._send_result(req_id, None)
+        except _ACPRPCError as e:
+            self._log(f"⚠️  {method} 协议错误 [{e.code}]: {e.message}")
+            self._send_error(req_id, e.code, e.message)
         except Exception as e:
             self._log(f"❌  处理 {method} 失败: {e}")
             traceback.print_exc(file=sys.stderr)
@@ -867,7 +934,6 @@ class ACPServer:
             "session/prompt": self._handle_session_prompt,
             "session/list": self._handle_session_list,
             "session/commands": self._handle_session_commands,
-            "session/set_mode": self._handle_session_set_mode,
             "session/ping": self._handle_session_ping,
         }
         return handlers.get(method)
@@ -940,9 +1006,23 @@ class ACPServer:
         os.environ[_CLIENT_CAPS_ENV] = json.dumps(caps_d, ensure_ascii=False)
         self._log(f"客户端 elicitation: form={self._client_elicitation['form']} url={self._client_elicitation['url']}")
 
+        # ── 协议版本协商 ──
+        # 客户端声明它支持的版本，agent 回自己能用的版本（不匹配由客户端决定
+        # 是否继续）。此前无条件回本端版本，等于静默无视客户端声明。
+        requested = params.get("protocolVersion")
+        negotiated = (
+            requested
+            if isinstance(requested, int) and requested in _SUPPORTED_PROTOCOL_VERSIONS
+            else ACP_PROTOCOL_VERSION
+        )
+        if requested is not None and negotiated != requested:
+            self._log(f"协议版本协商: 客户端请求 v{requested}，本端仅支持 v{negotiated}")
+
         return {
-            "protocolVersion": ACP_PROTOCOL_VERSION,
+            "protocolVersion": negotiated,
             "agentCapabilities": {
+                # 已实现历史回放（session/load 先回放 user/agent chunk 再响应），
+                # 故诚实声明 True。
                 "loadSession": True,
                 "sessionCapabilities": {
                     "list": {},
@@ -960,10 +1040,67 @@ class ACPServer:
             "agentInfo": {
                 "name": "fp",
                 "title": "FP",
-                "version": "0.1.0",
+                "version": _agent_version(),
             },
             "authMethods": [],
         }
+
+    def _apply_session_cwd(self, cwd: str) -> None:
+        """记录并应用会话根目录（规范：cwd 是会话根、相对路径解析基准）。
+
+        此前实现完全忽略 params.cwd，导致 IDE 在项目 A 里对话、工具却在 agent
+        自身进程 cwd 里读写文件（跨项目误伤）。此处 chdir 到会话根，使相对路径
+        落在 cwd 之下；绝对路径不受影响。
+        """
+        target = os.path.abspath(cwd)
+        if not os.path.isdir(target):
+            raise _ACPRPCError(_RPC_INVALID_PARAMS, f"会话 cwd 不存在或不是目录: {cwd}")
+        if os.getcwd() != target:
+            try:
+                os.chdir(target)
+            except OSError as e:
+                raise _ACPRPCError(_RPC_INTERNAL_ERROR, f"无法切换到会话 cwd {target}: {e}") from e
+        self._session_cwd = target
+        self._log(f"会话 cwd: {target}")
+
+    def _replay_history(self, session_id: str) -> None:
+        """把历史会话回放给客户端（session/load 响应之前必须完成）。
+
+        规范 MUST：load 时用 session/update 把整个会话流给客户端，否则客户端
+        本地状态为空、与 agent 侧上下文不一致（此前只回 sessionId 就响应）。
+        system/tool 消息不回放；同一角色的连续片段各自成一条消息（messageId 不同），
+        符合「messageId 变化即新消息」的约定。
+        """
+        try:
+            history = portal.ctl.sessions.read_messages(session_id) or []
+        except Exception as e:  # 读取失败不应让 load 整体失败
+            self._log(f"读取会话历史失败，跳过回放: {e}")
+            return
+        replayed = 0
+        for msg in history:
+            role = msg.get("role")
+            content = msg.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            if role == "user":
+                kind = "user_message_chunk"
+            elif role == "assistant":
+                kind = "agent_message_chunk"
+            else:
+                continue
+            self._send_notification(
+                "session/update",
+                {
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": kind,
+                        "messageId": str(uuid.uuid4()),
+                        "content": {"type": "text", "text": content},
+                    },
+                },
+            )
+            replayed += 1
+        self._log(f"会话历史回放: {replayed} 条")
 
     async def _handle_session_new(self, params: dict[str, Any]) -> dict[str, Any]:
         """
@@ -974,6 +1111,12 @@ class ACPServer:
 
         参考: https://agentclientprotocol.com/protocol/v1/session-setup
         """
+        # 规范 MUST：cwd 是会话根目录，决定相对路径解析基准
+        cwd = params.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            raise _ACPRPCError(_RPC_INVALID_PARAMS, "session/new 缺少必填参数 cwd（会话根目录绝对路径）")
+        self._apply_session_cwd(cwd)
+
         info = portal.ctl.sessions.new()
         self._session_id = info.session_id
         self._log(f"创建新会话: {info.session_id}")
@@ -993,19 +1136,31 @@ class ACPServer:
         # ACP v1 使用 camelCase
         session_id = params.get("sessionId") or params.get("session_id", "")
         if not session_id:
-            return {"sessionId": portal.run.status.session_id}
+            raise _ACPRPCError(_RPC_INVALID_PARAMS, "session/load 缺少必填参数 sessionId")
+
+        cwd = params.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            raise _ACPRPCError(_RPC_INVALID_PARAMS, "session/load 缺少必填参数 cwd（会话根目录绝对路径）")
+        self._apply_session_cwd(cwd)
 
         info = portal.ctl.sessions.load(session_id)
-        if info is not None:
-            self._session_id = info.session_id
-            self._log(f"恢复会话: {info.session_id}")
-            # 注意：命令注册通知在 _dispatch 中响应之后发送
-            return {"sessionId": info.session_id}
+        if info is None:
+            # 当前内存会话尚未落盘（session/new 后还没产生消息，文件惰性创建）：
+            # 它是合法会话，只是历史为空 —— 若在此报「不存在」，IDE 重连恢复
+            # 一个刚建的空会话会直接失败。
+            if session_id == portal.run.status.session_id:
+                self._session_id = session_id
+                self._log(f"恢复内存态会话（历史为空）: {session_id}")
+                return {"sessionId": session_id}
+            # 规范：真正不存在的会话应报错（此前静默新建空会话，IDE 以为历史已恢复）。
+            raise _ACPRPCError(_RPC_INVALID_PARAMS, f"会话不存在: {session_id}")
 
-        self._log(f"会话不存在: {session_id}，自动创建新会话")
-        new_sid = portal.ctl.sessions.new().session_id
-        self._session_id = new_sid
-        return {"sessionId": new_sid}
+        self._session_id = info.session_id
+        self._log(f"恢复会话: {info.session_id}")
+        # 规范 MUST：响应之前回放全部历史（见 _replay_history）
+        self._replay_history(info.session_id)
+        # 注意：命令注册通知在 _dispatch 中响应之后发送
+        return {"sessionId": info.session_id}
 
     async def _handle_session_list(self, params: dict[str, Any]) -> dict[str, Any]:
         """
@@ -1013,6 +1168,14 @@ class ACPServer:
 
         参考: https://agentclientprotocol.com/protocol/v1/session-list
         """
+        # 规范：cwd 为必填参数（用于按工作目录过滤会话）。
+        # 限制：会话 meta 目前未持久化 cwd，无法真正按目录过滤，此处只接受并
+        # 回填当前会话 cwd；过滤能力待 fp-core 在 meta 中记录 cwd 后补（二期）。
+        cwd = params.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            raise _ACPRPCError(_RPC_INVALID_PARAMS, "session/list 缺少必填参数 cwd（会话根目录绝对路径）")
+        list_cwd = self._session_cwd or os.path.abspath(cwd)
+
         all_sessions = portal.ctl.sessions.list()
         current_sid = portal.run.status.session_id
 
@@ -1027,6 +1190,7 @@ class ACPServer:
 
             session_entry = {
                 "sessionId": sid,
+                "cwd": list_cwd,
                 "title": title[:80] if title else None,
                 "updatedAt": meta.get("updated", meta.get("created", "")),
                 "_meta": {
@@ -1061,10 +1225,16 @@ class ACPServer:
         # ── 并发防护：同一时间只能处理一个 prompt ──
         if self._processing_prompt:
             self._log("⚠️  并发 prompt 请求被拒绝")
-            return {"stopReason": "cancelled"}
+            # stopReason="cancelled" 只能由 session/cancel 产生；并发冲突是请求
+            # 错误，回 cancelled 会让客户端误判「用户取消了本次回答」。
+            raise _ACPRPCError(_RPC_INVALID_REQUEST, "已有 prompt 正在处理中，请先 session/cancel 或等待完成")
         self._processing_prompt = True
 
-        # ── 快照当前 sessionId，防止在异步处理期间被 session/new 修改 ──
+        # ── 校验并快照 sessionId，防止在异步处理期间被 session/new 修改 ──
+        # 此前完全忽略 params.sessionId（全局单一会话），多会话必然串话。
+        req_sid = params.get("sessionId")
+        if isinstance(req_sid, str) and req_sid and self._session_id and req_sid != self._session_id:
+            raise _ACPRPCError(_RPC_INVALID_PARAMS, f"未知会话: {req_sid}（当前会话 {self._session_id}）")
         sid = self._session_id
 
         try:
@@ -1091,6 +1261,7 @@ class ACPServer:
                 if buf.strip():
                     self._send_message_notification(buf, session_id=sid)
 
+                self._clear_plan(sid)
                 return {"stopReason": "cancelled"}
             finally:
                 self._current_task = None
@@ -1107,14 +1278,11 @@ class ACPServer:
             elif reply_text:
                 self._send_message_notification(reply_text, session_id=sid)
 
+            # plan 条目必须走完生命周期，不能只发开始态
+            self._clear_plan(sid)
             return {"stopReason": "end_turn"}
         finally:
             self._processing_prompt = False
-
-    async def _handle_session_set_mode(self, params: dict[str, Any]) -> dict[str, Any]:
-        """切换 Agent 模式（预留）"""
-        mode = params.get("mode", "normal")
-        return {"mode": mode}
 
     async def _handle_session_ping(self, params: dict[str, Any]) -> dict[str, Any]:
         """ACP v1 心跳保持"""
@@ -1209,6 +1377,19 @@ class ACPServer:
                     header += f" ({mime})"
                 parts.append(f"{header}\n{text}")
 
+            elif block_type == "resource_link":
+                # 规范 baseline MUST：所有 agent 必须支持 text 与 resource_link。
+                # 此前该类型被静默丢弃 → IDE 里 @文件 引用在 prompt 中凭空消失。
+                # resource_link 只给指针不给内容，需提示 agent 自行读取。
+                uri = block.get("uri", "")
+                name = block.get("name") or uri
+                mime = block.get("mimeType", "")
+                detail = f"[文件引用: {name} → {uri}"
+                if mime:
+                    detail += f" ({mime})"
+                detail += "]（仅引用，未附带内容；如需内容请用 read_file 工具读取该路径）"
+                parts.append(detail)
+
         return "\n".join(parts)
 
     def _build_messages_text(self, messages: list[dict[str, Any]]) -> str:
@@ -1259,9 +1440,17 @@ class ACPServer:
         except Exception as e:
             self._log(f"注册斜杠命令失败: {e}")
 
-    def _send_plan_notification(self, session_id: str | None = None) -> None:
-        """发送 ACP v1 plan 更新通知"""
+    _PLAN_STATUSES = ("pending", "in_progress", "completed")
+
+    def _send_plan_notification(self, session_id: str | None = None, *, status: str = "in_progress") -> None:
+        """发送 ACP v1 plan 更新通知
+
+        PlanEntryStatus 枚举只有 pending/in_progress/completed（旧实现的 "running" 非法，
+        会让客户端 schema 校验失败）。计划条目必须走完生命周期，不能只发开始态。
+        """
         sid = session_id or self._session_id
+        if status not in self._PLAN_STATUSES:
+            status = "in_progress"
         self._send_notification(
             "session/update",
             {
@@ -1270,27 +1459,43 @@ class ACPServer:
                     "sessionUpdate": "plan",
                     "entries": [
                         {
-                            "content": "FP 正在思考...",
+                            "content": "FP 正在处理请求...",
                             "priority": "high",
-                            "status": "running",
+                            "status": status,
                         },
                     ],
                 },
             },
         )
 
-    def _send_message_notification(self, text: str, session_id: str | None = None) -> None:
-        """通过 agent_message_chunk 通知发送回复内容"""
-        import uuid
+    def _clear_plan(self, session_id: str | None = None) -> None:
+        """清空计划（取消/失败路径），避免计划永久停在 in_progress。"""
+        self._send_notification(
+            "session/update",
+            {
+                "sessionId": session_id or self._session_id,
+                "update": {"sessionUpdate": "plan", "entries": []},
+            },
+        )
 
+    def _send_message_notification(
+        self, text: str, session_id: str | None = None, message_id: str | None = None
+    ) -> None:
+        """通过 agent_message_chunk 通知发送回复内容
+
+        messageId 语义（规范）：同一条消息的所有 chunk 共享同一 id，id 变化 = 新消息开始。
+        故由 _make_acp_io 为每个用户回合生成一个 id 并全程复用 —— 旧实现每 chunk 新建
+        uuid，会把一条回复在客户端切成多条独立消息。
+        """
         sid = session_id or self._session_id
+        mid = message_id or f"msg_{uuid.uuid4().hex[:12]}"
         self._send_notification(
             "session/update",
             {
                 "sessionId": sid,
                 "update": {
                     "sessionUpdate": "agent_message_chunk",
-                    "messageId": f"msg_{uuid.uuid4().hex[:12]}",
+                    "messageId": mid,
                     "content": {
                         "type": "text",
                         "text": text,
@@ -1300,10 +1505,14 @@ class ACPServer:
         )
 
     def _make_acp_io(self, sid: str | None) -> ACPIO:
-        """构造 per-prompt ACPIO；客户端声明 elicitation.form 时注入带内 elicit 回调。"""
+        """构造 per-prompt ACPIO；客户端声明 elicitation.form 时注入带内 elicit 回调。
+
+        整轮共用一个 messageId（见 _send_message_notification 的语义说明）。
+        """
+        message_id = f"msg_{uuid.uuid4().hex[:12]}"
 
         def send(text: str) -> None:
-            self._send_message_notification(text, session_id=sid)
+            self._send_message_notification(text, session_id=sid, message_id=message_id)
 
         if not self._client_elicitation.get("form"):
             return ACPIO(send_chunk=send)
