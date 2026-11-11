@@ -139,6 +139,9 @@ class PeerService:
         self._calls: dict[str, PendingCall] = {}
         self._idem = IdempotencyWindow()  # 重投/重放去重（at-least-once → 恰好处理一次）
         self._last_housekeeping = 0.0
+        # 每个邻居最后一次**来信**的时间戳（发件方自律 require 用：判定"回了没有"）。
+        # 纯本地记账，不上线、不跨进程——对方看不见也不需要知道。
+        self._inbound_at: dict[str, float] = {}
 
     # ── 发现 ─────────────────────────────────────────────
 
@@ -283,9 +286,17 @@ class PeerService:
                 degraded=self.is_degraded(env.from_),
             )
             self._calls[call.id] = call
+            self._inbound_at[env.from_] = time.time()  # 记账：此人来过（require 边沿判定的事实来源）
             self._inject("peer_ring", call.ring(), wake=True)  # 铃声：只提示不打断；空闲则唤醒一轮
             n += 1
         return n
+
+    def last_inbound_from(self, name: str) -> float:
+        """某邻居最后一次来信的时间戳（0.0 = 从未）。
+
+        ``require`` 判"回了没有"的唯一事实来源：纯本地记账，不需要监听对方进程。
+        """
+        return self._inbound_at.get(normalize_peer_name(name), 0.0)
 
     def housekeeping(self, *, now: float | None = None, min_interval: float = 300.0) -> int:
         """低频维护：清理 transport 里过期的历史消息文件。

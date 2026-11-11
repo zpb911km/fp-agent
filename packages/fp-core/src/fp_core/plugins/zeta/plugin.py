@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import time
 from pathlib import Path
@@ -42,7 +43,7 @@ from fp_core.plugins.zeta.discovery import (
     infer_business,
     refresh_heartbeat,
 )
-from fp_core.plugins.zeta.domain import NeighborCard, neighbor_brief, normalize_peer_name
+from fp_core.plugins.zeta.domain import NeighborCard, PeerStatus, neighbor_brief, normalize_peer_name
 from fp_core.plugins.zeta.peer import PeerService
 from fp_core.plugins.zeta.transport import DirTransport
 from fp_core.tools import ToolRegistry
@@ -73,15 +74,49 @@ PEER_SEND_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "peer_send",
-        "description": "主动联系一个邻居实例（投递一条消息；对方离线则留话）。",
+        "description": (
+            "主动联系一个邻居实例（投递一条消息；对方离线则留话）。"
+            "投递是异步瞬时的，永不阻塞——所以任何时候想联系就发，不必先等。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "to": {"type": "string", "description": "邻居名（见 peer_list；可带 peer: 前缀，会自动剥掉）"},
                 "topic": {"type": "string", "description": "话题大类，如 contract/task/chat"},
                 "body": {"type": "string", "description": "正文"},
+                "require": {
+                    "type": "boolean",
+                    "description": (
+                        "是否需要对方回答。true = 只约束**我自己**：由我的 zeta 监视"
+                        "「对方已空闲却仍未回音」这个可观测事实，一旦成立就提醒我一次"
+                        "（单次，不反复催）。对方收不到这个标记、也看不见它——"
+                        "它不是催对方，是免去我自己轮询的记账。"
+                    ),
+                },
             },
             "required": ["to", "body"],
+        },
+    },
+}
+
+ALARM_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "alarm",
+        "description": (
+            "给自己设一个**本地**闹钟：delay 秒后把 text 注入自己的空闲泵，把自己叫醒。"
+            "不精确（秒级抖动）、不跨进程、随进程消失——它是「时间观念」，不是定时任务。"
+            "用途：①等了很久的事该回头看；②本轮已无事可做，想稍后再查；"
+            "③给正在 wait 的长任务设一个自查点（闹钟会打断 wait）。"
+            "**等待有对象时用 wait，没有对象时才用 alarm；不要用 bash sleep 假装在忙。**"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "delay": {"type": "number", "description": "多少秒后叫醒自己（>0）"},
+                "text": {"type": "string", "description": "叫醒时要注入的那句话（写给未来的自己看）"},
+            },
+            "required": ["delay", "text"],
         },
     },
 }
@@ -157,6 +192,18 @@ class ZetaPlugin(Plugin):
         self._gc_interval = 24 * 3600.0  # 共享目录卫生：启动一次 + 每日一次
         self._last_gc = 0.0
         self._disabled_reason: str | None = None
+        # ── 时间观念：本地闹钟（alarm）────────────────────────────
+        # 只存在于本进程；进程亡则闹钟亡——这正是"不跨进程"的含义，不是缺陷。
+        self._alarms: set[asyncio.Task[None]] = set()
+        self._alarm_max = 24 * 3600.0  # 上界：防止 LLM 设一个"永久"闹钟（等于没设）
+        # ── 回执自律：require 记账（发件方视角，对方不可见）──────
+        self._requires: list[dict[str, Any]] = []
+        self._require_grace = 60.0  # 宽限：刚发出不判"忘"，避免与"对方刚要回"抢跑
+        self._require_ttl = 24 * 3600.0  # 过期：太久远的 require 不再提醒（否则成幽灵）
+        # ── 忙/闲状态发布（require 的唯一硬依赖）──────────────────
+        # 只报自己，不监听别人。外部状态机仍只有忙/闲：wait 属**忙**
+        # （因此 require 不会被"正在礼让"误触发；对方在 wait 时本来也随时可被电话唤醒）。
+        self._busy = False
 
     # ── 生命周期 ─────────────────────────────────────
 
@@ -168,6 +215,9 @@ class ZetaPlugin(Plugin):
             return
         lifecycle.register(LifecycleHook.ON_INIT, self._on_init, priority=60, name="zeta_init")
         lifecycle.register(LifecycleHook.ON_SHUTDOWN, self._on_shutdown, priority=60, name="zeta_shutdown")
+        # 忙/闲状态发布：只在两个边界翻转，不侵入工具执行
+        lifecycle.register(LifecycleHook.ON_INPUT, self._hook_busy, priority=60, name="zeta_busy")
+        lifecycle.register(LifecycleHook.ON_TURN_END, self._hook_idle, priority=60, name="zeta_idle")
 
     def on_unregister(self):
         self._unregister_tools()
@@ -206,10 +256,31 @@ class ZetaPlugin(Plugin):
         logger.info(f"[zeta] 邻居通信已启用: {name} (workspace={ws})")
         return True
 
+    def _published_status(self) -> PeerStatus:
+        """对外发布的状态：只反映"我在不在干活"，全局只有忙/闲两态。
+
+        ``wait`` 算**忙**——因为任何工具都可能耗时很久，框架分不清"在等"和"在算"。
+        代价是可观测性，收益是判据统一：可达性由泵保证（wait 会被电话礼让），
+        所以"忙"不会变成"不可达"。
+        """
+        if self._card is not None and self._card.status == PeerStatus.AWAY:
+            return PeerStatus.AWAY  # 显式 away（用户离开）不被忙闲覆盖
+        return PeerStatus.BUSY if self._busy else PeerStatus.IDLE
+
+    async def _hook_busy(self, ctx: HookContext, **kwargs: Any) -> HookContext:
+        self._busy = True
+        return ctx
+
+    async def _hook_idle(self, ctx: HookContext, **kwargs: Any) -> HookContext:
+        self._busy = False
+        return ctx
+
     def _stop(self) -> None:
         if self._task is not None:
             self._task.cancel()
             self._task = None
+        self._stop_alarms()
+        self._requires.clear()
         if self._backend is not None and self._card is not None:
             with contextlib.suppress(OSError):
                 self._backend.withdraw(self._card.name)
@@ -225,8 +296,9 @@ class ZetaPlugin(Plugin):
                 if self._service is not None:
                     self._service.poll()
                     self._service.housekeeping()  # 低频清理过期历史消息（内部节流）
+                    self._check_requires()  # 回执自律：对方已空闲却未回 → 提醒我一次
                 if self._backend is not None and self._card is not None:
-                    refresh_heartbeat(self._card)
+                    refresh_heartbeat(self._card, status=self._published_status())
                     self._backend.publish(self._card)
                 self._maybe_gc()
             except asyncio.CancelledError:
@@ -272,6 +344,7 @@ class ZetaPlugin(Plugin):
                 ("peer_answer", PEER_ANSWER_TOOL, self._exec_peer_answer),
                 ("peer_propose", PEER_PROPOSE_TOOL, self._exec_peer_propose),
                 ("peer_ack", PEER_ACK_TOOL, self._exec_peer_ack),
+                ("alarm", ALARM_TOOL, self._exec_alarm),
             ):
                 registry.register_tool(nm, cast(OpenAISchema, tool), fn)
                 self._registered.append(nm)
@@ -334,7 +407,113 @@ class ZetaPlugin(Plugin):
             return "需要 to 与 body。可用 peer_list 查看邻居名。"
         msg_id, online = self._service.send(to, body, topic=topic)
         state = "在线" if online else "离线（已留话，待其上线）"
-        return f"已投递给 peer:{to}（{state}）；msg_id={msg_id}"
+        out = f"已投递给 peer:{to}（{state}）；msg_id={msg_id}"
+        if bool(params.get("require", False)):
+            # 只登记在我这边：对方收不到这个标记（见 PEER_SEND_TOOL 描述）
+            self._requires.append({
+                "to": to,
+                "body": body,
+                "sent_at": time.time(),
+                "msg_id": msg_id,
+                "was_online": online,  # 发送时是否在线：用于区分「已下线」与「至今未上线」
+            })
+            out += "\n已登记回执自律（require）：等它空闲仍未回音、或已下线时，我会被提醒一次。"
+        return out
+
+    # ── 时间观念：alarm ──────────────────────────────
+
+    async def _exec_alarm(self, params: dict[str, Any]) -> str:
+        """给自己设本地闹钟：delay 秒后把 text 注入空闲泵。"""
+        raw_delay = params.get("delay")
+        text = str(params.get("text") or "").strip()
+        if raw_delay is None or not text:
+            return json.dumps({"status": "error", "reason": "需要 delay(>0) 与 text"}, ensure_ascii=False)
+        try:
+            delay = float(raw_delay)
+        except (TypeError, ValueError):
+            return json.dumps({"status": "error", "reason": "delay 必须是数字"}, ensure_ascii=False)
+        if delay != delay or delay <= 0:  # NaN 也拒
+            return json.dumps({"status": "error", "reason": "delay 必须 > 0"}, ensure_ascii=False)
+        delay = min(delay, self._alarm_max)
+        task = asyncio.create_task(self._alarm_after(delay, text))
+        self._alarms.add(task)
+        task.add_done_callback(self._alarms.discard)
+        return json.dumps({"status": "scheduled", "delay": delay, "text": text}, ensure_ascii=False)
+
+    async def _alarm_after(self, delay: float, text: str) -> None:
+        """到点 → 注入空闲泵（wake=True：否则等于没设）。
+
+        本地、不精确、随进程亡：不跨进程，也不做持久化——
+        进程没了就不需要被叫醒，这正是"自己的时间观念"的含义。
+        """
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            raise
+        jobs.inject_event("alarm", text, wake=True)
+
+    def _stop_alarms(self) -> None:
+        for task in list(self._alarms):
+            task.cancel()
+        self._alarms.clear()
+
+    # ── 回执自律：require ────────────────────────────
+
+    def _check_requires(self) -> None:
+        """单次边沿触发，三态分离：**离线 → 报**；在线但忙 → 静默；在线且空闲未回 → 报。
+
+        判据全是可观测事实（注册表 scan 已按心跳 TTL=90s 过滤 + 本地来信时间戳），
+        **不判死活**：只陈述「不在线 / 空闲 / 忙」这三种观测结果，不下"它死了"的判决。
+        离线必须报——否则"对方被系统性错误干掉、我还在等"这类事故永远无人发现。
+        在线但在忙（含正在 wait）则静默：它随时可被电话唤醒，提醒没有意义。
+        """
+        if not self._requires or self._service is None or self._backend is None:
+            return
+        now = time.time()
+        online: set[str] = set()
+        idle: set[str] = set()
+        try:
+            cards = self._backend.scan()
+            online = {c.name for c in cards}
+            idle = {c.name for c in cards if c.status == PeerStatus.IDLE}
+        except Exception as exc:  # noqa: BLE001 — 记账失败绝不拖垮服务循环
+            logger.warning(f"[zeta] require 判定读取注册表失败: {exc}")
+            return
+        keep: list[dict[str, Any]] = []
+        for item in self._requires:
+            to = item["to"]
+            if now - item["sent_at"] < self._require_grace:
+                keep.append(item)  # 宽限内：不判忘（避免与"对方刚要回"抢跑）
+                continue
+            if now - item["sent_at"] > self._require_ttl:
+                continue  # 过期幽灵：静默注销
+            if item.get("_reminded"):
+                continue  # 已提醒过：单次边沿，不持续催
+            if self._service.last_inbound_from(to) >= item["sent_at"]:
+                continue  # 已回音：清账
+            if to not in online:
+                # 离线也是"可观测事实"：不判死，但必须报——否则系统性错误无从发现。
+                # 措辞只陈述观测结果，不推测原因（不写"崩溃/挂了"，那是判决不是事实）。
+                state = (
+                    "已下线（心跳过期 >90s）" if item.get("was_online") else "始终未上线（留话可能仍躺在它的收件箱）"
+                )
+                head = f"peer:{to} {state}，对你「{item['body'][:40]}」未回音。"
+                jobs.inject_event(
+                    "peer_no_reply",
+                    head + "（只提醒这一次；勿假定它仍在工作，可另作安排）",
+                    wake=True,
+                )
+                item["_reminded"] = True
+                continue  # 已提醒 → 注销
+            if to not in idle:
+                item["_seen_busy"] = True
+                keep.append(item)  # 在线但在忙（含 wait）：静默等待
+                continue
+            head = f"peer:{to} 现在空闲，但对你「{item['body'][:40]}」仍未回音——可能忘了。"
+            jobs.inject_event("peer_no_reply", head + "（只提醒这一次；可重发或另作安排）", wake=True)
+            item["_reminded"] = True
+            continue  # 已提醒 → 注销
+        self._requires = keep
 
     async def _exec_peer_answer(self, params: dict[str, Any]) -> str:
         if self._service is None:

@@ -44,6 +44,9 @@ from fp_core.core.jobs import (
 from fp_core.core.jobs import (
     start_job as start_job,
 )
+from fp_core.core.jobs import (
+    wait_for_pump as wait_for_pump,
+)
 
 # ── ask_user ────────────────────────────────────────────
 
@@ -146,7 +149,11 @@ async def _ask_user(params: dict[str, Any]) -> str:
 
 
 async def _wait_job(params: dict[str, Any]) -> str:
-    """阻塞等待后台任务完成（pull 正确形态：精确在完成一刻返回，不 sleep 轮询）。"""
+    """形忙实等：等待后台任务终态，但可被泵消息礼让。
+
+    契约见 tests/test_wait_yield.py：礼让零损失（终态由 _finalize 注入），
+    故不引入任何新状态——只改"循环何时回到环顶"。
+    """
     job_id = str(params.get("job_id") or "").strip()
     if not job_id:
         return json.dumps({"status": "error", "error": "job_id 必填"}, ensure_ascii=False)
@@ -167,31 +174,45 @@ async def _wait_job(params: dict[str, Any]) -> str:
     if job.task is None:
         return json.dumps({"status": job.status, "job_id": job_id}, ensure_ascii=False)
 
+    # ── 形忙实等（2026-11）───────────────────────────────
+    # 仍是普通工具调用（外层仍处"忙"），只让**循环提前回到环顶**。
+    # job 终态 与 泵消息 谁先到算谁：shield 保证"取消等待"不传播到 job.task。
+    job_waiter = asyncio.ensure_future(asyncio.shield(job.task))
+    pump_waiter = asyncio.ensure_future(wait_for_pump())
+    done: set[asyncio.Future[Any]] = set()
+    woken_by_pump = False
     try:
-        if timeout_f is not None:
-            await asyncio.wait_for(asyncio.shield(job.task), timeout=timeout_f)
-        else:
-            await job.task
-    except TimeoutError:
-        return json.dumps(
-            {"status": "still_running", "job_id": job_id, "elapsed": round(time.time() - job.started_at, 1)},
-            ensure_ascii=False,
-        )
-    except asyncio.CancelledError:
-        # 自身被中断（Ctrl+C）：任务是否存活由 kill/清算决定，如实回报
-        return json.dumps(
-            {"status": "wait_interrupted", "job_id": job_id, "job_status": job.status},
-            ensure_ascii=False,
-        )
-    except Exception as e:  # noqa: BLE001 — 任务失败以状态回报，不抛给 LLM
-        return json.dumps({"status": "failed", "job_id": job_id, "error": str(e)}, ensure_ascii=False)
+        done, _ = await asyncio.wait({job_waiter, pump_waiter}, timeout=timeout_f, return_when=asyncio.FIRST_COMPLETED)
+        woken_by_pump = pump_waiter in done  # 精确归因：别把"job 侧完成"说成"被礼让"
+    finally:
+        # 取消**不吞**：把自己被取消如实传播给上层（agent 的取消即取消整轮）；
+        # 而 job 因 shield 不受影响——"取消等待"≠"取消任务"。
 
+        # 收回探测器：pump_waiter 每次必收；job_waiter 只取消 shield 壳（job.task 不受影响）
+        pump_waiter.cancel()
+        if not job_waiter.done():
+            job_waiter.cancel()
+        await asyncio.gather(pump_waiter, job_waiter, return_exceptions=True)
+
+    # 失败以状态回报，不抛给 LLM（job 自身异常在 _finalize 里已落 status）
     if job.status == "done":
         return json.dumps(
             {"status": "done", "job_id": job_id, "result_file": job.result_path},
             ensure_ascii=False,
         )
-    return json.dumps({"status": job.status, "job_id": job_id, "error": job.error}, ensure_ascii=False)
+    if job.status != "running":
+        return json.dumps({"status": job.status, "job_id": job_id, "error": job.error}, ensure_ascii=False)
+
+    # 此时 job 仍在运行：或超时，或被泵礼让。两者都**不取消、不丢结果**——
+    # job 终态由 _finalize 经 inject_event 送进泵，与本次返回值无关。
+    payload: dict[str, Any] = {
+        "status": "yielded" if woken_by_pump else "still_running",
+        "job_id": job_id,
+        "elapsed": round(time.time() - job.started_at, 1),
+    }
+    if woken_by_pump:
+        payload["note"] = "泵中有新消息，循环提前回顶；job 仍在运行，终态会另行注入，勿重复确认"
+    return json.dumps(payload, ensure_ascii=False)
 
 
 async def _kill_job(params: dict[str, Any]) -> str:
@@ -341,8 +362,11 @@ PLUGIN_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "wait_job",
-            "description": "阻塞等待某个后台任务完成并取回结果文件路径。"
-            "精确在完成一刻返回（无轮询）。任务超时未完成会返回 still_running，可再次等待。",
+            "description": "等待某个后台任务完成（形忙实等：外层仍处忙，但泵里有新消息时会礼让）。"
+            "精确在完成一刻返回（无轮询）。"
+            "返回 yielded = 被泵中消息礼让、job 仍在跑（终态会另行注入，勿重复确认），可再次等待；"
+            "返回 still_running = 超时未完成，可再次等待。"
+            "等待期间请用 alarm 设定自查时间点，不要用 sleep 轮询。",
             "parameters": {
                 "type": "object",
                 "properties": {

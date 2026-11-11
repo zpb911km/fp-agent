@@ -61,6 +61,26 @@ class InjectItem:
 
 pending_inject: deque[InjectItem] = deque()
 
+# 泵信号：队列"由空变非空"的进程内可等待句柄。
+# 唯一用途是让**长时间等待类工具**（wait_job）礼让 —— 形忙实等：工具仍是
+# 普通工具调用（外层看仍是"忙"），但循环可提前回环顶把注入消费掉。
+# 注意：信号只是提示，**判据恒以 pending_inject 为准**（见 ``has_pending`` /
+# ``wait_for_pump``），故被外部置脏不会造成误报（自纠正）。
+#
+# 实现取舍：用 future 集合而非 asyncio.Event。Event 在首次 wait() 时绑定
+# event loop，跨 loop 复用（多测试/多实例）会 RuntimeError；future 由等待方
+# 在自己的 loop 里创建，天然安全，且没有"set/clear 状态不一致"这类可漏点。
+_pump_waiters: set[asyncio.Future[None]] = set()
+
+
+def _signal_pump() -> None:
+    """唤醒所有礼让等待者（纯提示：不消费队列，消费权在环顶）。"""
+    for fut in tuple(_pump_waiters):
+        if not fut.done():
+            fut.set_result(None)
+    _pump_waiters.clear()
+
+
 # ask 单 flight 锁（防止并行工具同时挂起等人）
 ask_lock = asyncio.Lock()
 
@@ -145,6 +165,29 @@ def inject_event(kind: str, content: str, *, wake: bool = False, human: bool = F
     if not human:
         content = f"{INJECT_MARK}{kind}] {content}"
     pending_inject.append(InjectItem(kind, content, wake))
+    _signal_pump()  # 唤醒礼让等待者（wait）——纯提示，判据仍是队列
+
+
+def has_pending() -> bool:
+    """队列是否非空（wait 礼让的唯一判据；不看 wake 级别）。"""
+    return bool(pending_inject)
+
+
+async def wait_for_pump() -> None:
+    """等到**队列非空**为止（供 wait 类工具礼让）。
+
+    判据恒为 ``pending_inject``；future 只是加速通道，被误唤也不会误报。
+    """
+    if pending_inject:
+        return
+    fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    _pump_waiters.add(fut)
+    try:
+        if pending_inject:  # 双检兜底（与注册之间无 await，正常走不到）
+            return
+        await fut
+    finally:
+        _pump_waiters.discard(fut)
 
 
 def has_pending_wake() -> bool:

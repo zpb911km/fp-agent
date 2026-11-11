@@ -87,7 +87,7 @@ def test_enabled_registers_tools_and_starts(monkeypatch, tmp_path):
 
     asyncio.run(_run())
 
-    assert set(reg.tools) == {"peer_list", "peer_send", "peer_answer", "peer_propose", "peer_ack"}
+    assert set(reg.tools) == {"peer_list", "peer_send", "peer_answer", "peer_propose", "peer_ack", "alarm"}
     assert ZETA_DESCRIPTION in ctx.data["system_prompt_append"]
 
 
@@ -124,7 +124,7 @@ def test_lock_conflict_degrades_visibly(monkeypatch, tmp_path):
         proc.kill()
         proc.wait()
 
-    assert set(reg2.tools) == {"peer_list", "peer_send", "peer_answer", "peer_propose", "peer_ack"}
+    assert set(reg2.tools) == {"peer_list", "peer_send", "peer_answer", "peer_propose", "peer_ack", "alarm"}
     assert any("不可用" in s for s in ctx2.data["system_prompt_append"])
 
 
