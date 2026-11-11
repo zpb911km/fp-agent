@@ -1,0 +1,230 @@
+/* ═══════════════════════════════════════════════════════════
+   FP WebUI — 左侧边栏（DeepSeek 风格）
+   会话列表展开到侧边栏 + 顶栏功能钮收纳。
+   分层：并入 components 层（层序声明见 tokens.css:4），
+   在 components.css 之后、overrides.css 之前引入。
+   ═══════════════════════════════════════════════════════════ */
+@layer components {
+
+/* ── 布局重排：app-container 由纵排改横排（侧边栏 + 主列） ── */
+.app-container {
+  flex-direction: row;
+  align-items: stretch;
+}
+
+.main-col {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;          /* 防止消息区/输入区被侧边栏挤压撑破 */
+  height: 100%;
+}
+
+/* ── 侧边栏本体 ── */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  width: 264px;
+  flex-shrink: 0;
+  min-height: 0;
+  background: var(--bg-secondary);
+  border-right: 4px solid var(--border);
+  z-index: 20;
+  overflow: hidden;                       /* 折叠时宽度收 0，内容不外溢 */
+  transition: width 0.18s ease, transform 0.2s ease;
+}
+.sidebar.collapsed {
+  width: 0;
+  border-right-width: 0;
+}
+
+/* ── 头部：折叠 + 新建 ── */
+.sidebar-head {
+  display: flex;
+  gap: 6px;
+  padding: 10px 10px 8px;
+  flex-shrink: 0;
+}
+.sidebar-head .side-btn { flex-shrink: 0; }
+.sidebar-head .side-new { flex: 1; min-width: 0; }
+
+/* ── 搜索 ── */
+.sidebar-search {
+  padding: 0 10px 8px;
+  flex-shrink: 0;
+}
+.sidebar-search input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #3b4261);
+  background: var(--bg-input, rgba(255, 255, 255, 0.04));
+  color: var(--text, #c0caf5);
+  font-size: clamp(12px, 0.95vw, 14px);
+  outline: none;
+}
+.sidebar-search input:focus {
+  border-color: var(--accent, #7aa2f7);
+}
+.sidebar-search input::placeholder {
+  color: var(--text-muted, #565f89);
+}
+
+/* ── 会话列表（滚动主体） ── */
+.sidebar-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 2px 10px 10px;
+  overscroll-behavior: contain;
+}
+.sidebar-body .session-item { margin-bottom: 3px; }
+
+/* ── 下拉刷新指示（#pullIndicator：搜索框与列表之间，JS 控 hidden/active/ready） ──
+   隐藏态必须显式 [hidden]{display:none}——作者 display:flex 会压过 UA 的
+   [hidden] 规则（经典陷阱）；显示高度用 max-height 过渡，JS unhide 后
+   强制回流再加 .active 以触发过渡。 */
+.pull-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  max-height: 0;
+  padding: 0;
+  overflow: hidden;
+  opacity: 0;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  user-select: none;
+  -webkit-user-select: none;
+  transition: max-height 0.15s ease, opacity 0.15s ease, padding 0.15s ease;
+}
+.pull-indicator[hidden] { display: none; }
+.pull-indicator.active {
+  max-height: 40px;
+  padding: 4px 0 6px;
+  opacity: 1;
+}
+.pull-indicator.ready { color: var(--accent); }
+
+/* ── 刷新钮旋转态（画风对齐 spinner.css：fp-spin keyframes + --fp-spin-* token） ── */
+#refreshBtn .refresh-icon {
+  display: inline-block;
+}
+#refreshBtn .refresh-icon.spinning {
+  /* #227：与新环同步——旧 steps(8) 顿挫是"方块跳帧"时代的遗留，环体用 linear 匀速 */
+  animation: fp-spin var(--fp-spin-period, 0.9s) var(--fp-spin-ease, linear) infinite;
+}
+
+/* 尊重"减少动态效果"偏好：环体停转，改为静态缺口环（仍有"正在加载"语义） */
+@media (prefers-reduced-motion: reduce) {
+  .fp-spin-box, #refreshBtn .refresh-icon.spinning { animation: none; }
+}
+
+/* ── 底部功能区（原顶栏 6 钮中的 4 个收纳于此） ── */
+.sidebar-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px;
+  flex-shrink: 0;
+  border-top: 2px solid var(--border);
+}
+.sidebar-foot .side-btn { flex: 1 1 40%; min-width: 0; }
+
+/* ── 侧边栏按钮（视觉继承 .topbar-btn，见 tokens 变量） ── */
+.side-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: var(--bg-primary);
+  border: 2px solid var(--border);
+  color: var(--text-secondary);
+  min-height: var(--touch-min);
+  padding: 7px 10px;
+  cursor: pointer;
+  font-size: clamp(10px, 1vw, 12px);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  transition: all 0.08s ease;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+  box-shadow: var(--shadow-brutal-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  position: relative;
+}
+.side-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+.side-btn:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+.side-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none !important;
+  box-shadow: var(--shadow-brutal-sm) !important;
+}
+.side-btn.danger:hover { border-color: var(--red); color: var(--red); }
+.side-btn.theme-btn { font-size: 16px; }
+.side-btn.theme-btn:hover { border-color: var(--yellow); }
+
+/* ── 窄屏遮罩（仅窄屏显示；宽屏侧边栏常驻无需遮罩） ── */
+.sidebar-scrim { display: none; }
+
+/* ═══ 响应式 ═══ */
+
+/* 大屏：侧边栏常驻，可折叠（.collapsed 宽度收 0） */
+@media (min-width: 900px) {
+  .sidebar-scrim { display: none !important; }
+}
+
+/* 窄屏（<900px）：侧边栏变 fixed 抽屉，主列占满全宽 */
+@media (max-width: 899px) {
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(84vw, 300px);
+    transform: translateX(-105%);         /* 收起：滑出左侧（留 5% 余量防阴影裁切） */
+    z-index: 120;
+    border-right: 4px solid var(--border);
+    box-shadow: 6px 0 24px rgba(0, 0, 0, 0.5);
+  }
+  .sidebar.open { transform: translateX(0); }
+  .sidebar.collapsed { width: min(84vw, 300px); border-right-width: 4px; } /* 窄屏无折叠语义，防宽屏类残留 */
+
+  .sidebar-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    z-index: 110;                          /* 低于抽屉(120)、高于主列 */
+    animation: overlayFadeIn 0.15s ease-out;
+  }
+  .sidebar-scrim[hidden] { display: none; }
+}
+
+/* 极窄屏（<600px）：与顶栏按钮同断点，抽屉内按钮保持可读 */
+@media (max-width: 599px) {
+  .sidebar-head { flex-wrap: wrap; }
+}
+
+/* ── 打印：侧边栏与遮罩一并隐藏（原 .modal-overlay 规则的替代） ── */
+@media print {
+  .sidebar, .sidebar-scrim { display: none !important; }
+}
+
+}
+/* ═══ 分层块结束（@layer components） ═══ */

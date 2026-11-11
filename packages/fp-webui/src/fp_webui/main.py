@@ -587,6 +587,7 @@ async def list_sessions() -> dict[str, Any]:
             "id": sid,
             "message_count": info.get("message_count", 0),
             "created": info.get("created", ""),
+            "updated": info.get("updated", ""),  # 菜单 meta 层级用（卡片二级菜单展示）
             "summary": info.get("summary", ""),
             "kw": info.get("kw") or [],  # KL 管线预算好的区分性关键词，前端只读
             "is_current": sid == current_sid,
@@ -609,11 +610,44 @@ async def search_sessions(q: str = "", limit: int = 30) -> dict[str, Any]:
             "summary": meta.get("summary", ""),
             "kw": meta.get("kw") or [],
             "message_count": meta.get("message_count", 0),
+            "created": meta.get("created", ""),  # 与 created 列表端点对齐，菜单 meta 层级用
             "updated": item.get("updated", ""),
             "is_current": item["id"] == current_sid,
             "snippets": item.get("snippets") or [],
         })
     return {"query": q, "results": results}
+
+
+async def _recompute_kw(sid: str) -> dict[str, Any]:
+    """重算指定会话的 ``meta.kw`` 并返回新关键词。
+
+    经接口组正门 ``portal.ctl.sessions.refresh_keywords``（算并写回，
+    失败静默空列表）——**纯本地 KL 统计，零 LLM 调用**（session_keywords
+    模块铁律1），单会话实测约 18ms（core/session.py _refresh_keywords
+    注释），故同步完成即可，无需异步任务。
+    """
+    path = portal.ctl.sessions.path(sid)
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="会话文件不存在（新会话尚无关键词可算）")
+    kws = portal.ctl.sessions.refresh_keywords(sid)
+    return {"status": "refreshed", "sid": sid, "kw": kws}
+
+
+@app.post("/api/sessions/refresh")
+async def refresh_current_keywords() -> dict[str, Any]:
+    """刷新按钮语义：重算**当前会话**关键词（POST；同步，见 _recompute_kw）。"""
+    await ensure_agent()
+    sid = portal.run.status.session_id
+    if not sid:
+        raise HTTPException(status_code=400, detail="无当前会话")
+    return await _recompute_kw(sid)
+
+
+@app.post("/api/sessions/{session_id}/refresh")
+async def refresh_session_keywords(session_id: str) -> dict[str, Any]:
+    """重算**指定会话**关键词（单卡菜单「⟳ 重算 kw」入口）。"""
+    await ensure_agent()
+    return await _recompute_kw(session_id)
 
 
 @app.get("/api/commands")
@@ -632,15 +666,16 @@ def _tool_cards() -> list[dict[str, Any]]:
 
     与 /api/commands 同一模式：动态读注册表，自动适配新增工具。
     """
-    # 真实来源是 fp_core.tools.registry（ToolRegistry），**不是**
-    # portal.run —— RunPlane 只暴露 commands，没有工具定义。
-    # 曾误调 portal.run.definitions()，AttributeError 被 except 静默
-    # 吞成 []，表现为"端点 200 但 tool_cards 恒空"。故此处只捕获
-    # 注册表本身的异常，且必须记日志 —— 静默降级会掩盖真实故障。
+    # 正门 = portal.tools.definitions()（ToolPlane，api/portal.py），
+    # 含过滤链应用结果，语义比直连 registry 更正确。
+    # （历史误判：曾误调 portal.run.definitions() → AttributeError 被
+    # except 吞成 []，误以为"RunPlane 无工具定义"，遂翻墙直连
+    # fp_core.tools.registry 违反协议 §5。正门一直在手边。）
+    # 实例未开时 definitions() 抛 InstanceNotOpenError，由此处既有
+    # try/except → warning 回空表兜底 —— 静默降级会掩盖真实故障，
+    # 故必须记日志。
     try:
-        from fp_core.tools import registry
-
-        defs = registry.get_all_definitions()
+        defs = portal.tools.definitions()
     except Exception as e:
         logging.warning("tool_cards 生成失败（回退空表，参数区将走 JSON 兜底）: %s", e)
         return []

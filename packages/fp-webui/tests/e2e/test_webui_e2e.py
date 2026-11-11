@@ -329,3 +329,95 @@ def test_12_backend_driven_tool_meta(page, errlog):
     expect(row.locator(".tool-state-icon")).to_have_text("✅")
 
     assert not errlog["pageerror"], f"元信息渲染出现 JS 报错: {errlog['pageerror']}"
+
+
+# ── 12. #228 单连接不变式：CLOSING 窗口不得开第二条、不得谎报「已断开」 ──
+def test_13_no_parallel_socket_when_reconnecting(page, errlog, server):
+    """历史 bug（用户实测：ws 连上 → 立刻断开 → 又连上）：
+
+    visibilitychange 处理器在原实现里只挡 OPEN/CONNECTING，看到 CLOSING 就
+    直接再开一条；而正在退场的那条 socket 的 onclose 随后仍把状态写成
+    「🔴 已断开」并排一条 3s 重连——用户于是看到"两次加载才连上"。
+
+    修复后：CLOSING 只挂号（immediateReconnect），旧连接一退场 0ms 接上，
+    全程无并行连接、无「已断开」误报。
+    """
+    expect(page.locator("#connectionStatus")).to_contain_text("已连接")
+    before = page.evaluate("window.__fp_test.wsStats()")
+    assert before["created"] == 1, f"登录后应只建连 1 次，实际 {before}"
+
+    # 记录状态文本的全部变化（用户能看到的那一句）
+    page.evaluate(
+        """() => {
+            window.__statusLog = [];
+            const el = document.getElementById('connectionStatus');
+            new MutationObserver(() => {
+                const t = (el.textContent || '').trim();
+                if (window.__statusLog[window.__statusLog.length - 1] !== t) window.__statusLog.push(t);
+            }).observe(el, {childList: true, characterData: true, subtree: true});
+        }"""
+    )
+
+    # 关键窗口：close() 之后、close 事件到达之前派发 visibilitychange
+    page.evaluate(
+        """() => {
+            Object.defineProperty(document, 'visibilityState', {value: 'visible', configurable: true});
+            window.__fp_test.closeSocket();
+            document.dispatchEvent(new Event('visibilitychange'));
+        }"""
+    )
+    expect(page.locator("#connectionStatus")).to_contain_text("已连接", timeout=12000)
+    page.wait_for_timeout(1200)  # 覆盖原实现那条 3s 定时器的窗口
+
+    after = page.evaluate("window.__fp_test.wsStats()")
+    log = page.evaluate("window.__statusLog")
+    assert after["created"] == before["created"] + 1, (
+        f"重连应恰好新增 1 条连接（并行建连=双连 bug）: {before} → {after}"
+    )
+    assert not any("已断开" in t for t in log), f"重连路径不得出现「已断开」误报（应走 immediate 的「重连中」）: {log}"
+
+    problems = _js_problems(errlog, server.base_url)
+    assert not problems, f"重连过程出现 JS 错误: {problems}"
+
+
+# ── 14. 同一等待场景只允许一处 loading 提示（#227 目标②）──────
+def test_14_single_loading_hint_on_disconnect(page, errlog, server):
+    """用户实测吐槽："等待会话加载的时候，甚至有旧版和新版两种提示，非常丑"。
+
+    断联重连路径曾经同时挂两处：状态栏行内「3 秒后重连…」spinner +
+    页面级全屏遮罩「与服务器连接已断开，正在重连…」。用户看到的是两层
+    loading 叠加（且遮罩盖住正在读的内容）。修复后只保留行内一处。
+    """
+    expect(page.locator("#connectionStatus")).to_contain_text("已连接")
+
+    # 以 100ms 采样，记录「行内 spinner」与「页面级遮罩」是否同帧并存
+    page.evaluate(
+        """() => {
+            window.__hintLog = [];
+            const sample = () => {
+                const st = document.getElementById('connectionStatus');
+                const inline = !!(st && st.querySelector('.fp-spin-box'));
+                // #fpPageLoading 是 position:fixed —— offsetParent 恒为 null，
+                // 不能用它判可见性；显隐机制是 body 上的 fp-page-done 类 + 淡出后被移除
+                const ov = document.getElementById('fpPageLoading');
+                const ovVis = !!(ov && !ov.classList.contains('fp-page-done')
+                                 && getComputedStyle(ov).display !== 'none'
+                                 && getComputedStyle(ov).visibility !== 'hidden');
+                window.__hintLog.push({t: Date.now(), inline, ovVis});
+            };
+            window.__hintTimer = setInterval(sample, 100);
+            sample();
+        }"""
+    )
+    page.evaluate("window.__fp_test.closeSocket()")  # 走 3s 定时重连路径（非 immediate）
+    expect(page.locator("#connectionStatus")).to_contain_text("已连接", timeout=15000)
+    page.wait_for_timeout(400)
+    page.evaluate("clearInterval(window.__hintTimer)")
+    log = page.evaluate("window.__hintLog")
+
+    assert any(s["inline"] for s in log), f"断联期间行内应有 spinner（采样 {len(log)} 帧）"
+    both = [s for s in log if s["inline"] and s["ovVis"]]
+    assert not both, f"行内 spinner 与页面级遮罩不得同帧并存（双提示）: {len(both)} 帧命中"
+
+    problems = _js_problems(errlog, server.base_url)
+    assert not problems, f"重连过程出现 JS 错误: {problems}"

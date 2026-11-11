@@ -18,19 +18,20 @@ import './ui.js';
 import './app.js';
 
 import { autoResize, handleInputFocus, toggleCmdPalette, closeSocket } from './ui.js';
+import { conn as wsConn } from './features/ws.js';
 import {
   doLogin, openSessions, closeSessions, newAgent, reloadAgent, clearSession,
   toggleHalo, toggleTheme, onFileInputChange, handleKeyDown, sendMessage,
-  onSessionsSearchInput
+  onSessionsSearchInput, toggleSidebar, refreshSessions
 } from './app.js';
 
 /* ── 内联事件属性的全局挂载 ──────────────────────────────────
-   index.html 有 15 处内联事件属性（onclick="doLogin()" 等）。
+   index.html 有 16 处内联事件属性（onclick="doLogin()" 等）。
    HTML 属性在**全局作用域**求值，而 ES Module 的顶层函数默认
-   不挂 window —— 若不集中暴露，这 15 处会全部静默失效。
+   不挂 window —— 若不集中暴露，这 16 处会全部静默失效。
 
    这里选择集中挂载而非改写为 addEventListener：改动面最小、
-   可被 e2e 立即验证；这 15 个符号是 HTML 契约的必然结果，
+   可被 e2e 立即验证；这 17 个符号是 HTML 契约的必然结果，
    不算泄漏。其余 96 个原全局符号已随模块化收敛为模块局部。
 
    （后续若要彻底消除内联属性以顺带消除 XSS 面，应整体改为
@@ -38,7 +39,8 @@ import {
 Object.assign(window, {
   doLogin, openSessions, closeSessions, newAgent, reloadAgent, clearSession,
   toggleHalo, toggleTheme, onFileInputChange, handleKeyDown, sendMessage,
-  onSessionsSearchInput, autoResize, handleInputFocus, toggleCmdPalette
+  onSessionsSearchInput, autoResize, handleInputFocus, toggleCmdPalette,
+  toggleSidebar, refreshSessions
 });
 
 /* ── 测试接缝（e2e 专用）─────────────────────────────────────
@@ -63,6 +65,11 @@ import { fetchToolMeta, toolCardCount, toolCardNames, isLoaded, getToolCard } fr
    本模块只负责把接口暴露到测试接缝，供 e2e 断言后端下发量。 */
 window.__fp_test = {
   closeSocket: closeSocket,
+  // #228：连接代际/建连计数快照——e2e 用它断言「重连期不并行开第二条」
+  wsStats: function () {
+    return { created: wsConn.created, gen: wsConn.gen, lastPingTime: wsConn.lastPingTime,
+             immediateReconnect: wsConn.immediateReconnect };
+  },
   registerRenderer: registerRenderer,
   registeredTools: registeredTools,
   fetchToolMeta: fetchToolMeta,

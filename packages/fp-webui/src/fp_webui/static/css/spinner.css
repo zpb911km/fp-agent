@@ -1,0 +1,181 @@
+/* FP WebUI · Spinner / Loading 指示（三场景：会话列表拉取 / WS 重连 / 首屏启动）
+   ────────────────────────────────────────────────────────────
+   规则：颜色、字体、阴影只引用 tokens.css 的 design token，零硬编码色值。
+   时长/缓动：tokens.css 未提供时长类 token（149 行全查），故本文件在
+   @layer tokens 单点补充模块 token（--fp-spin-*），组件规则内一律
+   var() 引用——单点可调、不散落魔法值（偏差已在 peer_reports/spinner_contract.md 披露）。
+
+   #227 画风重绘（用户反馈"spinner 好丑"）：
+   旧版 = 硬边方块 + steps(8) 顿挫旋转（方块直角 × 机械跳帧，与整体排版
+   冲突，观感笨重）。新版 = 细环弧：conic-gradient 渐隐弧 + radial mask
+   打孔成环，linear 匀速旋转。语言仍是终端/CRT（单色、细线、无圆角卡片），
+   但旋转体本身是流动的弧而不是跳动的方块——同一视觉语言下的更体面版本。
+   时长仍 0.9s（与 .thinking-wave 节奏一致），缓动改为 linear（旋转体专用）。 */
+
+/* ── 模块级补充 token（单点定义，模块内禁再出现裸时长/色值） ── */
+@layer tokens {
+  :root {
+    --fp-spin-period: 0.9s;    /* 主旋转周期 = waveBar 0.9s（components.css:787） */
+    --fp-spin-fade:   0.15s;   /* 显隐过渡   = overlayFadeIn 0.15s */
+    --fp-spin-ease:   linear;  /* 旋转体匀速（顿挫感已按用户反馈移除） */
+    --fp-spin-size:   18px;    /* 行内 spinner 基准边长 */
+    --fp-spin-ring:   2px;     /* 环带厚度 */
+    --fp-spin-arc:    0.72turn;/* 亮弧长度（1turn = 整圈） */
+    --fp-spin-tail:   0.10turn;/* 弧尾渐隐长度（避免硬切口） */
+    --fp-spin-mask:   #000;    /* 仅用其不透明度做 mask 打孔，非视觉色值 */
+    --fp-spin-blink:  1s;      /* CRT 光标闪烁周期 */
+    --fp-spin-track:  var(--border-strong);  /* 底色轨道（暗环） */
+  }
+}
+
+@layer components {
+
+  /* ═══ 旋转弧环（几何 + 动画；行内与首屏 CSS-only 共用同一套观感） ═══ */
+  .fp-spin-box,
+  body::after {
+    box-sizing: border-box;
+    border-radius: 50%;
+    /* 亮弧从透明渐入、到 --fp-spin-arc 处最亮、再经 tail 渐隐回透明 */
+    background: conic-gradient(from 0turn,
+      transparent 0turn,
+      var(--accent) var(--fp-spin-arc),
+      transparent calc(var(--fp-spin-arc) + var(--fp-spin-tail)));
+    /* 打孔成环：内侧透明、只有 --fp-spin-ring 厚的外圈被绘制 */
+    -webkit-mask: radial-gradient(farthest-side,
+      transparent calc(100% - var(--fp-spin-ring)),
+      var(--fp-spin-mask) calc(100% - var(--fp-spin-ring)));
+    mask: radial-gradient(farthest-side,
+      transparent calc(100% - var(--fp-spin-ring)),
+      var(--fp-spin-mask) calc(100% - var(--fp-spin-ring)));
+    animation: fp-spin var(--fp-spin-period) var(--fp-spin-ease) infinite;
+  }
+
+  /* 不支持 mask 的引擎：退回细边圆环（仍比方块克制），保证不出现实心圆饼 */
+  @supports not (mask: radial-gradient(#000, #000)) {
+    .fp-spin-box,
+    body::after {
+      background: none;
+      border: var(--fp-spin-ring) solid var(--fp-spin-track);
+      border-top-color: var(--accent);
+      border-right-color: var(--accent);
+    }
+  }
+
+  /* 行内 spinner 尺寸 */
+  .fp-spin-box {
+    display: inline-block;
+    flex: none;
+    width: var(--fp-spin-size);
+    height: var(--fp-spin-size);
+  }
+
+  @keyframes fp-spin {
+    to { transform: rotate(1turn); }
+  }
+  @keyframes fp-blink {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0; }
+  }
+
+  /* ═══ 场景③ 专用：JS 前的纯 CSS 首屏占位 ═══
+     index.html 只允许新增 <link>/<script> 引用行，无法内联占位元素，
+     故用 body 双伪元素兜底 JS 加载窗口（z-index 9000 < authOverlay 9999，
+     未登录时登录遮罩天然盖住本层，authInput 不受遮挡）。
+     spinner.js 就绪后加 body.fp-js 关闭本层，改由 #fpPageLoading 接管。 */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: var(--bg-primary);
+    z-index: 9000;
+  }
+  body::after {
+    content: '';
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    width: calc(var(--fp-spin-size) + 16px);
+    height: calc(var(--fp-spin-size) + 16px);
+    margin-left: calc((var(--fp-spin-size) + 16px) / -2);
+    margin-top: calc((var(--fp-spin-size) + 16px) / -2);
+    z-index: 9001;
+  }
+  body.fp-js::before,
+  body.fp-js::after { display: none; }
+
+  /* ═══ 场景①/②：target 内行内占位（LoadingState.show(target, label) 插入） ═══ */
+  .fp-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    width: 100%;
+    padding: 16px 6px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    user-select: none;
+  }
+
+  /* label 尾部 CRT 闪烁光标 ▌（行内与页面级共用） */
+  .fp-loading-label::after,
+  .fp-page-label::after {
+    content: '▌';
+    margin-left: 3px;
+    color: var(--accent);
+    animation: fp-blink var(--fp-spin-blink) step-end infinite;
+  }
+
+  /* status 行内宿主（#connectionStatus = .input-hint 内的行内 span，稳定 id）：
+     不撑满行、不换行，随状态文本同行显示 */
+  #connectionStatus .fp-loading {
+    display: inline-flex;
+    width: auto;
+    padding: 0 0 0 8px;
+  }
+  #connectionStatus .fp-spin-box {
+    width: 11px;
+    height: 11px;
+    --fp-spin-ring: 1.5px;
+  }
+
+  /* ═══ 页面级占位（spinner.js 创建 #fpPageLoading，接管 body 伪元素） ═══ */
+  #fpPageLoading {
+    position: fixed;
+    inset: 0;
+    z-index: 9000;                 /* < .auth-overlay 9999：登录流程永在其上 */
+    background: var(--bg-primary);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    font-family: var(--font-mono);
+    transition: opacity var(--fp-spin-fade) var(--fp-spin-ease),
+                visibility 0s linear var(--fp-spin-fade);
+  }
+  #fpPageLoading .fp-spin-box {
+    width: calc(var(--fp-spin-size) + 18px);
+    height: calc(var(--fp-spin-size) + 18px);
+    --fp-spin-ring: 3px;
+  }
+  #fpPageLoading .fp-page-label {
+    font-size: 12px;
+    letter-spacing: 1px;
+    color: var(--text-secondary);
+  }
+  #fpPageLoading.fp-page-done {
+    opacity: 0;
+    visibility: hidden;
+  }
+
+  /* ═══ 打印隐藏（与 components.css print 规则同语义） ═══ */
+  @media print {
+    body::before,
+    body::after,
+    #fpPageLoading,
+    .fp-loading { display: none !important; }
+  }
+
+}

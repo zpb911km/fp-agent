@@ -4,7 +4,7 @@
 
 /* ── 平滑过渡（主题切换） ── */
 html, body, .topbar, .messages-container, .input-area, .input-hint,
-.auth-overlay, .modal, .cmd-palette,
+.auth-overlay, .sidebar, .cmd-palette,
 .msg, .msg-group, .msg-avatar, .topbar-btn, .model-badge {
   transition: background-color 0.25s ease, color 0.25s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }

@@ -38,9 +38,10 @@ export function clearSession() {
 export function newAgent() {
   if (store.getState().processing) { showError('正在处理中，请等待完成'); return; }
 
-  var btn = document.querySelector('.topbar-btn[onclick*="newAgent"]');
-  var originalText = btn.textContent;
-  btn.textContent = '⏳...';
+  var btn = document.getElementById('newAgentBtn');
+  if (!btn) return;
+  var originalHtml = btn.innerHTML;
+  btn.innerHTML = '⏳...';
   btn.disabled = true;
 
   authFetch('/api/agent/new', { method: 'POST' })
@@ -62,5 +63,5 @@ export function newAgent() {
       }
     })
     .catch(function(err) { showError('新建 Agent 失败: ' + err.message); })
-    .finally(function() { btn.textContent = originalText; btn.disabled = false; });
+    .finally(function() { btn.innerHTML = originalHtml; btn.disabled = false; });
 }

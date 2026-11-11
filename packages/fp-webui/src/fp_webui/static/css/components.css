@@ -264,6 +264,8 @@
   box-shadow: none;
 }
 .topbar-btn.danger:hover { border-color: var(--red); color: var(--red); }
+/* 侧边栏 toggle（现居 topbar-left 最左）：禁止被 flex 压缩，窄屏保持方形触点 */
+#sidebarToggle { flex: none; }
 /* ── 主题切换按钮 ── */
 .theme-btn { font-size: 16px; padding: 5px 8px; min-width: 38px; }
 .theme-btn:hover { border-color: var(--yellow); }
@@ -1395,86 +1397,16 @@
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   会话列表浮层 v2
+   会话列表原浮层（#sessionsModal）已重构为左侧边栏，
+   浮层样式移除；会话项/搜索片段样式仍被侧边栏复用，保留于下。
    ═══════════════════════════════════════════════════════════════ */
-.modal-overlay {
-  display: none;
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.75);
-  z-index: 100;
-  align-items: flex-end;
-  justify-content: center;
-  animation: overlayFadeIn 0.15s ease-out;
-}
-.modal-overlay.active { display: flex; }
-
-.modal {
-  background: var(--bg-secondary);
-  border: 4px solid var(--border);
-  border-bottom: none;
-  padding: 18px 18px calc(18px + var(--safe-bottom));
-  width: 100%;
-  max-width: 680px;
-  max-height: 75vh;
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 -6px 0 0 var(--shadow-color);
-  animation: modalSlideUp 0.25s ease-out;
-}
-@keyframes modalSlideUp {
-  from { transform: translateY(100%); }
-  to   { transform: translateY(0); }
-}
-
-.modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 14px;
-  flex-shrink: 0;
-  border-bottom: 2px solid var(--border);
-  padding-bottom: 10px;
-}
-.modal-title {
-  font-size: clamp(16px, 2vw, 20px);
-  font-weight: 800;
-  color: var(--accent);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.modal-close {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: none;
-  border: 2px solid var(--border);
-  color: var(--text-secondary);
-  cursor: pointer;
-  width: var(--touch-min);
-  height: var(--touch-min);
-  font-size: 18px;
-  font-weight: 700;
-  transition: all 0.12s;
-  touch-action: manipulation;
-}
-.modal-close:hover {
-  background: var(--accent-dark);
-  color: #fff;
-  border-color: var(--accent-dark);
-}
-
-.modal-body {
-  flex: 1;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-}
 
 /* ── 会话项 v2 ── */
 .session-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;              /* ⋯ 菜单独占第二行（flex-basis:100% 换行） */
   gap: 8px;
   padding: 12px 14px;
   min-height: 56px;
@@ -1494,6 +1426,12 @@
   border-color: var(--green);
   background: var(--green-soft);
 }
+/* 当前会话高亮：JS 发的是 .current（非 .active）；badge 已收进 ⋯ 菜单，
+   关菜单态必须靠本规则才能一眼看出「当前是哪条」（基线此 class 无样式） */
+.session-item.current {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
 
 .session-item-info {
   display: flex;
@@ -1510,27 +1448,6 @@
   white-space: nowrap;
   margin-top: 2px;
   letter-spacing: 0.02em;
-}
-/* 会话弹窗搜索框：输入即搜正文 */
-.modal-search {
-  padding: 8px 14px 4px;
-}
-.modal-search input {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 8px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--border, #3b4261);
-  background: var(--bg-input, rgba(255, 255, 255, 0.04));
-  color: var(--text, #c0caf5);
-  font-size: clamp(12px, 0.95vw, 14px);
-  outline: none;
-}
-.modal-search input:focus {
-  border-color: var(--accent, #7aa2f7);
-}
-.modal-search input::placeholder {
-  color: var(--text-muted, #565f89);
 }
 /* 搜索命中片段：一眼确认「是不是这条」 */
 .session-item-snippet {
@@ -1562,6 +1479,127 @@
   margin-top: 2px;
 }
 
+/* ── 会话卡片 ⋯ 二级菜单（主卡只留 summary+kw+⋯；日期/meta/操作收于此） ── */
+.session-more-btn {
+  flex: none;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 7px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: color 0.1s, border-color 0.1s, background 0.1s;
+  align-self: flex-start;        /* 与 summary 首行对齐，不随卡片高度居中漂移 */
+}
+.session-more-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+.session-more-btn[aria-expanded="true"] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.session-item-menu {
+  flex-basis: 100%;              /* 借 flex-wrap: wrap 独占第二行 */
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  background: rgba(0, 0, 0, 0.15);
+}
+.session-item-menu[hidden] { display: none; }
+.session-item-menu .session-item-meta { margin-top: 0; white-space: normal; }
+/* 菜单 meta 分层行（打磨②）：icon + 值（等宽）+ 右对齐类型标签，
+   日期/消息数/kw 逐行成层，不再挤成一行 */
+.session-item-menu .session-item-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.sim-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: clamp(10px, 0.9vw, 12px);
+  color: var(--text-dim);
+}
+.sim-k { flex: none; width: 1.2em; text-align: center; opacity: 0.75; }
+.sim-v {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sim-l { flex: none; margin-left: auto; font-size: 10px; opacity: 0.6; letter-spacing: 0.04em; }
+.session-item-badge {
+  align-self: flex-start;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--green);
+  border: 1px solid var(--green);
+  padding: 1px 6px;
+  letter-spacing: 0.04em;
+}
+.session-item-actions {
+  display: flex;
+  gap: 6px;
+}
+/* 单卡「⟳ 重算 kw」（打磨③）：工具性动作，虚线弱化并靠右，
+   与左侧 主动作（切换/删除）分层 */
+.session-kw-btn {
+  margin-left: auto;
+  background: none;
+  border: 1px dashed var(--border);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 5px 10px;
+  cursor: pointer;
+  letter-spacing: 0.03px;
+  transition: all 0.08s ease;
+}
+.session-kw-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.session-kw-btn:disabled { opacity: 0.5; cursor: default; }
+.session-load-btn,
+.session-del-btn {
+  background: var(--bg-primary);
+  border: 2px solid var(--border);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 5px 10px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  transition: all 0.08s ease;
+}
+.session-load-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+.session-del-btn:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+.session-load-btn:active,
+.session-del-btn:active {
+  transform: translate(1px, 1px);
+}
+
 .no-sessions {
   padding: 28px 12px;
   text-align: center;
@@ -1569,22 +1607,12 @@
   font-size: 0.88em;
 }
 
-/* ── 拖拽手柄 ── */
-.modal-drag-handle {
-  width: 40px;
-  height: 4px;
-  background: var(--border);
-  border-radius: 0;
-  margin: -8px auto 8px;
-  flex-shrink: 0;
-}
-
 /* ── 隐藏工具类 ── */
 .hidden { display: none !important; }
 
 @media print {
   .topbar, .input-area,
-  .auth-overlay, .modal-overlay { display: none !important; }
+  .auth-overlay { display: none !important; }
   .messages-container { overflow: visible; height: auto; }
   body { background: #fff; color: #000; }
 }

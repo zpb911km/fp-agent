@@ -8,6 +8,7 @@ import { on, dispatch } from '../core/events.js';
 import { store } from '../core/store.js';
 import { showAskCard, clearAskCard } from './ask.js';
 import { flushPendingHistoryRefresh, fetchSessionHistory } from './history.js';
+import { LoadingState } from '../core/spinner.js';   // 返工①：connected/重拉间隙的主区占位收场
 import { conn } from './ws.js';
 
 // ── 避免 done.final_content 与 llm_end.content 重复渲染 ──
@@ -37,10 +38,25 @@ on('connected', function (data) {
     clearUI();
     needHistory = true;
     addSystemMessage('🔄 已重新连接，会话已重新同步');
+  } else if (wasConnected && !data.processing && sessionId) {
+    // 二次修改③：重连成功后必须完全重新请求一次会话内容——
+    // 此前仅 resync/DOM空 才重拉，断线重连后 DOM 里残留的片段无法向上翻阅；
+    // 现 clearUI + 全量重拉（复用 resync 同款安全路径），processing 中不打断流式（由重放续传）
+    clearUI();
+    needHistory = true;
+    addSystemMessage('🔁 已重新连接，正在重新加载会话内容…');
   }
-  // DOM 为空（首屏/重开页/刚清空）且无进行中任务 → 补一次权威历史
-  if (!data.processing && sessionId && (needHistory || messagesEl.children.length === 0)) {
-    fetchSessionHistory(sessionId);
+  // DOM 为首屏占位/空（首屏/重开页/刚清空）且无进行中任务 → 补一次权威历史。
+  // 返工①修复：initApp 接力的行内占位本身也是 children——用「非占位子元素」判真空，
+  // 否则占位会让 children.length===0 恒假、首拉被跳过（回归陷阱）。
+  var hasRealContent = messagesEl.querySelector(':scope > :not([data-fp-loading])') !== null;
+  if (!data.processing && sessionId && (needHistory || !hasRealContent)) {
+    fetchSessionHistory(sessionId);   // 其 show 幂等接管 initApp 接力的占位
+  } else {
+    // 返工①：无历史可拉的分支必须显式收场——否则 initApp 接力的行内占位永挂。
+    // 无 sessionId→撤占位后容器真空，:empty::after 空态才合法显示（真无消息）；
+    // processing→留给流式渲染（本就不在 spinner 职责内）。
+    LoadingState.hide(messagesEl);
   }
 
   // ── 运行时快照：任务没死，恢复"处理中"状态机 ──
@@ -186,7 +202,13 @@ on('history_changed', function (data) {
   // 重拉回来的历史里没有它 → 必须等 done/cancelled/error 收尾后再刷。
   if (store.getState().processing) { setPendingHistoryRefresh(true); return; }
   clearUI();
-  if (sessionId) setTimeout(function() { fetchSessionHistory(sessionId); }, 100);
+  if (sessionId) {
+    // 返工①：clearUI 真空后到 100ms 重拉 show 之间的帧，:empty::after 空态会抢跑——
+    // 此刻先 show 占位（fetchSessionHistory 的 show 幂等，label 届时更新）。
+    // 收在 sessionId 判空内：无会话时真空即合法空态，不挂占位。
+    LoadingState.show(messagesEl, '重新加载会话内容…');
+    setTimeout(function() { fetchSessionHistory(sessionId); }, 100);
+  }
 });
 
 on('queue_error', function (data) {

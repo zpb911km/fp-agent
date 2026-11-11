@@ -498,6 +498,18 @@ class SessionCtl:
 
         return read_messages(sid)
 
+    def refresh_keywords(self, sid: str) -> list[str]:
+        """重算指定会话的 ``meta.kw`` 关键词并返回新值（纯本地 KL 统计，零 LLM 调用）
+
+        与 ``search`` 同一纪律：会话关键词的算法在 ``core.session_keywords``，
+        前端不允许直接 import 核内模块，能力经本方法暴露。
+        文件不存在 / 无消息 / 写盘失败 → 返回空列表（关键词是增强，不拖垮主流程）。
+        """
+        from fp_core.core.session import session_file_path
+        from fp_core.core.session_keywords import update_session
+
+        return update_session(sid, session_file_path(sid)) or []
+
 
 # ══════════════════════════════════════════════════════════════
 # ctl 子面：扩展注册

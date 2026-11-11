@@ -14,6 +14,8 @@
 <link rel="stylesheet" href="/static/css/tokens.css?_t=1">
 <link rel="stylesheet" href="/static/css/base.css?_t=1">
 <link rel="stylesheet" href="/static/css/components.css?_t=1">
+<link rel="stylesheet" href="/static/css/sidebar.css?_t=1">
+<link rel="stylesheet" href="/static/css/spinner.css?_t=1">
 <link rel="stylesheet" href="/static/css/overrides.css?_t=1">
 
 <!-- Markdown 渲染 -->
@@ -66,99 +68,126 @@
   <!-- ═══ 主应用 ═══ -->
   <div class="app-container">
 
-    <!-- ─── 顶栏 ─── -->
-    <header class="topbar" role="banner">
-      <div class="topbar-left">
-        <span class="logo">
-          <span class="logo-full">FP</span>
-          <span class="logo-short"><span>F</span>P</span>
-        </span>
-        <span class="model-badge" id="modelBadge" aria-label="当前模型">—</span>
-      </div>
-      <div class="topbar-right">
-        <span class="session-label" id="sessionLabel" title="当前会话" aria-label="当前会话">—</span>
-        <button class="topbar-btn" onclick="openSessions()" title="历史会话" aria-label="打开历史会话列表">
-          <span aria-hidden="true">📋</span><span class="btn-label"> 会话</span>
+    <!-- ─── 左侧边栏（DeepSeek 风格：会话列表 + 顶栏功能钮收纳） ─── -->
+    <aside class="sidebar" id="sidebar" aria-label="侧边栏">
+      <!-- ②⑦ 功能钮同组：新建 · 重载 · 刷新（原顶栏/底栏分散收纳） -->
+      <div class="sidebar-head">
+        <button class="side-btn side-new" id="newAgentBtn" onclick="newAgent()"
+                title="新建 Agent（shutdown 旧实例，创建全新实例和会话）"
+                aria-label="新建 Agent">
+          <span aria-hidden="true">🆕</span> 新建会话
         </button>
-        <button class="topbar-btn" onclick="newAgent()" title="新建 Agent（shutdown 旧实例，创建全新实例和会话）" aria-label="新建 Agent">
-          <span aria-hidden="true">🆕</span><span class="btn-label"> 新建</span>
+        <button class="side-btn" id="reloadBtn" onclick="reloadAgent()"
+                title="热重启（进程级，等价聊天命令 /reload：落盘重启后自动重连）"
+                aria-label="热重启 Agent">
+          <span aria-hidden="true">🔄</span> 重载
         </button>
-        <button class="topbar-btn" onclick="reloadAgent()" title="热重启（进程级，等价聊天命令 /reload：落盘重启后自动重连）" aria-label="热重启 Agent">
-          <span aria-hidden="true">🔄</span><span class="btn-label"> 重载</span>
-        </button>
-        <button class="topbar-btn danger" onclick="clearSession()" title="清空当前会话" aria-label="清空当前会话">
-          <span aria-hidden="true">🗑️</span><span class="btn-label"> 清空</span>
-        </button>
-        <button class="topbar-btn halo-btn" onclick="toggleHalo()" title="光环背景" aria-label="光环背景开关" id="haloBtn">
-          <span aria-hidden="true">💤</span>
-        </button>
-        <button class="topbar-btn theme-btn" onclick="toggleTheme()" title="切换主题" aria-label="切换主题" id="themeBtn">
-          <span aria-hidden="true">☀️</span>
+        <button class="side-btn" id="refreshBtn" onclick="refreshSessions()"
+                title="刷新会话列表" aria-label="刷新会话列表">
+          <span aria-hidden="true" class="refresh-icon">⟳</span> 刷新
         </button>
       </div>
-    </header>
 
-    <!-- ─── 消息列表 ─── -->
-    <main class="messages-container" id="messagesContainer" role="log" aria-label="聊天消息" aria-live="polite"></main>
-    <!-- ─── 输入区 ─── -->
-    <div class="input-area" role="form" aria-label="消息输入">
-      <!-- 待发送文件标记（选中即后台上传，发送时随消息拼 [file:...] 引用） -->
-      <div class="pending-files" id="pendingFiles" hidden></div>
-      <input type="file" id="fileInput" multiple hidden
-             onchange="onFileInputChange(event)" aria-label="选择要上传的文件">
-      <div class="input-wrapper">
-
-        <button class="cmd-btn attach-btn" id="attachBtn" onclick="document.getElementById('fileInput').click()" title="上传文件（选中即后台上传到 fp_inbox）" aria-label="上传文件" type="button">📎</button>
-        <button class="cmd-btn" id="cmdBtn" onclick="toggleCmdPalette()" title="快捷命令 (Ctrl+/)" aria-label="快捷命令" type="button">⚡</button>
-        <div class="input-console">
-          <textarea id="inputField" class="input-field" rows="1"
-                    placeholder="输入指令..."
-                    autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-                    aria-label="输入消息"
-                    onkeydown="handleKeyDown(event)"
-                    oninput="autoResize(this)"
-                    onfocus="handleInputFocus()"></textarea>
-        </div>
-
-        <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="发送 (Enter)" aria-label="发送消息">
-          ➤
-        </button>
-      </div>
-      <!-- 快捷命令浮层 -->
-      <div class="cmd-palette" id="cmdPalette" role="listbox" aria-label="快捷命令" hidden>
-        <div class="cmd-palette-header">⚡ 快捷命令</div>
-        <div class="cmd-palette-list" id="cmdList"></div>
-      </div>
-      <div class="input-hint">
-        <span><kbd>Enter</kbd> 发送 · <kbd>Shift+Enter</kbd> 换行</span>
-        <span id="connectionStatus" aria-live="polite"><span style="color:var(--green-bright)">🟢</span> 已连接</span>
-      </div>
-      <!-- ─── 状态栏 ─── -->
-      <div class="status-bar">
-        <span class="status-item latency" id="sbLatency">⏱ —</span>
-        <span class="status-item tools" id="sbTools">⚙ 0</span>
-        <span class="status-item msgs" id="sbMsgs">✎ 0</span>
-        <span class="status-item state" id="sbState">○ idle</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- ═══ 会话列表浮层 ═══ -->
-  <div class="modal-overlay" id="sessionsModal" role="dialog" aria-label="历史会话列表">
-    <div class="modal">
-      <div class="modal-drag-handle" aria-hidden="true"></div>
-      <div class="modal-header">
-        <span class="modal-title">📋 历史会话</span>
-        <button class="modal-close" onclick="closeSessions()" aria-label="关闭会话列表">✕</button>
-      </div>
-      <div class="modal-search">
+      <div class="sidebar-search">
         <input type="search" id="sessionsSearchInput" autocomplete="off"
                placeholder="搜索会话内容（正文/标题/关键词，多词同现）"
                aria-label="搜索历史会话"
                oninput="onSessionsSearchInput()">
       </div>
-      <div class="modal-body" id="sessionsList">
-        <div class="no-sessions">加载中...</div>
+
+      <!-- ⑧ 下拉刷新指示（独立于 #sessionsList：列表 innerHTML 重绘不吞它） -->
+      <div class="pull-indicator" id="pullIndicator" hidden aria-live="polite"></div>
+
+      <!-- #227：初始不放静态「加载中...」文本——等待态一律由 LoadingState 渲染，
+           否则 spinner 与这句旧文案会在同一容器里上下并存（用户报的"新旧两种提示"） -->
+      <div class="sidebar-body" id="sessionsList"></div>
+
+      <!-- ⑤ 快速命令入口（原输入栏 ⚡ 按钮；#cmdPalette 浮层留输入区，快捷键 Ctrl+/ 不变） -->
+      <div class="sidebar-foot">
+        <button class="side-btn" id="cmdBtn" onclick="toggleCmdPalette()"
+                title="快捷命令 (Ctrl+/)" aria-label="快捷命令" type="button">
+          <span aria-hidden="true">⚡</span> 快速命令
+        </button>
+      </div>
+    </aside>
+    <!-- 窄屏抽屉遮罩（点击关闭侧边栏） -->
+    <div class="sidebar-scrim" id="sidebarScrim" hidden></div>
+
+    <div class="main-col">
+      <!-- ─── 顶栏 ─── -->
+      <header class="topbar" role="banner">
+        <div class="topbar-left">
+          <!-- ① toggle 归位（打磨①）：sidebar 在左侧，☰ 移到顶栏最左贴其上缘，
+               宽屏折叠后也正对 sidebar 展开位置，消除右上角视觉割裂 -->
+          <button class="topbar-btn" id="sidebarToggle" onclick="toggleSidebar()"
+                  title="展开/折叠侧边栏（窄屏：打开/关闭会话抽屉）"
+                  aria-label="折叠或展开侧边栏">
+            ☰
+          </button>
+          <span class="logo">
+            <span class="logo-full">FP</span>
+            <span class="logo-short"><span>F</span>P</span>
+          </span>
+          <span class="model-badge" id="modelBadge" aria-label="当前模型">—</span>
+        </div>
+        <div class="topbar-right">
+          <span class="session-label" id="sessionLabel" title="当前会话" aria-label="当前会话">—</span>
+          <!-- ③ halo / 主题留右上角（不进 sidebar） -->
+          <button class="topbar-btn" id="haloBtn" onclick="toggleHalo()"
+                  title="光环背景" aria-label="光环背景开关">
+            <span aria-hidden="true">💤</span>
+          </button>
+          <button class="topbar-btn" id="themeBtn" onclick="toggleTheme()"
+                  title="切换主题" aria-label="切换主题">
+            <span aria-hidden="true">☀️</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- ─── 消息列表 ─── -->
+      <main class="messages-container" id="messagesContainer" role="log" aria-label="聊天消息" aria-live="polite"></main>
+      <!-- ─── 输入区 ─── -->
+      <div class="input-area" role="form" aria-label="消息输入">
+        <!-- 待发送文件标记（选中即后台上传，发送时随消息拼 [file:...] 引用） -->
+        <div class="pending-files" id="pendingFiles" hidden></div>
+        <input type="file" id="fileInput" multiple hidden
+               onchange="onFileInputChange(event)" aria-label="选择要上传的文件">
+        <div class="input-wrapper">
+
+          <button class="cmd-btn attach-btn" id="attachBtn" onclick="document.getElementById('fileInput').click()" title="上传文件（选中即后台上传到 fp_inbox）" aria-label="上传文件" type="button">📎</button>
+          <!-- ⑤ 快速命令已移入 sidebar（#cmdBtn 现仅存在于 .sidebar-foot，此处原按钮已删，消除重复 id） -->
+          <div class="input-console">
+            <textarea id="inputField" class="input-field" rows="1"
+                      placeholder="输入指令..."
+                      autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                      aria-label="输入消息"
+                      onkeydown="handleKeyDown(event)"
+                      oninput="autoResize(this)"
+                      onfocus="handleInputFocus()"></textarea>
+          </div>
+
+          <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="发送 (Enter)" aria-label="发送消息">
+            ➤
+          </button>
+        </div>
+        <!-- 快捷命令浮层 -->
+        <div class="cmd-palette" id="cmdPalette" role="listbox" aria-label="快捷命令" hidden>
+          <div class="cmd-palette-header">⚡ 快捷命令</div>
+          <div class="cmd-palette-list" id="cmdList"></div>
+        </div>
+        <div class="input-hint">
+          <span><kbd>Enter</kbd> 发送 · <kbd>Shift+Enter</kbd> 换行</span>
+          <!-- #227：初始态不再硬编码「🟢 已连接」（那是谎报，且在 spinner 旁形成第二重提示）；
+               真实状态一律由 ws.js 在 onopen/onclose 写入 -->
+          <span id="connectionStatus" aria-live="polite">⚪ 未连接</span>
+        </div>
+        <!-- ─── 状态栏 ─── -->
+        <div class="status-bar">
+          <span class="status-item latency" id="sbLatency">⏱ —</span>
+          <span class="status-item tools" id="sbTools">⚙ 0</span>
+          <span class="status-item msgs" id="sbMsgs">✎ 0</span>
+          <span class="status-item state" id="sbState">○ idle</span>
+        </div>
       </div>
     </div>
   </div>
@@ -175,6 +204,9 @@
        现由 main.js 的 import 图显式表达同一顺序；
        type="module" 天然 defer，DOM 已解析的前提仍成立。
        ════════════════════════════════════════ -->
+  <!-- spinner 模块须先于 main.js 执行：type=module 按文档序执行，
+       尽早接管首屏（body 伪元素层 → #fpPageLoading 真元素） -->
+  <script type="module" src="/static/js/core/spinner.js"></script>
   <script type="module" src="/static/js/main.js"></script>
 </body>
 </html>

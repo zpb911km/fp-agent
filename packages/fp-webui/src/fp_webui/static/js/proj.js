@@ -57,7 +57,9 @@
   var topbar     = document.querySelector('.topbar');
   var composer   = document.querySelector('.input-area');
   var overlayEl  = document.getElementById('authOverlay');
-  var sessionsModal = document.getElementById('sessionsModal');
+  // 原 #sessionsModal（会话浮层）已重构为左侧边栏；仅窄屏抽屉态(.open)
+  // 是覆盖在界面上的浮层，需暂停投影——语义与原 .active 判断等价。
+  var sidebarEl  = document.getElementById('sidebar');
   if (!haloCanvas || !ov || !msgBox) return;
 
   var ovctx = ov.getContext('2d');
@@ -280,7 +282,7 @@
     if (!window.__haloLight || !haloCanvas.width
         || (window.isHaloEnabled && !window.isHaloEnabled())
         || (overlayEl && overlayEl.style.display !== 'none')
-        || (sessionsModal && sessionsModal.classList.contains('active'))) {
+        || (sidebarEl && sidebarEl.classList.contains('open'))) {
       clearOv();
       return;
     }

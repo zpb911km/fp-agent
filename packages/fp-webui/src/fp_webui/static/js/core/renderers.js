@@ -60,10 +60,14 @@ export function registeredTools() {
 }
 
 /* ── 后端元信息驱动的参数区（介于手写渲染器与 JSON 兜底之间）──
-   关键：元信息只有参数的 name/type/desc，**没有值**；值在 args 里。
-   所以必须两者合并 —— 只画元信息会丢掉实际传入的值，比 JSON
-   更糟。这里按 schema 顺序列出每个参数的名称/类型/必填/说明，
-   并附上实际值；args 里有但 schema 没有的参数也照列（不丢数据）。
+   元信息（type / required / desc）是给 LLM 看的 schema 定义，
+   不是给人看的内容 —— 用户只关心"这次实际传了什么"。所以这里
+   只借 card.params 的**顺序**，行内容一律是实参本身：
+     · 按 schema 顺序列出**实际传入**的参数（参数名 = 实际值）；
+     · 未传入的参数不占行（一个都没传才显示"未提供"占位）；
+     · schema 之外的实参照列（插件动态参数，绝不丢数据）；
+     · 类型 / 必填星号 / 参数说明一律不渲染。
+   原始 JSON 折叠仍在下方：结构化视图不丢任何字节。
 
    返回 null 表示"无元信息可用，走 JSON 兜底"。 */
 export function metaArgsHtml(ctx) {
@@ -75,38 +79,40 @@ export function metaArgsHtml(ctx) {
   const raw = typeof ctx.rawArgs === 'string' && ctx.rawArgs ? ctx.rawArgs : '';
 
   const esc = (v) => {
-    if (v === undefined) return '<em class="tool-args-absent">未提供</em>';
     let s;
     try { s = (typeof v === 'string') ? v : JSON.stringify(v); } catch (e) { s = String(v); }
     s = String(s);
     if (s.length > 200) s = s.slice(0, 200) + '…';
     return '<code class="tool-args-value">' + escaped(s) + '</code>';
   };
+  // 实参"已传入"判定：own 属性且值非 undefined（undefined = 未提供）
+  const passed = (k) => Object.prototype.hasOwnProperty.call(args, k) && args[k] !== undefined;
 
   const seen = new Set();
   let rows = '';
   for (const p of card.params) {
     if (!p || !p.name) continue;
     seen.add(p.name);
+    if (!passed(p.name)) continue;  // 未传入 → 不占行
     rows += '<div class="tool-args-meta-row">' +
-      '<span class="tool-args-meta-name">' + escaped(p.name) +
-        (p.required ? '<span class="tool-args-meta-req" title="必填">*</span>' : '') +
-      '</span>' +
-      '<span class="tool-args-meta-type">' + escaped(p.type || '') + '</span>' +
+      '<span class="tool-args-meta-name">' + escaped(p.name) + '</span>' +
+      '<span class="tool-args-meta-eq"> = </span>' +
       '<span class="tool-args-meta-value">' + esc(args[p.name]) + '</span>' +
-      (p.desc ? '<span class="tool-args-meta-desc">' + escaped(p.desc) + '</span>' : '') +
       '</div>';
   }
   // schema 之外的实参（如插件动态加的参数）—— 照列，绝不丢数据
   for (const k of Object.keys(args)) {
-    if (seen.has(k)) continue;
+    if (seen.has(k) || !passed(k)) continue;
     rows += '<div class="tool-args-meta-row tool-args-meta-unknown">' +
       '<span class="tool-args-meta-name">' + escaped(k) + '</span>' +
-      '<span class="tool-args-meta-type">—</span>' +
+      '<span class="tool-args-meta-eq"> = </span>' +
       '<span class="tool-args-meta-value">' + esc(args[k]) + '</span>' +
       '</div>';
   }
-  if (!rows) return null;
+  // 一个实参都没有 → "未提供"占位（空参数区看着像渲染失败）
+  if (!rows) {
+    rows = '<div class="tool-args-meta-row"><em class="tool-args-absent">未提供</em></div>';
+  }
 
   let html = '<div class="tool-args-label">参数:</div><div class="tool-args-meta">' + rows + '</div>';
   // 原始 JSON 折叠在下方：结构化视图不丢任何字节
