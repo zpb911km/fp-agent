@@ -50,6 +50,8 @@ def _init_repo(root: Path) -> None:
 
     # 按 DOC_LINKS 登记创建占位代码文件（保证 --audit 不误报链接断裂、反向提醒可测）
     _create_doc_link_code_files(root)
+    # 按 SYNC_PAIRS 创建主文档与生成物（保证 --audit 不误报「主文档缺失」）
+    _create_sync_pairs(root)
 
     env = {
         **os.environ,
@@ -76,6 +78,19 @@ def _create_doc_link_code_files(root: Path) -> None:
             p.parent.mkdir(parents=True, exist_ok=True)
             if not p.exists():
                 p.write_text("# placeholder\n", encoding="utf-8")
+
+
+def _create_sync_pairs(root: Path) -> None:
+    """按 SYNC_PAIRS 创建主文档，并生成一份「已同步」的副本（用脚本自己的渲染函数）。"""
+    mod = _load_script_module()
+    for master_rel, copy_rel in mod.SYNC_PAIRS:
+        master = root / master_rel
+        master.parent.mkdir(parents=True, exist_ok=True)
+        text = f"# {Path(master_rel).stem}\n\n主文档占位。\n"
+        master.write_text(text, encoding="utf-8")
+        copy = root / copy_rel
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_text(mod._render_copy(text, master_rel), encoding="utf-8")
 
 
 def _run_script(root: Path, *extra: str, allow: bool = False) -> subprocess.CompletedProcess:
@@ -315,3 +330,103 @@ def test_audit_detects_broken_doc_links(tmp_path):
     assert r.returncode == 1, r.stdout + r.stderr
     assert "不存在" in r.stdout
     assert linked in r.stdout
+
+
+def test_sync_drift_blocks(tmp_path):
+    """主文档改了但没 --sync → 生成物漂移，阻断（exit 1）并点名生成物"""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    mod = _load_script_module()
+    master_rel, copy_rel = mod.SYNC_PAIRS[0]
+    _modify(root / master_rel, "# 主文档更新\n", root)
+
+    r = _run_script(root)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "不同步" in r.stdout
+    assert copy_rel in r.stdout
+
+
+def test_sync_flag_regenerates_and_passes(tmp_path):
+    """--sync 后生成物与主文档一致 → 后续检查通过"""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    mod = _load_script_module()
+    master_rel, copy_rel = mod.SYNC_PAIRS[0]
+    _modify(root / master_rel, "# 主文档更新\n", root)
+
+    r = _run_script(root, "--sync")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (root / copy_rel).read_text(encoding="utf-8") == mod._render_copy("# 主文档更新\n", master_rel)
+
+    r2 = _run_script(root)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+
+
+def test_sync_copy_rebases_doc_links():
+    """生成物把 docs 内部相对链接改写为仓库绝对 URL；仓库根相对链接保持不变"""
+    mod = _load_script_module()
+    out = mod._render_copy("见 [指南](../guide/快速开始.md) 与 [许可](../../LICENSE)\n", "docs/packages/x.md")
+    assert "blob/main/docs/guide/快速开始.md" in out
+    assert "../../LICENSE" in out
+
+
+def test_stray_doc_warns(tmp_path):
+    """游离文档（docs/ 之外、未登记、非白名单）→ 警告"""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    stray = root / "notes" / "临时笔记.md"
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    _modify(stray, "# 临时\n", root)
+
+    r = _run_script(root)
+    assert "游离文档" in r.stdout
+    assert "notes/临时笔记.md" in r.stdout
+
+
+def test_whitelisted_roots_not_stray(tmp_path):
+    """SECURITY / CODE_OF_CONDUCT / .github 模板 / 提示词资产 不算游离"""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    for rel in [
+        "SECURITY.md",
+        "CODE_OF_CONDUCT.md",
+        ".github/PULL_REQUEST_TEMPLATE.md",
+        "packages/fp-core/src/fp_core/prompts/agent.md",
+    ]:
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        _modify(p, "# 占位\n", root)
+
+    r = _run_script(root)
+    assert "游离文档" not in r.stdout
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_synced_copy_change_not_flagged_as_manual_edit(tmp_path):
+    """主文档改动 + --sync 生成副本 → 副本出现在变更集里，但不算「手工改动」"""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    mod = _load_script_module()
+    master_rel, _copy_rel = mod.SYNC_PAIRS[0]
+    _modify(root / master_rel, "# 主文档更新\n", root)
+    _run_script(root, "--sync")
+
+    r = _run_script(root)
+    assert "手工改动" not in r.stdout, r.stdout
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_hand_edited_copy_is_flagged(tmp_path):
+    """直接手改生成物（主文档未变）→ 点名「手工改动」，并因漂移阻断"""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    mod = _load_script_module()
+    master_rel, copy_rel = mod.SYNC_PAIRS[0]
+    copy = root / copy_rel
+    _modify(copy, copy.read_text(encoding="utf-8") + "\n手改一行\n", root)
+
+    r = _run_script(root)
+    assert "手工改动" in r.stdout, r.stdout
+    assert copy_rel in r.stdout
+    assert master_rel in r.stdout  # 提示应改主文档
+    assert r.returncode == 1, r.stdout + r.stderr

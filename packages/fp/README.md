@@ -1,190 +1,129 @@
-# FP
+<!-- ⚠️ 生成物：本文件由 scripts/check_docs_sync.py --sync 从 docs/packages/fp.md 生成。
+     请修改主文档 docs/packages/fp.md，不要直接编辑本文件。 -->
 
-[![PyPI](https://img.shields.io/pypi/v/fp)](https://pypi.org/project/fp/)
-[![Python](https://img.shields.io/pypi/pyversions/fp)](https://pypi.org/project/fp/)
-[![License](https://img.shields.io/pypi/l/fp)](LICENSE)
+# fp-agent — FP 的安装入口与命令行
 
-## 简介
+[![PyPI](https://img.shields.io/pypi/v/fp-agent)](https://pypi.org/project/fp-agent/)
+[![Python](https://img.shields.io/pypi/pyversions/fp-agent)](https://pypi.org/project/fp-agent/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/zpb911km/fp-agent/blob/main/LICENSE)
 
-**FP** 是一个基于生命周期钩子的插件化 Agent 框架。它提供了灵活、可扩展的方式来构建和运行 AI Agent，支持终端 REPL、Web 界面和远程协议调用等多种交互方式。
+> FP 是一个基于生命周期钩子的插件化 AI Agent 框架 —— 灵感来自《Rain World》的迭代器「五块卵石」。
 
-> 灵感来源于《Rain World》中的迭代器「五块卵石」—— 冷静、理性、追求优雅的解决方案。
+`fp-agent` 是 FP 的**唯一命令入口**：本身不含引擎，只解析顶层参数、做首跑配置门禁，再把控制权交给对应前端（`fp-terminal` / `fp-webui` / `fp-acp`）。
 
----
+## 安装
 
-## 特性
-
-- 🤖 **强大的 Agent 引擎** — 基于生命周期钩子，在 Agent 运行的各个阶段注入自定义逻辑
-- 🔌 **插件化架构** — 通过插件动态扩展工具、命令和行为，无需修改核心代码
-- 🖥️ **终端 REPL** — 交互式命令行界面，语法高亮、自动补全、流式输出
-- 🌐 **Web 界面** — 浏览器端图形界面，开箱即用
-- 🔗 **ACP 协议** — JSON-RPC 2.0 远程调用，轻松集成 IDE、CI/CD、其他 Agent
-
----
-
-## 快速安装
-
-### 基本安装（核心 + CLI）
+要求 **Python ≥ 3.11**。
 
 ```bash
-pip install fp-agent
+pip install fp-agent            # 基础：自动拉取 fp-core（引擎）+ fp-terminal（终端 REPL）
+pip install "fp-agent[webui]"   # + Web 界面（fp-webui）
+pip install "fp-agent[acp]"     # + ACP 协议（fp-acp）
+pip install "fp-agent[all]"     # 全部
 ```
 
-安装后即可使用终端 REPL：
+Windows 上必须安装 **Git for Windows**（安装时勾选 Git Bash）。FP 强制使用 Git Bash：找不到时**不会降级到 cmd.exe**，而是报错并给出安装指引；也可用配置项 `BASH_PATH` 显式指定 `bash.exe` 路径。
+
+## 快速开始
 
 ```bash
-fp
+fp               # 交互式终端 REPL（默认 cli 模式）
+fp -m "你好"     # 单次消息，答完即退
+fp --mode webui  # 浏览器界面，默认 http://127.0.0.1:8765
+fp --mode acp    # ACP 服务，走 stdio（无端口）
 ```
 
-### 安装所有组件
+**首跑配置门禁**（先于任何前端启动）：
 
-```bash
-pip install fp-agent[all]
-```
+- 交互终端缺配置 → 进入向导，依次询问 **API 基础地址 → 模型名称 → API 密钥**（三项均必填，向导不给任何示例或默认值）；写盘后**本次启动立即生效**，无需重启。
+- 非交互场景（管道、`--headless`、`-m`、无 tty 的 `webui`、`acp`、subagent 子进程）→ 不阻塞，打印含配置文件绝对路径的指引并以**退出码 1** 退出。
+- `acp` **一律不进向导**（其 stdin 是 IDE 的 JSON-RPC 协议流）；`--version` / `--update` 跳过门禁。
 
-### 选择性安装
+## 命令行
 
-```bash
-# 核心 + Web 界面
-pip install fp-agent[webui]
+顶层参数（由 `fp/main.py` 注册，其余参数原样透传给前端）：
 
-# 核心 + ACP 协议
-pip install fp-agent[acp]
-```
+| 参数 | 说明 |
+|------|------|
+| `--mode`, `-m` | 启动模式，取值 `cli`（默认）/ `webui` / `acp` |
+| `--model` | 覆盖本次激活模型：`provider/model`，或 `LLM_PROVIDERS` 表内裸模型名；未命中则回退配置激活项并告警 |
+| `--session SID` | 恢复指定会话（cli 等价 `-r SID`；webui/acp 经 `FP_RELOAD_SID` 同样生效） |
+| `--docs` | 查看离线文档（等价 `fp docs`） |
+| `--version` | 打印版本号（`fp <fp-core 版本>`）并退出 |
+| `--update`, `-u` | 检查并升级本地已安装的 fp 组件（缺失的包不强装，单包失败不阻塞其余） |
 
-要求 Python >= 3.11。
+子命令（在顶层解析前路由，参数互不干扰）：
 
-> **Windows 用户**：推荐安装 [Git for Windows](https://git-scm.com)（安装时勾选"Git Bash"并添加到 PATH），以获得完整的 Unix 命令支持。未安装时会自动降级到 cmd.exe，仅支持 Windows 原生命令。
+- `fp docs [路径 | --list | --path | --open]` —— 离线文档（见下节）
+- `fp ext <子命令>` —— 扩展资产分发：工具 / 命令 / 插件（详见 `fp ext -h`）
 
----
+透传给前端的参数：
 
-## 快速使用
+| 模式 | 参数 |
+|------|------|
+| `cli` | `-m/--message MSG` 单次消息；`-r/--resume [SID]` 恢复会话；`--headless` 无头驻留 |
+| `webui` | `--host`（默认 `127.0.0.1`）、`--port`（默认 `8765`）、`--expose`（监听 `0.0.0.0`）、`--reload`（热重载） |
+| `acp` | 无参数；JSON-RPC 2.0 走 **stdio**，不监听端口 |
 
-### 终端 REPL（默认）
-
-```bash
-fp
-```
-
-进入交互式对话：
-
-```
->> 请用 Python 写一个斐波那契数列生成器
-```
-
-### 离线文档
-
-```bash
-fp docs            # 打开随包安装的离线文档目录
-fp docs --list     # 列出文档目录树
-fp docs --path     # 仅打印文档路径
-```
-
-离线文档随包分发在 `site-packages/fp/docs/`，无网络时也可查阅。
-
-### Web 界面
-
-```bash
-pip install fp-agent[webui]
-fp --webui
-```
-
-浏览器访问 `http://localhost:7860`。
-
-### ACP 远程调用
-
-```bash
-pip install fp-agent[acp]
-fp --acp
-```
-
-然后通过 JSON-RPC 调用：
-
-```bash
-curl http://localhost:9090 \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"chat","params":{"message":"你好"}}'
-```
-
----
+> `-m` 是双义短选项：取值命中 `cli|webui|acp` 时视为 `--mode`，否则视为 `--message`。
 
 ## 配置
 
-### 命令行选项
+配置文件 `~/.config/fp/config.json`（Windows：`%APPDATA%\fp\config.json`）；运行期数据（会话 / 记忆 / 日志）在 `~/.local/share/fp/`。
+
+```json
+{
+  "LLM_API_KEY": "sk-...",
+  "LLM_API_BASE_URL": "https://api.deepseek.com/v1",
+  "LLM_MODEL": "deepseek-chat"
+}
+```
+
+上述三键均**必填**——FP 不含任何内置连接默认值。可选键：`TEMPERATURE`、`MAX_TOKENS`、`TIMEOUT`、`RETRY_COUNT`、`MAX_ITERATIONS`、`MAX_CONTEXT_TOKENS`、`ACTIVE_LLM`、`LLM_PROVIDERS`（供应商 / 模型两级表）、`BASH_PATH`。
+
+**优先级：配置文件显式值 > 环境变量 > 内置默认**（环境变量与键同名）。完整字段与校验规则见 [配置指南](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/配置指南.md)。
+
+## 随包离线文档
+
+发布时仓库 `docs/` 会被注入 `site-packages/fp/docs/`，随 wheel 分发，装完即可离线查阅：
 
 ```bash
-fp [OPTIONS]
-
-选项：
-  --config FILE        指定配置文件路径
-  --webui             启动 Web 界面模式
-  --acp               启动 ACP Server 模式
-  --model NAME        指定 LLM 模型名称
-  --host HOST         监听地址（默认 127.0.0.1）
-  --port PORT         监听端口
-  --debug             启用调试模式
-  --quiet             静默模式
-  --version           显示版本信息
+fp docs                     # 用法与文档目录（等价 fp --docs）
+fp docs --list              # 文档目录树
+fp docs --path              # 仅打印文档目录绝对路径
+fp docs self/README.md      # 直接打印某篇（纯文本走 stdout）
+fp docs --open              # 用系统默认程序打开目录（人类交互用）
 ```
 
-### 配置文件
-
-默认读取 `~/.config/fp/config.yaml`：
-
-```yaml
-llm:
-  provider: openai
-  model: gpt-4o
-  temperature: 0.7
-  api_key: ${OPENAI_API_KEY}
-
-session:
-  storage: file
-  path: ~/.local/share/fp/sessions
-
-plugins:
-  - my_plugin
-
-cli:
-  theme: dark
-  stream: true
-```
-
----
-
-## 项目结构
-
-```
-fp                          # 主包（用户入口）
-├── fp-core                 # 核心引擎（Agent 逻辑、LLM 交互、插件系统）
-├── fp-terminal              # 终端 REPL 界面
-├── fp-webui                # Web 界面
-└── fp-acp                  # ACP 通信协议（JSON-RPC 2.0）
-```
-
----
+默认**绝不自动调用 GUI**：输出纯文本、不阻塞，供 agent 自举时读取。
 
 ## 文档
 
-- [快速开始](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/快速开始.md)
-- [配置指南](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/配置指南.md)
-- [插件开发](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/插件系统.md)
-- [ACP 协议规范](https://github.com/zpb911km/fp-agent/blob/main/packages/fp-acp/README.md)
-- [命令参考](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/命令参考.md)
+| 文档 | 内容 |
+|------|------|
+| [快速开始](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/快速开始.md) | 安装、首配、内置系统全貌 |
+| [CLI 入门](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/CLI入门.md) | 终端 REPL 操作与按键 |
+| [命令参考](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/命令参考.md) | 16 个斜杠命令速查 |
+| [WebUI 手册](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/WebUI手册.md) | 浏览器界面使用 |
+| [配置指南](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/配置指南.md) | config.json 全字段与优先级 |
+| [插件系统](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/插件系统.md) | 生命周期钩子与插件开发 |
+| [工具概览](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/工具概览.md) | 内置工具一览 |
+| [引擎](https://github.com/zpb911km/fp-agent/blob/main/docs/dev/引擎.md) | Agent 主循环与钩子挂载点 |
+| [架构设计](https://github.com/zpb911km/fp-agent/blob/main/docs/dev/架构设计.md) | 分层与数据流 |
+| [自举索引](https://github.com/zpb911km/fp-agent/blob/main/docs/self/README.md) | 能力边界 + 查找地图 |
 
----
+> 上表为仓库内相对路径；PyPI 不解析相对链接，请对照 [GitHub 文档目录](https://github.com/zpb911km/fp-agent/tree/main/docs) 阅读。
 
 ## 依赖
 
-| 依赖 | 版本 | 说明 |
-|------|------|------|
-| `fp-core` | >= 0.1.0 | Agent 核心引擎（必装） |
-| `fp-terminal` | >= 0.1.0 | 终端 REPL（必装） |
-| `fp-webui` | >= 0.1.0 | Web 界面（可选） |
-| `fp-acp` | >= 0.1.0 | ACP 协议（可选） |
+| 包 | 版本 | 角色 |
+|----|------|------|
+| `fp-core` | `>= 0.2.0` | Agent 核心引擎（必装） |
+| `fp-terminal` | `>= 0.2.0` | 终端 REPL（必装） |
+| `fp-webui` | `>= 0.2.0` | Web 界面（extra `webui`） |
+| `fp-acp` | `>= 0.2.0` | ACP 协议（extra `acp`） |
+| Python | `>= 3.11` | 运行时 |
 
----
+## License
 
-## 许可
-
-MIT © zpb
+MIT © zpb —— 见 [LICENSE](https://github.com/zpb911km/fp-agent/blob/main/LICENSE)。

@@ -1,167 +1,133 @@
-# fp-core — FP Agent 引擎
+<!-- ⚠️ 生成物：本文件由 scripts/check_docs_sync.py --sync 从 docs/packages/fp-core.md 生成。
+     请修改主文档 docs/packages/fp-core.md，不要直接编辑本文件。 -->
+
+# fp-core — FP 引擎内核
 
 [![PyPI](https://img.shields.io/pypi/v/fp-core)](https://pypi.org/project/fp-core/)
 [![Python](https://img.shields.io/pypi/pyversions/fp-core)](https://pypi.org/project/fp-core/)
-[![License](https://img.shields.io/pypi/l/fp-core)](LICENSE)
+[![License](https://img.shields.io/pypi/l/fp-core)](../../LICENSE)
 
-## 简介
-
-**fp-core** 是FPAgent 框架的核心引擎。它提供了 Agent 生命周期管理、LLM 交互、工具执行、会话管理及插件化扩展等基础能力，是整个框架的基石。
-
-> 如果你只是**使用** Agent，请安装 [`fp`](https://pypi.org/project/fp/) 主包；如果你要**自定义/扩展** Agent 行为，你正在正确的地方。
-
----
-
-## 特性
-
-- **生命周期钩子系统** — 在 Agent 的启动、消息处理、工具调用、响应生成等阶段注入自定义逻辑
-- **插件化架构** — 通过插件动态加载工具、命令、事件监听器，无需修改核心代码
-- **多 LLM 支持** — 统一的 LLM 交互接口，可接入 OpenAI、Claude、本地模型等
-- **工具执行引擎** — 安全的沙箱化工具执行，支持同步/异步、超时控制、结果缓存
-- **会话管理** — 持久化的会话存储与恢复，支持多会话并行
-- **提示词模板** — 结构化提示词组装，支持动态注入上下文与历史
-
----
+> 提供 Agent 主干、生命周期钩子、LLM 通信、会话管理、工具/插件注册等基础能力；想**使用** Agent 请装 [`fp-agent`](https://pypi.org/project/fp-agent/)，要扩展行为才需要本包。
 
 ## 安装
 
 ```bash
-pip install fp-core
+pip install fp-core           # 仅引擎
+pip install fp-agent          # 引擎 + CLI（推荐起点）
 ```
 
-要求 Python >= 3.11。
+要求 Python ≥ 3.11。`Agent` 构造时校验 LLM 配置（`LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`），缺失直接抛 `ValueError` 并指出配置文件路径；配置方式见 [配置指南](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/配置指南.md)。会话关键词可选装中文分词：`pip install "fp-core[kw]"`。
 
----
+## 最小示例
 
-## 快速使用
-
-### 初始化 Agent 引擎
+顶层导出即全部公共入口：`Agent`、`Message`、`Response`、`LifecycleManager`、`LifecycleHook`、`HookContext`、`Plugin`、`PluginConfig`、`PluginRegistry`。
 
 ```python
-from fp_core import AgentEngine
-
-engine = AgentEngine(config={
-    "llm": {"provider": "openai", "model": "gpt-4o"},
-    "session": {"storage": "file", "path": "./sessions"},
-})
+import asyncio
+from fp_core import Agent
+async def main() -> None:
+    # 入参全部可选：enable_log / resume / session_id / io / tool_executor / prompt_builder / role / on_shutdown
+    agent = Agent(enable_log=False)
+    await agent.ensure_initialized()   # 触发 ON_INIT / ON_INITIALIZED，插件在此注册工具与命令
+    resp = await agent.process("用一句话介绍你自己")
+    print(resp.content)                # Response(content, metadata, error)
+    await agent.shutdown()             # 触发 ON_SHUTDOWN / ON_CLEANUP
+asyncio.run(main())
 ```
 
-### 注册插件
+## 生命周期钩子
+
+`LifecycleHook`（`fp_core/core/lifecycle.py`）共 **50 个枚举值**，与 agent loop 状态机边集一一对应。命名约定：pre 边（数据变更前）多带 `BEFORE`/`ENTER`/`EXEC`，post 边为观察点。**所有钩子都是执行钩子**——没有「通知」与「执行」之分：既能改数据，也能阻断/取消流程。
+
+| 阶段 | 钩子 |
+|------|------|
+| 初始化（3） | `ON_INIT` `ON_INITIALIZED` `ON_CONFIG_LOADED` |
+| 输入/命令（11） | `ON_INPUT` `ON_EMPTY` `ON_BEFORE_COMMAND` `ON_COMMAND` `ON_COMMAND_BLOCKED` `ON_FALLTHROUGH` `ON_MSG_ENTER` `ON_MESSAGE_BLOCKED` `ON_MESSAGE_FILTER` `ON_MESSAGE_RECEIVED` `ON_RESUME` |
+| LLM 循环（16） | `ON_INTERRUPT` `ON_CTX_REPAIR` `ON_EARLY_EXIT` `ON_BEFORE_LLM_CALL` `ON_AFTER_LLM_CALL` `ON_CANCEL` `ON_LLM_RETRY` `ON_LLM_RETRY_OK` `ON_LLM_FATAL` `ON_STREAM_STRIP` `ON_TOOL_BLOCKED` `ON_LLM_PASS` `ON_CTX_APPEND` `ON_STREAM_INTERRUPT` `ON_TURN_END` `ON_ITERATION` |
+| 工具执行（13） | `ON_TOOL_SELECT` `ON_TOOL_CANCELLED` `ON_TOOL_CALL` `ON_TOOL_REJECTED` `ON_TOOL_EXEC` `ON_TOOL_RESULT` `ON_TOOL_ERROR` `ON_TOOL_SUPPRESSED` `ON_TOOL_ERROR_PROPAGATED` `ON_RESULT_MUTATED` `ON_TOOL_RESULTS_READY` `ON_TOOL_ABORT` `ON_TOOL_PARTIAL` |
+| 响应/上下文/错误/资源（7） | `ON_BEFORE_RESPONSE` `ON_CONTEXT_UPDATE` `ON_SESSION_SAVE` `ON_ERROR` `ON_CONTEXT_RESTORE` `ON_SHUTDOWN` `ON_CLEANUP` |
+
+注册只有一条路：`lifecycle.register(hook, func, priority=100, name=None)`（`priority` 越小越先执行，`name` 是注销与诊断的键）。`emit()` 以 `func(context, **context.data)` 调用钩子，故签名写 `async def handler(ctx, **kwargs)`；就地改 `ctx.data` 或返回新 `HookContext` 都会被调用方消费。
 
 ```python
-from fp_core.plugins import BasePlugin
+from fp_core import LifecycleHook
+async def on_filter(ctx, **kwargs):          # 载荷原样展开进 kwargs，与 ctx.data 同源
+    if "secret" in kwargs.get("original_content", ""):
+        ctx.data["filtered_content"] = "[已过滤]"
+    return ctx
 
-class MyPlugin(BasePlugin):
+agent.lifecycle.register(LifecycleHook.ON_MESSAGE_FILTER, on_filter, priority=60, name="guard_filter")
+```
+
+> 另有 `fp_core.core.lifecycle.hook` 装饰器（`@hook(LifecycleHook.ON_MESSAGE_FILTER)`）：它只写入 `_lifecycle_hook` 标记，运行时无读取方，**不自动注册**——仍须在 `on_register` 里显式 `lifecycle.register()`。
+
+## 插件
+
+基类在 `fp_core.plugins.base.plugin`（**`fp_core/plugins/__init__.py` 为空，`from fp_core.plugins import ...` 不存在**）。`Plugin` 是抽象基类，子类必须实现 `on_register(lifecycle)` 与 `on_unregister()`；类属性 `name`（默认 `base_plugin`）、`version` 为元信息，`PluginConfig(enabled, priority, metadata)` 提供开关与优先级。
+
+```python
+from fp_core import LifecycleHook, Plugin
+class MyPlugin(Plugin):
     name = "my_plugin"
-    
-    def on_agent_start(self, ctx):
-        print("Agent 启动了！")
-
-    def on_message(self, ctx, message):
-        # 在消息处理前注入逻辑
-        return message
-
-engine.plugin_manager.register(MyPlugin())
+    def on_register(self, lifecycle) -> None:
+        lifecycle.register(LifecycleHook.ON_INIT, self.on_init, priority=50, name="my_init")
+    def on_unregister(self) -> None:
+        pass
+    async def on_init(self, ctx, **kwargs):
+        kwargs.get("tool_registry")          # ON_INIT 由 Agent 传入本次独占的 ToolRegistry
+        return ctx
 ```
 
-### 执行一次对话
+`PluginRegistry(lifecycle, plugin_dir=...)` 扫描目录加载插件，**文件即开关**：`name.py` 加载、`name.py.disabled` 跳过、`_name.py` 视为内部模块。`unregister(name)` 连带清理该插件注册的全部钩子（`_TrackingLifecycle` 追踪）。`Agent` 实例自带 `agent.lifecycle` 与 `agent.plugins`（构造时已扫描内置 `fp_core/plugins/` 和三来源用户插件目录）；手工注册用 `PluginRegistry.register(instance)`，重名抛 `ValueError`。
+
+## 工具注册
+
+`fp_core.tools` 提供 `ToolRegistry`、模块级全局实例 `registry`、以及 `create_registry()`（与全局完全隔离，多 Agent 场景用它）。`register_tool` 签名固定为 `(name: str, definition: OpenAISchema, executor: ToolExecutor)`，`executor` 为 `async def (params: dict) -> str`——**工具层全异步，没有 `BaseTool` 这类基于类的工具抽象，也没有 `tool_manager`**。
 
 ```python
-response = engine.chat("你好，请介绍一下你自己")
-print(response)
+async def hello(params: dict) -> str:
+    return f"hello, {params['who']}"
+registry.register_tool(
+    name="hello",
+    definition={"type": "function", "function": {"name": "hello", "description": "打招呼", "parameters": {
+        "type": "object", "properties": {"who": {"type": "string"}}, "required": ["who"]}}},
+    executor=hello)
 ```
 
----
+配套方法：`unregister_tool(name)`（只清动态注册条目，须与注册成对调用，避免插件禁用后残留）、`get_all_definitions()`、`await execute(tool_name, params)`。核心工具（`bash` / `read_file` / `write_file` / `edit_file`）直接绑定在 `tools/core.py`，不可插件化。
 
-## 架构概览
+## 模块结构
 
 ```
 fp_core/
-├── core/           # 核心运行时：AgentEngine, LLM 接口, 上下文管理
-│   ├── agent.py        # Agent 主循环
-│   ├── llm.py          # LLM 客户端抽象
-│   └── context.py      # 会话上下文
-├── commands/       # 内置命令（内置工具）
-├── tools/          # 工具执行引擎与内置工具集
-│   └── extensions/     # 工具扩展加载器
-├── plugins/        # 插件系统
-│   └── base/           # 插件基类与钩子定义
-├── prompts/        # 提示词模板管理
-└── sessions/       # 会话存储与管理
+├── __init__.py      # 公共导出：Agent / Message / Response / LifecycleHook / Plugin …（无 core/llm.py、core/context.py、顶层 sessions/）
+├── config.py        # LLM 配置解析（LLM_API_KEY / LLM_BASE_URL / LLM_MODEL / ACTIVE_LLM）；同级 logger.py platform_utils.py
+├── core/            # agent.py 编排主干｜lifecycle.py 钩子｜llm_client.py + llm_service.py 通信
+│                    # conversation.py 上下文｜session*.py 会话｜tool_executor.py 执行｜handoff/jobs/state/io/prompt_builder…
+├── tools/           # __init__.py（ToolRegistry）+ core.py（核心工具）+ extensions/
+├── plugins/         # base/plugin.py（Plugin/PluginRegistry）+ memory/ task_system/ shortcircuit/ zeta/
+├── commands/  prompts/  api/     # 斜杠命令实现、系统提示词模板、portal.py 对外门面
+└── taskmap/         # 任务图模型、渲染、存取
 ```
 
-### 生命周期钩子
+## 文档
 
-插件可以通过实现以下钩子方法介入 Agent 运行流程：
-
-| 钩子 | 触发时机 | 典型用途 |
-|------|---------|---------|
-| `on_agent_start` | Agent 初始化完成 | 加载自定义资源 |
-| `on_agent_stop` | Agent 关闭前 | 资源清理 |
-| `on_message` | 收到用户消息后 | 消息预处理/校验 |
-| `before_llm_call` | 调用 LLM 前 | 注入系统提示词 |
-| `after_llm_call` | 收到 LLM 响应后 | 响应后处理/过滤 |
-| `before_tool_exec` | 执行工具前 | 权限检查/参数校验 |
-| `after_tool_exec` | 工具执行完成后 | 结果格式化/缓存 |
-| `on_response` | 生成最终响应前 | 响应润色/转译 |
-
----
+| 文档 | 内容 |
+|------|------|
+| [架构设计](https://github.com/zpb911km/fp-agent/blob/main/docs/dev/架构设计.md) / [引擎](https://github.com/zpb911km/fp-agent/blob/main/docs/dev/引擎.md) | 分层结构与模块职责 / 主循环与状态机 |
+| [插件系统（指南）](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/插件系统.md) / [开发](https://github.com/zpb911km/fp-agent/blob/main/docs/dev/插件系统.md) | 上手写插件 / §6.2 完整 50 钩子清单与 payload |
+| [工具系统](https://github.com/zpb911km/fp-agent/blob/main/docs/dev/工具系统.md) / [会话模块](https://github.com/zpb911km/fp-agent/blob/main/docs/dev/会话模块.md) | 工具 schema 与执行链 / 持久化格式 |
+| [LLM 通信](https://github.com/zpb911km/fp-agent/blob/main/docs/dev/LLM通信.md) / [配置系统](https://github.com/zpb911km/fp-agent/blob/main/docs/dev/配置系统.md) / [命令参考](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/命令参考.md) | 请求重试与流式 / 配置位置与优先级 / 斜杠命令 |
 
 ## 依赖
 
-| 依赖 | 版本 | 用途 |
+| 包 | 版本 | 用途 |
 |------|------|------|
-| `httpx` | >= 0.28.0 | LLM API 异步 HTTP 请求 |
-| `rich` | >= 14.0.0 | 控制台输出格式化 |
-| `wcwidth` | >= 0.2.0 | 终端文本宽度计算 |
-| `pyyaml` | >= 6.0 | 配置文件解析 |
+| `httpx` | >=0.28.0 | 唯一网络传输层（LLM 调用、连接池管理） |
+| `pyyaml` | >=6.0 | 配置文件与记忆树的 YAML 读写 |
+| `jieba` | >=0.42（可选，extra `kw`） | 会话关键词中文分词；缺失自动退化为 bigram |
+| `rich` / `wcwidth` | 不含 | 显示层依赖，属 `fp-terminal`；除此之外本包只用标准库 |
 
----
+## License
 
-## 扩展开发
-
-### 编写自定义插件
-
-```python
-from fp_core.plugins import BasePlugin
-from fp_core.plugins.base import hook
-
-class LogPlugin(BasePlugin):
-    name = "logger"
-    
-    @hook("on_message")
-    def log_message(self, ctx, message):
-        print(f"[LOG] 收到消息: {message[:50]}...")
-        return message
-    
-    @hook("before_llm_call")
-    def inject_system_prompt(self, ctx, messages):
-        messages.insert(0, {"role": "system", "content": "请用简洁的语言回答"})
-        return messages
-```
-
-### 编写自定义工具
-
-```python
-from fp_core.tools import BaseTool
-
-class WeatherTool(BaseTool):
-    name = "get_weather"
-    description = "获取指定城市的天气"
-    
-    async def execute(self, city: str) -> dict:
-        # 实现天气查询逻辑
-        return {"city": city, "temperature": 22}
-```
-
-注册到 Agent：
-
-```python
-engine.tool_manager.register_tool(WeatherTool())
-```
-
----
-
-## 许可
-
-MIT © zpb
+MIT —— 见仓库根 [LICENSE](../../LICENSE)。

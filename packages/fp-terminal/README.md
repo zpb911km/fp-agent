@@ -1,255 +1,119 @@
-# fp-terminal — FP 终端 REPL
+<!-- ⚠️ 生成物：本文件由 scripts/check_docs_sync.py --sync 从 docs/packages/fp-terminal.md 生成。
+     请修改主文档 docs/packages/fp-terminal.md，不要直接编辑本文件。 -->
 
-[![PyPI](https://img.shields.io/pypi/v/fp-terminal)](https://pypi.org/project/fp-terminal/)
-[![Python](https://img.shields.io/pypi/pyversions/fp-terminal)](https://pypi.org/project/fp-terminal/)
-[![License](https://img.shields.io/pypi/l/fp-terminal)](LICENSE)
+# fp-terminal — FP 的终端界面
 
-## 简介
+[![PyPI](https://img.shields.io/pypi/v/fp-terminal.svg)](https://pypi.org/project/fp-terminal/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
 
-**fp-terminal** 是FPAgent 框架的交互式命令行界面。它基于 `prompt-toolkit` 构建，提供了语法高亮、自动补全、多行编辑、历史记录等现代终端体验。
-
-> 通常通过主包 `fp` 安装，无需单独安装。
-
----
-
-## 特性
-
-- **REPL 交互模式** — 实时与 Agent 对话，流式输出响应
-- **命令系统** — 内置 `/` 命令用于控制会话、加载插件、切换模型等
-- **语法高亮** — 代码块自动识别并着色
-- **自动补全** — 命令与参数 Tab 补全
-- **多行编辑** — 支持粘贴多行文本或代码
-- **会话历史** — 对话历史持久化存储，跨会话可回溯
-- **多彩输出** — 基于 `rich` 的渲染引擎
-
----
+> **Textual** 打造的终端 UI：流式对话、可折叠卡片、多行输入、补全浮层、键位可配置。
+> 它是 `fp` 命令的默认前端，通常随 `fp-agent` 一并安装，无需单独引入。
 
 ## 安装
 
 ```bash
-pip install fp-terminal
+pip install fp-agent       # 推荐：`fp` 命令全家桶（fp-core + fp-terminal）
+pip install fp-terminal    # 只装终端界面（fp-core 会被一并拉入）
 ```
 
 要求 Python >= 3.11。
 
-> **Windows 用户**：推荐安装 [Git for Windows](https://git-scm.com)（安装时勾选"Git Bash"并添加到 PATH），以获得完整的 Unix 命令支持。未安装时会自动降级到 cmd.exe，仅支持 Windows 原生命令。
-
----
-
-## 快速使用
-
-### 启动 REPL
+## 启动
 
 ```bash
-fp
+fp                    # 直接进入 TUI
+fp -r [SESSION_ID]    # 恢复历史会话再进 TUI
+fp --keys             # 启动即打开键位面板（无 TTY 时打印键位表后退出）
 ```
 
-或显式调用：
+`fp` 默认走 TUI（L0）。下列任一条件成立时**自动降级**为经典 REPL（L1：裸 `input`，
+无补全、无历史），并在首行提示原因：
 
-```bash
-python -m fp_cli
-```
+| 条件 | 降级原因 |
+|------|---------|
+| `FP_NO_TUI=1` | 显式关闭 TUI |
+| `FP_IS_SUBAGENT=1` | subagent 子进程 |
+| stdin 或 stdout 不是 TTY | 管道 / 重定向 |
+| `TERM=dumb` | 终端不支持交互渲染 |
+| 未安装 `textual` | 依赖缺失 |
 
-启动后进入交互模式：
+`fp -m "..."`（单次消息）与 `fp --headless`（无头驻留）本就不进交互前端，走 L2 打印通路。
 
-```
-╭─ FP ───────────────────────────╮
-│ 输入 /help 查看可用命令                   │
-│ 按 Ctrl+D 或输入 /exit 退出               │
-╰──────────────────────────────────────────╯
+## 交互
 
-🤖 你好！我是 FP，请告诉我你的问题。
-```
+输入框是**多行**的，所以「换行」与「发送」是两个键：
 
-### 开始对话
+| 按键 | 动作 |
+|------|------|
+| `Shift+Enter` | **发送**（等价点击右侧发送按钮） |
+| `Enter` | 输入框内**换行**（动作 `insert_newline`，在 `Ctrl+K` 面板改键后 `Enter` 即让位） |
+| `Tab` | 补全：`/` 命令与路径，插入当前选中候选 |
+| `↑` / `↓` | 光标未到行边界时移动光标；到首/末行时翻**输入历史**；补全浮层打开时选候选 |
+| `Esc` | 关闭补全浮层 |
+| `Ctrl+C` | 复制当前选区（OSC52 写入系统剪贴板）；无选区只提示，**不退出** |
+| `Ctrl+Q` | **退出**（走正常收尾：生成摘要、统计面板、保存会话） |
+| `Ctrl+K` | 键位设置面板开关（再按一次关闭） |
 
-```
->> 请用 Python 写一个快速排序
-# 直接输入即发送消息，Agent 会流式输出回复
+- **打断**（`interrupt`）默认**不绑键**：`Ctrl+C` 已归复制，给它别的键等于替用户拍板。要打断请自行设键。
+- 其余动作——消息区翻页、卡片导航与开合、统计、外观、输入框内编辑——出厂**一律未绑定**，在 `Ctrl+K` 面板里按自己的手感分配。TextArea 的原生编辑键（`Ctrl+A/E/U/K/W`、`Ctrl+Z/Y`、`Ctrl+V`…）始终生效。
+- 一个动作只绑**一个**键。覆盖写在 `~/.config/fp/config.json` 的 `tui.keys`（动作 id → 键串）；非法项逐条忽略并提示原因，坏配置不会让 TUI 起不来。
 
->> /save session-quicksort
-# 保存当前会话
+## 内置命令
 
->> /load session-quicksort
-# 恢复历史会话
-```
-
----
-
-## 命令列表
+16 条内置命令，均以 `/` 开头并支持 `Tab` 补全：
 
 | 命令 | 别名 | 说明 |
 |------|------|------|
-| `/help` | `/h` | 显示帮助信息 |
-| `/exit` | `/q`, `/quit` | 退出 REPL |
-| `/clear` | `/c` | 清屏 |
-| `/save <name>` | — | 保存当前会话 |
-| `/load <name>` | — | 加载指定会话 |
-| `/list` | `/ls` | 列出所有会话 |
-| `/delete <name>` | `/rm` | 删除指定会话 |
-| `/model <name>` | — | 切换 LLM 模型 |
-| `/plugin list` | — | 列出已加载的插件 |
-| `/plugin load <name>` | — | 动态加载插件 |
-| `/tool list` | — | 列出可用工具 |
-| `/env` | — | 查看当前环境配置 |
-| `/config <key>=<value>` | — | 动态修改配置 |
-| `/reset` | — | 重置当前会话上下文 |
-| `/export <format>` | — | 导出会话（json/md） |
+| `/help` | `/?` | 显示可用命令列表 |
+| `/exit` | `/quit` | 正常退出（摘要 + 统计面板 + 保存会话） |
+| `/exit!` | — | 核弹级退出：删除当前会话、不留痕迹 |
+| `/clear` | — | 清空当前会话 |
+| `/new` | `/fresh` | 新建空白会话（先保存当前会话） |
+| `/back` | — | 回退到对话的某个历史时刻（`/back list` 列出，`/back <N>` 回退） |
+| `/history` | — | 查看当前对话历史 |
+| `/fork` | — | 基于当前上下文新建会话 |
+| `/compact` | — | 压缩对话历史 |
+| `/sc` | — | 修剪历史连通块：`list` / `N` / `-d` 退化 / `-c` 裁剪 / `-r` 提炼 |
+| `/task` | — | 任务图控制台：`list` `show` `new` `approve` `answer` `pause` 等 |
+| `/resume` | — | 切换 / 删除 / 清理历史会话 |
+| `/option` | `/opt` `/op` `/ext` `/extension` `/extensions` | 统一管理 commands / plugins / tools 三种扩展 |
+| `/reload` | `/rl` `/hotreload` | 热重启进程（落盘会话 → 原命令重启 → 自动恢复） |
+| `/token` | `/tokens` `/usage` | 显示当前会话 token 消耗统计 |
+| `/session` | — | 显示当前会话信息 |
 
----
+其中 `/sc` 与 `/task` 由插件在启动时注入注册表，其余以命令文件自动发现；用户级扩展命令（插件 / `fp ext`）会追加进同一张表，`/help` 与补全实时反映。
+运行中斜杠命令被禁用（防会话状态竞态），普通输入则排队穿插到本轮之后。
 
-## 快捷键
+## 面板与显示
 
-| 快捷键 | 功能 |
-|--------|------|
-| `Tab` | 自动补全命令/参数 |
-| `Ctrl+C` | 中断当前输出 |
-| `Ctrl+D` | 退出 REPL |
-| `Ctrl+L` | 清屏 |
-| `Ctrl+R` | 反向搜索历史 |
-| `Up/Down` | 浏览历史命令 |
-| `Shift+Enter` | 换行（多行输入） |
-| `Ctrl+W` | 删除前一个词 |
-| `Ctrl+U` | 删除整行 |
-| `Ctrl+K` | 删除光标至行尾 |
+- **状态行**（顶部常驻）：`模型 · 会话 ID 前 8 位 · 空闲/运行中 · 提示`。
+- **消息区**：`VerticalScroll` 消息流，流式输出按帧节流（约 20fps）；工具调用与返回是可折叠卡片，返回体超过 200 行会截断并标注总行数。
+- **输入区**：多行输入框（最高 6 行）+ 发送按钮；占位符随忙闲切换，运行中提示「输入将排队注入（斜杠禁用）」。
+- **补全浮层**：左候选窗 + 右用法说明，窄屏自动切成上下叠放，`Tab` 插入、`Esc` 关闭。
+- **键位面板**（`Ctrl+K`）：选中动作按 `Enter` 进入捕获、按新键即改（立即生效并写回），`Delete`/`Backspace` 取消绑定，`R` 恢复当前项，`Ctrl+R` 全部恢复。
+- **统计面板 / 外观面板**：会话统计（角色分布 + 长度曲线）与主题/配色/符号设置，出厂未绑定，用 `Ctrl+K` 分配。
+- **问询弹窗**：Agent 向用户提问时弹出选项卡 + 自由输入框。
+- **上下文对账**：命令或工具改写上下文后（`/sc`、`/back`、`/resume`、压缩等），消息区重建为新上下文的样子，并留一条「上下文已同步：视图重建（N → M 条消息）」——看到它即表示屏幕内容与 Agent 真正持有的上下文一致。
 
-### TUI 模式
+## 文档
 
-TUI 里**所有操作都可纯键盘完成**——鼠标不可用的终端（如 Windows 传统控制台）
-同样能全功能使用。按 `F1` 或 `Ctrl+/` 查看当前生效键位。
-
-默认键位取**保守集**，并刻意做到**不依赖功能键**：
-
-- **每个核心操作都有非功能键通路**。`F1-F12`、`PgUp/PgDn`、`Home/End` 在 60%
-  机械键盘上要 `Fn` 组合、在 Mac 上是亮度/音量层、部分终端还会截获——所以它们
-  只作加速器（`F1`、`PgUp/PgDn` 仍然可用），唯一入口一律是 `Ctrl+字母`。
-- 避开 `Alt+方向键`（Windows conhost 需终端配合）和 `Ctrl+Shift+字母`（非 kitty
-  键盘协议下会退化成 `Ctrl+字母`）。
-- `Ctrl+/` 在终端里与 `Ctrl+_` 是**同一个字节**（`0x1F`），Textual 解析为
-  `ctrl+underscore`。改键面板和配置文件都接受 `ctrl+/` 写法，显示时也还原成
-  `Ctrl+/`。
-
-| 快捷键 | 功能 |
-|--------|------|
-| `Shift+Enter` | 发送消息 |
-| `Enter` | 输入框内换行（普通可改键动作 `insert_newline`，改走后 `Enter` 即让位） |
-| `Ctrl+Q` | 退出 |
-| `Ctrl+C` | 复制选区 / 打断运行（空闲且无选区时只提示，不退出） |
-| `F1` / `Ctrl+/` | 快捷键总览（也见 `/help`） |
-| `F1` / `Esc` | 总览面板内关闭 |
-| `PgUp` / `PgDn` 或 `Ctrl+U` / `Ctrl+D` | 消息区上 / 下翻页 |
-| `Ctrl+Home` / `Ctrl+End` | 跳到最早 / 最新消息 |
-| `Ctrl+N` / `Ctrl+P` | 聚焦下一张 / 上一张卡片（工具、思考卡） |
-| `Ctrl+O` | 开合当前卡片（无聚焦卡片时作用于最后一张） |
-| `Ctrl+E` | 全部展开 / 全部折叠 |
-| `Ctrl+G` | 会话统计 |
-| `Ctrl+T` | 外观设置 |
-| `Ctrl+K` | 键位设置（也可 `fp --keys`） |
-| `Tab` | 命令/路径补全 |
-
-消息区的键是**优先级绑定**：焦点停在输入框里也照常生效，不必先 `Tab` 出去。
-
-#### 外观面板（`Ctrl+T`，再按一次关闭）
-
-| 操作 | 键 |
-|---|---|
-| 上 / 下一分页 | `←` / `→`（五个分页循环） |
-| 选中字段 | `↑` / `↓`、`PgUp` / `PgDn` |
-| 编辑 / 切换开关 | `Enter`（主题页 = 选定并落盘；字段页 = 打开编辑框） |
-| 恢复当前项默认 | `R`（编辑框留空同效） |
-| 关闭 | `Esc`（放弃未落盘的主题预览） |
-
-`Tab` / `Shift+Tab` 在面板内移动焦点；主屏输入框里的 `Tab` 仍是命令补全。
-80x24 小终端下面板自动收缩，标题与操作提示不会被裁到屏幕外。
-
-#### 自定义键位
-
-`config.json` 的 `tui.keys`，键名是动作 id（见 `F1` 面板，或
-`src/fp_cli/tui_actions.py` 的 `ACTIONS`）：
-
-```json
-{
-  "tui": {
-    "keys": {
-      "card_next": "ctrl+down",
-      "help": "f2",
-      "scroll_page_up": ["pageup", "ctrl+b"]
-    }
-  }
-}
-```
-
-值是键串或键串数组（数组 = 等价别名）。非法项**逐条忽略并在启动时提示原因**，
-不会因为一个手滑的配置项让 TUI 起不来。
-
-#### 图形化改键（推荐）
-
-按 `Ctrl+K`，或在 shell 里 `fp --keys`（启动即开面板）：
-
-| 操作 | 键 |
-|---|---|
-| 选中动作 | `↑` / `↓` |
-| 改键（进入捕获） | `Enter` → 按新键 |
-| 恢复当前项默认 | `R` |
-| 全部恢复默认 | `Ctrl+R` |
-| 关闭 | `Esc` |
-
-`fp --keys` 不经过 TUI 内任何键位绑定 —— **键位配坏、或终端认不出 `Ctrl+K`/`F1`
-时，这是唯一可靠的兜底入口**；在非交互环境（管道、无 TTY）它直接打印键位表：
-
-```bash
-fp --keys          # TUI 里打开面板 / 无 TTY 时打印表格
-fp --keys | less   # 查看全部键位
-```
-
-> 外壳**不占用 `/` 斜杠命名空间**——那是 agent 与插件的命令注册表（`/help`、
-> `/reload` 等都在里面）。外壳若静默劫持同名命令，插件永远轮不到，用户还得
-> 不到任何提示。
-
-改键**立即生效**并写回 `config.json` 的 `tui.keys`。捕获到已被同作用域其他动作
-占用的键会拒绝并提示是谁占着，避免绑出一个静默失效的键。
-
----
-
-## 配置
-
-通过命令行标志自定义启动行为：
-
-```bash
-# 指定配置文件
-fp --config ./my-config.yaml
-
-# 指定初始模型
-fp --model claude-3-opus
-
-# 静默模式（跳过启动横幅）
-fp --quiet
-
-# 调试模式
-fp --debug
-```
-
-配置文件示例（YAML）：
-
-```yaml
-cli:
-  theme: dark          # dark / light
-  multi_line: true     # 启用多行编辑
-  max_history: 1000    # 历史记录条数
-  stream: true         # 流式输出
-```
-
----
+- [CLI 入门](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/CLI入门.md)——命令行参数、快捷键、中断与上下文同步细节
+- [命令参考](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/命令参考.md)——16 条命令的完整用法
+- [会话管理](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/会话管理.md)——恢复、切换、清理历史会话
+- [配置指南](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/配置指南.md)——`config.json` 全字段，含 `tui.theme` / `tui.keys` / `tui.symbols`
+- [工具概览](https://github.com/zpb911km/fp-agent/blob/main/docs/guide/工具概览.md)——Agent 侧工具与卡片渲染的对应关系
 
 ## 依赖
 
 | 依赖 | 版本 | 用途 |
 |------|------|------|
-| `fp-core` | >= 0.1.0 | Agent 核心引擎 |
-| `prompt-toolkit` | >= 3.0.40 | 终端交互框架 |
+| `fp-core` | >= 0.2.0 | 引擎、会话、命令注册表与生命周期钩子 |
+| `textual` | >= 8.0.0 | TUI 框架（渲染、键位绑定、屏幕与弹窗） |
+| `rich` | >= 14.0.0 | Markdown / 富文本渲染 |
+| `wcwidth` | >= 0.2.0 | CJK 宽字符度量（折行与对齐） |
 
----
+Windows 上工具执行**强制使用 Git Bash**（`fp_core/platform_utils.py` 的 `find_bash`：`BASH_PATH` 配置 → PATH 中的 `bash.exe`（跳过 WSL 空壳）→ Git for Windows 常见安装位置）。找不到时给出安装指引，**不降级到 cmd.exe**。
 
-## 许可
+## License
 
-MIT © zpb
+MIT，见仓库根 [LICENSE](../../LICENSE)。

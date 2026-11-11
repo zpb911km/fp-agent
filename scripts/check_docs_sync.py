@@ -20,10 +20,19 @@
 
     这样新增/改名/重组都不怕：不需要预知任何名称，跟着 diff 走即可。
 
+    在此之上还有两档「常驻检查」（每次运行都执行，不依赖 diff）：
+      1. 生成物同步（SYNC_PAIRS）：docs/packages/*.md 是唯一权威主文档，
+         packages/*/README.md 是它的生成物（PyPI 落地页）。两者不一致 →
+         提醒运行 --sync（阻断提交）；生成物被手工改动也会被点名（改主文档）。
+      2. 游离文档扫描（STRAY）：全仓库 *.md 中既不在 docs/ 树、也不是登记的
+         生成物、又不在白名单（GitHub 模板 / SECURITY / CODE_OF_CONDUCT /
+         提示词资产 / .fp 记忆）→ 提醒归档进 docs/ 或登记。
+
 用法:
     python scripts/check_docs_sync.py                  # pre-commit：检查暂存区
     python scripts/check_docs_sync.py --since HEAD~3   # 主动触发：最近 3 次提交
-    python scripts/check_docs_sync.py --audit          # 审计：列出未覆盖代码文件 + 文档关联断裂
+    python scripts/check_docs_sync.py --sync           # 同步：主文档 → packages/*/README.md
+    python scripts/check_docs_sync.py --audit          # 审计：未覆盖代码 + 关联断裂 + 游离文档
     python scripts/check_docs_sync.py --repo PATH      # 指定仓库根（测试用）
 
 环境变量:
@@ -38,6 +47,7 @@
 import argparse
 import fnmatch
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -57,25 +67,31 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
     (
         "packages/fp-core/src/fp_core/commands/*.py",
         ["docs/dev/命令系统.md"],
-        ["docs/guide/命令参考.md", "docs/self/扩展命令.md", "README.md"],
+        [
+            "docs/guide/命令参考.md",
+            "docs/self/扩展命令.md",
+            "README.md",
+            "docs/packages/fp.md",
+            "docs/packages/fp-terminal.md",
+        ],
     ),
     # 工具（含 extensions 子目录）
     (
         "packages/fp-core/src/fp_core/tools/*.py",
         ["docs/dev/工具系统.md"],
-        ["docs/guide/工具概览.md", "docs/self/扩展工具.md", "README.md"],
+        ["docs/guide/工具概览.md", "docs/self/扩展工具.md", "README.md", "docs/packages/fp-core.md"],
     ),
     # 生命周期钩子
     (
         "packages/fp-core/src/fp_core/core/lifecycle.py",
         ["docs/dev/插件系统.md"],
-        ["docs/guide/插件系统.md", "docs/self/扩展插件.md", "README.md"],
+        ["docs/guide/插件系统.md", "docs/self/扩展插件.md", "README.md", "docs/packages/fp-core.md"],
     ),
     # TUI 交互层：键位/面板行为一变，两处用户文档（README 表格 + CLI 入门）必然漂移
     (
         "packages/fp-terminal/src/fp_cli/tui*.py",
         ["docs/dev/显示层.md"],
-        ["docs/guide/CLI入门.md"],
+        ["docs/guide/CLI入门.md", "docs/packages/fp-terminal.md"],
     ),
     (
         "packages/fp-terminal/src/fp_cli/keys_panel.py",
@@ -127,9 +143,9 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
     # 终端界面（src/ 一条即覆盖子目录；build/ 不匹配 src 前缀）
     ("packages/fp-terminal/src/*.py", ["docs/dev/显示层.md"], ["docs/guide/CLI入门.md"]),
     # WebUI
-    ("packages/fp-webui/src/*.py", ["docs/guide/WebUI手册.md"], []),
+    ("packages/fp-webui/src/*.py", ["docs/guide/WebUI手册.md", "docs/packages/fp-webui.md"], []),
     # ACP 协议
-    ("packages/fp-acp/src/*.py", ["docs/acp/README.md"], []),
+    ("packages/fp-acp/src/*.py", ["docs/acp/README.md", "docs/packages/fp-acp.md"], []),
     # 测试（含 conftest）— 变更需确认测试文档
     # 结构变更（新增测试文件）也提醒测试文档：覆盖范围表通常要同步更新
     ("packages/fp-core/tests/*.py", ["docs/dev/测试.md"], ["docs/dev/测试.md"]),
@@ -147,6 +163,8 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
     ("packages/fp-webui/src/fp_webui/static/*.html", ["docs/guide/WebUI手册.md"], []),
     # 开发/脚本工具
     ("scripts/*.py", ["docs/CONTRIBUTING.md"], []),
+    # 包内开发脚本（如 fp-webui 前端依赖图生成）
+    ("packages/*/scripts/*.py", ["docs/CONTRIBUTING.md"], []),
     # 工程配置
     (".pre-commit-config.yaml", ["docs/CONTRIBUTING.md"], []),
     # CI 工作流（矩阵 / 平台覆盖变化 → 测试文档同步；结构变更另确认贡献指南）
@@ -183,9 +201,41 @@ DOC_LINKS: list[tuple[str, list[str]]] = [
     ("docs/dev/zeta_协议.md", ["packages/fp-core/src/fp_core/plugins/zeta/*.py"]),
 ]
 
-# 文档文件本身（变更它们不算「代码变更」）
-# fnmatch 的 `*` 跨 `/`，`docs/*` 一条即覆盖 docs 全树（含子目录）
-_DOC_PATTERNS = ("README.md", "docs/*")
+# ── 生成物同步：主文档（docs/）→ 包内 README（生成物） ──────────────────
+# 每条: (主文档, 生成物) —— 均相对仓库根。
+# 为什么不是软链/硬链：见 docs/dev/资产分发系统.md §4.2 —— git 只存链接本身，
+# 别人 clone 到的是断链、发布物里没有内容；且 Windows CI（ci.yml windows-latest）
+# 默认把软链 checkout 成文本文件。故用「脚本生成 + 门禁比对」，与 release.yml
+# 注入 docs/ 的做法同一套心智：docs/ 是唯一真相，包内文件是分发产物。
+SYNC_PAIRS: list[tuple[str, str]] = [
+    ("docs/packages/fp.md", "packages/fp/README.md"),
+    ("docs/packages/fp-core.md", "packages/fp-core/README.md"),
+    ("docs/packages/fp-terminal.md", "packages/fp-terminal/README.md"),
+    ("docs/packages/fp-webui.md", "packages/fp-webui/README.md"),
+    ("docs/packages/fp-acp.md", "packages/fp-acp/README.md"),
+]
+
+# 生成物里 docs 内部链接改写用的绝对 URL 前缀（见 _rebase_doc_links）
+_DOC_URL_BASE = "https://github.com/zpb911km/fp-agent/blob/main/docs/"
+
+# 游离文档扫描的白名单：这些位置的 .md 有正当归属，不算游离。
+#   docs/ 树本身是所有文档的家（整树自动登记，见 _scan_stray_docs）
+#   .github/ 是 GitHub 原生模板位置；.fp/ 是 FP 本地记忆/设计稿（非仓库文档）
+#   提示词模板是代码资产（随 prompts 规则走，不进 docs 树）
+_STRAY_WHITELIST_FILES = {
+    "README.md",  # 仓库首页（docs/README.md 的镜像入口，见 docs/README.md 末尾约定）
+    "SECURITY.md",  # GitHub 线上仓库安全策略（保留在根部）
+    "CODE_OF_CONDUCT.md",  # GitHub 线上仓库行为准则（保留在根部）
+}
+_STRAY_WHITELIST_PREFIXES = (
+    ".fp/",
+    ".github/",
+    "packages/fp-core/src/fp_core/prompts/",
+)
+
+# 文档文件判定（见 _is_doc）：所有 Markdown 都算文档——变更它不构成「代码变更」。
+# 例外：src/ 下的提示词模板（如 prompts/agent.md）是行为资产，按代码对待，
+# 其变更走 DOC_RULES 的 prompts 规则提醒 docs/dev/引擎.md。
 
 # 结构性变更状态（内容修改 M 之外都算）
 _STRUCTURAL_STATUSES = {"A", "D", "C", "T", "R"}
@@ -220,7 +270,14 @@ def _git_changed_files(repo: Path, since: str | None) -> list[tuple[str, str]]:
 
 
 def _is_doc(path: str) -> bool:
-    return any(fnmatch.fnmatch(path, p) for p in _DOC_PATTERNS)
+    """是否文档（文档变更 ≠ 代码变更）。
+
+    所有 Markdown 都算文档——包括游离文档与生成物。例外：src/ 下的提示词模板
+    是行为资产，按代码对待（否则改提示词不会提醒引擎文档）。
+    """
+    if not path.endswith(".md"):
+        return False
+    return "/src/" not in f"/{path}"
 
 
 def _is_structural(status: str) -> bool:
@@ -292,6 +349,106 @@ def _audit_broken_doc_links(repo: Path) -> list[str]:
     return sorted(broken)
 
 
+# ── 生成物同步（docs/packages/*.md → packages/*/README.md） ────────────
+
+
+def _generated_copies() -> dict[str, str]:
+    """{生成物路径: 主文档路径}"""
+    return {copy: master for master, copy in SYNC_PAIRS}
+
+
+def _rebase_doc_links(text: str) -> str:
+    """主文档里的 docs 内部相对链接 → 仓库绝对 URL。
+
+    主文档位于 docs/packages/，`../guide/x.md` 指向 docs/guide/x.md；
+    生成物位于 packages/<pkg>/README.md，同样写法会指向不存在的
+    packages/guide/x.md。故生成时改写为 GitHub 绝对 URL（PyPI 上可点）。
+    `../../LICENSE` 这类指向仓库根的链接在两个位置解析一致，不改写。
+    """
+    return re.sub(
+        r"\]\(\.\./(?!\.)([^)]*?\.md(?:#[^)]*)?)\)",
+        lambda m: f"]({_DOC_URL_BASE}{m.group(1)})",
+        text,
+    )
+
+
+def _render_copy(master_text: str, master_rel: str) -> str:
+    """主文档内容 → 生成物文本（顶部加不可见的「勿手改」横幅）。
+
+    横幅用 HTML 注释：PyPI/GitHub 渲染时不可见，但打开文件的人一眼能看到。
+    """
+    body = master_text if master_text.endswith("\n") else master_text + "\n"
+    banner = (
+        f"<!-- ⚠️ 生成物：本文件由 scripts/check_docs_sync.py --sync 从 {master_rel} 生成。\n"
+        f"     请修改主文档 {master_rel}，不要直接编辑本文件。 -->\n\n"
+    )
+    return banner + _rebase_doc_links(body)
+
+
+def _sync_status(repo: Path) -> tuple[list[tuple[str, str]], list[str]]:
+    """(漂移的 (主文档, 生成物) 列表, 缺失的主文档列表)。"""
+    drift: list[tuple[str, str]] = []
+    missing: list[str] = []
+    for master_rel, copy_rel in SYNC_PAIRS:
+        master = repo / master_rel
+        if not master.exists():
+            missing.append(master_rel)
+            continue
+        expected = _render_copy(master.read_text(encoding="utf-8"), master_rel)
+        copy = repo / copy_rel
+        actual = copy.read_text(encoding="utf-8") if copy.exists() else ""
+        if actual != expected:
+            drift.append((master_rel, copy_rel))
+    return drift, missing
+
+
+def _sync_apply(repo: Path) -> int:
+    """--sync：把主文档渲染写入生成物。返回更新的文件数。"""
+    updated = 0
+    for master_rel, copy_rel in SYNC_PAIRS:
+        master = repo / master_rel
+        copy = repo / copy_rel
+        if not master.exists():
+            print(f"❌ 主文档不存在，跳过: {master_rel}")
+            continue
+        expected = _render_copy(master.read_text(encoding="utf-8"), master_rel)
+        actual = copy.read_text(encoding="utf-8") if copy.exists() else None
+        if actual == expected:
+            print(f"  = {copy_rel}")
+            continue
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_text(expected, encoding="utf-8")
+        print(f"  ✏️  {copy_rel}  ←  {master_rel}")
+        updated += 1
+    print(f"✅ 同步完成（{updated} 个文件更新）")
+    return 0
+
+
+# ── 游离文档扫描 ──────────────────────────────────────────────────────
+
+
+def _scan_stray_docs(repo: Path) -> list[str]:
+    """全仓库 *.md 中脱离了统一文档管理的文件（相对路径，已排序）。
+
+    不入册 = 不在 docs/ 树、不是登记的生成物、不在白名单 → 视为游离。
+    """
+    registered = set(_generated_copies())
+    stray: list[str] = []
+    for p in repo.rglob("*.md"):
+        rel = p.relative_to(repo).as_posix()
+        parts = p.parts
+        if any(part in _AUDIT_IGNORED_DIRS or part.endswith(".egg-info") for part in parts):
+            continue
+        if rel.startswith("docs/"):
+            continue  # docs/ 是文档的家，整树自动登记
+        if rel in registered or rel in _STRAY_WHITELIST_FILES:
+            continue
+        if any(rel.startswith(pfx) for pfx in _STRAY_WHITELIST_PREFIXES):
+            continue
+        stray.append(rel)
+    return sorted(stray)
+
+
 def _affected_docs(path: str, structural: bool) -> list[str]:
     """某个代码变更文件 → 受影响文档列表。
 
@@ -312,6 +469,46 @@ def check(repo: Path, since: str | None) -> int:
     code_changes = [(s, f) for s, f in changed if f and not _is_doc(f)]
     doc_changes = set(f for s, f in changed if f and _is_doc(f))
 
+    # ── 常驻检查 1：生成物 ↔ 主文档 漂移 ──────────────────────────────
+    drift, missing = _sync_status(repo)
+    gen_copies = _generated_copies()
+    allow = os.environ.get("FP_DOCS_SYNC_ALLOW") == "1"
+
+    if missing:
+        print("❌ 登记的主文档不存在（生成物无从同步）：")
+        for m in missing:
+            print(f"    - {m}")
+        print("    修复：先恢复主文档，或从 SYNC_PAIRS 移除该登记。")
+        print()
+    if drift:
+        print("🔄 生成物与主文档不同步（packages/*/README.md 由 docs/packages/*.md 生成）：")
+        for master, copy in drift:
+            print(f"    - {copy}  ≠  {master}")
+        print("    修复：python scripts/check_docs_sync.py --sync")
+        print()
+
+    # 生成物被手工改动：改了生成物而没改主文档 → 点名（改动会被下次 --sync 覆盖）
+    # 判据需排除「刚由 --sync 生成」的情形：生成物在变更集里且与主文档一致 = 正常同步结果。
+    drifted_copies = {copy for _, copy in drift}
+    changed_masters = {master for master, _ in drift if master in doc_changes}
+    manual_edits = [
+        f for _, f in changed if f in gen_copies and f in drifted_copies and gen_copies[f] not in changed_masters
+    ]
+    if manual_edits:
+        print("⚠️  以下生成物被手工改动（应改主文档，产物会被 --sync 覆盖）：")
+        for f in manual_edits:
+            print(f"    - {f} ← 请改 {gen_copies[f]}")
+        print()
+
+    # ── 常驻检查 2：游离文档扫描（警告，不阻断） ──────────────────────
+    stray = _scan_stray_docs(repo)
+    if stray:
+        print("📄 游离文档（未纳入 docs/ 统一管理，也无登记）：")
+        for f in stray:
+            print(f"    - {f}")
+        print("    处理：归档进 docs/（推荐）／登记进 SYNC_PAIRS 或白名单／确认为过程产物删除。")
+        print()
+
     # 反向提醒：文档变更 + 关联代码未同步变更（不阻断，文档允许先行编写/补充说明）
     reverse_hits: list[tuple[str, str]] = []
     for doc in sorted(doc_changes):
@@ -326,6 +523,13 @@ def check(repo: Path, since: str | None) -> int:
         print()
 
     if not code_changes:
+        if drift:
+            if allow:
+                print("（已通过 FP_DOCS_SYNC_ALLOW=1 放行生成物漂移）")
+                return 0
+            print("❌ 生成物与主文档不同步，提交被阻断。")
+            print("   修复：python scripts/check_docs_sync.py --sync")
+            return 1
         if not since:
             print("✅ 无代码变更，文档同步检查通过")
         return 0
@@ -358,6 +562,13 @@ def check(repo: Path, since: str | None) -> int:
     unsynced = [d for d in needed if not any(fnmatch.fnmatch(f, d) or f == d for f in doc_changes)]
 
     if not unsynced:
+        if drift:
+            if allow:
+                print("（已通过 FP_DOCS_SYNC_ALLOW=1 放行生成物漂移）")
+                return 0
+            print("❌ 生成物与主文档不同步（见上），提交被阻断。")
+            print("   修复：python scripts/check_docs_sync.py --sync")
+            return 1
         print("✅ 相关文档已同步变更")
         return 0
 
@@ -383,13 +594,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=str(REPO_ROOT), help="仓库根目录")
     parser.add_argument("--since", default=None, help="主动触发：检查 REF..工作区 的变更（如 HEAD~3）")
-    parser.add_argument("--audit", action="store_true", help="审计模式：列出未被任何规则覆盖的代码文件")
+    parser.add_argument(
+        "--sync", action="store_true", help="同步模式：把 docs/packages/*.md 生成到 packages/*/README.md"
+    )
+    parser.add_argument("--audit", action="store_true", help="审计模式：未覆盖代码文件 + 文档关联断裂 + 游离文档")
     args = parser.parse_args()
+
+    if args.sync:
+        return _sync_apply(Path(args.repo))
 
     if args.audit:
         repo = Path(args.repo)
         unmapped = _audit_unmapped_code_files(repo)
         broken = _audit_broken_doc_links(repo)
+        stray = _scan_stray_docs(repo)
+        drift, missing = _sync_status(repo)
         problems = 0
         if unmapped:
             problems += 1
@@ -409,9 +628,31 @@ def main() -> int:
             print("建议：更新 scripts/check_docs_sync.py 的 DOC_LINKS，")
             print("      将文档指向当前实际存在的代码文件。")
             print()
+        if drift or missing:
+            problems += 1
+            if missing:
+                print("⚠️  以下登记的主文档不存在：")
+                for m in missing:
+                    print(f"    - {m}")
+                print()
+            if drift:
+                print("⚠️  以下生成物与主文档不同步：")
+                for master, copy in drift:
+                    print(f"    - {copy}  ≠  {master}")
+                print("    修复：python scripts/check_docs_sync.py --sync")
+                print()
+        if stray:
+            problems += 1
+            print("⚠️  以下 .md 游离在统一文档管理之外（既不在 docs/ 树，也非登记生成物/白名单）：")
+            for f in stray:
+                print(f"    - {f}")
+            print()
+            print("建议：归档进 docs/（推荐），或登记进 SYNC_PAIRS/白名单，")
+            print("      或确认为一次性过程产物后删除。")
+            print()
         if problems:
             return 1
-        print("✅ 所有代码文件均被文档规则覆盖，且文档关联代码文件均存在，无盲区")
+        print("✅ 代码文件全覆盖、文档关联完好、生成物同步、无游离文档，无盲区")
         return 0
 
     return check(Path(args.repo), since=args.since)

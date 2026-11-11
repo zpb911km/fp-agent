@@ -298,13 +298,26 @@ echo "你是谁" | fp                   # 测试系统提示词
   并同步更新脚本中的 `ANCHOR` 常量。
 - **显式放行**：确认本次改动确实不影响文档时，用
   `FP_DOCS_SYNC_ALLOW=1 git commit`（仅输出提醒，不阻断）。
+- **包 README 是生成物（不要手改）**：`docs/packages/*.md` 是各包说明的
+  **唯一权威主文档**，`packages/*/README.md`（PyPI 展示页）由脚本从主文档
+  渲染生成（相对链接自动改写为仓库绝对 URL）。两者不一致 → 阻断提交，
+  修复命令 `python scripts/check_docs_sync.py --sync`。
+  直接修改 `packages/*/README.md` 会被点名警告，且下次 `--sync` 覆盖——
+  要改文案请改 `docs/packages/<pkg>.md`。登记表是脚本里的 `SYNC_PAIRS`。
+- **CI 兜底**：`.github/workflows/ci.yml` 的 `quality` job 也会执行
+  `check_docs_sync.py` 与 `--audit`，防止 `git commit --no-verify` 绕过钩子。
+- **游离文档警告**：每次运行都会全仓扫描 `*.md`，凡「不在 `docs/` 树、
+  也不是登记过的生成物、又不在白名单（GitHub 模板 / SECURITY /
+  CODE_OF_CONDUCT / 提示词资产 / `.fp` 记忆）」的散落 Markdown 会被列出
+  （仅警告，不阻断）。处置：归档进 `docs/`、登记进 `SYNC_PAIRS` 或白名单，
+  确认是过程产物则删除——避免文档脱离统一管理。
 - **手动主动触发**：`python scripts/check_docs_sync.py --since HEAD~N`
   检查最近 N 次提交的代码变更与文档是否同步。
 - **规则审计**：`python scripts/check_docs_sync.py --audit`
   列出所有未被任何文档规则覆盖的代码文件（新增代码目录/文件时先跑一次，
   确认它们被登记到 `DOC_RULES`，否则门禁对它们不设防），
   同时校验 `DOC_LINKS` 反向关联：文档登记的「源码真相」代码文件若已不存在
-  （被重构/改名），会报链接断裂。
+  （被重构/改名），会报链接断裂；并列出游离文档与生成物漂移。
 
 代码变更文件与受影响文档的对应规则集中在 `scripts/check_docs_sync.py`
 的 `DOC_RULES`（命令/工具/钩子/核心/界面层/脚本各自关联到对应文档；

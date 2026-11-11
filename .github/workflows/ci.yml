@@ -47,6 +47,13 @@ jobs:
       - name: 🔍 Ruff Format 检查
         run: ruff format --check .
 
+      - name: 📋 文档同步检查（生成物漂移 + 游离文档 + 规则盲区）
+        if: matrix.python-version == '3.14'
+        run: |
+          # 防绕过：pre-commit 可用 --no-verify 跳过，CI 侧再兜一道
+          python scripts/check_docs_sync.py
+          python scripts/check_docs_sync.py --audit
+
       - name: 🔍 Python 语法检查（全部 .py 文件）
         run: |
           echo "检查所有 Python 文件语法..."

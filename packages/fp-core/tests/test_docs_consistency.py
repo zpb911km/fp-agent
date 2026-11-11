@@ -212,7 +212,7 @@ def test_no_ghost_components_in_docs():
 
     # 段落级豁免：标题含这些词的章节视为「部署环境/示例」描述，不校验内置性
     section_skip_words = ("用户级", "示例", "非仓库内置", "部署环境")
-    # 行级豁免：API 端点路径 / 占位符 / 部署环境引用
+    # 行级豁免：API 端点路径 / 占位符 / 部署环境引用 / 文件系统路径
     api_context_words = (
         "端点",
         "API",
@@ -225,6 +225,7 @@ def test_no_ghost_components_in_docs():
         "用户目录",
         "部署环境",
         "非仓库内置",
+        "POSIX",  # 文件系统路径上下文（如「POSIX `/tmp`」），非斜杠命令
     )
 
     suspicious = []

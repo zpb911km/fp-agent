@@ -40,7 +40,12 @@
 | | [dev/自我修改.md](dev/自我修改.md) | 自修改流程、测试、回滚 |
 | | [dev/测试.md](dev/测试.md) | 测试体系、会话隔离、防漂移门禁 |
 | | [dev/文件命名约定.md](dev/文件命名约定.md) | 「文件即开关」通用规则（Plugin/Skill/Command/Tool 共用） |
-| 🔌 **ACP 协议** | [acp/README.md](acp/README.md) | ACP 协议索引（完整规范在子包 `packages/fp-acp/README.md`） |
+| 🔌 **ACP 协议** | [acp/README.md](acp/README.md) | ACP 协议索引（完整落地页见 [packages/fp-acp.md](packages/fp-acp.md)） |
+| 📦 **包文档** | [packages/fp.md](packages/fp.md) | 主包 fp-agent：安装入口、命令行、配置、随包离线文档 |
+| | [packages/fp-core.md](packages/fp-core.md) | 引擎内核：Agent 主干、50 个生命周期钩子、插件/工具注册 API |
+| | [packages/fp-terminal.md](packages/fp-terminal.md) | 终端 TUI：交互键位、16 个内置命令、面板与显示 |
+| | [packages/fp-webui.md](packages/fp-webui.md) | Web 界面：流式对话、会话管理、文件中枢 |
+| | [packages/fp-acp.md](packages/fp-acp.md) | ACP v1 适配层：stdio JSON-RPC、能力协商、会话语义 |
 | 📋 **项目信息** | [CHANGELOG.md](CHANGELOG.md) | 版本历史：0.2.2（迭代记录见 CHANGELOG） |
 | | [CONTRIBUTING.md](CONTRIBUTING.md) | PR 流程、代码风格、Commit 规范 |
 
@@ -90,13 +95,26 @@ docs/
 │   └── 文件命名约定.md            文件即开关（四类扩展共用）
 │
 ├── acp/                       ← 🔌 ACP 协议规范
-│   └── README.md                协议索引（完整规范在子包 packages/fp-acp/README.md）
+│   └── README.md                协议索引（完整落地页在 packages/fp-acp.md）
+│
+├── packages/                  ← 📦 各包落地页（PyPI 展示页的唯一主文档）
+│   ├── fp.md                    主包 fp-agent：安装入口、命令行
+│   ├── fp-core.md               引擎内核：Agent、钩子、插件/工具
+│   ├── fp-terminal.md           终端 TUI
+│   ├── fp-webui.md              Web 界面
+│   └── fp-acp.md                ACP v1 适配层
 │
 ├── CHANGELOG.md                ← 版本历史
 └── CONTRIBUTING.md             ← 贡献指南
 ```
 
 > **注**：`prompts/agent.md` 是系统提示词模板，由运行时加载。
+>
+> **注**：`packages/*.md` 是 `packages/*/README.md` 的**唯一主文档**。包内 README 是
+> 由 `python scripts/check_docs_sync.py --sync` 生成的产物（顶部带「生成物」横幅），
+> **不要直接编辑**；两者不一致时门禁会阻断提交。选脚本而非软链的原因见
+> [dev/资产分发系统.md](dev/资产分发系统.md) §4.2（git 只存链接、clone 到断链、
+> 发布物无内容；Windows CI 会把软链 checkout 成文本文件）。
 
 ---
 
