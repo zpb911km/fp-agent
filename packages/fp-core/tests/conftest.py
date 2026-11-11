@@ -1,8 +1,11 @@
 """pytest fixtures — 隔离文件 I/O，避免污染真实配置"""
 
+import importlib.util as _ilu
 import os
+import sys as _sys
 import tempfile
 from collections.abc import Generator
+from pathlib import Path as _Path
 from unittest.mock import patch
 
 import pytest
@@ -74,50 +77,32 @@ def _reset_config_cache():
     yield
 
 
-@pytest.fixture(autouse=True)
-def _isolate_sessions_dir(tmp_path) -> Generator[None, None, None]:
-    """全局隔离会话目录：任何测试都不允许写真实用户会话数据。
-
-    背景：Agent.__init__ 无条件创建 SessionManager 并写入
-    config.SESSIONS_DIR（~/.local/share/fp/sessions/），此前
-    test_agent_tool_parallel.py 未隔离导致真实会话目录被测试垃圾污染。
-
-    同时 patch 两个引用点：
-      - fp_core.config.SESSIONS_DIR（agent.py 里 os.makedirs 用的）
-      - fp_core.core.session.SESSIONS_DIR（SessionManager 内部用的）
-    """
-    import fp_core.config as cfg
-    import fp_core.core.session as session_mod
-
-    tmp = str(tmp_path / "sessions")
-    with (
-        patch.object(cfg, "SESSIONS_DIR", tmp),
-        patch.object(session_mod, "SESSIONS_DIR", tmp),
-    ):
-        yield
+# ── 会话/数据根隔离：实现在仓库根 conftest.py（#219 上提，单点维护）────────
+# 为什么这里保留一段**再导出**而不是照搬删除：`pytest packages/fp-core/tests`
+# （含 docs/dev/测试.md 的 pre-commit 门禁命令）rootdir=packages/fp-core，
+# pytest 只从 rootdir 向下收集 conftest → 仓库根 conftest **不加载**；若本文件
+# 也删掉隔离，单包跑会重新写真实 ~/.local/share/fp/sessions/（#219 溯源确认
+# 的正是这类目录级缺口）。故按路径取根 conftest 的 fixture 对象导入本命名空间——
+# 实现只有一份，这里只做转发，不复制实现。
+_ROOT_CONF_PATH = _Path(__file__).resolve().parents[3] / "conftest.py"  # tests→fp-core→packages→仓库根
 
 
-@pytest.fixture(autouse=True)
-def _isolate_data_dir(tmp_path) -> Generator[None, None, None]:
-    """全局隔离 FP 数据根：任何测试都不允许扫描真实的 fetched/public/private 资产。
+def _load_root_conftest():
+    """取根 conftest 模块：已被 pytest 加载则复用，否则按路径加载一次。"""
+    for _m in list(_sys.modules.values()):  # 不依赖模块名（各包 tests 可能同名）
+        if _m is not None and _Path(getattr(_m, "__file__", "") or "").resolve() == _ROOT_CONF_PATH:
+            return _m
+    _spec = _ilu.spec_from_file_location("_fp_repo_root_conftest", _ROOT_CONF_PATH)
+    assert _spec is not None and _spec.loader is not None, f"根 conftest 缺失: {_ROOT_CONF_PATH}"
+    _mod = _ilu.module_from_spec(_spec)
+    _sys.modules["_fp_repo_root_conftest"] = _mod
+    _spec.loader.exec_module(_mod)
+    return _mod
 
-    背景：ToolRegistry / Agent 会扫描 user_dirs("tools"/"plugins")，即
-    {DATA}/{fetched,public,private}/...。若测试构造真实 ToolRegistry/Agent，
-    用户安装的 private 插件会污染断言（例如被删除/迁移的旧插件）。
-    把 config._FP_DATA_DIR 指向 tmp，可让 user_dirs() 全部落到临时目录。
-    """
-    import fp_core.config as cfg
 
-    tmp = str(tmp_path / "fp_data")
-    patches = [patch.object(cfg, "_FP_DATA_DIR", tmp)]
-
-    for p in patches:
-        p.start()
-    try:
-        yield
-    finally:
-        for p in reversed(patches):
-            p.stop()
+_root_conftest = _load_root_conftest()
+_isolate_sessions_dir = _root_conftest._isolate_sessions_dir
+_isolate_data_dir = _root_conftest._isolate_data_dir
 
 
 @pytest.fixture
