@@ -51,7 +51,8 @@ def fork_new(state: State) -> SessionInfo:
     old_sid = state.session_id
     summary = _save_current(state)
     new_sid = state.session.create_session()
-    state.rebuild_system_prompt()
+    # 新会话无历史可续，天然要付一次前缀 → 直接取最新构建的提示词
+    state.rebuild_system_prompt(refresh=True)
     state.conversation.reset(state.conversation.system_prompt)
     # 惰性 sid：新会话先不落盘（clear_session_file 对不存在的文件是 no-op），
     # 列表可见性由 list_sessions() 合并在内存 meta 保证——不再靠占位文件
@@ -82,7 +83,7 @@ def switch_to(state: State, sid: str) -> SessionInfo | None:
 
 def clear(state: State) -> None:
     """清空当前会话文件并重建上下文（语义对齐 commands/clear.py）"""
-    state.rebuild_system_prompt()
+    state.rebuild_system_prompt(refresh=True)
     state.conversation.reset(state.conversation.system_prompt)
     state.session.clear_session_file()
 

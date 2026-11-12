@@ -149,12 +149,21 @@ class Agent:
         # 不传参数 → ToolExecutor 自动创建独立的 ToolRegistry（不再使用全局单例）
         self._tool_exec = tool_executor or ToolExecutor()
 
+        # ── 会话：先建立，其 meta 里可能固化了 system prompt（见下） ──
+        # 顺序很关键：system prompt 位于请求序列最前端，prompt 缓存按 token 前缀
+        # 匹配，它一变后面整段历史全废。所以 resume（含 reload 续接）必须复用
+        # 会话里固化过的原文，而不是重新构建一份"此刻的最新状态"。
+        # session_id 非空时使用预置 sid（subagent 场景：父进程预生成，便于兜底补写）
+        self.session = session.SessionManager(resume=resume, new_sid=session_id)
+        os.makedirs(config.SESSIONS_DIR, exist_ok=True)
+        self._pinned_prompt: str | None = self.session.get_system_prompt()
+
         # ── 角色系统：覆盖 system prompt / 工具集 / LLM 配置 ──
         self._role = role
 
         if role is not None:
-            # 角色模式：使用角色的 system prompt
-            initial_prompt = getattr(role, "system_prompt", self._prompter.build_system_prompt())
+            # 角色模式：使用角色的 system prompt（会话固化版本优先）
+            initial_prompt = self._pinned_prompt or getattr(role, "system_prompt", self._prompter.build_system_prompt())
 
             # 角色覆盖模型配置
             model_override = getattr(role, "llm_model", None)
@@ -184,16 +193,11 @@ class Agent:
                     d for d in _orig_get_defs() if d["function"]["name"] in allowed_set
                 ]
         else:
-            # 超级个体模式：使用标准 system prompt
-            initial_prompt = self._prompter.build_system_prompt()
+            # 超级个体模式：使用标准 system prompt（会话固化版本优先）
+            initial_prompt = self._pinned_prompt or self._prompter.build_system_prompt()
 
         # ConversationState：上下文状态的唯一所有者
         self._conv = ConversationState(initial_prompt)
-
-        # SessionManager：持久化（不再持有 _context）
-        # session_id 非空时使用预置 sid（subagent 场景：父进程预生成，便于兜底补写）
-        self.session = session.SessionManager(resume=resume, new_sid=session_id)
-        os.makedirs(config.SESSIONS_DIR, exist_ok=True)
 
         if not os.environ.get("FP_SUBAGENT_QUIET"):
             self.io.info(f"📂 新会话：{self.session.session_id}")
@@ -1356,12 +1360,21 @@ class Agent:
             from fp_core.prompts import apply_system_prompt_append, normalize_prompt_append
 
             raw_append = ctx.data.get("system_prompt_append")
-            apply_system_prompt_append(self._conv, raw_append)
+            # 会话已固化 system prompt 时不重放插件段：那份原文里已经含过一遍，
+            # 再 append 一次会重复注入，而且必然改写前缀（缓存全废）。
+            if getattr(self, "_pinned_prompt", None) is None:
+                apply_system_prompt_append(self._conv, raw_append)
             # 缓存归一化后的注入段：会话重建（rebuild_system_prompt）时重放，
             # 保证插件注入跨 /clear /new /resume 与 api 会话操作不丢失。
             _st = getattr(self, "state", None)
             if _st is not None:  # 兼容测试桩（object.__new__ 跳过 __init__）
                 _st.prompt_appends = normalize_prompt_append(raw_append)
+            # 固化：会话首次定型时把 system prompt 原文写进会话 meta。
+            # 此后同会话（含跨进程 resume / reload 续接）只读这一份，
+            # 前缀永不改写——这是「reload 不再全额重算上下文」的关键。
+            _sess = getattr(self, "session", None)
+            if _sess is not None:
+                _sess.pin_system_prompt(self._conv.system_prompt)
             await self.lifecycle.emit(LifecycleHook.ON_INITIALIZED, first_time=True)
 
     async def shutdown(self) -> None:

@@ -46,6 +46,19 @@ def _extract_sid(filename: str) -> str:
 
 # ── 会话文件（嵌入 meta） ─────────────────────────
 
+# 固化在会话 meta 里的 system prompt（原文）
+#
+# 为什么固化：LLM 的 prompt 缓存按「token 前缀」匹配，而 system prompt 位于
+# 请求序列的最前端——它只要有一个字节变化，后面的全部历史都会退化为未命中。
+# 而 system prompt 里混装的都是易变内容（记忆根索引会随 memory_save 变、插件
+# 追加段会随代码改动变），每次重建都拿"此刻的最新状态"，等于每次重启都白付
+# 一整份上下文。实测：41 次 reload 中 28 次命中率跌到 1%（累计 194 万 token）。
+#
+# 策略：会话首次定型时固化原文，此后 resume / reload 一律复用这份，
+# 只有显式动作（/new、/clear、/prompt refresh）才重建并覆盖。
+SYSTEM_PROMPT_FIELD = "system_prompt"
+SYSTEM_PROMPT_AT_FIELD = "system_prompt_at"
+
 
 def _default_meta(sid: str) -> dict[str, Any]:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -668,7 +681,15 @@ class SessionManager:
         列表被占位文件刷屏的来源之一）。当前会话在列表中的可见性由
         `list_sessions()` 合并在内存 meta 保证，不再依赖占位文件。
         """
+        keep_prompt = self.get_system_prompt()
+        keep_at = self.get_system_prompt_at()
         self._meta = _default_meta(self._session_id)
+        # 清空的是「消息」，不是「会话的 system prompt 固化」——保留它，
+        # 否则 /clear 之后 prefix 会悄悄换成新构建的版本（多付一次全量）。
+        if keep_prompt:
+            self._meta[SYSTEM_PROMPT_FIELD] = keep_prompt
+            if keep_at:
+                self._meta[SYSTEM_PROMPT_AT_FIELD] = keep_at
         self._sync_token_tracker()  # 清空会话 = 无用量，tracker 同步归零
         path = self._session_path()
         if not os.path.exists(path):
@@ -875,6 +896,45 @@ class SessionManager:
     def meta(self) -> dict[str, Any]:
         """获取当前会话的 meta 信息（只读视图）"""
         return dict(self._meta)
+
+    # ── 固化的 system prompt ─────────────────────
+
+    def get_system_prompt(self) -> str | None:
+        """当前会话固化的 system prompt 原文；尚未固化返回 None。"""
+        prompt = self._meta.get(SYSTEM_PROMPT_FIELD)
+        return prompt if isinstance(prompt, str) and prompt.strip() else None
+
+    def get_system_prompt_at(self) -> str | None:
+        """固化时刻（``YYYY-MM-DD HH:MM:SS``）；未固化返回 None。"""
+        at = self._meta.get(SYSTEM_PROMPT_AT_FIELD)
+        return at if isinstance(at, str) and at else None
+
+    def pin_system_prompt(self, prompt: str, *, force: bool = False) -> bool:
+        """把 system prompt 固化进当前会话 meta。
+
+        这是「会话内前缀永不改写」的唯一写入口：
+
+          - ``force=False``（默认）已有固化版本时不覆盖——会话进行中调用
+            只有一次生效机会，重复调用是无害的 no-op。
+          - ``force=True`` 显式重建（/new、/clear、/prompt refresh 用），
+            调用方须自知：前缀一变，下一次调用必然全量未命中。
+
+        只改内存 meta，随下一次 ``save_context`` / ``save_message`` 落盘
+        （与惰性会话约定一致：不给空会话凭空造出 0 长度会话文件）；
+        若会话文件已在盘上则立即回写，避免进程猝死后固化丢失。
+
+        Returns:
+            True = 本次真的写入了（首次固化或 force 覆盖）；False = 未写。
+        """
+        if not prompt or not prompt.strip():
+            return False
+        if not force and self.get_system_prompt() is not None:
+            return False
+        self._meta[SYSTEM_PROMPT_FIELD] = prompt
+        self._meta[SYSTEM_PROMPT_AT_FIELD] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if self._session_exists(self._session_id):
+            self._write_meta(self._meta)
+        return True
 
     def save_and_summarize(
         self,

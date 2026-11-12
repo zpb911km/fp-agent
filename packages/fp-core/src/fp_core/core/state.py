@@ -91,22 +91,37 @@ class State:
 
     # ── 便捷操作 ────────────────────────────────────────
 
-    def rebuild_system_prompt(self):
+    def rebuild_system_prompt(self, refresh: bool = False) -> None:
         """重建 system prompt 并应用到当前会话
 
         命令层（clear, resume 等）与 api 会话操作需要重置上下文时调用此方法，
         无需知道 PromptBuilder 的存在。
 
-        重建后**重放**插件注入（prompt_appends，见 ensure_initialized 捕获），
-        保证插件 system_prompt_append 跨会话重建不丢失（原 webui 独有补丁归核）。
+        **默认不重建**：若当前会话已固化过 system prompt（见
+        ``SessionManager.pin_system_prompt``），直接复用那一份原文。
+        因为 system prompt 位于请求序列最前端，缓存按 token 前缀匹配——
+        重建后哪怕只差一个字符，后面整段历史全部退化为未命中。
+
+        Args:
+            refresh: True = 强制重新构建并覆盖固化版本。只在「显式要求
+                让新提示词/新插件段生效」时使用（/new、/clear、/prompt refresh）；
+                调用方须自知这会让下一次 LLM 调用全量未命中。
         """
         from fp_core.core.prompt_builder import PromptBuilder
         from fp_core.prompts import apply_system_prompt_append
+
+        if not refresh:
+            pinned = self.session.get_system_prompt()
+            if pinned:
+                self.conversation.set_system_prompt(pinned)
+                return
 
         prompt = PromptBuilder().build_system_prompt()
         self.conversation.set_system_prompt(prompt)
         if self.prompt_appends:
             apply_system_prompt_append(self.conversation, self.prompt_appends)
+        # 固化刚构建出的原文：本次会话此后（含跨进程 resume）都用它
+        self.session.pin_system_prompt(self.conversation.system_prompt, force=True)
 
     # ── Agent 回引（由 Agent.__init__ 设置，供命令访问 Agent 实例） ──
     agent: "Agent | None" = field(repr=False, default=None)
