@@ -616,6 +616,143 @@ def _summary_limit() -> int:
     return SUMMARY_LIMIT
 
 
+def _fmt_tokens(n: int) -> str:
+    """token 数的紧凑写法（卡片二级菜单一行放得下）。
+
+    与终端 ``TokenUsage.short_str`` 同口径的「人读优先」取舍：过千折 k、
+    过百万折 M，保留一位有效小数并去掉无意义的 ``.0``。
+    """
+    if n < 1000:
+        return str(n)
+    if n < 999_950:  # 留出四舍五入余量，免得 999_999 显示成 "1000k"
+        v = f"{n / 1000:.1f}"
+        return (v[:-2] if v.endswith(".0") else v) + "k"
+    v = f"{n / 1_000_000:.2f}"
+    if v.endswith("0"):
+        v = v[:-1]
+    if v.endswith(".0"):
+        v = v[:-2]
+    return v + "M"
+
+
+def _token_summary(raw: Any) -> dict[str, Any] | None:
+    """会话 meta 的 ``token_usage`` → 前端可直接展示的摘要（无用量 → ``None``）。
+
+    展示串在**后端**拼好下发，前端只做插值——与 ``kw_show``/``summary_limit``
+    同一条纪律（前端不写死第二份口径）。``call_count == 0`` 的陈旧记录不返回，
+    免得卡片显示一行「0 tokens」的假数据。
+
+    ``rows`` 是卡片二级菜单的**成品行**（图标/数值/标签/悬浮说明），前端逐行
+    插值即可：菜单要的是「输入未命中 / 输入命中 / 输出 / 命中率」四行明细，
+    行内容与顺序在此一处定义，JS 不再自己拼第二份。
+
+    缓存细分的诚实处理：部分厂商/模型不上报 ``cache_hit_tokens``
+    （``cache_hit + cache_miss == 0``），此时命中率未知——硬填 0% 是假数据，
+    故退化成「输入」（= prompt 全量）一行 + 命中率 ``—``。
+    """
+    if not isinstance(raw, dict):
+        return None
+    # isinstance 窄化后仍是 dict[Unknown, Unknown]（meta 来自 json.loads），
+    # 显式 cast 一次，免得 Any/Unknown 扩散到后续每一处 .get()（pyright strict）。
+    data = cast("dict[str, Any]", raw)
+    raw_total = data.get("total")
+    if not isinstance(raw_total, dict):
+        return None
+    total = cast("dict[str, Any]", raw_total)
+    calls = int(total.get("call_count") or 0)
+    total_tokens = int(total.get("total_tokens") or 0)
+    if calls <= 0 or total_tokens <= 0:
+        return None
+    prompt = int(total.get("prompt_tokens") or 0)
+    completion = int(total.get("completion_tokens") or 0)
+    reasoning = int(total.get("reasoning_tokens") or 0)
+    hit = int(total.get("cache_hit_tokens") or 0)
+    miss = int(total.get("cache_miss_tokens") or 0)
+    cache_base = hit + miss
+    has_cache = cache_base > 0
+
+    # ── 二级菜单成品行（顺序即用户要的阅读次序） ──
+    rows: list[dict[str, str]] = [
+        {
+            "k": "🪙",
+            "v": _fmt_tokens(total_tokens),
+            "l": "总计",
+            "tip": f"输入 + 输出 = {total_tokens:,} tokens · {calls} 次调用",
+        }
+    ]
+    if has_cache:
+        rows.append({
+            "k": "📥",
+            "v": _fmt_tokens(miss),
+            "l": "输入未命中",
+            "tip": f"{miss:,} tokens —— 未命中缓存的全价输入",
+        })
+        rows.append({
+            "k": "🎯",
+            "v": _fmt_tokens(hit),
+            "l": "输入命中",
+            "tip": f"{hit:,} tokens —— 命中提示缓存，单价更低",
+        })
+    else:
+        rows.append({
+            "k": "📥",
+            "v": _fmt_tokens(prompt),
+            "l": "输入",
+            "tip": f"{prompt:,} tokens（该模型未上报缓存命中/未命中细分）",
+        })
+    out_tip = f"{completion:,} tokens"
+    if reasoning:
+        # 思考 token 已含在 completion 内，单列提示避免「输出」被误读为可见文本量
+        out_tip += f"，其中思考 {reasoning:,}"
+    # 图标选择有实测依据：📥(收件盒) 与 📤(出件盒) 在 12px 卡片字号下**无法
+    # 一眼区分**（截图交叉验证时被认成同一个托盘），故「输出」改用 ⬇ ——
+    # 与终端 TokenUsage 的 ↑prompt/↓completion 口径同源，纯色字形小字号更清晰。
+    rows.append({"k": "⬇", "v": _fmt_tokens(completion), "l": "输出", "tip": out_tip})
+    if has_cache:
+        rows.append({
+            "k": "⚡",
+            "v": f"{hit / cache_base:.0%}",
+            "l": "命中率",
+            "tip": f"输入命中 {hit:,} / 输入合计 {cache_base:,}",
+        })
+    else:
+        rows.append({
+            "k": "⚡",
+            "v": "—",
+            "l": "命中率",
+            "tip": "该模型未上报缓存细分，命中率未知（不填 0% 以免误读）",
+        })
+
+    # 明细串只给悬浮提示（title）的总入口，不占卡片行宽
+    detail = f"↑{_fmt_tokens(prompt)} ↓{_fmt_tokens(completion)} ×{calls} 次调用"
+    if has_cache:
+        detail += f" · 缓存命中 {hit / cache_base:.0%}"
+    raw_models = data.get("per_model")
+    if isinstance(raw_models, dict):
+        models = cast("dict[str, Any]", raw_models)
+        # 调用次数最多的模型排前面，让「这轮用的是哪个模型」一眼可见
+        used: list[tuple[str, int]] = []
+        for name, m in models.items():
+            if not isinstance(m, dict):
+                continue
+            used.append((str(name), int(cast("dict[str, Any]", m).get("call_count") or 0)))
+        used.sort(key=lambda kv: kv[1], reverse=True)
+        if used:
+            detail += " · " + ", ".join(name for name, _ in used[:3])
+    return {
+        "total": total_tokens,
+        "prompt": prompt,
+        "completion": completion,
+        "calls": calls,
+        "hit": hit,
+        "miss": miss,
+        "hit_rate": (hit / cache_base) if has_cache else None,
+        "short": _fmt_tokens(total_tokens),
+        "detail": detail,
+        "rows": rows,
+    }
+
+
 @app.get("/api/sessions")
 async def list_sessions() -> dict[str, Any]:
     """列出所有历史会话"""
@@ -635,6 +772,9 @@ async def list_sessions() -> dict[str, Any]:
             # "已锁定"，否则预填自动摘要会让用户误以为那是自己起的名字。
             "summary_locked": bool(info.get("summary_locked")),
             "kw": info.get("kw") or [],  # KL 管线预算好的区分性关键词，前端只读
+            # token 消耗（卡片二级菜单一行）：摘要串由后端拼好，前端只插值。
+            # 无用量（老会话只在退出时结算过 / 未调用过 LLM）→ None，前端不渲染该行。
+            "token_usage": _token_summary(info.get("token_usage")),
             "is_current": sid == current_sid,
         })
 
@@ -656,6 +796,8 @@ async def search_sessions(q: str = "", limit: int = 30) -> dict[str, Any]:
             "summary_locked": bool(meta.get("summary_locked")),
             "kw": meta.get("kw") or [],
             "message_count": meta.get("message_count", 0),
+            # 与 /api/sessions 同口径（同一张卡片两种来源，字段不许漂）
+            "token_usage": _token_summary(meta.get("token_usage")),
             "created": meta.get("created", ""),  # 与 created 列表端点对齐，菜单 meta 层级用
             "updated": item.get("updated", ""),
             "is_current": item["id"] == current_sid,

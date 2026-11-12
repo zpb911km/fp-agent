@@ -69,7 +69,7 @@ REST 走 `Authorization: Bearer <token>`（`/api/auth`、`/api/health` 白名单
 |------|------|
 | `POST /api/auth` · `GET /api/health` | 登录校验 · 健康与运行时快照 |
 | `POST /api/chat` | 非流式一次性发送（流式请用 WS） |
-| `GET /api/sessions` · `GET /api/sessions/search` | 会话列表（含摘要/kw/是否有内容） · 按正文检索 |
+| `GET /api/sessions` · `GET /api/sessions/search` | 会话列表（含摘要/kw/是否有内容/token 明细 `token_usage.rows`；两端点字段必须同口径——同一张卡片两种来源） · 按正文检索 |
 | `POST /api/sessions` · `DELETE /api/sessions/{sid}` | 新建并切换 · 删除（不能删当前会话） |
 | `GET /api/sessions/{sid}/messages` · `POST /api/sessions/{sid}/search` | 读全文 · 按内容片段搜消息（返回文件行号） |
 | `POST /api/sessions/{sid}/switch` · `POST /api/sessions/clear` | 切换 · 清空当前会话 |

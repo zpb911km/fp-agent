@@ -1552,6 +1552,14 @@
 .session-item-actions {
   display: flex;
   gap: 6px;
+  /* 窄卡片下宁可整颗按钮换行，也不许把按钮文字劈成「当/前」「重/命名」：
+     flex 项目默认 shrink=1 且会按字符断行，是之前折词的真凶。 */
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.session-item-actions > button {
+  flex: none;
+  white-space: nowrap;
 }
 /* 单卡「⟳ 重算 kw」（打磨③）：工具性动作，虚线弱化并靠右，
    与左侧 主动作（切换/删除）分层 */

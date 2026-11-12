@@ -106,19 +106,30 @@ function renderSessionItem(s, withSnippets) {
   /* 主卡只留 summary + kw + ⋯（验收⑥）；日期/meta/操作全收二级菜单。
      搜索片段(snippets)留主卡：它是命中确认信息，收进菜单会让搜索失去
      「为何命中」的即时反馈（取舍已写入报告）。
-     菜单 meta 分层（打磨②）：日期(创建/更新) → 消息数 → kw 全量，
-     逐行成层；模型不可得——会话 meta 与消息行均无 model 字段（勘察实测），
-     报告写明，不造假日数据。 */
+     菜单 meta 分层（打磨②）：日期(创建/更新) → 消息数 → token 明细 → kw 全量，
+     逐行成层。token 明细由后端 /api/sessions 的 token_usage 摘要下发
+     （rows=成品行：图标/数值/标签/悬浮说明，含总计/输入未命中/输入命中/
+     输出/命中率），前端只插值——口径不在这边写第二份。 */
   var kwAll = (s.kw && s.kw.length) ? s.kw.join(' · ') : '';
-  function metaRow(icon, value, label) {
+  function metaRow(icon, value, label, tip) {
     return '<div class="sim-row"><span class="sim-k">' + icon + '</span>' +
-      '<span class="sim-v">' + escapeHtml(value) + '</span>' +
-      '<span class="sim-l">' + label + '</span></div>';
+      '<span class="sim-v"' + (tip ? ' title="' + escapeHtml(tip) + '"' : '') + '>' +
+      escapeHtml(value) + '</span>' +
+      '<span class="sim-l">' + escapeHtml(label) + '</span></div>';
   }
   var metaRows = '';
   if (s.created) metaRows += metaRow('📅', String(s.created).slice(0, 16), '创建');
   if (s.updated) metaRows += metaRow('🕐', String(s.updated).slice(0, 16), '更新');
   metaRows += metaRow('💬', String(msgCount), '条消息');
+  /* token 消耗：无用量（未调用过 LLM 的会话 / 只在退出时结算过的老会话）→ 不渲染，
+     不造 "0 tokens" 的假数据。rows 为后端成品行；short/detail 是兼容旧载荷的
+     单行退化路径（跨版本热更时前端新、后端旧也不会空着）。 */
+  var tk = s.token_usage;
+  if (tk && tk.rows && tk.rows.length) {
+    tk.rows.forEach(function(r) { metaRows += metaRow(r.k || '🪙', r.v, r.l || '', r.tip); });
+  } else if (tk && tk.short) {
+    metaRows += metaRow('🪙', tk.short, 'tokens', tk.detail);
+  }
   if (kwAll) metaRows += metaRow('🏷', kwAll, '关键词');
   return '<div class="session-item' + (isCurrent ? ' current' : '') + '" data-sid="' + s.id + '"' +
       ' data-locked="' + (s.summary_locked ? '1' : '') + '">' +
