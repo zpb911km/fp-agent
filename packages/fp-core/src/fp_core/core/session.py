@@ -415,6 +415,7 @@ class SessionManager:
 
     _session_id: str
     _meta: dict[str, Any]
+    _token_tracker: Any
 
     def __init__(self, resume: str | bool | None = None, new_sid: str | None = None):
         """
@@ -426,6 +427,8 @@ class SessionManager:
                             供 subagent 等需要"父进程预知子会话 id"的场景）
         """
         os.makedirs(SESSIONS_DIR, exist_ok=True)
+        # token 追踪器由 Agent 在构造后 bind（此处 SessionManager 先于它存在）
+        self._token_tracker = None
 
         # 预置 sid：直接使用，不经过 resume 逻辑
         if new_sid:
@@ -479,6 +482,25 @@ class SessionManager:
             meta = self._meta
         path = self._session_path()
         _write_meta_to_file(path, meta)
+
+    # ── token 追踪器绑定 ─────────────────────────
+
+    def bind_token_tracker(self, tracker: Any) -> None:
+        """绑定 Agent 的 TokenTracker，此后会话切换时自动对齐其累计值。
+
+        为什么由 SessionManager 负责对齐：``token_usage`` 是**按会话**的累计
+        快照，而 tracker 是**按进程**的单例。若不绑定，``/new`` 后新会话会
+        继承旧会话的累计（存多），``/resume`` 切到别的会话则带着当前会话的
+        数字（串味）。切换点只有 SessionManager 知道，所以在它这里同步最不易漏。
+        """
+        self._token_tracker = tracker
+        self._sync_token_tracker()
+
+    def _sync_token_tracker(self) -> None:
+        """把 tracker 对齐到当前会话的 meta（无用量的会话 → 归零）。"""
+        if self._token_tracker is None:
+            return
+        self._token_tracker.restore(self._meta.get("token_usage"))
 
     # ── 会话生命周期 ──────────────────────────────
 
@@ -610,6 +632,7 @@ class SessionManager:
         self._session_id = sid
         self._meta = self._load_meta_from_session()
         _register_current_session(sid)  # 同步进程级「当前会话」（get_current_session_id 的语义）
+        self._sync_token_tracker()  # token 累计随之对齐到目标会话
         return True
 
     def create_session(self, sid: str | None = None) -> str:
@@ -621,6 +644,7 @@ class SessionManager:
         self._session_id = self._allocate_session(sid)
         self._meta = self._load_meta_from_session()
         _register_current_session(self._session_id)  # 同步进程级「当前会话」
+        self._sync_token_tracker()  # 新会话无用量 → tracker 归零，不继承旧会话
         return self._session_id
 
     def delete_session(self, sid: str, force: bool = False) -> bool:
@@ -645,6 +669,7 @@ class SessionManager:
         `list_sessions()` 合并在内存 meta 保证，不再依赖占位文件。
         """
         self._meta = _default_meta(self._session_id)
+        self._sync_token_tracker()  # 清空会话 = 无用量，tracker 同步归零
         path = self._session_path()
         if not os.path.exists(path):
             return
@@ -657,10 +682,12 @@ class SessionManager:
         if latest and self._session_exists(latest):
             self._session_id = latest
             self._meta = self._load_meta_from_session()
+            self._sync_token_tracker()
             return True
         # 没有历史会话 → 分配新会话 ID（惰性文件创建）
         self._session_id = self._allocate_session()
         self._meta = self._load_meta_from_session()
+        self._sync_token_tracker()
         return False
 
     def prune_empty_sessions(self) -> list[str]:
@@ -761,8 +788,16 @@ class SessionManager:
             summary = f"[subagent] {summary}"
         self._meta["summary"] = summary
 
-    def save_context(self, context: list[dict[str, Any]]) -> None:
-        """将完整上下文写入文件。context 应为 to_serializable() 的输出（无 system prompt）。"""
+    def save_context(self, context: list[dict[str, Any]], meta_updates: dict[str, Any] | None = None) -> None:
+        """将完整上下文写入文件。context 应为 to_serializable() 的输出（无 system prompt）。
+
+        Args:
+            context: 待落盘的完整上下文（system 消息会被过滤）
+            meta_updates: 与正文**同一次写入**合并进 meta 的字段（如
+                ``{"token_usage": ...}``）。走这条路径而不是事后再调
+                ``update_meta``，可以保证「一盘一写」——每轮问答落盘时
+                token 用量随之增量更新，也不会出现 meta 与正文不同步的窗口。
+        """
         # 防御性过滤：防止误传入 system 消息
         context = [m for m in context if m.get("role") != "system"]
         path = self._session_path()
@@ -772,6 +807,8 @@ class SessionManager:
 
         lines = [json.dumps(msg, ensure_ascii=False) for msg in context]
 
+        if meta_updates:
+            self._meta.update(meta_updates)
         self._meta["message_count"] = len(context)
         self._meta["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._refresh_summary(context)  # 摘要随写随更（生产主路径是本方法）
@@ -839,7 +876,12 @@ class SessionManager:
         """获取当前会话的 meta 信息（只读视图）"""
         return dict(self._meta)
 
-    def save_and_summarize(self, messages: list[dict[str, Any]], session_id: str | None = None) -> str:
+    def save_and_summarize(
+        self,
+        messages: list[dict[str, Any]],
+        session_id: str | None = None,
+        meta_updates: dict[str, Any] | None = None,
+    ) -> str:
         """保存会话上下文并生成摘要（统一入口）。
 
         所有会话切换/退出路径都应调用此方法，确保摘要生成逻辑一致。
@@ -857,6 +899,9 @@ class SessionManager:
         Args:
             messages: to_serializable() 输出的非 system 消息列表
             session_id: 目标会话 ID（None 表示当前会话）
+            meta_updates: 与正文同一次写入合并进 meta 的字段（如
+                ``{"token_usage": ...}``，退出时结算用）。仅对当前会话生效
+                （``save_context`` 只写当前 sid，切走旧会话时该字段无效）。
 
         Returns:
             摘要文本；无可保存内容且文件不在盘上时返回 ""
@@ -872,7 +917,7 @@ class SessionManager:
             return ""
 
         # 1. 持久化消息（空 context 时 save_context 是 no-op，不建文件）
-        self.save_context(messages)
+        self.save_context(messages, meta_updates=meta_updates)
 
         # 2. 先刷关键词——summary 由 kw 派生，必须排在它前面
         self._refresh_keywords(target_sid, messages)

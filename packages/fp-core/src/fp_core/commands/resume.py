@@ -113,7 +113,9 @@ async def execute(state: State, arg: str) -> tuple[bool, str]:
     # ── /resume latest ─────────────────────────────────────────
     if arg == "latest":
         # 保存当前会话的上下文和摘要，再切换
-        state.session.save_and_summarize(state.conversation.to_serializable())
+        state.session.save_and_summarize(
+            state.conversation.to_serializable(), meta_updates=state.token_tracker.meta_fragment()
+        )
         if state.session.resume_latest():
             _rebuild_context(state)
             return (True, f"📂 已切换到最新会话: `{state.session_id}`")
@@ -140,7 +142,9 @@ async def execute(state: State, arg: str) -> tuple[bool, str]:
         return (True, render_search(state, arg.split()))
 
     # 保存当前会话的上下文和摘要，再切换
-    state.session.save_and_summarize(state.conversation.to_serializable())
+    state.session.save_and_summarize(
+        state.conversation.to_serializable(), meta_updates=state.token_tracker.meta_fragment()
+    )
     if state.session.switch_session(sid):
         _rebuild_context(state)
         # 落盘新会话：启动时按 meta.updated 取「最新会话」，而上面刚把【旧】会话的

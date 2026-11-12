@@ -179,8 +179,12 @@ async def perform_exec_reload(state: State, *, kind: str, tool_result_text: str 
     #    故 ensure_on_disk 兜底占位（meta-only 文件让新进程 resume 认得这个 sid）
     #    并做存在性硬校验：文件不在盘上绝不 exec，否则新进程会静默新建会话、
     #    consume 因 sid 不匹配静默放弃续接（E2E 实测踩过）。
+    #    token 用量必须**随这次落盘一并写入**：silent_shutdown 会跳过
+    #    shutdown 钩子里的结算（见 Agent._builtin_shutdown），这是 exec 前
+    #    最后一次写盘机会，漏掉就丢「上一轮落盘之后」的消耗。
+    _meta_updates = state.token_tracker.meta_fragment()
     try:
-        session.save_context(conv.to_serializable())
+        session.save_context(conv.to_serializable(), meta_updates=_meta_updates)
     except Exception as e:
         if snapshot is not None:
             conv.replace_all(snapshot)
@@ -201,7 +205,7 @@ async def perform_exec_reload(state: State, *, kind: str, tool_result_text: str 
         if snapshot is not None:
             conv.replace_all(snapshot)
             with contextlib.suppress(Exception):
-                session.save_context(conv.to_serializable())
+                session.save_context(conv.to_serializable(), meta_updates=_meta_updates)
         with contextlib.suppress(OSError):
             os.remove(hp)
         return f"❌ handoff 写入失败，未重启（已回滚）: {e}"
@@ -225,7 +229,7 @@ async def perform_exec_reload(state: State, *, kind: str, tool_result_text: str 
         if snapshot is not None:
             conv.replace_all(snapshot)
             with contextlib.suppress(Exception):
-                session.save_context(conv.to_serializable())
+                session.save_context(conv.to_serializable(), meta_updates=_meta_updates)
         with contextlib.suppress(OSError):
             os.remove(hp)
         return f"❌ 重启失败（{e}）。已回滚消息与 handoff，当前实例仍在运行——请修复后重试。"

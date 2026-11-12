@@ -315,3 +315,75 @@ async def test_reload_command_awaits_async_core(make_agent, monkeypatch):
     else:
         # 真实路径被触发（is_processing 拦截或核心自检），至少未抛异常
         assert isinstance(out, str)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  #53b token_usage 随每轮落盘增量写入 meta
+# ═══════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_turn_save_persists_token_usage_incrementally(make_agent):
+    """每轮 save_context 都把累计 token 用量一并写进会话 meta（不是只等退出）。"""
+    agent, _ = make_agent()
+
+    async def mock_chat(messages: Any, tools: Any = None, **kw: Any) -> LLMResult:
+        return LLMResult(
+            message={"role": "assistant", "content": "ok", "_interrupted": False},
+            usage={"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+        )
+
+    agent._llm.chat = mock_chat  # pyright: ignore[reportPrivateUsage]
+    path = agent.session.get_session_path()
+
+    await agent.process("first")
+    meta = session_mod._read_meta_from_file(path)  # pyright: ignore[reportPrivateUsage]
+    assert meta is not None
+    assert meta["token_usage"]["total"]["total_tokens"] == 120
+    assert meta["token_usage"]["total"]["call_count"] == 1
+
+    # 第二轮：写的是累计快照（240），不是单轮 120
+    await agent.process("second")
+    meta = session_mod._read_meta_from_file(path)  # pyright: ignore[reportPrivateUsage]
+    assert meta is not None
+    assert meta["token_usage"]["total"]["total_tokens"] == 240
+    assert meta["token_usage"]["total"]["call_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_token_tracker_follows_session_switch_no_bleed(make_agent):
+    """tracker 随会话切换对齐：/new 要把累计归零，切回旧会话要读回它的用量。
+
+    这是「存多」的核心防线：token_usage 是**按会话**的累计快照，而 tracker 是
+    **按进程**的单例。若切换时不对齐，新会话第一轮就会把旧会话的累计一并写进
+    自己的 meta（数字凭空变大），/resume 切到别的会话则带着别人的数字。
+    """
+    agent, _ = make_agent()
+    tracker = agent.state.token_tracker
+
+    async def mock_chat(messages: Any, tools: Any = None, **kw: Any) -> LLMResult:
+        return LLMResult(
+            message={"role": "assistant", "content": "ok", "_interrupted": False},
+            usage={"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+        )
+
+    agent._llm.chat = mock_chat  # pyright: ignore[reportPrivateUsage]
+    old_sid = agent.session.session_id
+    await agent.process("first")
+    await agent.process("second")
+    assert tracker.total.total_tokens == 240
+
+    # 新会话：tracker 归零 → 新会话 meta 只记自己的 120，不掺旧会话的 240
+    agent.session.create_session()
+    assert tracker.total.call_count == 0
+    new_path = agent.session.get_session_path()
+    await agent.process("third")
+    meta = session_mod._read_meta_from_file(new_path)  # pyright: ignore[reportPrivateUsage]
+    assert meta is not None
+    assert meta["token_usage"]["total"]["total_tokens"] == 120
+    assert meta["token_usage"]["total"]["call_count"] == 1
+
+    # 切回旧会话：读回它自己的累计（240），而非留在新会话的 120 上
+    assert agent.session.switch_session(old_sid) is True
+    assert tracker.total.total_tokens == 240
+    assert tracker.total.call_count == 2

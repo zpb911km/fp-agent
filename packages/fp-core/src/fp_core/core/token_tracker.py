@@ -222,6 +222,36 @@ class TokenTracker:
             result["per_model"] = {model: usage.to_dict() for model, usage in self._per_model.items()}
         return result
 
+    def reset(self) -> None:
+        """清空累计（切到「还没有任何用量」的会话时用）。
+
+        **in-place**：State 与 Agent 共享同一个 TokenTracker 实例（State 持
+        的是引用），换对象会让读取方看到旧数据，所以只能原地归零。
+        """
+        self._total = TokenUsage()
+        self._per_model = {}
+
+    def restore(self, data: dict[str, Any] | None) -> None:
+        """用持久化数据**原地覆盖**当前累计（切到另一会话时对齐其用量）。
+
+        与 ``from_dict`` 的分工：那个造新对象（进程启动/独立使用），这个改
+        现有对象（会话切换时必须保引用）。``data`` 为空等价于 reset。
+        """
+        other = type(self).from_dict(data)
+        self._total = other._total
+        self._per_model = other._per_model
+
+    def meta_fragment(self) -> dict[str, Any] | None:
+        """打包成 session meta 片段，供落盘时与正文同一次写入。
+
+        返回 None 表示「一次 LLM 调用都没有」——此时不写 token_usage，
+        免得空会话的 meta 里出现 0 值噪声。
+        """
+        data = self.to_dict()
+        if data.get("total", {}).get("call_count", 0) <= 0:
+            return None
+        return {"token_usage": data}
+
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> TokenTracker:
         """从持久化数据恢复 TokenTracker"""

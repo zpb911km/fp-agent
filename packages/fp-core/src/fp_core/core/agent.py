@@ -204,11 +204,11 @@ class Agent:
             self._conv.set_messages(initial_prompt, saved)
 
         # ── Token 消耗跟踪 ───────────────────────────
+        # 构造后立刻 bind：SessionManager 负责在**每次会话切换**时把 tracker
+        # 对齐到目标会话的 meta（无用量 → 归零，有则 resume）。bind 内部即从
+        # 当前会话 meta 恢复，故不需在此另写 from_dict。
         self._token_tracker = TokenTracker()
-        # 恢复会话后还原 token_usage（resume 场景）
-        meta_token_usage = self.session.meta.get("token_usage")
-        if meta_token_usage:
-            self._token_tracker = TokenTracker.from_dict(meta_token_usage)
+        self.session.bind_token_tracker(self._token_tracker)
 
         # 生命周期管理器
         self.lifecycle = LifecycleManager(enable_log=enable_log)
@@ -330,6 +330,16 @@ class Agent:
         """当前模型名称"""
         return self._llm.model
 
+    def _token_meta(self) -> dict[str, Any] | None:
+        """把累计 token 用量打成 meta 片段，供落盘时与正文一起写入。
+
+        返回 None 表示「一次 LLM 调用都没有」——此时不写 token_usage，
+        免得 meta 里出现 0 值噪声（与旧的 create=False 行为同口径：无用量
+        就不产生该键）。有值时是**累计快照**（不是本轮增量），每轮落盘
+        幂等覆盖，resume 时由 ``TokenTracker.restore`` 读回继续累加。
+        """
+        return self._token_tracker.meta_fragment()
+
     # ── 内置钩子 ─────────────────────────────────────
 
     def _register_builtin_hooks(self) -> None:
@@ -360,15 +370,9 @@ class Agent:
 
         summary = ""
         if not self.state.nuclear_exit:
-            # 统一入口：保存上下文 + 生成摘要
+            # 统一入口：保存上下文 + 生成摘要（token 用量与正文同一次写入）
             messages = self._conv.to_serializable()
-            summary = self.session.save_and_summarize(messages)
-
-            # 保存 token 消耗到会话 meta（create=False：会话没落盘就不凭空
-            # 造 0 长度会话文件，token_usage 只附着在真实存在的会话上）
-            token_data = self._token_tracker.to_dict()
-            if token_data.get("total", {}).get("call_count", 0) > 0:
-                self.session.update_meta(token_usage=token_data, create=False)
+            summary = self.session.save_and_summarize(messages, meta_updates=self._token_meta())
 
         # 触发 shutdown 回调（终端用于渲染退出面板）
         if self._shutdown_callback and not getattr(self.state, "silent_shutdown", False):
@@ -1293,7 +1297,8 @@ class Agent:
             msg_count=len(_to_save),
             messages=_to_save,
         )
-        self.session.save_context(_to_save)
+        # token 用量随本轮正文同一次写入 meta（每轮增量、幂等覆盖为累计快照）
+        self.session.save_context(_to_save, meta_updates=self._token_meta())
 
         # 提取最终回复
         final_content = self._conv.get_last_content()

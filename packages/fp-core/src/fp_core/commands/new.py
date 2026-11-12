@@ -26,8 +26,11 @@ def execute(state: State, arg: str) -> tuple[bool, str]:
     # ── fork 阶段：保存旧会话 ──────────────────────────────────
     old_sid = state.session_id
 
-    # 无论是否有消息都保存，避免丢历史
-    state.session.save_and_summarize(state.conversation.to_serializable(), old_sid)
+    # 无论是否有消息都保存，避免丢历史（含 token 结算：必须在 create_session
+    # 之前算，那一句会切会话并让 tracker 归零）
+    state.session.save_and_summarize(
+        state.conversation.to_serializable(), old_sid, meta_updates=state.token_tracker.meta_fragment()
+    )
 
     # 创建新会话（lazy file，此时只是分配 ID + 切换 session_id）
     new_sid = state.session.create_session()

@@ -17,9 +17,12 @@ def execute(state: State, arg: str) -> tuple[bool, str]:
     if not old_messages:
         return (True, "当前会话没有消息，无法 `fork`")
 
-    # 保存当前会话（上下文 + 摘要）
+    # 保存当前会话（上下文 + 摘要 + token 结算；须在 create_session 之前，
+    # 因为那句会切换会话并让 tracker 归零）
     old_sid = state.session_id
-    state.session.save_and_summarize(state.conversation.to_serializable(), old_sid)
+    state.session.save_and_summarize(
+        state.conversation.to_serializable(), old_sid, meta_updates=state.token_tracker.meta_fragment()
+    )
     new_sid = state.session.create_session()
 
     # 重建上下文：用当前 system prompt + 旧消息

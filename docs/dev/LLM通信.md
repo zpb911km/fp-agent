@@ -270,6 +270,11 @@ reply = message.content or "（无文本回复）"
 `LLMService(on_usage=...)` 回调回流到 `TokenTracker` 聚合统计（agent 构造时注入
 `_record_aux_usage`）；主循环路径由 agent 自行 accumulate、不经过该回调，不会双计。
 
+聚合结果每轮问答收尾随正文一起落进 `meta.token_usage`（**累计快照**，`call_count==0`
+不写）；会话切换时由 `SessionManager` 把 tracker 对齐到目标会话（见《会话模块》
+「token 用量与会话切换对齐」）。即：**聚合归 LLMService→TokenTracker，落盘归 Agent，
+跨会话对齐归 SessionManager**，三层各管一段，任一层缺失都会让面板数字失真。
+
 ---
 
 ## 超时与瞬时错误重试
