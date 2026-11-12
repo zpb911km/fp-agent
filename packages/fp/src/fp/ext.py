@@ -157,17 +157,115 @@ def _find_main_file(d: str, atype: str) -> str | None:
         if os.path.isfile(init):
             return init
     else:  # memory
-        for f in os.listdir(d):
-            if f.endswith(".md"):
-                return os.path.join(d, f)
+        # 记忆资产永远是「叶子文件」，目录只是分类分组——类别目录不是资产。
+        # 这里返回 None，调用方改走 _iter_memory_assets（<category>/<name>.md）。
+        return None
     return None
+
+
+# ── 记忆：分类目录模型（category 是分组，不是资产） ──────────────
+#
+# 记忆树布局（见 fp_core/plugins/memory/tree.py）：
+#   <memory>/<category>/<name>.md   分类布局（现行）
+#   <memory>/<name>.md              遗留扁平（fm.type 决定归类，仍受支持）
+#   <memory>/<category>/_node.md    派生缓存（分类节点，可重建）
+#   <memory>/_index.md              派生缓存（索引，可重建）
+#   <memory>/_access.json           访问计数（机读元数据）
+# 资产的**身份 = 相对记忆根的路径去掉 .md**：`<category>/<name>` 或遗留扁平的
+# `<name>`。类别目录本身不进资产清单——这正是「把类别当资产」的根因。
+
+# 记忆根下的派生物（可重建缓存 / 机读元数据），一律不算资产
+MEMORY_DERIVED: frozenset[str] = frozenset({"_index.md", "_node.md", "_access.json"})
+
+
+def _is_memory_leaf(fname: str) -> bool:
+    """文件名是否为记忆叶子（资产本体）：.md 且非派生物、非隐藏/停用。"""
+    return (
+        fname.endswith(".md")
+        and fname not in MEMORY_DERIVED
+        and not fname.startswith(".")
+        and not fname.endswith(".disabled")
+    )
+
+
+def _iter_memory_assets(d: str) -> list[tuple[str, str]]:
+    """枚举记忆目录下的资产叶子，返回 [(资产名, 绝对路径)]（按名排序）。
+
+    资产名 = 相对记忆根的路径去掉 ``.md``：
+      - 分类布局 ``<category>/<name>.md`` → ``<category>/<name>``
+      - 遗留扁平 ``<name>.md``            → ``<name>``
+    ``_`` 前缀目录（分类节点缓存等）与派生物文件整体跳过；类别目录不产生条目。
+    """
+    out: list[tuple[str, str]] = []
+    if not os.path.isdir(d):
+        return out
+    for entry in sorted(os.listdir(d)):
+        fpath = os.path.join(d, entry)
+        if os.path.isdir(fpath):
+            if entry.startswith("_"):
+                continue
+            for fname in sorted(os.listdir(fpath)):
+                if _is_memory_leaf(fname):
+                    out.append((f"{entry}/{fname[:-3]}", os.path.join(fpath, fname)))
+        elif _is_memory_leaf(entry):
+            out.append((entry[:-3], fpath))
+    return out
+
+
+def _memory_name_matches(asset_name: str, query: str) -> bool:
+    """记忆资产名匹配：接受全路径（category/name）、裸名（name）、.md 后缀、memory/ 前缀。"""
+    q = query[len("memory/") :] if query.startswith("memory/") else query
+    if q.endswith(".md"):
+        q = q[:-3]
+    if asset_name == q:
+        return True
+    # 裸名兜底：跨类别同名时按排序取第一个（与 _find_asset 的三来源优先级一致）
+    return "/" in asset_name and asset_name.rsplit("/", 1)[-1] == q
+
+
+def _memory_asset_name_from_path(d: str, path: str) -> str:
+    """记忆文件 → 资产身份：相对记忆根的路径去掉 .md（``<category>/<name>``）。"""
+    rel = os.path.relpath(path, d).replace(os.sep, "/")
+    return rel[:-3] if rel.endswith(".md") else rel
+
+
+def _canonical_name(d: str, name: str, atype: str) -> str:
+    """把调用方给的资产名规范化为与磁盘路径一致的身份（其余类型原样返回）。
+
+    记忆必须带分类：promote/demote/info 用裸名 ``foo`` 找到表 ``reference/foo.md``
+    时，若仍以 ``memory/foo`` 登记清单，清单键就与磁盘路径脱节——那正是
+    「类别当资产 / 清单悬空」的复发路径。
+    """
+    if atype != "memory":
+        return name
+    _, bare = _split_type_prefix(name)
+    head, sep, _rest = bare.rpartition("/")
+    if sep and os.path.isdir(os.path.join(d, head)):
+        return bare  # 调用方已给出 <category>/<name>
+    p = _asset_filepath(d, name, atype)
+    return _memory_asset_name_from_path(d, p) if p else bare
+
+
+def _split_type_prefix(name: str) -> tuple[str | None, str]:
+    """把 ``memory/reference/foo`` 拆成 (类型, 名称)；无类型前缀返回 (None, name)。"""
+    head, sep, rest = name.partition("/")
+    if sep and head in ASSET_TYPES and rest:
+        return head, rest
+    return None, name
 
 
 def _asset_filepath(d: str, name: str, atype: str) -> str | None:
     """在资产目录 d 中定位资产路径（支持单文件与目录型资产）。
 
     优先级：单文件匹配 → <name>/ 目录型 → manifest name 兜底。
+    记忆是例外：资产=叶子文件，按相对路径身份定位（类别目录绝不匹配）。
     """
+    # 0. 记忆：路径身份（<category>/<name>），裸名兜底
+    if atype == "memory":
+        for n, p in _iter_memory_assets(d):
+            if _memory_name_matches(n, name):
+                return p
+        return None
     # 1. 单文件匹配
     candidates = [name, f"{name}.py", f"{name}.md"]
     if atype == "tools":
@@ -206,9 +304,15 @@ def _asset_filepath(d: str, name: str, atype: str) -> str | None:
 
 
 def _find_asset(name: str) -> tuple[str, str] | None:
-    """在三来源中查找资产，返回 (来源, 类型)。优先级 private > public > fetched。"""
+    """在三来源中查找资产，返回 (来源, 类型)。优先级 private > public > fetched。
+
+    ``name`` 可带类型前缀（如 ``memory/reference/foo``），用于跨类型消歧。
+    """
+    atype_hint, name = _split_type_prefix(name)
     for source in reversed(SOURCES):  # private 优先
         for atype in ASSET_TYPES:
+            if atype_hint and atype != atype_hint:
+                continue
             if _asset_filepath(source_dir(source, atype), name, atype):
                 return source, atype
     return None
@@ -251,6 +355,17 @@ def _save_public_index(index: _PublicIndex) -> None:
     os.replace(tmp, path)
 
 
+def _legacy_memory_index_key(atype: str, name: str) -> str | None:
+    """记忆资产的旧扁平登记键（``memory/<name>``）；非记忆或本就扁平则 None。
+
+    分类改造前记忆键不带分类层级；改造后磁盘路径变了，清单里那条旧键就成了
+    指向不存在文件的孤儿，登记/注销时一并清理。
+    """
+    if atype != "memory" or "/" not in name:
+        return None
+    return f"memory/{name.rsplit('/', 1)[-1]}"
+
+
 def _register_asset_in_index(atype: str, name: str, commit: bool = True) -> bool:
     """把资产登记进 public 库清单（幂等）。清单不存在时跳过（不自动创建）。
 
@@ -261,12 +376,22 @@ def _register_asset_in_index(atype: str, name: str, commit: bool = True) -> bool
         return False
     key = f"{atype}/{name}"
     assets = cast(dict[str, Any], index).setdefault("assets", {})
-    if key in assets:
+    changed = False
+    # 记忆按分类布局：登记键恒为 <category>/<name>。若清单里残留旧扁平键
+    # （memory/<name>，分类改造前登记、磁盘上已不存在），同一次登记里清掉，
+    # 否则清单会同时挂着"有效键 + 孤儿键"，与磁盘路径不一致。
+    legacy = _legacy_memory_index_key(atype, name)
+    if legacy and legacy in assets:
+        del assets[legacy]
+        changed = True
+    if key not in assets:
+        assets[key] = {
+            "source": name,
+            "updated_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+        }
+        changed = True
+    if not changed:
         return False
-    assets[key] = {
-        "source": name,
-        "updated_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
-    }
     _save_public_index(index)
     if commit:
         ensure_repo(source_root("public"))
@@ -280,9 +405,13 @@ def _unregister_asset_in_index(atype: str, name: str, commit: bool = True) -> bo
     if index is None:
         return False
     key = f"{atype}/{name}"
-    if key not in index.get("assets", {}):
+    assets = cast(dict[str, Any], index).setdefault("assets", {})
+    legacy = _legacy_memory_index_key(atype, name)
+    removed = [k for k in (key, legacy) if k and k in assets]
+    if not removed:
         return False
-    del cast(dict[str, Any], index)["assets"][key]
+    for k in removed:
+        del assets[k]
     _save_public_index(index)
     if commit:
         ensure_repo(source_root("public"))
@@ -296,11 +425,22 @@ def _scan_public_assets() -> list[_PublicAsset]:
     返回 [{atype, name, path, manifest}]：
       name 为 None → 无法解析（缺 __fp__ 也无工具定义，孤儿候选）；
       manifest 为 None → 缺 __fp__（文件级协议缺失，share 拒绝）。
+
+    记忆按分类目录递归（名字 = ``<category>/<name>``）：类别目录是分组，不是资产。
     """
     assets: list[_PublicAsset] = []
     for atype in ASSET_TYPES:
         d = source_dir("public", atype)
         if not os.path.isdir(d):
+            continue
+        if atype == "memory":
+            for mname, fpath in _iter_memory_assets(d):
+                assets.append({
+                    "atype": "memory",
+                    "name": mname,
+                    "path": fpath,
+                    "manifest": parse_memory_manifest(fpath),
+                })
             continue
         for e in sorted(os.listdir(d)):
             if e.startswith(".") or e == "__pycache__" or e.endswith(".disabled"):
@@ -376,6 +516,21 @@ def _check_public_orphans(assets: list[_PublicAsset], index: _PublicIndex) -> li
 # ═══════════════════════════════════════════════════════════════
 
 
+def _memory_repo_name(relpath: str) -> str:
+    """仓库内记忆文件的资产名：最后一个 ``memory/`` 段之后的相对路径去掉 .md。
+
+    ``memory/reference/foo.md`` → ``reference/foo``；``memory/foo.md`` → ``foo``；
+    无 ``memory`` 段（散装仓库）→ 文件名去扩展名。
+    """
+    parts = relpath.replace(os.sep, "/").split("/")
+    if "memory" in parts[:-1]:
+        i = len(parts) - 1 - parts[::-1].index("memory")
+        rest = parts[i + 1 :]
+        if rest and rest[-1].endswith(".md"):
+            return "/".join(rest)[:-3]
+    return os.path.splitext(parts[-1])[0]
+
+
 def _scan_repo_assets(staging: str) -> list[_RepoAsset]:
     """扫描暂存区（仓库/目录/单文件）中的**全部**资产。
 
@@ -411,13 +566,16 @@ def _scan_repo_assets(staging: str) -> list[_RepoAsset]:
                 assets.append({"type": atype, "name": name, "relpath": relpath, "manifest": m})
                 seen.add(key)
             elif fname.endswith(".md"):
+                if not _is_memory_leaf(fname):
+                    continue  # 派生缓存（_index/_node）/隐藏文件不是资产
                 m = parse_memory_manifest(fpath)
                 if not m or not m.get("name"):
                     continue
-                key = f"memory/{m['name']}"
+                mname = _memory_repo_name(rel)
+                key = f"memory/{mname}"
                 if key in seen:
                     continue
-                assets.append({"type": "memory", "name": m["name"], "relpath": rel, "manifest": m})
+                assets.append({"type": "memory", "name": mname, "relpath": rel, "manifest": m})
                 seen.add(key)
     return assets
 
@@ -530,19 +688,32 @@ def _standard_asset_filename(atype: str, name: str) -> str | None:
 
     tools → <name>_plugin.py（保持 *_plugin.py 后缀约定）
     commands → <name>.py
-    memory → <name>.md
+    memory → <category>/<name>.md（保留分类层级，与记忆树布局一致）
     plugins → <name>.py（plugins 目录包走目录型 <name>/，不在此列）
     """
+    if atype == "memory":
+        # 记忆不压平：<category>/<name> 原样落地，否则记忆树会把「a_b」当成叶子名
+        return f"{name.replace(' ', '_')}.md"
     safe = name.replace("/", "_")
     if atype == "tools":
         return f"{safe}_plugin.py" if not safe.endswith("_plugin") else f"{safe}.py"
     if atype == "commands":
         return f"{safe}.py"
-    if atype == "memory":
-        return f"{safe}.md"
     if atype == "plugins":
         return f"{safe}.py"
     return None
+
+
+def _copy_asset_file(src: str, dest: str) -> None:
+    """复制单文件资产到 dest，自动建父目录。
+
+    记忆资产的标准落地路径可能带分类层级（``memory/<category>/<name>.md``），
+    父目录不预先存在时直接 copy2 会失败。
+    """
+    parent = os.path.dirname(dest)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    shutil.copy2(src, dest)
 
 
 def _dir_has_extra_entries(d: str, main: str) -> bool:
@@ -574,8 +745,15 @@ def _find_asset_in_staging(staging: str, atype: str, name: str) -> str | None:
                 if parse_tool_name(fpath) == name:
                     return fpath
             else:
+                if atype == "memory" and not _is_memory_leaf(fname):
+                    continue
                 m = parse_fp_manifest(fpath) if fname.endswith(".py") else parse_memory_manifest(fpath)
-                if m and m.get("name") == name:
+                if not m:
+                    continue
+                if m.get("name") == name:
+                    return fpath
+                # 记忆：裸名兜底（registry/参数常写 name，仓库路径是 <category>/<name>）
+                if atype == "memory" and _memory_name_matches(_memory_repo_name(os.path.relpath(fpath, staging)), name):
                     return fpath
     return None
 
@@ -643,6 +821,12 @@ def cmd_install(args: argparse.Namespace) -> int:
     dest_root = source_dir("fetched", atype)
     os.makedirs(dest_root, exist_ok=True)
 
+    if atype == "memory" and os.path.isdir(src_body):
+        # 记忆资产恒为叶子文件：目录（类别）不是资产，拒绝整目录落地
+        print(f"❌ 记忆资产应为单个 .md 叶子文件，不能是目录: {src_body}")
+        print("   类别（如 reference/）只是分组，请安装具体的记忆叶子。")
+        return 1
+
     if os.path.isdir(src_body):
         # 目录型本体：plugins 目录包 / 多文件资产 → 目录整体落地；
         # tools/commands/memory 的「纯包装目录」（仅含主文件，如本地目录源）
@@ -654,7 +838,7 @@ def cmd_install(args: argparse.Namespace) -> int:
                 print(f"⚠️  已存在: {dest}")
                 print("   使用 --force 覆盖（同 source 重新安装），或先 fp ext remove。")
                 return 1
-            shutil.copy2(main, dest)
+            _copy_asset_file(main, dest)
         else:
             dest = os.path.join(dest_root, name)
             if os.path.exists(dest) and not args.force:
@@ -682,7 +866,7 @@ def cmd_install(args: argparse.Namespace) -> int:
             print(f"⚠️  已存在: {dest}")
             print("   使用 --force 覆盖（同 source 重新安装），或先 fp ext remove。")
             return 1
-        shutil.copy2(src_body, dest)
+        _copy_asset_file(src_body, dest)
 
     # 注册表（保留审查字段；无 registry 记录则构造新条目）
     now = __import__("datetime").datetime.now().isoformat(timespec="seconds")
@@ -781,6 +965,12 @@ def cmd_list(args: argparse.Namespace) -> int:
             d = source_dir(source, atype)
             if not os.path.isdir(d):
                 continue
+            if atype == "memory":
+                # 记忆：按分类目录递归列出叶子（<category>/<name>），类别本身不算资产
+                for mname, _mpath in _iter_memory_assets(d):
+                    lines.append(f"  memory/{mname}")
+                    total += 1
+                continue
             for e in sorted(os.listdir(d)):
                 if e.startswith(".") or e == "__pycache__" or e.endswith(".disabled"):
                     continue
@@ -819,6 +1009,7 @@ def cmd_info(args: argparse.Namespace) -> int:
         return 1
     source, atype = found
     d = source_dir(source, atype)
+    name = _canonical_name(d, name, atype)  # 记忆：裸名 → <category>/<name>
     fpath = _asset_filepath(d, name, atype)
 
     print(f"📦 {_asset_display(source, atype, name)}")
@@ -853,12 +1044,21 @@ def _asset_paths(d: str, name: str, atype: str) -> list[str]:
     """定位资产的实际路径：目录型返回资产目录，单文件返回文件。
 
     promote/demote/remove 移动时按此取路径，保证目录型资产整体迁移（不只主文件）。
+    记忆是例外：资产恒为叶子文件，类别目录（含多个 .md）不会被当成资产。
     """
+    if atype == "memory":
+        p = _asset_filepath(d, name, atype)
+        return [p] if p else []
     pdir = os.path.join(d, name)
     if os.path.isdir(pdir) and _find_main_file(pdir, atype):
         return [pdir]
     p = _asset_filepath(d, name, atype)
     return [p] if p else []
+
+
+def _trash_label(name: str) -> str:
+    """回收站目录名用的资产标签（记忆名含 ``/``，压成 ``_`` 保持回收站一层）。"""
+    return name.replace("/", "_")
 
 
 def cmd_remove(args: argparse.Namespace) -> int:
@@ -897,7 +1097,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
                 append_audit("remove", key, note="fetched 本体缺失，仅清理 registry")
                 print(f"🗑  已清理 registry（fetched 本体缺失）: {key}")
                 return 0
-            trash = os.path.join(trash_dir(), f"fetched_{atype}_{name}")
+            trash = os.path.join(trash_dir(), f"fetched_{atype}_{_trash_label(name)}")
             os.makedirs(trash, exist_ok=True)
             for p in paths:
                 shutil.move(p, os.path.join(trash, os.path.basename(p)))
@@ -912,7 +1112,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
         if _asset_paths(source_dir("fetched", t), name, t):
             d = source_dir("fetched", t)
             paths = _asset_paths(d, name, t)
-            trash = os.path.join(trash_dir(), f"fetched_{t}_{name}")
+            trash = os.path.join(trash_dir(), f"fetched_{t}_{_trash_label(name)}")
             os.makedirs(trash, exist_ok=True)
             for p in paths:
                 shutil.move(p, os.path.join(trash, os.path.basename(p)))
@@ -929,7 +1129,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
     d = source_dir(source, atype)
     paths = _asset_paths(d, name, atype)
 
-    trash = os.path.join(trash_dir(), f"{source}_{atype}_{name}")
+    trash = os.path.join(trash_dir(), f"{source}_{atype}_{_trash_label(name)}")
     os.makedirs(trash, exist_ok=True)
     for p in paths:
         shutil.move(p, os.path.join(trash, os.path.basename(p)))
@@ -960,8 +1160,11 @@ def cmd_update(args: argparse.Namespace) -> int:
         print(f"❌ 拉取失败: {reg['source']}")
         return 1
 
-    # 新版本仍含该资产？（仓库可能已移除）
-    if not any(a["name"] == name for a in assets):
+    # 新版本仍含该资产？（仓库可能已移除；记忆可能按 <category>/<name> 命名）
+    if not any(
+        a["name"] == name or a["name"].endswith(f"/{name}") or a["name"].rsplit("/", 1)[-1] == name.rsplit("/", 1)[-1]
+        for a in assets
+    ):
         print(f"❌ 远程仓库中已不存在该资产: {name}")
         return 1
 
@@ -1001,6 +1204,12 @@ def cmd_check(args: argparse.Namespace) -> int:
             d = source_dir(source, atype)
             if not os.path.isdir(d):
                 continue
+            if atype == "memory":
+                # 记忆：逐个叶子查 frontmatter；类别目录不是资产，不参与判定
+                for mname, mpath in _iter_memory_assets(d):
+                    if parse_memory_manifest(mpath) is None:
+                        unmanaged.append(f"{source}/memory/{mname}.md")
+                continue
             for fname in sorted(os.listdir(d)):
                 if fname.startswith(".") or fname == "__pycache__" or fname.endswith(".disabled"):
                     continue
@@ -1027,6 +1236,40 @@ def cmd_check(args: argparse.Namespace) -> int:
         issues += len(unmanaged)
     else:
         print("✅ 所有资产均有 manifest")
+
+    # 1.5 public 库清单 ↔ 磁盘一致性：清单登记了、磁盘上却找不到 = 孤儿登记
+    # （典型成因：记忆分类改造后旧扁平键 memory/<name> 仍挂在清单里）
+    orphans: list[str] = []
+    pub_index = _load_public_index()
+    if pub_index:
+        seen_files: dict[str, str] = {}
+        for key in sorted(pub_index.get("assets", {})):
+            atype, _, iname = key.partition("/")
+            if atype not in ASSET_TYPES or not iname:
+                orphans.append(f"{key}（键格式非法）")
+                continue
+            adir = source_dir("public", atype)
+            hits = _asset_paths(adir, iname, atype)
+            if not hits:
+                orphans.append(f"{key}（磁盘无对应资产）")
+                continue
+            # 键必须等于资产在磁盘上的相对标识（记忆含 <category>/ 层级）；
+            # 裸名能被宽松解析到分类下的同名文件，但键本身继续滞留就是重复登记。
+            if atype == "memory":
+                canonical = os.path.splitext(os.path.relpath(hits[0], adir))[0]
+                if canonical != iname:
+                    orphans.append(f"{key}（键与磁盘路径不符，应为 memory/{canonical}）")
+                elif hits[0] in seen_files:
+                    orphans.append(f"{key}（与 {seen_files[hits[0]]} 重复登记同一文件）")
+                else:
+                    seen_files[hits[0]] = key
+    if orphans:
+        print(f"\n⚠️  发现 {len(orphans)} 条 public 库清单登记问题：")
+        for o in orphans:
+            print(f"   · {o}")
+        print("   public 清单应只登记磁盘上真实存在的资产；")
+        print("   引导：重新 promote 该资产可自动清理旧键，或手工编辑 fp.ext.json")
+        issues += len(orphans)
 
     # 2. 待安装资产（pending_review / reviewed 未落地）
     pending = [
@@ -1135,15 +1378,28 @@ def cmd_new(args: argparse.Namespace) -> int:
             f.write("    def on_unregister(self):\n        pass\n")
         print(f"✅ 已生成: {pkg}")
     elif atype == "memory":
-        path = os.path.join(dest_dir, f"{safe_name}.md")
+        # 记忆必须带分类：<category>/<name>（类别是目录，不是资产名的一部分文件）
+        cat, _, leaf = name.partition("/") if "/" in name else ("", "", name)
+        if not cat:
+            print("❌ 记忆资产必须指定分类：fp ext new memory <category>/<name>")
+            print("   现有分类见记忆根目录下的子目录（reference/skill/project/user/feedback/...）")
+            return 1
+        if cat.startswith("_"):
+            print(f"❌ 分类不能以 _ 开头（_ 前缀目录是派生缓存，不会被当作记忆）: {cat}")
+            return 1
+        safe_leaf = leaf.replace(" ", "_")
+        safe_name = f"{cat}/{safe_leaf}"
+        cat_dir = os.path.join(dest_dir, cat)
+        os.makedirs(cat_dir, exist_ok=True)
+        path = os.path.join(cat_dir, f"{safe_leaf}.md")
         if os.path.exists(path):
             print(f"❌ 已存在: {path}")
             return 1
         with open(path, "w", encoding="utf-8") as f:
             f.write("---\n")
-            f.write(f"name: {safe_name}\n")
+            f.write(f"name: {safe_leaf}\n")
             f.write("description: \n")
-            f.write(f"type: {atype}\n")
+            f.write(f"type: {cat}\n")
             f.write("created: \n")
             f.write("---\n\n")
         print(f"✅ 已生成: {path}")
@@ -1156,33 +1412,8 @@ def cmd_new(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_init(args: argparse.Namespace) -> int:
-    """为已有资产补充/校验 __fp__ manifest。"""
-    target = os.path.abspath(args.dir)
-    if not os.path.isdir(target):
-        print(f"❌ 目录不存在: {target}")
-        return 1
-
-    # 找类型：按路径是否在三来源某类型目录下
-    atype = None
-    for t in ASSET_TYPES:
-        if (
-            target.startswith(source_dir("private", t))
-            or target.startswith(source_dir("public", t))
-            or target.startswith(source_dir("fetched", t))
-        ):
-            atype = t
-            break
-    if atype is None:
-        print("❌ 无法推断资产类型（需位于三来源的某类型目录下）")
-        return 1
-
-    # 找主文件（目录型资产规则，与 _asset_filepath/_scan_public_assets 一致）
-    main_file = _find_main_file(target, atype)
-    if main_file is None:
-        print(f"❌ 未找到 {atype} 主文件（{target}）")
-        return 1
-
+def _init_asset_manifest(main_file: str, atype: str, name_hint: str) -> int:
+    """为单个资产主文件补/校验 manifest，返回退出码（0=有效或已补）。"""
     # 已存在 manifest → 校验
     m = parse_fp_manifest(main_file) if main_file.endswith(".py") else parse_memory_manifest(main_file)
     if m:
@@ -1196,12 +1427,24 @@ def cmd_init(args: argparse.Namespace) -> int:
         return 0
 
     # 无 manifest → 追加（工具/命令：文件头；插件：__init__.py 头部；记忆：frontmatter）
-    name = os.path.basename(target.rstrip("/")) or os.path.basename(os.path.dirname(target))
+    name = name_hint
     if atype in ("tools", "commands", "memory") and main_file:
         base = os.path.basename(main_file)
         name = base[: -len(".py")] if base.endswith(".py") else base[: -len(".md")] if base.endswith(".md") else base
         if atype == "tools":
             name = name.replace("_plugin", "")
+
+    # 记忆的 type 字段 = 分类（以目录为准）：<memory>/<category>/<name>.md → type: <category>
+    type_value = atype
+    if atype == "memory":
+        for src in SOURCES:
+            root = source_dir(src, "memory")
+            if main_file.startswith(root + os.sep):
+                parts = os.path.relpath(main_file, root).split(os.sep)
+                if len(parts) >= 2:
+                    type_value = parts[-2]
+                break
+
     if main_file.endswith(".py"):
         with open(main_file, encoding="utf-8") as f:
             content = f.read()
@@ -1231,13 +1474,54 @@ def cmd_init(args: argparse.Namespace) -> int:
     else:
         with open(main_file, encoding="utf-8") as f:
             content = f.read()
-        block = f"---\nname: {name}\ndescription: \ntype: {atype}\ncreated: \n---\n\n"
+        block = f"---\nname: {name}\ndescription: \ntype: {type_value}\ncreated: \n---\n\n"
         with open(main_file, "w", encoding="utf-8") as f:
             f.write(block + content.lstrip())
 
     print(f"✅ 已补充 manifest: {main_file}")
     append_audit("init", f"{atype}/{name}")
     return 0
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    """为已有资产补充/校验 __fp__ manifest。"""
+    target = os.path.abspath(args.dir)
+    if not os.path.isdir(target):
+        print(f"❌ 目录不存在: {target}")
+        return 1
+
+    # 找类型：按路径是否在三来源某类型目录下
+    atype = None
+    for t in ASSET_TYPES:
+        if (
+            target.startswith(source_dir("private", t))
+            or target.startswith(source_dir("public", t))
+            or target.startswith(source_dir("fetched", t))
+        ):
+            atype = t
+            break
+    if atype is None:
+        print("❌ 无法推断资产类型（需位于三来源的某类型目录下）")
+        return 1
+
+    # 记忆：类别目录/记忆根下可能有多枚叶子，逐个补/校验（类别目录本身不是资产）
+    if atype == "memory":
+        leaves = _iter_memory_assets(target)
+        if not leaves:
+            print(f"❌ 未找到 memory 叶子文件（{target}）")
+            return 1
+        rc = 0
+        for mname, mpath in leaves:
+            rc = _init_asset_manifest(mpath, atype, mname.rsplit("/", 1)[-1]) or rc
+        return rc
+
+    # 找主文件（目录型资产规则，与 _asset_filepath/_scan_public_assets 一致）
+    main_file = _find_main_file(target, atype)
+    if main_file is None:
+        print(f"❌ 未找到 {atype} 主文件（{target}）")
+        return 1
+    name_hint = os.path.basename(target.rstrip("/")) or os.path.basename(os.path.dirname(target))
+    return _init_asset_manifest(main_file, atype, name_hint)
 
 
 def cmd_promote(args: argparse.Namespace) -> int:
@@ -1291,9 +1575,16 @@ def cmd_promote(args: argparse.Namespace) -> int:
             return 1
         print("⚠️  --force：忽略隐私风险继续")
 
-    # 移动资产到 public/（分享=移动；目标已存在则先移除旧版再移入，保证单版本）
+    # 记忆：身份带分类（裸名 → <category>/<name>），保证清单键 == 磁盘路径
+    name = _canonical_name(src_dir, name, atype)
+
+    # 移动资产到 public/（分享=移动；保留相对路径，记忆的 <category>/ 层级不能压平；
+    # 目标已存在则先移除旧版再移入，保证单版本）
     for p in paths:
-        dest = os.path.join(dest_dir, os.path.basename(p))
+        dest = os.path.join(dest_dir, os.path.relpath(p, src_dir))
+        parent = os.path.dirname(dest)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         if os.path.exists(dest):
             if os.path.isdir(dest):
                 shutil.rmtree(dest, ignore_errors=True)
@@ -1342,13 +1633,20 @@ def cmd_demote(args: argparse.Namespace) -> int:
         print(f"❌ 未找到 {name} 的实际文件")
         return 1
 
-    # 移回 private（目标已存在同名 → 拒绝，防止覆盖用户当前工作区文件）
+    # 记忆：身份带分类（裸名 → <category>/<name>），清单键与磁盘路径保持一致
+    name = _canonical_name(src_dir, name, atype)
+
+    # 移回 private（目标已存在同名 → 拒绝，防止覆盖用户当前工作区文件；
+    # 保留相对路径，记忆的 <category>/ 层级不压平）
     for p in paths:
-        dest = os.path.join(dest_dir, os.path.basename(p))
+        dest = os.path.join(dest_dir, os.path.relpath(p, src_dir))
         if os.path.exists(dest):
             print(f"❌ private/ 已存在同名资产 {dest}，demote 会覆盖工作区文件。")
             print("   请先处理 private 中的同名资产（移动/删除）后重试。")
             return 1
+        parent = os.path.dirname(dest)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         shutil.move(p, dest)
 
     # 同步移除库清单登记

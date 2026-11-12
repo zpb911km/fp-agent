@@ -371,12 +371,17 @@ class TestCli:
         assert _run("new", "tools", "hello") == 0
         assert _run("new", "commands", "greet") == 0
         assert _run("new", "plugins", "myplugin") == 0
-        assert _run("new", "memory", "memo") == 0
-        # 生成后文件存在
+        assert _run("new", "memory", "reference/memo") == 0
+        # 生成后文件存在（记忆按分类目录布局：<category>/<name>.md）
         assert os.path.isfile(source_dir("private", "tools") + "/hello_plugin.py")
         assert os.path.isfile(source_dir("private", "commands") + "/greet.py")
         assert os.path.isdir(source_dir("private", "plugins") + "/myplugin")
-        assert os.path.isfile(source_dir("private", "memory") + "/memo.md")
+        assert os.path.isfile(source_dir("private", "memory") + "/reference/memo.md")
+
+    def test_new_memory_requires_category(self):
+        """记忆必须有分类：裸名报错，不生成遗留扁平文件。"""
+        assert _run("new", "memory", "memo") == 1
+        assert not os.path.exists(os.path.join(source_dir("private", "memory"), "memo.md"))
 
     def test_new_invalid_type(self):
         """argparse choices 校验非法类型 → SystemExit(2)。"""
@@ -705,3 +710,205 @@ class TestCli:
         assets = _scan_public_assets()
         names = {a["name"] for a in assets}
         assert "dir_pub" in names
+
+
+# ═══════════════════════════════════════════════════════════
+# 记忆分类目录模型（category 是分组，不是资产）
+# ═══════════════════════════════════════════════════════════
+
+
+def _write_memory(src: str, category: str, name: str, *, with_fm: bool = True) -> str:
+    """在 <src>/memory/<category>/<name>.md 写一枚记忆叶子，返回路径。"""
+    d = os.path.join(source_dir(src, "memory"), category)
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, f"{name}.md")
+    fm = f"---\nname: {name}\ndescription: demo\ntype: {category}\ncreated: 2026-01-01\n---\n\n正文\n"
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(fm if with_fm else "正文（无 frontmatter）\n")
+    return p
+
+
+def _init_public_index() -> None:
+    pub_root = source_root("public")
+    os.makedirs(pub_root, exist_ok=True)
+    with open(os.path.join(pub_root, "fp.ext.json"), "w", encoding="utf-8") as f:
+        f.write('{"schema": 1, "author": "t", "license": "MIT", "assets": {}}')
+
+
+class TestMemoryCategories:
+    def test_iter_memory_assets_skips_category_and_derived(self):
+        """资产 = 叶子路径（<category>/<name>）；类别目录与 _index/_node 不算资产。"""
+        from fp.ext import _iter_memory_assets
+
+        d = source_dir("private", "memory")
+        _write_memory("private", "reference", "alpha")
+        _write_memory("private", "skill", "beta")
+        with open(os.path.join(d, "_index.md"), "w", encoding="utf-8") as f:
+            f.write("# 索引\n")
+        with open(os.path.join(d, "reference", "_node.md"), "w", encoding="utf-8") as f:
+            f.write("# 节点\n")
+        with open(os.path.join(d, "_access.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+
+        names = [n for n, _ in _iter_memory_assets(d)]
+        assert names == ["reference/alpha", "skill/beta"]
+
+    def test_list_does_not_show_category_as_asset(self, capsys):
+        _write_memory("private", "reference", "alpha")
+        assert _run("list") == 0
+        out = capsys.readouterr().out
+        assert "memory/reference/alpha" in out
+        assert "memory/reference\n" not in out.replace("memory/reference/", "")
+
+    def test_info_and_paths_resolve_category(self, capsys):
+        from fp.ext import _asset_paths
+
+        p = _write_memory("private", "reference", "alpha")
+        assert _asset_paths(source_dir("private", "memory"), "reference/alpha", "memory") == [p]
+        assert _asset_paths(source_dir("private", "memory"), "alpha", "memory") == [p]
+        # 类别目录本身不是资产：不能把整个 reference/ 当资产吐出来
+        assert _asset_paths(source_dir("private", "memory"), "reference", "memory") == []
+
+        assert _run("info", "alpha") == 0
+        out = capsys.readouterr().out
+        assert "memory/reference/alpha" in out
+
+    def test_scan_public_assets_uses_category_names(self):
+        from fp.ext import _scan_public_assets
+
+        _write_memory("public", "reference", "alpha")
+        _write_memory("public", "skill", "beta")
+        d = source_dir("public", "memory")
+        with open(os.path.join(d, "_index.md"), "w", encoding="utf-8") as f:
+            f.write("# 索引\n")
+
+        assets = {a["name"]: a for a in _scan_public_assets() if a["atype"] == "memory"}
+        assert set(assets) == {"reference/alpha", "skill/beta"}
+        assert assets["reference/alpha"]["manifest"]["type"] == "reference"
+
+    def test_promote_keeps_category_and_index_key(self):
+        """promote 裸名 → 登记 <category>/<name>，磁盘保留分类目录（清单键==路径）。"""
+        import json
+
+        _init_public_index()
+        src = _write_memory("private", "reference", "alpha")
+        assert _run("promote", "alpha") == 0
+
+        dst = os.path.join(source_dir("public", "memory"), "reference", "alpha.md")
+        assert os.path.isfile(dst)
+        assert not os.path.exists(src)
+        with open(os.path.join(source_root("public"), "fp.ext.json"), encoding="utf-8") as f:
+            index = json.load(f)
+        assert "memory/reference/alpha" in index["assets"]
+        assert "memory/alpha" not in index["assets"]
+
+    def test_share_passes_with_categorized_memory(self):
+        _init_public_index()
+        _write_memory("private", "reference", "alpha")
+        assert _run("promote", "alpha") == 0
+        assert _run("share") == 0
+
+    def test_share_detects_stale_flat_key(self):
+        """事故复现：清单键停在扁平 memory/alpha，磁盘已分类 → share 必须拦住。"""
+        _init_public_index()
+        _write_memory("public", "reference", "alpha")
+        idx = os.path.join(source_root("public"), "fp.ext.json")
+        with open(idx, "w", encoding="utf-8") as f:
+            f.write(
+                '{"schema": 1, "author": "t", "license": "MIT", "assets": '
+                '{"memory/alpha": {"source": "alpha", "updated_at": "2026-01-01T00:00:00"}}}'
+            )
+        assert _run("share") == 1
+
+    def test_install_memory_preserves_category(self):
+        """从仓库安装记忆 → fetched/memory/<category>/<name>.md（不压平成 category_name.md）。"""
+        repo = tmp_path_mem = os.path.join(os.getcwd(), "memrepo")
+        try:
+            import shutil
+
+            shutil.rmtree(repo, ignore_errors=True)
+            d = os.path.join(repo, "memory", "reference")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "alpha.md"), "w", encoding="utf-8") as f:
+                f.write("---\nname: alpha\ndescription: demo\ntype: reference\n---\n\n正文\n")
+            assert _run("fetch", repo) == 0
+            assert _run("review", "reference/alpha", "--approve", "--note", "OK") == 0
+            assert _run("install", "reference/alpha") == 0
+            assert os.path.isfile(os.path.join(source_dir("fetched", "memory"), "reference", "alpha.md"))
+        finally:
+            import shutil
+
+            shutil.rmtree(repo if "repo" in dir() else tmp_path_mem, ignore_errors=True)
+
+    def test_check_flags_memory_without_frontmatter(self, capsys):
+        """体检逐叶子查 frontmatter：无 fm 的叶子被点名，类别目录不被误报。"""
+        _write_memory("private", "reference", "alpha")
+        _write_memory("private", "reference", "nofm", with_fm=False)
+        assert _run("check") == 0
+        out = capsys.readouterr().out
+        assert "memory/reference/nofm.md" in out
+        # 类别目录不得被当成未纳管资产（否则会以 trailing "/" 结尾单列一行）
+        assert not any(line.strip().endswith("private/memory/reference/") for line in out.splitlines())
+
+    def test_promote_cleans_stale_flat_key(self):
+        """库存旧扁平键记忆/alpha 残留时，promote 登记规范键的同一次里清掉旧键。"""
+        import json
+
+        _init_public_index()
+        idx = os.path.join(source_root("public"), "fp.ext.json")
+        with open(idx, "w", encoding="utf-8") as f:
+            f.write(
+                '{"schema": 1, "author": "t", "license": "MIT", "assets": '
+                '{"memory/alpha": {"source": "alpha", "updated_at": "2026-01-01T00:00:00"}}}'
+            )
+        _write_memory("private", "reference", "alpha")
+        assert _run("promote", "reference/alpha") == 0
+        with open(idx, encoding="utf-8") as f:
+            assets = json.load(f)["assets"]
+        assert "memory/reference/alpha" in assets
+        assert "memory/alpha" not in assets, "旧扁平键必须随规范键登记一并清理"
+
+    def test_demote_cleans_both_keys(self):
+        """demote 注销时同时清规范键与旧扁平键，public 清单不留孤儿。"""
+        import json
+
+        _init_public_index()
+        _write_memory("public", "reference", "alpha")
+        idx = os.path.join(source_root("public"), "fp.ext.json")
+        with open(idx, "w", encoding="utf-8") as f:
+            f.write(
+                '{"schema": 1, "author": "t", "license": "MIT", "assets": {'
+                '"memory/alpha": {"source": "alpha", "updated_at": "2026-01-01T00:00:00"},'
+                '"memory/reference/alpha": {"source": "reference/alpha", '
+                '"updated_at": "2026-01-01T00:00:00"}}}'
+            )
+        assert _run("demote", "memory/reference/alpha") == 0
+        with open(idx, encoding="utf-8") as f:
+            assets = json.load(f)["assets"]
+        assert not [k for k in assets if k.endswith("alpha")]
+
+    def test_check_flags_key_path_mismatch(self, capsys):
+        """体检发现「清单键 ≠ 磁盘路径」：扁平旧键滞留即报，规范键不报。"""
+        _init_public_index()
+        _write_memory("public", "reference", "alpha")
+        idx = os.path.join(source_root("public"), "fp.ext.json")
+        with open(idx, "w", encoding="utf-8") as f:
+            f.write(
+                '{"schema": 1, "author": "t", "license": "MIT", "assets": '
+                '{"memory/alpha": {"source": "alpha", "updated_at": "2026-01-01T00:00:00"}}}'
+            )
+        assert _run("check") == 0
+        out = capsys.readouterr().out
+        assert "memory/alpha" in out
+        assert "键与磁盘路径不符" in out
+
+        # 换成规范键后不再报
+        with open(idx, "w", encoding="utf-8") as f:
+            f.write(
+                '{"schema": 1, "author": "t", "license": "MIT", "assets": '
+                '{"memory/reference/alpha": {"source": "reference/alpha", '
+                '"updated_at": "2026-01-01T00:00:00"}}}'
+            )
+        assert _run("check") == 0
+        out = capsys.readouterr().out
+        assert "键与磁盘路径不符" not in out

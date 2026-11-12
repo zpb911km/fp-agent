@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- **`fp ext` 把记忆的「分类目录」当成了资产**: 记忆改成 `<category>/<name>.md` 分类布局后，ext 仍按「一个目录 = 一个资产」扫描 `memory/`——`fp ext list` 输出的不是 `memory/reference/webui_filehub_protocol`，而是 `memory/reference` 这个**类别目录**本身。于是记忆既无法被单独 info/promote/demote，清单键又停在改造前的扁平写法（`memory/webui_filehub_protocol`），与磁盘路径 `public/memory/reference/webui_filehub_protocol.md` 完全脱节，`share` 侧只能靠孤儿校验事后拦截。现在**资产身份 = 相对记忆根路径去掉 `.md`**（`<category>/<name>`），扫描/`list`/`info`/`install`/`promote`/`demote`/`new`/`check`/`fetch` 一律按路径身份走：类别目录、`_index.md`/`_node.md`/`_access.json` 这些派生缓存与机读元数据都不再是资产；`promote`/`demote` 保留分类层级不压平，登记键与磁盘路径一一对应；同一次登记/注销里顺手清掉旧的扁平键（否则清单会同时挂着有效键与孤儿键，下次 `share` 必报）；`fp ext new memory` 要求写成 `<category>/<name>`，裸名拒绝。`fp ext check` 新增「public 库清单登记问题」体检项：键 ≠ 磁盘路径、键在清单但磁盘无物、键格式非法，各报一条。
 - **会话关键词 v2：标识符不再被当噪声删除**（`KW_VERSION` 1→2）: v1 切词前用 `_CODE_RE.sub(" ", line)` 抹掉英文标识符与路径、再只取 CJK 连续段——实测 941 个会话的 `kw` 里含英文字母的 **0 个**，而语料里躺着 30491 个唯一标识符、其中 98.6% 的 df ≤ 5%，正是区分度最高的天然锚点。`/resume -f shortcircuit` 从 0 命中变为 28 命中。v2 先抽标识符/路径（含 `tool_calls.file_path`，2445 个唯一路径——「我改过哪个文件」正是用户自己的记忆方式），再对剩余 CJK 走 jieba；fenced 代码块整块跳过（v1 靠「标识符全删 + 只留 CJK」天然排除代码块，加了标识符通道后该前提失效）。
 - **背景模型断供自愈**: `.kw/` 日常桶停在 `df-20261020`（实测断供 43 天），`load_background` 只取 `[day-21, day]`，窗口内无桶时 KL 静默退化成纯词频，产出「哪些/真实/实际/值钱」这类虚词。现在窗口全空则回退最近非空桶（背景滞后远好于没有背景），并在会话落盘路径低频（10 分钟节流）刷新当天桶，不再依赖手动 `rebuild_all()`。
 - **`sup` 抑制表不再永久拉黑**: 原为 104 词固定表（含「代码/文件/修复/任务」）。改为 rebuild 时由 `DF_MAX` 自动生成（实测降到 37 词）——「部署」这类词在冲刺期是背景噪声，三个月后未必。
