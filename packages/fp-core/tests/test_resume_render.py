@@ -26,17 +26,20 @@ def _meta(summary: str, kw: list[str] | None, updated: str, **extra):
 
 
 SESSIONS = {
-    "s_261020_100000000001": _meta("推送", ["定时器", "节流", "重排"], "2026-10-20 10:00:00"),
-    "s_261020_100000000002": _meta("提交", ["量子退火", "排程"], "2026-10-19 10:00:00"),
-    "s_261020_100000000003": _meta("ok", ["西红柿", "炒蛋"], "2026-10-18 10:00:00", source="subagent"),
+    # v3 契约：summary 来自**最后一条 user 消息**（截 20 字），kw 是独立的检索
+    # 指纹——两者不同源，因此 fixture 里 summary 必须是句子而非单个词。
+    "s_261020_100000000001": _meta("把定时器改成节流重排", ["定时器", "节流", "重排"], "2026-10-20 10:00:00"),
+    "s_261020_100000000002": _meta("用量子退火做排程优化", ["量子退火", "排程"], "2026-10-19 10:00:00"),
+    "s_261020_100000000003": _meta("西红柿炒蛋的做法", ["西红柿", "炒蛋"], "2026-10-18 10:00:00", source="subagent"),
 }
 
 
 class TestRender:
     def test_keywords_shown(self):
+        """summary 是一句话，后缀渲染 kw[:TOP_SHOW]（5 个）。"""
         text = session_list_text(_FakeState(SESSIONS))
-        assert "定时器 节流 重排" in text
-        assert "量子退火 排程" in text
+        assert "把定时器改成节流重排 · 定时器 节流 重排" in text
+        assert "用量子退火做排程优化 · 量子退火 排程" in text
 
     def test_meta_line_intact(self):
         text = session_list_text(_FakeState(SESSIONS))
@@ -80,7 +83,7 @@ class TestFilter:
         assert "1/3" in text  # 命中计数
 
     def test_filter_by_summary(self):
-        text = session_list_text(_FakeState(SESSIONS), terms=["推送"])
+        text = session_list_text(_FakeState(SESSIONS), terms=["定时器"])
         assert "定时器" in text
         assert "量子退火" not in text
 
@@ -110,8 +113,13 @@ class TestFilter:
 
 
 class TestKwSuffixUnit:
-    def test_limits_to_three(self):
-        assert kw_suffix({"kw": ["一", "二", "三", "四"]}) == " · 一 二 三"
+    def test_suffix_shows_all_keywords(self):
+        """summary 与 kw 不同源，后缀不再排除任何词——不足 5 个时全展示。"""
+        assert kw_suffix({"kw": ["一", "二", "三", "四"], "summary": "随便什么句子"}) == " · 一 二 三 四"
+
+    def test_suffix_caps_at_five(self):
+        """存储有 12 个，展示只取前 5 个（TOP_SHOW），终端宽度不变。"""
+        assert kw_suffix({"kw": ["一", "二", "三", "四", "五", "六", "七"]}) == " · 一 二 三 四 五"
 
     def test_empty_cases(self):
         assert kw_suffix({}) == ""

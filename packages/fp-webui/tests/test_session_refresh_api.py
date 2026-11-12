@@ -112,3 +112,39 @@ def test_list_sessions_exposes_updated(monkeypatch):
     assert item["created"] == "2026-11-01 10:00:00"
     assert item["updated"] == "2026-11-02 11:00:00"
     assert item["kw"] == ["词"]
+
+
+def test_list_sessions_exposes_kw_show(monkeypatch):
+    """列表端点下发 kw_show（主卡展示的关键词个数）
+
+    单一真相源 = fp_core.core.session_keywords.TOP_SHOW（经 fp_core.api.KW_SHOW）。
+    前端曾写死 3，而后端已是 5 —— 终端显示 5 个、webui 只显示 3 个。下发后前端只读。
+    """
+    fake = SimpleNamespace(
+        ctl=SimpleNamespace(sessions=SimpleNamespace(list=lambda: {})),
+        run=SimpleNamespace(status=SimpleNamespace(session_id="s_1")),
+    )
+    monkeypatch.setattr(main, "portal", fake)
+
+    async def _noop() -> None:
+        return None
+
+    monkeypatch.setattr(main, "ensure_agent", _noop)
+    out = asyncio.run(main.list_sessions())
+    assert out["kw_show"] == session_keywords.TOP_SHOW
+
+
+def test_search_sessions_exposes_kw_show(monkeypatch):
+    """搜索端点同样下发 kw_show（前端两条路径共用一个渲染函数）"""
+    fake = SimpleNamespace(
+        ctl=SimpleNamespace(sessions=SimpleNamespace(search=lambda q, limit: [])),
+        run=SimpleNamespace(status=SimpleNamespace(session_id="s_1")),
+    )
+    monkeypatch.setattr(main, "portal", fake)
+
+    async def _noop() -> None:
+        return None
+
+    monkeypatch.setattr(main, "ensure_agent", _noop)
+    out = asyncio.run(main.search_sessions(q="x"))
+    assert out["kw_show"] == session_keywords.TOP_SHOW

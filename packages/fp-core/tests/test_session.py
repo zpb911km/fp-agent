@@ -364,23 +364,32 @@ class TestZeroLengthSessionHygiene:
         _rewrite_first_line(path, before)
 
         sessions = sm.list_sessions()
-        assert sessions[sid]["summary"] == "帮我看看这段代码为什么报错"
-        assert _first_line_meta(path)["summary"] == "帮我看看这段代码为什么报错"  # 已自愈
+        # v3：summary 跟随末条 user，上限 20 字（本句 14 字，不截断）
+        want = "帮我看看这段代码为什么报错"
+        assert sessions[sid]["summary"] == want
+        assert _first_line_meta(path)["summary"] == want  # 已自愈
         assert _first_line_meta(path)["updated"] == before["updated"]  # 排序不受影响
 
     def test_list_labels_empty_and_summaryless(self, sessions_dir):
-        """空会话给「(空白会话)」、有消息但摘不出来给「(无摘要)」——不显示 sid"""
+        """空会话给「(空白会话)」；无 user 正文时回退首条 assistant，仍摘不出才「(无摘要)」"""
         sm = SessionManager(resume=False)
         sm.create_session()
         empty_sid = sm.session_id
         sm.clear_session_file()
         assert sm.list_sessions()[empty_sid]["summary"] == session_mod.EMPTY_SESSION_LABEL
 
-        # 有消息但没有任何 user 消息 → (无摘要)
+        # 有消息但没有任何 user 消息 → 回退到首条非空 assistant 正文
+        # （契约变更：实测 20 个 peer_ring / 无 user 的会话原先全显示「(无摘要)」，
+        #   在列表里毫无辨识度；首条 assistant 通常复述了任务，比空白标签有用）
         other = SessionManager(resume=False)
         other.save_message("assistant", "只有模型自言自语")
         shown = sm.list_sessions()[other.session_id]["summary"]
-        assert shown == session_mod.NO_SUMMARY_LABEL
+        assert shown == "只有模型自言自语"
+
+        # 连 assistant 正文都没有（只有 tool 行）→ 才退化成 (无摘要)
+        bare = SessionManager(resume=False)
+        bare.save_message("tool", "工具输出，无正文")
+        assert sm.list_sessions()[bare.session_id]["summary"] == session_mod.NO_SUMMARY_LABEL
 
     def test_resume_latest_prefers_non_empty(self, sessions_dir):
         """auto-resume 落到有消息的会话，而不是 updated 更新的空占位"""
@@ -433,3 +442,54 @@ class TestZeroLengthSessionHygiene:
         sessions = holder.list_sessions()
         assert "s_260101_000000000003" not in sessions
         assert other_sid in sessions and current_sid in sessions
+
+
+class TestInjectionStrip:
+    """注入型消息的正文剥离：真实数据里注入块与用户指令**在同一条消息**里。
+
+    这组用例的输入全部取自 942 个真实会话（2026-11 采样）——按前缀整条丢弃
+    会让 77 个会话拿不到 summary，只能沿用旧值。
+    """
+
+    def test_background_block_yields_task_body(self):
+        """[背景信息] 块之后的 [任务] 段才是真实指令"""
+        raw = "[背景信息]\n项目路径: /x\n\n[任务]\n运行现有测试套件，验证改动"
+        assert session_mod._strip_injection(raw) == "运行现有测试套件，验证改动"
+
+    def test_background_block_without_task_is_noise(self):
+        """只有背景、没有 [任务] → 剥不出正文"""
+        assert session_mod._strip_injection("[背景信息]\n项目根目录: /x") == ""
+
+    def test_subgraph_marker_yields_body(self):
+        assert session_mod._strip_injection("[背景信息]\n[子图] 为考研政治补写片段") == "为考研政治补写片段"
+
+    def test_manager_dispatch_label_yields_body(self):
+        """【经理派遣·sidebar】标签之后即用户指令"""
+        raw = "【经理派遣·sidebar·接替2】你是 FP 无头 worker…"
+        assert session_mod._strip_injection(raw).startswith("你是 FP 无头 worker")
+
+    def test_ring_notification_is_noise(self):
+        """【铃声】/ ⁂[peer_ring] 是纯通知，标签后的正文只是路由提示"""
+        assert session_mod._strip_injection("【铃声】peer:AI-63516 在找你（主题=chat）→ 接听调 peer_answer") == ""
+        assert session_mod._strip_injection("⁂[peer_ring] 【铃声】peer:x 在找你（主题=task）") == ""
+
+    def test_plain_text_passes_through(self):
+        assert session_mod._strip_injection("  检查一下 git 仓库 ") == "检查一下 git 仓库"
+
+    def test_last_user_text_skips_notifications_to_find_real_instruction(self):
+        """末条是铃声 → 继续往前找，取到真正的用户指令"""
+        msgs = [
+            {"role": "user", "content": "【经理派遣·x】重构前端布局"},
+            {"role": "assistant", "content": "好"},
+            {"role": "user", "content": "【铃声】peer:y 在找你（主题=task）"},
+        ]
+        assert session_mod._last_user_text(msgs) == "重构前端布局"
+
+    def test_last_user_text_falls_back_to_first_assistant(self):
+        """整段无用户正文 → 回退首条非空 assistant（原先只能给"无摘要"）"""
+        msgs = [
+            {"role": "user", "content": "⁂[peer_ring] 【铃声】peer:x 在找你"},
+            {"role": "assistant", "content": "已接听邻居来电并回复。"},
+            {"role": "tool", "content": "输出"},
+        ]
+        assert session_mod._last_user_text(msgs) == "已接听邻居来电并回复。"

@@ -300,7 +300,7 @@ class TestExecutePaths:
 
 class TestHelpers:
     def test_derive_summary_from_file(self, tmp_path, monkeypatch):
-        """从会话文件提取最后一条 user 消息"""
+        """kw 为空时回退末条 user，并受 10 字上限约束（v2 与核心同策略）"""
         sid = _generate_sid()
         path = os.path.join(str(tmp_path), f"{sid}.jsonl")
         with open(path, "w", encoding="utf-8") as f:
@@ -312,7 +312,7 @@ class TestHelpers:
         with patch("fp_core.core.session.SESSIONS_DIR", str(tmp_path)):
             summary = subagent._derive_summary_from_file(sid)
 
-        assert summary == "最后一条 user 消息"
+        assert summary == "最后一条 user 消息"  # 20 字上限内，不截断
 
     def test_derive_summary_from_file_missing(self, tmp_path):
         assert subagent._derive_summary_from_file("s_nonexistent") == ""

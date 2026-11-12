@@ -15,6 +15,7 @@
 import re
 from typing import Any, cast
 
+from fp_core.core.session_keywords import TOP_SHOW
 from fp_core.core.state import State
 
 
@@ -26,14 +27,17 @@ def escape_md(text: str) -> str:
 
 
 def kw_suffix(meta: dict[str, Any]) -> str:
-    """关键词后缀：`` · 量子 退火 排程``（无关键词返回空串）。
+    """关键词后缀：`` · 退火 排程 语料 分词 索引``（无关键词返回空串）。
 
-    只读 ``meta["kw"]``——由会话落盘时的 KL 管线预先算好，这里绝不算。
+    summary 现在来自**最后一条 user 消息**，与 kw 不同源，故后缀渲染
+    ``kw[:TOP_SHOW]``（5 个）全量，不再需要排除某个被 summary 占用的词。
+
+    只读 ``meta["kw"]``——由会话落盘时的管线预先算好，这里绝不算。
     """
     kws = meta.get("kw")
     if not isinstance(kws, list) or not kws:
         return ""
-    words = [str(w) for w in cast(list[Any], kws)[:3] if w]
+    words = [str(w) for w in cast(list[Any], kws) if w][:TOP_SHOW]
     return (" · " + " ".join(words)) if words else ""
 
 

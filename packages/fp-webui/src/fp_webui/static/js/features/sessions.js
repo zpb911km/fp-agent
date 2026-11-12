@@ -10,6 +10,12 @@ import { LoadingState } from '../core/spinner.js';
 
 // ── 会话管理 ──
 
+/* 主卡展示的关键词个数：**由后端下发**（fp_core.core.session_keywords.TOP_SHOW，
+   经 /api/sessions 的 kw_show 字段），前端不再写死。
+   曾写死 3 而后端是 5，结果终端显示 5 个、webui 只显示 3 个——同一份数据两处
+   各存一份，改一处必漂另一处。兜底值仅首帧未拿到响应时用。 */
+var _kwShow = 5;
+
 /* 侧边栏开合语义（重构后：会话列表常驻侧边栏，不再是浮层）：
    - 宽屏(≥900px)：侧边栏常驻，openSessions=确保展开+聚焦搜索；closeSessions=无操作
      （切换会话/Esc 不再把宽屏侧边栏关掉，DeepSeek 行为）
@@ -83,7 +89,7 @@ function renderSessionItem(s, withSnippets) {
   // 后端已保证 summary 可展示；此处仅兜底——不用 sid 冒充标题
   var summary = s.summary || (msgCount ? '（无摘要）' : '（空白会话）');
   // 关键词由后端 KL 管线预先算好（meta.kw），前端只读不算
-  var kw = (s.kw && s.kw.length) ? s.kw.slice(0, 3).join(' · ') : '';
+  var kw = (s.kw && s.kw.length) ? s.kw.slice(0, _kwShow).join(' · ') : '';
   var snippets = '';
   if (withSnippets) {
     (s.snippets || []).forEach(function(sn) {
@@ -148,6 +154,7 @@ function runSessionsSearch(q) {
   authFetch('/api/sessions/search?q=' + encodeURIComponent(q))
     .then(function(r) { return r.json(); })
     .then(function(data) {
+      if (data.kw_show) _kwShow = data.kw_show;
       var results = data.results || [];
       if (!results.length) {
         list.innerHTML = '<div class="no-sessions">没有找到含「' + escapeHtml(q) + '」的会话</div>';
@@ -168,6 +175,7 @@ export function loadSessionsList() {
   return authFetch('/api/sessions')
     .then(function(r) { return r.json(); })
     .then(function(data) {
+      if (data.kw_show) _kwShow = data.kw_show;
       var sessions = data.sessions || [];
       if (sessions.length === 0) {
         list.innerHTML = '<div class="no-sessions">暂无历史会话</div>';

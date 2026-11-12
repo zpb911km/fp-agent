@@ -58,7 +58,8 @@ fp-webui --reload             # 开发用：uvicorn 热重载
   重连带 `?seq=&run_id=` 协商，能重放走环形缓冲（`replay`），溢出或换轮则 `resync` 让前端全量重拉。
 - **热重载 / 新建实例** — 命令面 `/reload` 走 execve 原启动命令；`POST /api/agent/new` 只换内存实例（409 拒绝忙时调用）。
 - **外观** — 深/浅主题（`localStorage.webui_theme`）、迭代器光环与投影装饰（`localStorage.webui_halo`，默认关闭省 GPU）。
-- **前端无构建** — 纯 HTML + CSS + 原生 ESM，无打包步骤；静态引用 `?_t=` 由服务端按文件 mtime 自动改写，改完即生效。
+- **前端无构建** — 纯 HTML + CSS + 原生 ESM，无打包步骤；静态引用 `?_t=` 由服务端按**子目录相对路径**取真实 mtime 改写，改完即生效。
+- **静态资源强制重验证** — `/static/*` 一律回 `Cache-Control: no-cache`（配 ETag 走 304，代价近零）。只靠 `?_t=` 不够：前端是 ESM import 图，`import './features/x.js'` 的 URL 写死在模块里无法逐个打戳，而 `StaticFiles` 不发 `Cache-Control` 时浏览器按启发性新鲜期（≈`(now - Last-Modified)`×10%，文件越旧缓存越久）缓存——症状是「磁盘 `/static` 与接口全对，用户刷新后界面仍是旧行为」。契约由 `tests/test_static_cache.py` 钉死。
 
 ## API 与协议
 

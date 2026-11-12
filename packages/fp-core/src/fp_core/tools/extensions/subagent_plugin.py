@@ -26,31 +26,27 @@ from typing import Any, cast
 
 
 def _derive_summary_from_file(sid: str) -> str:
-    """从会话文件读取最后一条 user 消息，生成摘要（与 save_and_summarize 策略一致）。"""
-    from fp_core.core.session import _session_path  # pyright: ignore[reportPrivateUsage]
+    """从会话文件派生摘要（与 ``save_and_summarize`` 同策略：kw[0] 前 10 字）。
+
+    v1 这里是独立实现的 ``last_user[:20]``——同一件事两处实现，策略必然
+    漂移（v2 把核心改成 kw 派生后，subagent 会话就会是另一套规则）。
+    现在直接复用核心的 ``derive_summary``，kw 为空才回退末条 user。
+    """
+    from fp_core.core.session import _session_path, derive_summary  # pyright: ignore[reportPrivateUsage]
+    from fp_core.core.session_keywords import read_session
 
     path = _session_path(sid)
     if not os.path.exists(path):
         return ""
+    meta, msgs = read_session(path)
     last_user = ""
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                except Exception:
-                    continue
-                if msg.get("__meta__") or msg.get("role") != "user":
-                    continue
-                content = msg.get("content", "")
-                if content:
-                    last_user = content
-    except Exception:
-        pass
-    return last_user.strip().replace("\n", " ")[:20]
+    for msg in reversed(msgs):
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                last_user = content
+                break
+    return derive_summary(meta.get("kw") or [], last_user)
 
 
 def _finalize_subagent_session(sid: str, parent_sid: str, fallback_summary: str = "") -> None:

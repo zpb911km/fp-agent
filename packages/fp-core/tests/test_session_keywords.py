@@ -13,6 +13,7 @@ import fp_core.core.session_keywords as kw_mod
 from fp_core.core.session import SessionManager
 from fp_core.core.session_keywords import (
     KW_VERSION,
+    TOP_STORE,
     compute,
     load_background,
     needs_rebuild,
@@ -61,11 +62,16 @@ def _msgs(*texts: str) -> list[dict]:
 
 
 class TestTokenize:
-    def test_keeps_cjk_drops_code_and_stopwords(self):
+    def test_keeps_cjk_and_identifiers(self):
+        """v2：标识符从「噪声」变成最高区分度锚点（复合标识符保留，代码关键字仍排除）。
+
+        v1 断言 "foo" not in joined——那正是导致 941 个会话 kw 含英文 0 个的原因。
+        """
         cnt = tokenize(["请帮我看看 量子退火算法 `def foo_bar():` 的 实现"])
         assert "量子" in cnt or "退火" in cnt
         joined = "".join(cnt)
-        assert "foo" not in joined  # 标识符不进词表
+        assert "foo_bar" in joined  # 复合标识符 = 天然高区分度锚点
+        assert "def" not in cnt  # 代码关键字仍排除
         assert "的" not in cnt  # 虚词被过滤
 
     def test_code_block_excluded(self):
@@ -128,6 +134,24 @@ class TestBuckets:
         assert tc["甲"] == 3 and total == 3 and gdf["甲"] == 1 and n == 1
 
     def test_window_excludes_old_buckets(self, sessions_dir):
+        """窗口内有新桶时，超出 21 天的旧桶不参与背景。"""
+        import collections
+        import datetime
+
+        old = datetime.date(2026, 1, 1)
+        today = datetime.date(2026, 10, 20)
+        save_bucket(old, collections.Counter({"陈年": 5}), collections.Counter({"陈年": 1}), 1, sessions_dir)
+        save_bucket(today, collections.Counter({"新鲜": 3}), collections.Counter({"新鲜": 1}), 1, sessions_dir)
+        tc, _, _, _ = load_background(today, sessions_dir)
+        assert "陈年" not in tc  # 超出 21 天窗口
+        assert "新鲜" in tc
+
+    def test_background_falls_back_to_last_filled_bucket(self, sessions_dir):
+        """窗口内全空 → 自愈回退最近非空桶（对应实测断供 43 天时的止血）。
+
+        背景滞后远好于没有背景：没有背景时 KL 静默退化成纯词频，抽出的是
+        「哪些/真实/实际/值钱」这类虚词。
+        """
         import collections
         import datetime
 
@@ -135,7 +159,7 @@ class TestBuckets:
         today = datetime.date(2026, 10, 20)
         save_bucket(old, collections.Counter({"陈年": 5}), collections.Counter({"陈年": 1}), 1, sessions_dir)
         tc, _, _, _ = load_background(today, sessions_dir)
-        assert "陈年" not in tc  # 超出 21 天窗口
+        assert "陈年" in tc
 
     def test_needs_rebuild_when_state_missing(self, sessions_dir):
         assert needs_rebuild(sessions_dir) is True
@@ -146,7 +170,8 @@ class TestCompute:
         path = _write_session(sessions_dir, "s_261020_100000000001", _msgs("量子退火算法怎么实现", "再讲一次量子退火"))
         kws = compute(path, sessions_dir)
         assert kws
-        assert len(kws) <= 3
+        # v2：存储 TOP_STORE(12) 个，列表只渲染 TOP_SHOW(3) 个
+        assert len(kws) <= TOP_STORE
 
     def test_fork_skips_shared_prefix(self, sessions_dir):
         """fork 会话只统计分叉点之后的内容——共享前缀是关键词扎堆的根因。"""

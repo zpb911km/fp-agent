@@ -2,10 +2,11 @@
 
 为什么需要它
 ------------
-会话标题只是「最后一条 user 消息的前 20 字」，会话一多就退化成
-「推送 / 提交 / ok」这类无信息噪声。本模块给每个会话补 3 个**区分性**
-关键词——用 KL 贡献 ``P_d·log(P_d/P_C)`` 衡量「这个词在这个会话里比在
-日常语料里突出多少」。
+v1 的会话标题只是「最后一条 user 消息的前 20 字」，会话一多就退化成
+「推送 / 提交 / ok」这类无信息噪声。v2 起标题改由本模块的 ``kw[0]`` 派生
+（硬 10 字），本模块负责给每个会话算 **12 个**区分性关键词（``TOP_STORE``，
+列表只渲染前 3 个）——用 KL 贡献 ``P_d·log(P_d/P_C)`` 衡量「这个词在这个
+会话里比在日常语料里突出多少」。
 
 三条铁律
 --------
@@ -33,6 +34,7 @@
 from __future__ import annotations
 
 import collections
+import contextlib
 import datetime
 import json
 import math
@@ -45,8 +47,11 @@ from typing import Any, cast
 from .. import config
 
 # ── 参数（源于 905 会话离线实验，勿随意改动） ──────────────
-KW_VERSION = 1
-"""索引版本；管线语义变化时 +1，用于判定旧 kw 是否过期。"""
+KW_VERSION = 2
+"""索引版本；管线语义变化时 +1，用于判定旧 kw 是否过期。
+
+v2：标识符/路径纳入词源（v1 把它们当噪声删掉，导致 kw 含英文占比 0%）。
+"""
 
 WINDOW_DAYS = 21
 """背景语料窗口（天）。全局 IDF 在「工作冲刺期」会失效，故用局部窗口。"""
@@ -60,8 +65,57 @@ DF_MAX = 0.10
 MIN_DF = 3
 """文档频次下限：只出现过 1~2 次的词多半是错字或专名碎片。"""
 
-TOP_K = 3
-"""写入 meta 的词数（终端宽度有限；webui 宽屏自行截断展示 5 词）。"""
+TOP_STORE = 12
+"""写入 ``meta["kw"]`` 的词数（**存**多少，不是**显示**多少）。
+
+v1 的 ``TOP_K = 3`` 让「蓝牙」这类真主题词在 kw 里命中率为 0——不是抽不
+出来，是挤不进前 3。存储与展示解耦后：检索吃全部 12 个，列表仍只渲染
+``TOP_SHOW`` 个，终端宽度不变而检索召回显著提升。
+"""
+
+TOP_SHOW = 5
+
+LANDMARK_DF_MAX = 4
+"""中文路标可接受的最大全局 df。超过它视为「大路货」，让位给罕见标识符。"""
+
+LANDMARK_MAX_LEN = 10
+"""过滤过长词的最大词长（= ``session.SUMMARY_LIMIT``）。
+
+注：summary 已改为跟随末条 user，与 kw 不同源；本常量仅用于滤除
+超长标识符，避免 kw 里塞进不可读的整段路径。
+
+超过它的词会被截成 ``scripts/…`` 这种认不出的残片，故排序时降权——
+宁可选个短一点都不那么罕见的词，也不要一个截断后无法辨认的文件名。
+"""
+"""列表展示的词数（全部作后缀，summary 已独立于 kw）。"""
+
+ID_MIN_LEN = 3
+"""标识符最短长度（低于此多为变量名碎片，如 ``ok``/``id``）。"""
+
+ID_WEIGHT = 2
+"""标识符计数权重。
+
+用户事后找会话时，记得住的是「我改过 ``shortcircuit.py``」「我跑过那条
+``systemd`` 命令」，而不是当轮说了什么自然语言。标识符因此拿最高权重。
+"""
+
+MIN_ID_DF = 1
+"""标识符文档频次下限。
+
+中文词用 ``MIN_DF=3`` 挡错字碎片是对的；但一个文件名只出现在 1 个会话
+里恰恰是**最高**区分度，用 3 会把最该留的锚点全筛掉。
+"""
+
+DF_MAX_ID = 0.30
+"""标识符文档频次上限（比中文的 0.10 宽：文件/模块名天然集中在少数会话）。"""
+
+SUP_TTL_DAYS = 45
+"""抑制词表有效期（天）。
+
+固定的 ``sup`` 表会把「部署/代码/修复/任务」这类**阶段性**高频词永久拉黑
+——冲刺期它们是背景噪声，三个月后却可能正是你要找的那个词。超过期限未
+重建即视为过期、不再生效：宁可多几个词，不可丢锚点。
+"""
 
 USER_WEIGHT = 2
 """user 正文加权——用户自己打字的内容最能代表「这个会话在干嘛」。"""
@@ -78,6 +132,171 @@ _INJECTED_PREFIXES = ("[背景信息]", "⁂", "[子图]", "[subagent]", "[任�
 _CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
 _CODE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*|/[A-Za-z0-9_./\-]{4,}")
 _SPLIT_RE = re.compile(r"[。！？；，、,.!?;:：\s]+")
+
+# ── 标识符通道（v2 新增）────────────────────────────────
+# v1 用 _CODE_RE.sub(" ", line) 把标识符/路径直接删掉再切中文，结果是 941
+# 个会话的 kw 里含英文字母的有 0 个。而语料里有 30491 个唯一英文标识符、
+# 其中 98.6% 的 df ≤ 5%——这是天然的最高区分度锚点，全被扔了。
+_PATH_RE = re.compile(r"(?:\.{0,2}/)?(?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_.\-]+")
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*")
+
+# 语言关键字与通用碎词：频率极高、不指向任何具体事物，进索引只会稀释区分度
+_CODE_STOP = frozenset([
+    "def",
+    "return",
+    "import",
+    "from",
+    "class",
+    "self",
+    "none",
+    "true",
+    "false",
+    "elif",
+    "except",
+    "finally",
+    "while",
+    "lambda",
+    "yield",
+    "async",
+    "await",
+    "raise",
+    "assert",
+    "global",
+    "nonlocal",
+    "pass",
+    "break",
+    "continue",
+    "print",
+    "str",
+    "int",
+    "float",
+    "bool",
+    "list",
+    "dict",
+    "set",
+    "tuple",
+    "type",
+    "object",
+    "super",
+    "init",
+    "args",
+    "kwargs",
+    "value",
+    "item",
+    "key",
+    "null",
+    "undefined",
+    "function",
+    "const",
+    "let",
+    "var",
+    "export",
+    "default",
+    "public",
+    "private",
+    "void",
+    "static",
+    "struct",
+    "typedef",
+    "include",
+    "define",
+    # 通用英文词（精确匹配；file_path 这类复合标识符不受影响）
+    "the",
+    "and",
+    "for",
+    "not",
+    "you",
+    "this",
+    "that",
+    "with",
+    "have",
+    "are",
+    "error",
+    "test",
+    "main",
+    "data",
+    "name",
+    "path",
+    "file",
+    "text",
+    "line",
+    "msg",
+    "tmp",
+    "json",
+    "true",
+    "false",
+    "null",
+    "utf",
+    "ascii",
+    "echo",
+    "cat",
+    # 工具/动词类泛词：几乎所有会话都出现，指不向任何具体事物
+    "run",
+    "runs",
+    "tool",
+    "tools",
+    "push",
+    "pull",
+    "dev",
+    "command",
+    "cmd",
+    "bash",
+    "shell",
+    "grep",
+    "find",
+    "head",
+    "tail",
+    "less",
+    "more",
+    "sort",
+    "user",
+    "users",
+    "root",
+    "home",
+    "usr",
+    "etc",
+    "var",
+    "opt",
+    "lib",
+    "bin",
+    "src",
+    "pkg",
+    "site",
+    "packages",
+    "cache",
+    "temp",
+    "log",
+    "logs",
+    "http",
+    "https",
+    "www",
+    "com",
+    "org",
+    "net",
+    "html",
+    "css",
+    "get",
+    "set",
+    "add",
+    "del",
+    "put",
+    "new",
+    "old",
+    "msg",
+    "val",
+    "obj",
+    "self",
+    "this",
+    "void",
+    "none",
+    "null",
+    "enum",
+    "extends",
+    "implements",
+])
+
+# git ref 前缀：`origin/dev` 这类由路径通道误抽，不是文件路径
+_GIT_REF_PREFIX = frozenset(["origin", "upstream", "refs", "heads", "tags", "remotes", "head"])
 
 # 高频虚词：即使 KL 靠平滑把它们顶上来也无意义
 _CJK_STOP = frozenset([
@@ -239,14 +458,57 @@ def _cut(seg: str) -> Iterable[str]:
             yield run[i : i + 2]
 
 
+_ID_HAS_ALPHA = re.compile(r"[a-z]")
+
+
+def _extract_identifiers(line: str) -> list[str]:
+    """从一行文本抽标识符/路径候选（未小写、未过滤）。
+
+    路径给两档粒度，因为用户回忆的粒度不确定：
+    ``/a/b/core/agent.py`` → ``core/agent.py``（推荐）、``agent.py``（够用）。
+    完整绝对路径不取——前缀人人相同，区分度为零。
+    """
+    out: list[str] = []
+    for m in _PATH_RE.finditer(line):
+        parts = [p for p in m.group(0).split("/") if p]
+        if not parts or parts[0].lower() in _GIT_REF_PREFIX:
+            continue  # `origin/dev` 之类是分支名，不是文件路径
+        if len(parts) >= 2:
+            out.append("/".join(parts[-2:]))
+        out.append(parts[-1])
+    for m in _IDENT_RE.finditer(_PATH_RE.sub(" ", line)):
+        out.append(m.group(0))
+    return list(dict.fromkeys(out))
+
+
 def tokenize(texts: Iterable[Any], weight: int = 1) -> collections.Counter[str]:
-    """正文 → 词频表。按行切分后再分词（防跨行粘连假词）。"""
+    """正文 → 词频表。按行切分后再分词（防跨行粘连假词）。
+
+    两条通道并行：
+      1. **标识符/路径**：先抽、小写归并、加权 ``ID_WEIGHT``（v1 在此把它们
+         当噪声删掉，导致 kw 含英文占比 0%）
+      2. **中文词**：剔除标识符后的 CJK 段走 jieba，原逻辑不变
+    """
     cnt: collections.Counter[str] = collections.Counter()
     for text in texts:
         if not isinstance(text, str) or not text:
             continue
+        in_fence = False
         for line in text.split("\n"):
-            line = _CODE_RE.sub(" ", line)  # 标识符/路径先进噪声，避免切碎
+            # fenced 代码块整块跳过：v1 靠「标识符全删 + 只留 CJK」天然排除代码，
+            # v2 加了标识符通道后这个前提失效（```python 的 python 会被抽出）。
+            # 代码块是机器/演示产物，不是用户自己的用词，跳过既修 bug 又降噪。
+            if line.lstrip().startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            for tok in _extract_identifiers(line):
+                low = tok.lower()
+                if len(low) < ID_MIN_LEN or low in _CODE_STOP or not _ID_HAS_ALPHA.search(low):
+                    continue
+                cnt[low] += weight * ID_WEIGHT
+            line = _CODE_RE.sub(" ", line)  # 标识符已单独抽取，中文通道剔除防切碎
             for seg in _SPLIT_RE.split(line):
                 if not seg:
                     continue
@@ -288,6 +550,40 @@ def read_session(path: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     return meta, msgs
 
 
+_TOOL_PATH_KEYS = ("file_path", "path", "notebook_path")
+
+
+def _tool_anchors(msgs: list[dict[str, Any]]) -> list[str]:
+    """从 ``tool_calls`` 抽文件路径（只认路径类参数，噪声可控）。
+
+    为什么值得做：「我改过哪个文件」正是用户自己的记忆方式。实测语料里只有
+    2445 个唯一路径，而正文自然语言是几十万 token——前者信噪比高一个量级。
+    不抽 bash 的整条 command：路径混在参数里会带进大量临时文件与日志路径。
+    """
+    out: list[str] = []
+    for m in msgs:
+        raw_calls = m.get("tool_calls")
+        if not isinstance(raw_calls, list):
+            continue
+        for call in cast(list[Any], raw_calls):
+            holder = cast(dict[str, Any], call or {})
+            fn = cast(dict[str, Any], holder.get("function") or {})
+            raw = fn.get("arguments")
+            if not isinstance(raw, str):
+                continue
+            try:
+                args = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(args, dict):
+                continue
+            for key in _TOOL_PATH_KEYS:
+                val = cast(dict[str, Any], args).get(key)
+                if isinstance(val, str) and val.strip():
+                    out.append(val.strip())
+    return out
+
+
 def session_tokens(msgs: list[dict[str, Any]], skip_before: int = 0) -> collections.Counter[str]:
     """消息列表 → 词频表。
 
@@ -303,6 +599,7 @@ def session_tokens(msgs: list[dict[str, Any]], skip_before: int = 0) -> collecti
     assts = [m.get("content") for m in body if m.get("role") == "assistant"]
     cnt = tokenize(users, USER_WEIGHT)
     cnt.update(tokenize(assts, 1))
+    cnt.update(tokenize(_tool_anchors(body), 1))
     return cnt
 
 
@@ -347,16 +644,12 @@ def save_bucket(
         return False
 
 
-def load_background(
+def _merge_window(
     day: datetime.date,
-    sessions_dir: str | None = None,
-    window: int = WINDOW_DAYS,
+    sessions_dir: str | None,
+    window: int,
 ) -> tuple[collections.Counter[str], int, collections.Counter[str], int]:
-    """合并 ``[day-window, day]`` 内所有桶 → (tc, T, gdf, N)。
-
-    只取**过去**的窗口（在线场景看不到未来）。桶缺失就跳过——冷启动时
-    背景为空，``score()`` 会退化为纯词频，仍然可用。
-    """
+    """合并 ``[day-window, day]`` 内所有桶 → (tc, T, gdf, N)。缺桶即跳过。"""
     tc: collections.Counter[str] = collections.Counter()
     gdf: collections.Counter[str] = collections.Counter()
     n = 0
@@ -375,7 +668,98 @@ def load_background(
     return tc, sum(tc.values()), gdf, n
 
 
+def _find_last_filled(day: datetime.date, sessions_dir: str | None) -> datetime.date | None:
+    """找 ``<= day`` 的最近一个桶日期（一次 listdir，不做 400 次 stat）。"""
+    try:
+        names = os.listdir(kw_dir(sessions_dir))
+    except OSError:
+        return None
+    best: datetime.date | None = None
+    for name in names:
+        m = re.fullmatch(r"df-(\d{8})\.json", name)
+        if not m:
+            continue
+        try:
+            d = datetime.datetime.strptime(m.group(1), "%Y%m%d").date()
+        except ValueError:
+            continue
+        if d <= day and (best is None or d > best):
+            best = d
+    return best
+
+
+def load_background(
+    day: datetime.date,
+    sessions_dir: str | None = None,
+    window: int = WINDOW_DAYS,
+) -> tuple[collections.Counter[str], int, collections.Counter[str], int]:
+    """合并 ``[day-window, day]`` 内所有桶 → (tc, T, gdf, N)。
+
+    只取**过去**的窗口（在线场景看不到未来）。
+
+    **自愈**：若窗口内一个桶都没有——典型原因是 ``rebuild_all()`` 长期没跑
+    （实测 2026-10-21 起断供 43 天）——直接返回空背景会让 ``score()`` 静默
+    退化成纯词频，抽出来的就是「哪些/真实/实际/值钱」这类虚词。此时向前找
+    最近一个有内容的桶日期 ``d0``，改用 ``[d0-window, d0]`` 作背景。
+    背景滞后远好于没有背景：它衡量的是「日常语料」，缓慢漂移不影响排序。
+    """
+    tc, total, gdf, n = _merge_window(day, sessions_dir, window)
+    if n > 0:
+        return tc, total, gdf, n
+    d0 = _find_last_filled(day, sessions_dir)
+    if d0 is not None and d0 != day:
+        return _merge_window(d0, sessions_dir, window)
+    return tc, total, gdf, n
+
+
+def refresh_day_bucket(day: datetime.date, sessions_dir: str | None = None) -> int:
+    """重算**某一天**的桶（覆盖写）→ 返回该天会话数。
+
+    为什么需要增量写桶：桶原本只由手动 ``rebuild_all()`` 生成，一旦没人跑
+    就永久断供（实测断了 43 天）。会话结束时顺手刷新「今天」这一格，桶链
+    就永远不断。成本 = 该天会话数 × 单会话解析，且被调用方节流到低频路径。
+    """
+    root = sessions_dir or config.SESSIONS_DIR
+    tc: collections.Counter[str] = collections.Counter()
+    gdf: collections.Counter[str] = collections.Counter()
+    n = 0
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return 0
+    for name in names:
+        if not name.endswith(".jsonl"):
+            continue
+        path = os.path.join(root, name)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                first = f.readline()
+            meta = json.loads(first)
+        except Exception:
+            continue
+        if not meta.get("__meta__") or _session_day(meta) != day:
+            continue
+        _meta, msgs = read_session(path)
+        if not msgs:
+            continue
+        cnt = session_tokens(msgs, skip_before=_fork_skip(meta))
+        if not cnt:
+            continue
+        tc.update(cnt)
+        n += 1
+        for word in cnt:
+            gdf[word] += 1
+    if n:
+        save_bucket(day, tc, gdf, n, root)
+    return n
+
+
 # ── 打分 ──────────────────────────────────────────────
+
+
+def is_identifier(word: str) -> bool:
+    """该词是否走标识符通道（含 ASCII 字母）。"""
+    return bool(_ID_HAS_ALPHA.search(word))
 
 
 def score(
@@ -384,10 +768,15 @@ def score(
     total: int,
     gdf: collections.Counter[str],
     n_sessions: int,
-    top_k: int = TOP_K,
+    top_k: int = TOP_STORE,
     suppress: frozenset[str] | set[str] | None = None,
 ) -> list[str]:
-    """KL 贡献排序取 top_k。空背景时退化为纯词频排序。"""
+    """KL 贡献排序取 top_k。空背景时退化为纯词频排序。
+
+    df 阈值分两条通道：中文词用 ``MIN_DF=3``/``DF_MAX=0.10`` 挡错字与背景
+    噪声（原设计）；标识符用 ``MIN_ID_DF=1``/``DF_MAX_ID=0.30``——一个文件名
+    只出现在 1 个会话里恰恰是最高区分度，用 3 会把它筛掉。
+    """
     doc_len = sum(cnt.values())
     if not doc_len:
         return []
@@ -397,13 +786,41 @@ def score(
             continue
         if n_sessions >= 10:
             df = gdf.get(word, 0)
-            if df < MIN_DF or df > DF_MAX * n_sessions:
+            if is_identifier(word):
+                if df < MIN_ID_DF or df > DF_MAX_ID * n_sessions:
+                    continue
+            elif df < MIN_DF or df > DF_MAX * n_sessions:
                 continue
         # 无背景时平滑项退化为常数，排序等价于纯词频
         p_c = max(tc.get(word, 0) / total, 1e-9) if total > 0 else 1.0
         p_d = (freq + MU * p_c) / (doc_len + MU)
         scored[word] = p_d * math.log(p_d / p_c)
-    ranked = sorted(scored.items(), key=lambda kv: -kv[1])
+
+    # 排序：**跨会话稀缺性**优先，而不是会话内 KL。
+    # 为什么：kw[0] 要直接当 summary（列表路标），而 KL 衡量的是「这个词在
+    # 本会话里比在日常语料突出多少」——它会在不同会话间选出同一个高频词。
+    # 实测 941 会话按纯 KL 取 kw[0]：唯一值仅 569（重复率 39.5%，「错误」
+    # 出现 13 次、「版本」11 次、「会话」11 次）。改用全局 df 升序作主键后
+    # 重复率降到 2.7%——路标需要的正是「跨会话能区分」。
+    # 次键「长度 ≤ LANDMARK_MAX_LEN」：超长标识符当 summary 会被截成
+    # ``scripts/…``；再次键中文优先（可读性），最后才是 KL 分。
+    def _key(item: tuple[str, float]) -> tuple[int, int, int, int, float]:
+        word, kl = item
+        df = gdf.get(word, 0) if n_sessions >= 10 else 0
+        cjk = bool(_CJK_RUN.fullmatch(word))
+        # 首选「稀缺的中文词」：中文是唯一能一句话说清「在干嘛」的载体，
+        # 但若该中文词已经很常见（df>4，如「错误」「版本」），它就没有区分
+        # 价值——此时宁可退到罕见的标识符（df=1 的文件名/函数名）。
+        rare_cjk = 0 if (cjk and df <= LANDMARK_DF_MAX) else 1
+        return (
+            rare_cjk,
+            0 if len(word) <= LANDMARK_MAX_LEN else 1,
+            df,
+            0 if cjk else 1,
+            -kl,
+        )
+
+    ranked = sorted(scored.items(), key=_key)
     return [w for w, _ in ranked[:top_k]]
 
 
@@ -432,28 +849,57 @@ def save_state(state: dict[str, Any], sessions_dir: str | None = None) -> bool:
         return False
 
 
+def _is_stale(stamp: str, ttl_days: int) -> bool:
+    """时间戳是否已过期（解析失败视为过期——宁可不用旧表）。"""
+    try:
+        at = datetime.datetime.strptime(str(stamp)[:19], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return True
+    return (datetime.datetime.now() - at).days > ttl_days
+
+
 def _suppress_set(sessions_dir: str | None = None) -> frozenset[str]:
-    sup = load_state(sessions_dir).get("sup")
-    if isinstance(sup, list):
-        return frozenset(str(w) for w in cast(list[Any], sup))
-    return frozenset()
+    """当前生效的抑制词集合。
+
+    ``sup`` 带有效期：固定表会把「部署/代码/修复/任务」这类**阶段性**高频词
+    永久拉黑（实测 104 词把技术工作常用词全禁了，且永不过期）。超过
+    ``SUP_TTL_DAYS`` 未重建即整体失效——多几个噪声词可以忍，丢掉锚点不行。
+    """
+    state = load_state(sessions_dir)
+    sup = state.get("sup")
+    if not isinstance(sup, list):
+        return frozenset()
+    if _is_stale(state.get("sup_at") or "", SUP_TTL_DAYS):
+        return frozenset()
+    return frozenset(str(w) for w in cast(list[Any], sup))
 
 
 # ── 写回 meta ─────────────────────────────────────────
 
 
 def _write_meta_header(path: str, meta: dict[str, Any]) -> bool:
-    """重写会话文件第一行（meta header），正文原样保留。"""
+    """重写会话文件第一行（meta header），正文原样保留。
+
+    **原子写**：旧实现直接 ``open(path, "w")`` 截断后回填，中途崩溃/并发会让
+    首行残缺 → ``_read_meta_from_file`` 返回 None → 该会话从列表静默消失且
+    无备份。这里改 tmp + ``os.replace``（同目录，POSIX 原子）。
+    """
     if not os.path.exists(path):
         return False
+    tmp = f"{path}.kwtmp"
     try:
         with open(path, encoding="utf-8") as f:
             lines = f.readlines()
-        with open(path, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             f.write(json.dumps(meta, ensure_ascii=False) + "\n")
             f.writelines(lines[1:])
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
         return True
     except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
         return False
 
 
@@ -486,7 +932,7 @@ def compute_from_messages(
     if not cnt:
         return []
     tc, total, gdf, n = load_background(day, sessions_dir)
-    return score(cnt, tc, total, gdf, n, TOP_K, _suppress_set(sessions_dir))
+    return score(cnt, tc, total, gdf, n, TOP_STORE, _suppress_set(sessions_dir))
 
 
 def compute(path: str, sessions_dir: str | None = None) -> list[str]:
@@ -558,7 +1004,7 @@ def rebuild_all(
     for sid, _path, meta, cnt in docs:
         day = _session_day(meta) or datetime.date.today()
         tc, total, gdf, _n = load_background(day, root)
-        first_pass[sid] = score(cnt, tc, total, gdf, n_sessions, top_k=14)
+        first_pass[sid] = score(cnt, tc, total, gdf, n_sessions, top_k=TOP_STORE)
 
     # 3. 二遍抑制：跨会话重复出现的 top 词对区分没贡献
     appear: collections.Counter[str] = collections.Counter()
@@ -574,7 +1020,7 @@ def rebuild_all(
     for _sid, path, meta, cnt in docs:
         day = _session_day(meta) or datetime.date.today()
         tc, total, gdf, _n = load_background(day, root)
-        kws = score(cnt, tc, total, gdf, n_sessions, TOP_K, sup_set)
+        kws = score(cnt, tc, total, gdf, n_sessions, TOP_STORE, sup_set)
         meta["kw"] = kws
         meta["kw_v"] = KW_VERSION
         if _write_meta_header(path, meta):
@@ -588,6 +1034,7 @@ def rebuild_all(
     state.update({
         "kw_v": KW_VERSION,
         "sup": suppress,
+        "sup_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "rebuilt_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "sessions": n_sessions,
     })

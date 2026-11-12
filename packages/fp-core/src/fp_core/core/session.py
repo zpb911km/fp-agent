@@ -14,6 +14,8 @@ import contextlib
 import json
 import os
 import re
+import threading
+import time
 from datetime import datetime
 from typing import Any, cast
 
@@ -108,27 +110,173 @@ def _read_meta_from_file(path: str) -> dict[str, Any] | None:
 
 
 def _write_meta_to_file(path: str, meta: dict[str, Any]) -> bool:
-    """重写会话文件的第一行（meta header）。"""
+    """重写会话文件的第一行（meta header），正文原样保留。
+
+    **原子写**（tmp + ``os.replace``）：旧实现 ``open(path,"w")`` 截断后回填，
+    中途崩溃会让首行残缺 → 整个会话从列表静默消失。全量重建会写 941 个文件，
+    不能赌「不会崩」。
+    """
     if not os.path.exists(path):
         return False
+    tmp = f"{path}.metatmp"
     try:
         content = json.dumps(meta, ensure_ascii=False)
         with open(path, encoding="utf-8") as f:
             lines = f.readlines()
-        with open(path, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             f.write(content + "\n")
             f.writelines(lines[1:])
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
         return True
     except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
         return False
 
 
-def summarize_text(content: str, limit: int = 20) -> str:
-    """摘要策略：文本首 N 字符（换行转空格）——全链路唯一的摘要生成规则。
+SUMMARY_LIMIT = 20
+"""summary 字符上限（**硬**上限）。
 
-    save_and_summarize、会话列表回填、subagent 兜底共用，避免各自漂移。
+summary 是列表里一行一个的「路标」，不是摘要——它必须短到能一眼扫过。
+20 字是实测的「一句完整话」长度：截到 10 字会砍掉宾语（``请你找到webui的``、
+``我想修改一下简历``），正好丢掉最能认人的部分。所以取用户**最后一条**消息
+（比首条开场指令有记忆点，跨会话也不易重复）截到 20 字。
+"""
+
+# 注入型前缀：这些开头的 user 消息是系统塞进来的，不是用户意图
+_SUMMARY_INJECTED = ("[背景信息]", "⁂", "[子图]", "[subagent]", "[任务]", "[铃声]", "[task]", "【")
+
+
+def _clip(text: str) -> str:
+    """截到 ``SUMMARY_LIMIT`` 字，被截断时末位补省略号。
+
+    为什么不裸切：``packages/fp-core.md`` 裸切成 ``packages/f`` 会被误读成
+    真实文件名；``…`` 明确告知"这里还有内容"。
     """
-    return content.strip().replace("\n", " ")[:limit]
+    if len(text) <= SUMMARY_LIMIT:
+        return text
+    return text[: SUMMARY_LIMIT - 1] + "…"
+
+
+def _strip_injection(text: str) -> str:
+    """从注入型消息里剥出残留的**用户意图正文**（剥不出返回 ``""``）。
+
+    为什么不能整条跳过：真实数据里注入块和用户指令**在同一条消息里**——
+    ``[背景信息]\\n<背景>\\n\\n[任务]\\n<用户指令>`` 与 ``【经理派遣·x】<用户指令>``。
+    按前缀整条丢弃会把用户原话一起扔掉，实测 77 个会话因此拿不到 summary，
+    只能沿用旧值（70 个至今显示着上一版的 kw[0]）。
+
+    纯通知型（``⁂[peer_ring] 【铃声】...``）剥完为空，返回 ``""`` 继续往前找。
+    """
+    s = text.strip()
+    if not s:
+        return ""
+    # [背景信息] 块之后可能跟 [任务]（真实指令）或 [子图]（子图任务）
+    if s.startswith(("[背景信息]", "[子图]")):
+        for marker in ("[任务]", "[子图]"):
+            if marker in s:
+                body = s.rsplit(marker, 1)[1].strip()
+                if body:
+                    return body
+        return ""
+    # 【经理派遣·sidebar·接替2】<用户指令>：标签后即正文；
+    # 【铃声】peer:xxx 在找你… 是纯通知（标签本身已是完整语义，正文只是路由提示）
+    if s.startswith("【"):
+        idx = s.find("】")
+        if idx < 0:
+            return ""
+        label = s[1:idx].strip()
+        body = s[idx + 1 :].strip()
+        if not body or label.startswith("铃声") or body.startswith(("[铃声]", "⁂")):
+            return ""
+        return body
+    if s.startswith(("⁂", "[铃声]", "[subagent]", "[task]", "[任务]")):
+        return ""
+    return s
+
+
+def _last_user_text(messages: list[dict[str, Any]]) -> str:
+    """取最后一条**可用的**用户意图正文（单行化）。
+
+    逆序扫描 user 消息，每条先经 ``_strip_injection`` 剥注入块：剥出正文就用
+    （末条常是 ``⁂[job_killed]`` / ``[铃声]`` 这类系统补齐，无正文则继续往前）；
+    整段会话都没有用户正文时（实测 20 个 peer_ring / 无 user 的会话）回退到
+    **首条非空 assistant 正文**——它通常复述了任务，比沿用旧摘要更有信息量。
+    """
+    for m in reversed(messages):
+        if m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if not isinstance(content, str):
+            continue
+        body = _strip_injection(content)
+        if body:
+            return body.replace("\n", " ")
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip().replace("\n", " ")
+    return ""
+
+
+def derive_summary(kws: list[str] | None, fallback: str = "") -> str:
+    """由**最后一条 user 消息**派生 summary，截到 ``SUMMARY_LIMIT`` 字。
+
+    为什么用末条 user 而不是关键词：kw 抽的是「会话内突出」的统计，取 kw[0]
+    当摘要在 941 个真实会话上实测 39.5% 撞车（「错误」×13、「版本」×11），
+    且抽出来常是「对冲」「示波器」「抓不住」这类分词碎片，人无法据此认出
+    是哪次会话。末条 user 是用户亲手写的原话，天然有记忆点，跨会话也不易重复。
+
+    ``kws`` 参数仅为签名兼容保留，不参与计算（subagent_plugin 等调用方仍传）。
+
+    传进来的 ``fallback`` 应已由 ``_strip_injection`` / ``_last_user_text`` 剥过
+    注入块；仍留 ``_SUMMARY_INJECTED`` 前缀守卫作兜底，命中时返回 ""，由调用方
+    沿用盘上旧摘要。
+    """
+    clean = (fallback or "").strip().replace("\n", " ")
+    for prefix in _SUMMARY_INJECTED:
+        if clean.startswith(prefix):
+            return ""
+    return _clip(clean)
+
+
+# ── 语料桶自愈 ────────────────────────────────────────
+_BUCKET_LOCK = threading.Lock()
+_BUCKET_STATE: dict[str, float] = {"t": 0.0}
+_BUCKET_INTERVAL = 600.0
+"""刷新「今天」语料桶的最小间隔（秒）。
+
+桶原本只由手动 ``rebuild_all()`` 生成——实测 2026-10-21 起断供 43 天，
+背景窗口取空后 KL 打分静默退化成纯词频，抽出的全是「哪些/真实/实际」
+这类虚词。这里让会话结束时顺手补一格：10 分钟一次、后台线程、不阻塞保存。
+``load_background`` 的「回退最近非空桶」是第一道止血，本机制是让它不再流血。
+"""
+
+
+def _maybe_refresh_bucket() -> None:
+    """节流刷新当天语料桶（后台线程，任何异常静默）。"""
+    now = time.time()
+    with _BUCKET_LOCK:
+        if now - _BUCKET_STATE.get("t", 0.0) < _BUCKET_INTERVAL:
+            return
+        _BUCKET_STATE["t"] = now
+
+    def _work() -> None:
+        try:
+            from datetime import date
+
+            from .session_keywords import refresh_day_bucket
+
+            refresh_day_bucket(date.today())
+        except Exception:
+            pass
+
+    with contextlib.suppress(Exception):
+        threading.Thread(target=_work, daemon=True).start()
 
 
 def _scan_messages(path: str) -> tuple[bool, str, int]:
@@ -143,6 +291,7 @@ def _scan_messages(path: str) -> tuple[bool, str, int]:
         return False, "", 0
     has_msgs = False
     last_user = ""
+    first_asst = ""
     count = 0
     try:
         with open(path, encoding="utf-8") as f:
@@ -160,13 +309,20 @@ def _scan_messages(path: str) -> tuple[bool, str, int]:
                 if not isinstance(msg, dict):
                     continue
                 d = cast("dict[str, Any]", msg)
-                if d.get("role") == "user":
-                    content = d.get("content")
-                    if isinstance(content, str) and content.strip():
-                        last_user = content
+                role = d.get("role")
+                content = d.get("content")
+                if not isinstance(content, str) or not content.strip():
+                    continue
+                # 与 _last_user_text 同一套剥离：注入块里可能藏着真实指令
+                if role == "user":
+                    body = _strip_injection(content)
+                    if body:
+                        last_user = body
+                elif role == "assistant" and not first_asst:
+                    first_asst = content
     except Exception:
         return True, "", 0
-    return has_msgs, last_user, count
+    return has_msgs, last_user or first_asst, count
 
 
 def _find_latest_session() -> str | None:
@@ -421,14 +577,16 @@ class SessionManager:
         summary = summary_raw
         if summary == "empty_session":
             summary = ""
-        if not summary and last_user:
-            summary = summarize_text(last_user)
-            if meta.get("source") == "subagent" and not summary.startswith("[subagent] "):
-                summary = f"[subagent] {summary}"
-            healed = dict(meta)
-            healed["summary"] = summary
-            healed["message_count"] = out["message_count"]
-            _write_meta_to_file(path, healed)  # 不碰 updated，排序不受影响
+        if not summary:
+            # 回填：用净化后的末条 user（kw 不再参与摘要）
+            summary = derive_summary(None, last_user)
+            if summary:
+                if meta.get("source") == "subagent" and not summary.startswith("[subagent] "):
+                    summary = f"[subagent] {summary}"
+                healed = dict(meta)
+                healed["summary"] = summary
+                healed["message_count"] = out["message_count"]
+                _write_meta_to_file(path, healed)  # 不碰 updated，排序不受影响
         if not summary:
             summary = NO_SUMMARY_LABEL
         out["summary"] = summary
@@ -573,20 +731,16 @@ class SessionManager:
         self._write_meta(self._meta)
 
     def _refresh_summary(self, messages: list[dict[str, Any]]) -> None:
-        """让 `meta.summary` 跟随最后一条 user 消息（**摘要随写随更**）。
+        """**仅在摘要为空时**用最后一条 user 消息兜底，不再逐轮覆写。
 
-        两条落盘路径都调用它：`save_context`（全量重写，生产主路径）与
-        `save_message`（追加）。摘要因此在消息产生的那一刻就已在盘上，
-        进程被 SIGKILL / 崩溃也不丢——会话列表不必等 `save_and_summarize`
-        （切换/退出）才拿得到摘要。没有 user 消息时保持原摘要不动。
+        策略：**每轮跟随最后一条非系统注入的 user 消息**（``_last_user_text``）。
+        选末条而非首条：末条是用户最后一次亲口交代的需求，天然有记忆点、
+        跨会话不易撞车；首条常是「读一下docs」这类空壳指令。
+        末条是系统注入或算不出内容时不动旧摘要。
         """
-        last_user = next((m for m in reversed(messages) if m.get("role") == "user"), None)
-        if last_user is None:
+        summary = derive_summary(None, _last_user_text(messages))
+        if not summary:
             return
-        content = last_user.get("content")
-        if not isinstance(content, str) or not content.strip():
-            return
-        summary = summarize_text(content)
         if self._meta.get("source") == "subagent" and not summary.startswith("[subagent] "):
             summary = f"[subagent] {summary}"
         self._meta["summary"] = summary
@@ -673,9 +827,9 @@ class SessionManager:
         """保存会话上下文并生成摘要（统一入口）。
 
         所有会话切换/退出路径都应调用此方法，确保摘要生成逻辑一致。
-        摘要策略：取最后一条用户消息的前 20 字符，换行转空格
-        （`summarize_text`）。subagent 会话（meta.source == "subagent"）
-        自动加 "[subagent] " 前缀。
+        摘要策略：**跟随最后一条 user 消息**——取最后一条非系统注入的 user
+        正文，截到 ``SUMMARY_LIMIT``(20) 字。kw 只作检索指纹，不参与摘要。
+        subagent 会话（meta.source == "subagent"）自动加 "[subagent] " 前缀。
 
         不变量：
           - **消息为空且文件不在盘上 → 完全 no-op**（不创建 0 长度会话文件）。
@@ -694,21 +848,23 @@ class SessionManager:
         target_sid = session_id or self._session_id
         target_path = _session_path(target_sid)
 
+        # 0. 空会话 + 文件不存在 → 完全 no-op，且必须在刷 kw **之前**拦。
+        #    _refresh_keywords 里的 update_meta 会创建 meta 文件，一旦先跑完，
+        #    下面再读 meta 就不是 None 了，于是走进"已有文件"分支写进
+        #    `empty_session` 标记——空转进程退出就留下一条空会话记录。
+        if not messages and not os.path.exists(target_path):
+            return ""
+
         # 1. 持久化消息（空 context 时 save_context 是 no-op，不建文件）
         self.save_context(messages)
 
-        # 2. 从最后一条用户消息生成摘要
-        summary: str = ""
-        last_user = next(
-            (m for m in reversed(messages) if m.get("role") == "user"),
-            None,
-        )
-        if last_user:
-            content = last_user.get("content", "")
-            if isinstance(content, str) and content.strip():
-                summary = summarize_text(content)
+        # 2. 先刷关键词——summary 由 kw 派生，必须排在它前面
+        self._refresh_keywords(target_sid, messages)
 
-        # 3. 与盘上 meta 合并
+        # 3. 摘要跟随最后一条 user（kw 只作检索指纹，不参与摘要）
+        summary = derive_summary(None, _last_user_text(messages))
+
+        # 4. 与盘上 meta 合并
         meta = _read_meta_from_file(target_path)
         source = (meta or {}).get("source")
         if source is None and target_sid == self._session_id:
@@ -725,15 +881,17 @@ class SessionManager:
         if not summary:
             summary = meta.get("summary") or "empty_session"
         self.update_meta(target_sid, summary=summary)
-        self._refresh_keywords(target_sid, messages)
         return summary
 
-    def _refresh_keywords(self, sid: str, messages: list[dict[str, Any]]) -> None:
-        """刷新会话关键词（``meta.kw``）——挂在会话落盘/切换这条**低频**路径上。
+    def _refresh_keywords(self, sid: str, messages: list[dict[str, Any]]) -> list[str] | None:
+        """刷新会话关键词（``meta.kw``）并返回它——挂在落盘/切换这条**低频**路径上。
 
         为什么不在 ``list_sessions()`` 里算：那里是 900+ 会话的循环，实算会
         把毫秒级列表拖成秒级。列表永远只读现成字段，缺失即留空。
         单会话成本约 18ms（900 会话全量回放实测）。
+
+        返回 kw 是为了让 ``save_and_summarize`` 能立刻用它派生 summary——
+        summary 与 kw 必须同源，否则又是两套漂移的规则。
 
         关键词是**增强**功能：任何异常都静默吞掉，不能让会话保存失败。
         """
@@ -743,8 +901,10 @@ class SessionManager:
             meta = self._meta if sid == self._session_id else (_read_meta_from_file(_session_path(sid)) or {})
             kws = compute_from_messages(meta, messages)
             self.update_meta(sid, kw=kws, kw_v=KW_VERSION)
+            _maybe_refresh_bucket()  # 桶链自愈：不靠手动 rebuild_all
+            return kws
         except Exception:
-            pass
+            return None
 
     def update_meta(self, sid: str | None = None, *, create: bool = True, **kwargs: Any) -> None:
         """更新指定会话的内嵌 meta 字段。

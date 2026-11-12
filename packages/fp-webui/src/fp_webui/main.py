@@ -52,7 +52,7 @@ except ImportError as e:
     sys.exit(1)
 
 # ── 唯一接口组导入（协议 §5：前端只许 fp_core.api + 纯工具模块） ──
-from fp_core.api import ExitReason, RestIO, WebSocketIO, portal
+from fp_core.api import KW_SHOW, ExitReason, RestIO, WebSocketIO, portal
 from fp_core.logger import get_logger
 from fp_webui.bridge import WebUIBridge
 from fp_webui.protocol import SCHEMA
@@ -369,6 +369,28 @@ async def auth_middleware(request: Request, call_next: Callable[[Request], Await
     return await call_next(request)
 
 
+# ── 静态资源强制重验证 ──────────────────────────────────
+
+
+@app.middleware("http")
+async def static_revalidate_middleware(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    """``/static/*`` 一律 ``Cache-Control: no-cache``（配 ETag 走 304，代价近零）。
+
+    为什么不能只靠 ``?_t=`` 缓存戳：前端是 **ESM import 图**，模块 URL 由
+    ``import ... from './features/sessions.js'`` 写死，无法像 index.html 那样
+    逐个改写；StaticFiles 默认又不发 Cache-Control，浏览器对"没有 Cache-Control"
+    的响应按启发式新鲜期缓存（≈(now - Last-Modified) 的 10%，文件越旧缓存越久）。
+    实测后果：改了 ``features/sessions.js``（kw 3→5 个），磁盘与 /static 已一致，
+    用户刷新后页面仍跑旧模块，界面上永远停在 3 个。
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 # ── 访问日志（URL 脱敏，防止 token 明文泄露） ────────────
 
 _SENSITIVE_QUERY_KEYS = {"token", "key", "secret", "password", "access_token"}
@@ -574,6 +596,16 @@ async def send_message(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _kw_show() -> int:
+    """主卡展示的关键词个数（单一真相源 = ``session_keywords.TOP_SHOW``）。
+
+    前端曾把这个数字写死成 3，而终端 ``kw_suffix`` 跟随后端 ``TOP_SHOW=5``——
+    同一份数据两处各写一份，改一处必漂另一处（实测终端 5 个、webui 3 个）。
+    故由后端下发，前端只读。
+    """
+    return KW_SHOW
+
+
 @app.get("/api/sessions")
 async def list_sessions() -> dict[str, Any]:
     """列出所有历史会话"""
@@ -593,7 +625,7 @@ async def list_sessions() -> dict[str, Any]:
             "is_current": sid == current_sid,
         })
 
-    return {"sessions": result}
+    return {"sessions": result, "kw_show": _kw_show()}
 
 
 @app.get("/api/sessions/search")
@@ -615,7 +647,7 @@ async def search_sessions(q: str = "", limit: int = 30) -> dict[str, Any]:
             "is_current": item["id"] == current_sid,
             "snippets": item.get("snippets") or [],
         })
-    return {"query": q, "results": results}
+    return {"query": q, "results": results, "kw_show": _kw_show()}
 
 
 async def _recompute_kw(sid: str) -> dict[str, Any]:
@@ -1334,8 +1366,13 @@ def _stamp_cache(html: str) -> str:
     """
 
     def _sub(m: re.Match[str]) -> str:
-        fname = m.group(1).split("/")[-1]
-        path = os.path.join(_static_dir, fname)
+        # 用**完整相对路径**解析。曾误取文件名（split("/")[-1]）去 static/ 根目录找，
+        # 而实际文件都在 css/ js/ 子目录 → 一律 OSError 静默回退，于是这套机制
+        # 自 CSS/JS 分目录起就从未生效过（实测 index.html 里恒为 ?_t=1）。
+        rel = m.group(1).lstrip("/")
+        if rel.startswith("static/"):
+            rel = rel[len("static/") :]
+        path = os.path.join(_static_dir, rel)
         try:
             return f"{m.group(1)}?_t={int(os.path.getmtime(path))}"
         except OSError:
