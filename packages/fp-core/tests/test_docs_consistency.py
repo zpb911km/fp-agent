@@ -226,6 +226,7 @@ def test_no_ghost_components_in_docs():
         "部署环境",
         "非仓库内置",
         "POSIX",  # 文件系统路径上下文（如「POSIX `/tmp`」），非斜杠命令
+        "`/static",  # 静态资源 URL 前缀（如「磁盘 `/static` 与接口全对」），非斜杠命令
     )
 
     suspicious = []

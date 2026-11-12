@@ -492,6 +492,16 @@ class SessionCtl:
 
         return session_file_path(sid)
 
+    def rename(self, sid: str, summary: str) -> str | None:
+        """**人工重命名**任意会话，返回生效文本（会话不存在/写盘失败 → None）
+
+        语义见 ``SessionManager.set_summary``：写入即锁定（``summary_locked``），
+        后续自动派生不再覆盖用户起的名字；空串 = 撤销，回到自动派生；
+        不动 ``updated``（改名不改排序位置）、不创建会话文件。
+        前端（webui 侧栏）不允许直连核内 session 模块，能力经本方法暴露。
+        """
+        return self._portal._require().state.session.set_summary(sid, summary)
+
     def read_messages(self, sid: str) -> list[dict[str, Any]] | None:
         """只读解析会话消息（含 system；文件不存在 → None）"""
         from fp_core.core.session_ops import read_messages

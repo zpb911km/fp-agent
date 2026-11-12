@@ -29,6 +29,7 @@ from fp_core.core.events import EVENT_TYPES, Event, EventBridge, EventBus
 from fp_core.core.io import IOChannel, RestIO, WebSocketIO
 from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 from fp_core.core.messages import Message, Response
+from fp_core.core.session import SUMMARY_LIMIT
 from fp_core.core.session_keywords import TOP_SHOW as KW_SHOW
 from fp_core.core.session_ops import SessionInfo, SessionMeta
 from fp_core.core.token_tracker import TokenUsage
@@ -37,6 +38,7 @@ from fp_core.plugins.base.plugin import Plugin
 __all__ = [
     "EVENT_TYPES",
     "KW_SHOW",
+    "SUMMARY_LIMIT",
     "CommandInfo",
     "ControlPlane",
     "Event",

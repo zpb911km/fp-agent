@@ -148,6 +148,15 @@ summary 是列表里一行一个的「路标」，不是摘要——它必须短
 # 注入型前缀：这些开头的 user 消息是系统塞进来的，不是用户意图
 _SUMMARY_INJECTED = ("[背景信息]", "⁂", "[子图]", "[subagent]", "[任务]", "[铃声]", "[task]", "【")
 
+SUMMARY_LOCKED = "summary_locked"
+"""meta 键：摘要已被**人工重命名**锁定（见 ``SessionManager.set_summary``）。
+
+为什么需要一把锁：summary 是自动派生的（跟随最后一条 user 消息），
+``save_context`` / ``save_message`` / ``save_and_summarize`` 三条落盘路径都会
+重写它。人工改完名字若不锁，用户发下一条消息就会静默变回派生值——「改了但没改」，
+比不支持改名更糟。锁存于会话 meta（随文件走），故重启/reload 后依然生效。
+"""
+
 
 def _clip(text: str) -> str:
     """截到 ``SUMMARY_LIMIT`` 字，被截断时末位补省略号。
@@ -577,8 +586,10 @@ class SessionManager:
         summary = summary_raw
         if summary == "empty_session":
             summary = ""
-        if not summary:
+        if not summary and not meta.get(SUMMARY_LOCKED):
             # 回填：用净化后的末条 user（kw 不再参与摘要）
+            # 锁定（人工重命名过）时不回填——名字是用户的，派生值没资格覆盖它，
+            # 哪怕它此刻为空（空名字是用户的表达，不是缺陷）。
             summary = derive_summary(None, last_user)
             if summary:
                 if meta.get("source") == "subagent" and not summary.startswith("[subagent] "):
@@ -737,7 +748,12 @@ class SessionManager:
         选末条而非首条：末条是用户最后一次亲口交代的需求，天然有记忆点、
         跨会话不易撞车；首条常是「读一下docs」这类空壳指令。
         末条是系统注入或算不出内容时不动旧摘要。
+
+        ``summary_locked``（人工重命名，见 ``set_summary``）为真时整体让路：
+        派生值绝不能覆盖用户亲手起的名字。
         """
+        if self._meta.get(SUMMARY_LOCKED):
+            return
         summary = derive_summary(None, _last_user_text(messages))
         if not summary:
             return
@@ -862,10 +878,15 @@ class SessionManager:
         self._refresh_keywords(target_sid, messages)
 
         # 3. 摘要跟随最后一条 user（kw 只作检索指纹，不参与摘要）
+        #    人工重命名过（summary_locked）→ 派生值让路：切换/退出路径不许
+        #    把用户亲手起的名字改回自动摘要（save_context 已刷 kw，此处只需返回）。
+        meta = _read_meta_from_file(target_path)
+        if (meta or {}).get(SUMMARY_LOCKED):
+            return str((meta or {}).get("summary") or "")
+
         summary = derive_summary(None, _last_user_text(messages))
 
-        # 4. 与盘上 meta 合并
-        meta = _read_meta_from_file(target_path)
+        # 4. 与盘上 meta 合并（meta 已在上面读入）
         source = (meta or {}).get("source")
         if source is None and target_sid == self._session_id:
             source = self._meta.get("source")
@@ -940,3 +961,62 @@ class SessionManager:
         _write_meta_to_file(path, meta)
         if sid == self._session_id:
             self._meta = meta
+
+    def set_summary(self, sid: str, summary: str) -> str | None:
+        """**人工重命名**会话（任意 sid）：写 ``meta.summary`` 并加锁，返回生效文本。
+
+        与 `update_meta(summary=...)` 的区别（这是它与「顺手写个字段」的分水岭）：
+
+          1. **加锁**：置 ``meta[SUMMARY_LOCKED]``，让三条自动派生路径
+             （`_refresh_summary` / `save_and_summarize` / 列表回填）全体让路。
+             不加锁的名字会被**下一条用户消息**立刻改回派生值——见
+             ``SUMMARY_LOCKED`` 的注释。
+          2. **不动 ``updated``**：改名不该让会话在列表里跳到最前面
+             （列表排序键是 updated，与列表回填写盘时同一纪律）。
+          3. **不创建文件**：惰性会话（当前会话尚未落盘）只改内存 meta，
+             名字随首条消息一起落盘；非当前会话且文件不存在 → `None`（无此会话）。
+          4. **规范化**：空白折叠成单空格（换行会破坏列表一行一条的路标形态），
+             超 ``SUMMARY_LIMIT`` 截断加省略号——与自动派生同一上限，前端据此
+             渲染 maxlength，不在两处各写一个数字。
+
+        Args:
+            sid: 目标会话 ID（任意会话，不限于当前）
+            summary: 新名字；**空串 = 撤销人工命名**，回到自动派生（立即按
+                文件末条 user 消息重算，避免界面闪一次「(无摘要)」）
+
+        Returns:
+            最终生效的摘要文本；会话不存在 / 写盘失败 → `None`
+        """
+        sid = (sid or "").strip()
+        # 防路径穿越：sid 直接来自 HTTP path/CLI 参数，不许带分隔符
+        if not sid or "/" in sid or "\\" in sid or sid in (".", ".."):
+            return None
+
+        path = _session_path(sid)
+        on_disk = os.path.exists(path)
+        meta = _read_meta_from_file(path) if on_disk else None
+        is_current = sid == self._session_id
+        if meta is None:
+            if not is_current:
+                return None  # 既不在盘上也不是当前会话 → 无此会话
+            meta = dict(self._meta)
+        elif is_current:
+            # 内存优先：标记类写入（source/token_usage，create=False）可能还没落盘
+            merged = dict(meta)
+            merged.update(self._meta)
+            meta = merged
+
+        text = _clip(" ".join(str(summary or "").split()))
+        if text:
+            meta["summary"] = text
+            meta[SUMMARY_LOCKED] = True
+        else:
+            meta.pop(SUMMARY_LOCKED, None)
+            meta["summary"] = derive_summary(None, _scan_messages(path)[1]) if on_disk else ""
+            text = str(meta.get("summary") or "")
+
+        if on_disk and not _write_meta_to_file(path, meta):
+            return None  # 写盘失败 → 内存也不动，避免「显示改了、盘上没改」
+        if is_current:
+            self._meta = meta
+        return text

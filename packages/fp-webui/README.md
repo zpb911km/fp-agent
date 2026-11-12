@@ -77,6 +77,7 @@ REST 走 `Authorization: Bearer <token>`（`/api/auth`、`/api/health` 白名单
 | `GET /api/sessions/{sid}/messages` · `POST /api/sessions/{sid}/search` | 读全文 · 按内容片段搜消息（返回文件行号） |
 | `POST /api/sessions/{sid}/switch` · `POST /api/sessions/clear` | 切换 · 清空当前会话 |
 | `POST /api/sessions/refresh` · `POST /api/sessions/{sid}/refresh` | 重算当前/指定会话关键词 |
+| `POST /api/sessions/{sid}/rename` | 人工重命名会话摘要（body `{summary}`）；写入即锁定，`""` = 撤销锁定回到自动派生 |
 | `POST /api/agent/new` · `GET /api/commands` · `GET /api/ui/schema` | 换实例 · 斜杠命令表 · WS 协议契约 + 工具卡/面板描述 |
 | `POST /api/files`（表单字段 `file`） · `GET /api/files/download?box=&name=` | 上传到 inbox · 从 inbox/outbox 下载（realpath 防穿越） |
 | `GET /` | 聊天界面 HTML |

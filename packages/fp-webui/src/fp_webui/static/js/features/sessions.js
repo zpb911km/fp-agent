@@ -16,6 +16,11 @@ import { LoadingState } from '../core/spinner.js';
    各存一份，改一处必漂另一处。兜底值仅首帧未拿到响应时用。 */
 var _kwShow = 5;
 
+/* 重命名输入框的字数上限：同样**由后端下发**（= fp_core.core.session.SUMMARY_LIMIT），
+   前端不写死——写死必漂（kw 展示个数就漂过一次：终端 5 个、webui 3 个）。
+   兜底值仅在首帧未拿到响应时用。 */
+var _summaryLimit = 20;
+
 /* 侧边栏开合语义（重构后：会话列表常驻侧边栏，不再是浮层）：
    - 宽屏(≥900px)：侧边栏常驻，openSessions=确保展开+聚焦搜索；closeSessions=无操作
      （切换会话/Esc 不再把宽屏侧边栏关掉，DeepSeek 行为）
@@ -115,7 +120,8 @@ function renderSessionItem(s, withSnippets) {
   if (s.updated) metaRows += metaRow('🕐', String(s.updated).slice(0, 16), '更新');
   metaRows += metaRow('💬', String(msgCount), '条消息');
   if (kwAll) metaRows += metaRow('🏷', kwAll, '关键词');
-  return '<div class="session-item' + (isCurrent ? ' current' : '') + '" data-sid="' + s.id + '">' +
+  return '<div class="session-item' + (isCurrent ? ' current' : '') + '" data-sid="' + s.id + '"' +
+      ' data-locked="' + (s.summary_locked ? '1' : '') + '">' +
     '<div class="session-item-info">' +
       '<div class="session-item-summary">' + escapeHtml(summary) + '</div>' +
       (kw ? '<div class="session-item-kw">' + escapeHtml(kw) + '</div>' : '') +
@@ -130,6 +136,8 @@ function renderSessionItem(s, withSnippets) {
         '<button class="session-load-btn">' +
           (isCurrent ? '✓ 当前' : '切换到') +
         '</button>' +
+        '<button class="session-rename-btn" title="重命名会话（改名后不会被自动摘要覆盖）"' +
+          ' aria-label="重命名会话">✎ 重命名</button>' +
         (!isCurrent ? '<button class="session-del-btn" title="删除会话" aria-label="删除会话">🗑</button>' : '') +
         '<button class="session-kw-btn" title="重算该会话关键词（本地 KL 管线，零 LLM）"' +
           ' aria-label="重算关键词">⟳ 重算 kw</button>' +
@@ -155,6 +163,7 @@ function runSessionsSearch(q) {
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (data.kw_show) _kwShow = data.kw_show;
+      if (data.summary_limit) _summaryLimit = data.summary_limit;
       var results = data.results || [];
       if (!results.length) {
         list.innerHTML = '<div class="no-sessions">没有找到含「' + escapeHtml(q) + '」的会话</div>';
@@ -176,6 +185,7 @@ export function loadSessionsList() {
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (data.kw_show) _kwShow = data.kw_show;
+      if (data.summary_limit) _summaryLimit = data.summary_limit;
       var sessions = data.sessions || [];
       if (sessions.length === 0) {
         list.innerHTML = '<div class="no-sessions">暂无历史会话</div>';
@@ -226,6 +236,89 @@ function recomputeKw(sid, btn) {
       if (btn) { btn.disabled = false; btn.textContent = '⟳ 重算 kw'; }
       showError('重算关键词失败: ' + err.message);
     });
+}
+
+/* ── 单卡菜单「✎ 重命名」：卡片内联编辑（不弹 window.prompt） ──
+   为什么内联：prompt 是阻塞式原生框，移动端观感割裂，且拿不到 maxlength
+   与实时边界提示；内联 input 还能复用卡片位置，眼睛不用跳。
+
+   交互：✎ → summary 行就地变 input → Enter 保存 / Esc 取消 / 失焦保存。
+   **只改这一条卡片**，不重绘整个列表——重绘会吃掉其它卡片的展开态、
+   以及正在编辑的另一条。空值保存 = 撤销人工命名（后端解锁回自动摘要）。
+
+   预填策略：只有**人工命名过**的会话才预填当前名字（便于微调）；自动摘要
+   是句子片段（「帮我定位这个 bug」），当名字用反而要先删，故留空。
+   判断依据是 data-locked（纯布尔，不把名字塞进 HTML 属性——省掉一轮
+   属性转义，避免引号破坏 DOM）。 */
+function beginRename(item, btn) {
+  if (!item || item.querySelector('.session-rename-input')) return;
+  var line = item.querySelector('.session-item-summary');
+  if (!line) return;
+
+  var sid = item.dataset.sid;
+  var shown = line.textContent || '';
+  var initial = item.dataset.locked === '1' ? shown : '';
+
+  // 收起该卡菜单：编辑态让 input 独占视线（菜单展开时卡片很高，易错位）
+  var menu = item.querySelector('.session-item-menu');
+  var more = item.querySelector('.session-more-btn');
+  if (menu) menu.hidden = true;
+  if (more) more.setAttribute('aria-expanded', 'false');
+
+  var input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'session-rename-input';
+  input.maxLength = _summaryLimit;
+  input.value = initial;
+  input.placeholder = '会话名称（清空保存 = 恢复自动摘要）';
+  input.setAttribute('aria-label', '会话名称');
+  input.title = '最多 ' + _summaryLimit + ' 字；清空保存 = 恢复自动摘要';
+  line.textContent = '';
+  line.appendChild(input);
+  input.focus();
+  input.select();
+
+  var closed = false;   // 防「Enter 保存 + 随后的 blur」双触发（Esc 同理）
+  function restore(text) { closed = true; line.textContent = text; }
+
+  function save() {
+    if (closed) return;
+    var value = input.value.trim();
+    if (value === initial.trim()) { restore(shown); return; }   // 没改：不打扰后端
+    closed = true;
+    input.disabled = true;            // 提交中：禁止继续输入
+    authFetch('/api/sessions/' + sid + '/rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ summary: value }),
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.status !== 'renamed') throw new Error(data.detail || '未知错误');
+        // 后端回的是**生效值**（已规范化/截断；撤销时是重新派生的自动摘要）
+        line.textContent = data.summary || '（无摘要）';
+        item.dataset.locked = data.renamed ? '1' : '';
+      })
+      .catch(function(err) {
+        closed = false;
+        input.disabled = false;
+        line.textContent = shown;     // 回滚到编辑前
+        showError('重命名失败: ' + err.message);
+      });
+  }
+
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();            // 别让全局 Enter 快捷键（发送消息等）抢走
+      save();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      restore(shown);                 // 取消：恢复原名
+    }
+  });
+  input.addEventListener('blur', save);
 }
 
 /* ── 下拉刷新（#sessionsList 到顶后继续下拉 → 同一 refreshSessions 链路）──
@@ -401,8 +494,12 @@ document.getElementById('sessionsList').addEventListener('click', function (e) {
     }
     return;
   }
+  // 重命名编辑态：点 input 本身不许触发「点卡切换会话」
+  if (e.target.closest('.session-rename-input')) return;
   var del = e.target.closest('.session-del-btn');
   if (del) { deleteSession(del.closest('.session-item').dataset.sid, del); return; }
+  var ren = e.target.closest('.session-rename-btn');
+  if (ren) { beginRename(ren.closest('.session-item'), ren); return; }
   var kwb = e.target.closest('.session-kw-btn');
   if (kwb) { recomputeKw(kwb.closest('.session-item').dataset.sid, kwb); return; }
   var load = e.target.closest('.session-load-btn');

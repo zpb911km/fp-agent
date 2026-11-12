@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **会话可人工重命名（`summary_locked` 锁定语义）**: 新增 `SessionManager.set_summary(sid, summary)`（经接口组正门 `portal.ctl.sessions.rename`、WebUI `POST /api/sessions/{sid}/rename` 暴露），可改**任意**会话的摘要显示名。关键在于「写入即锁定」——`meta.summary_locked` 置位后，三条自动派生路径（`save_and_summarize` / `_refresh_summary` / `list_sessions` 的摘要回填）全体让路；否则用户刚起的名字会被下一条消息改回「末条 user 前 20 字」，改名有效期只有一个回合。`summary` 传空串 = 显式撤销（解锁并按末条 user 重算派生值）；改名不碰 `updated`（排序位不动）、不创建会话文件、`sid` 做形态校验防路径穿越。WebUI 侧栏会话卡 `⋯ → ✎ 重命名` 就地编辑（`Enter` 保存 / `Esc` 取消 / 失焦保存，上限读后端下发的 `summary_limit`），只局部更新单卡不重绘列表。列表端点新增下发 `summary_locked`，供前端决定预填内容（锁定的填当前名、未锁定的填空，避免误以为自动摘要是自己起的）。
+
 ### Fixed
 
 - **会话关键词 v2：标识符不再被当噪声删除**（`KW_VERSION` 1→2）: v1 切词前用 `_CODE_RE.sub(" ", line)` 抹掉英文标识符与路径、再只取 CJK 连续段——实测 941 个会话的 `kw` 里含英文字母的 **0 个**，而语料里躺着 30491 个唯一标识符、其中 98.6% 的 df ≤ 5%，正是区分度最高的天然锚点。`/resume -f shortcircuit` 从 0 命中变为 28 命中。v2 先抽标识符/路径（含 `tool_calls.file_path`，2445 个唯一路径——「我改过哪个文件」正是用户自己的记忆方式），再对剩余 CJK 走 jieba；fenced 代码块整块跳过（v1 靠「标识符全删 + 只留 CJK」天然排除代码块，加了标识符通道后该前提失效）。

@@ -52,7 +52,7 @@ except ImportError as e:
     sys.exit(1)
 
 # ── 唯一接口组导入（协议 §5：前端只许 fp_core.api + 纯工具模块） ──
-from fp_core.api import KW_SHOW, ExitReason, RestIO, WebSocketIO, portal
+from fp_core.api import KW_SHOW, SUMMARY_LIMIT, ExitReason, RestIO, WebSocketIO, portal
 from fp_core.logger import get_logger
 from fp_webui.bridge import WebUIBridge
 from fp_webui.protocol import SCHEMA
@@ -606,6 +606,16 @@ def _kw_show() -> int:
     return KW_SHOW
 
 
+def _summary_limit() -> int:
+    """重命名输入框的长度上限（单一真相源 = ``session.SUMMARY_LIMIT``）。
+
+    与 ``_kw_show`` 同一条纪律：数字核内定义一份、下发前端，JS 不写死第二份。
+    前端把它当 input 的 maxlength——用户输入时就看得见边界，而不是保存后
+    才发现被后端截断。
+    """
+    return SUMMARY_LIMIT
+
+
 @app.get("/api/sessions")
 async def list_sessions() -> dict[str, Any]:
     """列出所有历史会话"""
@@ -621,11 +631,14 @@ async def list_sessions() -> dict[str, Any]:
             "created": info.get("created", ""),
             "updated": info.get("updated", ""),  # 菜单 meta 层级用（卡片二级菜单展示）
             "summary": info.get("summary", ""),
+            # 用户手工改过名（meta.summary_locked）→ 前端据此预填输入框并提示
+            # "已锁定"，否则预填自动摘要会让用户误以为那是自己起的名字。
+            "summary_locked": bool(info.get("summary_locked")),
             "kw": info.get("kw") or [],  # KL 管线预算好的区分性关键词，前端只读
             "is_current": sid == current_sid,
         })
 
-    return {"sessions": result, "kw_show": _kw_show()}
+    return {"sessions": result, "kw_show": _kw_show(), "summary_limit": _summary_limit()}
 
 
 @app.get("/api/sessions/search")
@@ -640,6 +653,7 @@ async def search_sessions(q: str = "", limit: int = 30) -> dict[str, Any]:
         results.append({
             "id": item["id"],
             "summary": meta.get("summary", ""),
+            "summary_locked": bool(meta.get("summary_locked")),
             "kw": meta.get("kw") or [],
             "message_count": meta.get("message_count", 0),
             "created": meta.get("created", ""),  # 与 created 列表端点对齐，菜单 meta 层级用
@@ -647,7 +661,7 @@ async def search_sessions(q: str = "", limit: int = 30) -> dict[str, Any]:
             "is_current": item["id"] == current_sid,
             "snippets": item.get("snippets") or [],
         })
-    return {"query": q, "results": results, "kw_show": _kw_show()}
+    return {"query": q, "results": results, "kw_show": _kw_show(), "summary_limit": _summary_limit()}
 
 
 async def _recompute_kw(sid: str) -> dict[str, Any]:
@@ -680,6 +694,34 @@ async def refresh_session_keywords(session_id: str) -> dict[str, Any]:
     """重算**指定会话**关键词（单卡菜单「⟳ 重算 kw」入口）。"""
     await ensure_agent()
     return await _recompute_kw(session_id)
+
+
+@app.post("/api/sessions/{session_id}/rename")
+async def rename_session(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """重命名**任意**会话（侧栏会话卡「✎ 重命名」入口）
+
+    语义在核内（``portal.ctl.sessions.rename`` → ``SessionManager.set_summary``）：
+    写入即锁定（``meta.summary_locked``），三条自动派生路径（含退出/切换落盘）
+    全体让路——否则用户刚起的名字会被下一条消息改回自动摘要。``summary`` 传空串
+    = 撤销自定义名，回到「最后一条用户消息」派生值；不改 ``updated``（排序不动）。
+    """
+    await ensure_agent()
+    raw = body.get("summary")
+    if raw is not None and not isinstance(raw, str):
+        raise HTTPException(status_code=400, detail="summary 必须是字符串")
+    if "summary" not in body:
+        # 缺字段 ≠ 撤销：撤销必须显式传空串（否则前端 bug 会静默清名）
+        raise HTTPException(status_code=400, detail="缺少 summary 字段")
+    value = raw or ""
+    final = portal.ctl.sessions.rename(session_id, value)
+    if final is None:
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在或重命名失败")
+    return {
+        "status": "renamed",
+        "session_id": session_id,
+        "summary": final,
+        "renamed": bool(value.strip()),  # False = 已撤销，回到自动摘要
+    }
 
 
 @app.get("/api/commands")

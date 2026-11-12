@@ -1574,7 +1574,8 @@
 }
 .session-kw-btn:disabled { opacity: 0.5; cursor: default; }
 .session-load-btn,
-.session-del-btn {
+.session-del-btn,
+.session-rename-btn {
   background: var(--bg-primary);
   border: 2px solid var(--border);
   color: var(--text-secondary);
@@ -1591,6 +1592,31 @@
   border-color: var(--accent);
   color: var(--text-primary);
 }
+.session-rename-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* 内联重命名输入框：占满 summary 行，字重/字号继承卡片，
+   焦点用 accent 描边（与卡片 hover 同色，视线不用跳） */
+.session-rename-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-primary);
+  border: 1px solid var(--accent);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: inherit;
+  font-weight: 600;
+  padding: 4px 7px;
+  border-radius: 3px;
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.session-rename-input::placeholder {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.session-rename-input:disabled { opacity: 0.6; }
 .session-del-btn:hover {
   border-color: var(--red);
   color: var(--red);
