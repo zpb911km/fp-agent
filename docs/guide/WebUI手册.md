@@ -521,7 +521,7 @@ WebUI 提供双向文件通道（插件内实现，不依赖 core/bridge）：
 物理位置：`tempfile.gettempdir()` 下的 `fp_inbox/` 与 `fp_outbox/`（Windows=`%TEMP%`、Termux=其私有 tmp、POSIX=系统 /tmp 目录），可用环境变量 `FP_FILEHUB_DIR` 覆盖；启动时自动创建，临时目录语义即集散点，多实例共享、删了不心疼。
 
 **引用协议**（跨平台稳定，物理路径本地解析）：消息文本中的
-`[file:inbox/<name>]` / `[file:outbox/<name>]`（由
+`[filehub:inbox/<name>]` / `[filehub:outbox/<name>]`（由
 `static/components/markdown.js` 的 `renderFileRefs` 正则识别）会被渲染为可点击下载链接——
 用户消息与 agent 消息均渲染；下载经 `fetch` + `Authorization` 头取
 blob（token 不入 URL），404 时链接就地转为「已不存在」失效态，

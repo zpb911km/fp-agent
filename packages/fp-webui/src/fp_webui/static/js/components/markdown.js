@@ -10,10 +10,10 @@ import { getToken } from '../core/http.js';
 
 // ── 消息渲染 ──
 
-// ── 文件引用渲染：[file:inbox/name] / [file:outbox/name] → 下载链接 ──
+// ── 文件引用渲染：[filehub:inbox/name] / [filehub:outbox/name] → 下载链接 ──
 // 协议相对格式（跨平台稳定），物理路径由服务端按本机集散点解析。
 export function renderFileRefs(html) {
-  return html.replace(/\[file:(inbox|outbox)\/([^\]\r\n]+?)\]/g, function (_, box, name) {
+  return html.replace(/\[file(?:hub)?:(inbox|outbox)\/([^\]\r\n]+?)\]/g, function (_, box, name) {
     // 下载走 JS fetch + Authorization 头（token 不进 URL/历史/Referer），
     // 成功后用 blob + a[download] 触发保存
     return '<a class="file-ref" href="#" data-filebox="' + escapeHtml(box) + '" data-filename="' + escapeHtml(name) + '" title="下载 ' + escapeHtml(name) + '">' +
@@ -107,4 +107,3 @@ export function renderMath(root) {
     });
   } catch (e) {}
 }
-

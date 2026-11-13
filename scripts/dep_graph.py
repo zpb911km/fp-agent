@@ -18,7 +18,7 @@ import re
 import sys
 from pathlib import Path
 
-STATIC = Path(__file__).resolve().parent.parent / "src" / "fp_webui" / "static"
+STATIC = Path(__file__).resolve().parent.parent / "packages" / "fp-webui" / "src" / "fp_webui" / "static"
 
 IMPORT_RE = re.compile(r"""(?:^|\n)\s*import\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)[']""")
 EXPORT_RE = re.compile(r"""(?:^|\n)\s*export\s+(?:\*|\{[^}]*\})\s*from\s+['"]([^'"]+)[']""")

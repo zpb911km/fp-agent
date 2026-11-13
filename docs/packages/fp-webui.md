@@ -52,7 +52,7 @@ fp-webui --reload             # 开发用：uvicorn 热重载
 - **会话侧栏** — 常驻左侧，`☰` 折叠；搜索、切换、删除、清空、重算关键词（kw），
   并可对历史消息做内容检索（返回真实文件行号）。空跑会话被后端过滤，不占列表。
 - **文件中枢** — 双向哑管道：上传落 `fp_inbox/`（原名、撞名覆盖），agent 产物放
-  `fp_outbox/`；消息里的 `[file:inbox/<name>]` / `[file:outbox/<name>]` 由 Markdown
+  `fp_outbox/`；消息里的 `[filehub:inbox/<name>]` / `[filehub:outbox/<name>]` 由 Markdown
   渲染器识别为下载链接（带 `Authorization` 头上传下载，token 不进 URL），404 就地转失效态。
 - **断连续传** — 连接只是传输层：断连只清推送任务与订阅，处理任务归属会话级 runtime 继续跑；
   重连带 `?seq=&run_id=` 协商，能重放走环形缓冲（`replay`），溢出或换轮则 `resync` 让前端全量重拉。

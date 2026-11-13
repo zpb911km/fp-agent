@@ -56,7 +56,7 @@ def test_upload_writes_inbox(client, hub):
     assert r.status_code == 200
     data = r.json()
     assert data["name"] == "notes.txt"
-    assert data["ref"] == "[file:inbox/notes.txt]"
+    assert data["ref"] == "[filehub:inbox/notes.txt]"
     assert (hub / "fp_inbox" / "notes.txt").read_bytes() == b"hello"
 
 

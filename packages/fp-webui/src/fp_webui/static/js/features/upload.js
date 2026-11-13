@@ -7,7 +7,7 @@ import { escapeHtml, showError, inputEl } from '../ui.js';
 import { authFetch } from '../core/http.js';
 
 // ── 文件上传（集散点 inbox） ──
-// 选中即后台上传，输入框显示可删除标记；发送时把 [file:inbox/name]
+// 选中即后台上传，输入框显示可删除标记；发送时把 [filehub:inbox/name]
 // 引用拼进消息正文，agent 收到路径引用即可取用。
 var _pendingFiles = [];  // [{name, path, size}]
 

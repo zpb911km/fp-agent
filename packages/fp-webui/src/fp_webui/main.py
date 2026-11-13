@@ -193,8 +193,8 @@ _WEBUI_TOKEN: str = _load_or_create_token()
 #
 # 跨平台：默认落在当前平台的临时目录下（Windows=%TEMP%，Termux=...
 # /usr/tmp，POSIX=/tmp），可用环境变量 FP_FILEHUB_DIR 覆盖。
-# 协议约定：消息中的引用一律使用相对格式 [file:inbox/<name>] /
-# [file:outbox/<name>]，物理路径由各端按本机规则解析。
+# 协议约定：消息中的引用一律使用相对格式 [filehub:inbox/<name>] /
+# [filehub:outbox/<name>]，物理路径由各端按本机规则解析。
 
 _FILEHUB_DIR: str = os.environ.get("FP_FILEHUB_DIR") or _tempfile.gettempdir()
 _FILEHUB_INBOX: str = os.path.join(_FILEHUB_DIR, "fp_inbox")
@@ -523,7 +523,7 @@ async def upload_file(file: UploadFile) -> dict[str, Any]:
         "name": name,
         "path": target,
         "size": size,
-        "ref": f"[file:inbox/{name}]",
+        "ref": f"[filehub:inbox/{name}]",
     }
 
 
