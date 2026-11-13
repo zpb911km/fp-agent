@@ -1006,14 +1006,25 @@ class Agent:
                 )
                 return Response(content=ctx.data.get("cancel_reason", "已取消"))
 
-            messages_for_llm = ctx.data.get(
-                "modified_messages",
-                self._conv.get_messages_for_llm(
-                    # 本轮请求是否携带 tools —— 决定 reasoning_content 回传策略：
-                    # DeepSeek v4 官方要求带 tools 时回传历史思维链；不带 tools 时
-                    # 回传会被忽略，直接剥离省 token
-                    with_tools=bool(self._tool_exec.get_definitions()),  # type: ignore[reportUnknownMemberType]
-                ),
+            # 插件改写：整体替换并**写回 _conv**（唯一事实源）。
+            # 落盘由轮末 to_serializable() / shutdown 自动完成，不单独触发——
+            # 写 _conv 与工具结果入库走同一生命周期，天然随轮保存。
+            # 契约（写回后是永久的，勿当 request-only 用）：
+            #   ① 改动应是「末条 append」型（尾随 hint/注解）——改写历史消息
+            #      = 打掉已固化的缓存前缀，下一轮整段退化为未命中；
+            #   ② replace_all 是整表替换：删减列表 = 改写磁盘历史。
+            # 与 ON_CONTEXT_UPDATE(下方) 同款判据，保持一致。
+            _modified_messages = ctx.data.get("modified_messages")
+            if _modified_messages is not None:
+                self._conv.replace_all(_modified_messages)
+            # 统一从 _conv 取，不再被 modified_messages 绕过——
+            # 让 _repair_ordering、_ 下划线协议标记剥离（如忙时注入的 _drained
+            # 不得出网）、reasoning_content 剥离三者对该轮同样生效。
+            messages_for_llm = self._conv.get_messages_for_llm(
+                # 本轮请求是否携带 tools —— 决定 reasoning_content 回传策略：
+                # DeepSeek v4 官方要求带 tools 时回传历史思维链；不带 tools 时
+                # 回传会被忽略，直接剥离省 token
+                with_tools=bool(self._tool_exec.get_definitions()),  # type: ignore[reportUnknownMemberType]
             )
 
             self._processing = True

@@ -134,7 +134,12 @@ class BeforeLLMCallEvent:
 
     messages: list[dict[str, Any]]  # 传给 LLM 的消息（插件可修改）
     tools: list[dict[str, Any]]  # 工具定义列表
-    modified_messages: list[dict[str, Any]] | None = None  # 插件修改后的消息
+    # 插件改写后的消息：agent 收到后**整体替换并写回会话**（`_conv.replace_all`，
+    # 随轮末 to_serializable() 落盘）——不再是"仅影响本次请求"。
+    # 契约：改动应为末条 append 型（尾随 hint/注解）；改写历史消息会打掉已固化的
+    # 缓存前缀，下一轮整段退化为未命中；且 replace_all 是整表替换，删减列表
+    # = 改写磁盘历史。与 ContextUpdateEvent.modified_messages 同语义。
+    modified_messages: list[dict[str, Any]] | None = None
     cancelled: bool = False  # 守卫：是否取消此次调用
     cancel_reason: str = ""  # 取消原因
 

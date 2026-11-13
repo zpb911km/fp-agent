@@ -55,7 +55,6 @@ class TaskSystemPlugin(Plugin):
     def __init__(self, config: PluginConfig | None = None):
         super().__init__(config)
         self._store = TaskMapStore()
-        self._description_injected = False
         self._tool_registry: ToolRegistry | None = None
         self._registered_tools: list[str] = []
 
@@ -94,8 +93,6 @@ class TaskSystemPlugin(Plugin):
                 if tool_name not in self._registered_tools:
                     self._registered_tools.append(tool_name)
 
-        self._description_injected = True
-
         # 注入面向用户的 /task 控制台命令(与命令文件扫描地位相同)
         from fp_core.commands import register_command
 
@@ -106,18 +103,14 @@ class TaskSystemPlugin(Plugin):
         return ctx
 
     async def _on_before_llm_call(self, ctx: HookContext, **kwargs: Any) -> HookContext:
-        """ON_BEFORE_LLM_CALL: 追加 [task] 跟随提醒到最后一条消息末尾"""
-        # fallback: 若 ON_INIT 未完成注入描述, 在这里补(system prompt 已含则不重复)
-        if not self._description_injected:
-            modified: list[dict[str, Any]] = list(kwargs.get("messages", []))
-            if modified and modified[0].get("role") == "system":
-                existing: str = modified[0].get("content", "")
-                if "【任务系统 · 任务图" not in existing:
-                    modified[0] = dict(modified[0])
-                    modified[0]["content"] = existing + "\n\n" + TASK_SYSTEM_DESCRIPTION
-                    ctx.data["modified_messages"] = modified
-            self._description_injected = True
+        """ON_BEFORE_LLM_CALL: 追加 [task] 跟随提醒到最后一条消息末尾
 
+        system prompt 描述**只走 ON_INIT 的 `system_prompt_append` 正道**（agent
+        apply 进 _conv 后固化、随 resume 重放）。此处原有的兜底分支已删除：
+        正常启动顺序是「先注册全部插件、再 ensure_initialized」，ON_INIT 必先执行，
+        该分支实为死代码；且它写 modified_messages 只影响单次请求、不落盘，
+        置位标志又在判断之外，触发也只闪现一次。
+        """
         # 生成 [task] 提醒
         text = summary(self._store.list_all())
         if text is None:
@@ -131,6 +124,14 @@ class TaskSystemPlugin(Plugin):
         last: dict[str, Any] = modified[-1]
         last_content: str | None = last.get("content")
         if not last_content:  # 纯 tool_calls 的 assistant 消息(content 为空)
+            return ctx
+        # 幂等：同一条末条消息不叠第二份 hint。
+        # `modified_messages` 改语义后会写回 _conv 并落盘，重复注入会永久沉积；
+        # 触发窗口 = 钩子 fire 后本轮夭折（LLM 报错 continue / 取消 / early-exit），
+        # 无新消息落地、末条未换，下一次钩子又对着它。
+        # 判据用稳定前缀而非 hint 全文——正文每轮都变（▶#1 进行:n0 → n1）。
+        # 正常每轮末条都会换（工具结果/新消息落地），故不影响「持续提醒」。
+        if "\n\n[task] " in last_content:
             return ctx
         modified[-1] = dict(last)
         modified[-1]["content"] = last_content + f"\n\n{hint}"
