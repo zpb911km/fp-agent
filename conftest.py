@@ -34,6 +34,22 @@ os.environ.setdefault("GIT_COMMITTER_EMAIL", "fp-tests@local")
 
 
 # ══════════════════════════════════════════════════════════════
+# 可选依赖缺位时整目录不收集（e2e 需 playwright）
+# ══════════════════════════════════════════════════════════════
+# playwright 既不在各包 pyproject，也不在 docs/dev/测试.md 的测试依赖清单里
+# （本机是手装的）→ CI / 未装它的机器上，e2e/conftest.py 顶层的
+# `from playwright.sync_api import expect` 在**收集期**就 ImportError，
+# 整个全量 pytest 直接 exit 2（2026-11-13 实测：5 个测试 job 连环挂）。
+# 未装则整目录不收集：装了的本机照常跑 e2e，没装的环境静默跳过而非崩。
+# 注：`-m "not e2e"` 救不了——标记过滤发生在**导入之后**，模块顶层 import 已经炸；
+# `--ignore=...` 同为收集期忽略、能救，但要人手写每条命令，易漏 → 用 find_spec 自动判。
+import importlib.util as _ilu
+
+if _ilu.find_spec("playwright") is None:
+    collect_ignore = ["packages/fp-webui/tests/e2e"]
+
+
+# ══════════════════════════════════════════════════════════════
 # 全局测试隔离（#219 上提：原 fp-core/tests/conftest.py 同款实现，单点维护）
 # ══════════════════════════════════════════════════════════════
 # 为什么在根 conftest：rootdir=仓库根时（`pytest` / `pytest packages` /
