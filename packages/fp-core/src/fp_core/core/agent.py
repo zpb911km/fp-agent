@@ -965,14 +965,22 @@ class Agent:
             # ── 后台任务完成/ask_user 回答 的惰性注入（环顶串行 drain — 无锁竞态） ──
             # 环顶惰性注入（见 docs/dev/引擎.md「环顶惰性注入与退出清算」）：完成回调只入 pending 队列，
             # 注入统一发生在环顶（无并发轮次），身份由注入协议携带（系统事件 ⁂[kind]
-            # 标头 / 人类回答裸文本），以 user 角色落盘 —— 人类话语恒保留；已闭合块内
-            # 的系统标记消息可由短路作噪声剪除（I2/I3，引擎.md「注入消息身份协议」）。
+            # 标头 / 人类回答裸文本）。双路径分流：
+            #   · 忙时自动消息（有末条 tool 可尾随）→ 并入该 tool 的 content 尾部，与 tool 同批发给
+            #     LLM（缓存安全不变式见 append_tail_to_last_tool；msg_count 不变 → 不发
+            #     ON_CTX_APPEND，否则 bridge 按 is_append=True 误判断裂）；
+            #   · 人类消息恒走环顶 user（裸文本 + _drained 标记，人类话语恒保留）；
+            #   · 末条非 tool（闲时唤醒轮 / 终答后）→ 自动消息也走环顶 user（带 ⁂ 标头，
+            #     已闭合块内可由短路作噪声剪除 I2/I3，引擎.md「注入消息身份协议」）。
             for _inject_msg in _drain_background_injects():
-                _inj = self._conv.add_user_message(_inject_msg["content"])
+                _content = _inject_msg["content"]
+                if is_injected(_content) and self._conv.append_tail_to_last_tool(_content) is not None:
+                    continue  # 已并入末条 tool：不新增消息、不发观察事件
+                _inj = self._conv.add_user_message(_content)
                 # 忙时标记：裸文本注入 = 忙时被排空的人类话语（submit 排队 / ask_user 回答）。
                 # shortcircuit 据此不把它当块边界（它属于当前 run），且压缩时恒保留。
                 # 系统事件（⁂[kind] 标头）靠标头识别，无需标记。
-                if not is_injected(_inject_msg["content"]):
+                if not is_injected(_content):
                     _inj["_drained"] = True
                 await self.lifecycle.emit(
                     LifecycleHook.ON_CTX_APPEND,

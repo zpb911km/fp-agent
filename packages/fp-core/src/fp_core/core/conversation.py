@@ -108,6 +108,26 @@ class ConversationState:
         self._messages.append(msg)
         return msg
 
+    def append_tail_to_last_tool(self, text: str) -> dict[str, Any] | None:
+        """把 text 并入末条 tool 消息的 content 尾部（忙时系统事件尾随 tool 注入）。
+
+        仅当末条是 tool 角色才并入；否则返回 None（调用方走环顶 user 注入）。
+
+        缓存安全不变式：末条是 tool ⇒ 自该 tool append 后无 assistant 落地 ⇒
+        它尚未随任何 LLM 调用发送 ⇒ 并入内容属首次发送，前缀零损失。
+
+        Returns:
+            被修改的 tool 消息 dict（与 _messages 共享引用），或 None。
+        """
+        if not text:
+            return None
+        if not self._messages or self._messages[-1].get("role") != "tool":
+            return None
+        msg = self._messages[-1]
+        existing = msg.get("content") or ""
+        msg["content"] = f"{existing}\n\n{text}" if existing else text
+        return msg
+
     # ── 查询方法 ─────────────────────────────────────
 
     def get_non_system_messages(self) -> list[dict[str, Any]]:

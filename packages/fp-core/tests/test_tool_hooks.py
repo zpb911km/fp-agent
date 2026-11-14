@@ -281,7 +281,7 @@ async def test_suppressed_error_passes_result_gate(tmp_path, monkeypatch):
     # 缺陷①断言：抑制结果经 RESULT 门被 blocked 改写（修复前内容为 "错误已被抑制…"）
     tool_msgs = [m for m in agent._conv.messages if m["role"] == "tool"]
     assert len(tool_msgs) == 1
-    assert tool_msgs[0]["content"] == "结果被过滤(插件)", "缺陷①未修复：抑制结果绕过了 RESULT 门"
+    assert tool_msgs[0]["content"].split("\n\n[task]")[0] == "结果被过滤(插件)", "缺陷①未修复：抑制结果绕过了 RESULT 门"
 
     mutated = rec.of(LifecycleHook.ON_RESULT_MUTATED)
     assert len(mutated) == 1
@@ -355,7 +355,7 @@ async def test_success_result_gate_mutates(tmp_path, monkeypatch):
 
     tool_msgs = [m for m in agent._conv.messages if m["role"] == "tool"]
     assert len(tool_msgs) == 1
-    assert tool_msgs[0]["content"] == "被改写的结果"
+    assert tool_msgs[0]["content"].split("\n\n[task]")[0] == "被改写的结果"
 
     mutated = rec.of(LifecycleHook.ON_RESULT_MUTATED)
     assert len(mutated) == 1

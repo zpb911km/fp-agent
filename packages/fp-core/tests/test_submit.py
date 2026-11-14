@@ -126,7 +126,7 @@ async def test_submit_idle_consumed_by_kick(make_agent):
         assert p._wake_kick_task is not None
         await asyncio.wait_for(p._wake_kick_task, timeout=2.0)
 
-        contents = [m.get("content", "") for m in agent.state.conversation.messages]
+        contents = [(m.get("content", "") or "").split("\n\n[task]")[0] for m in agent.state.conversation.messages]
         assert "请查一下天气" in contents, "空闲 submit 应经 kick 立即消费落盘"
         assert not jobs.has_pending_wake()
         assert calls, "kick 起轮应触发 LLM 调用"
@@ -134,7 +134,7 @@ async def test_submit_idle_consumed_by_kick(make_agent):
         user_msgs = [
             m
             for m in agent.state.conversation.messages
-            if m.get("role") == "user" and m.get("content") == "请查一下天气"
+            if m.get("role") == "user" and (m.get("content") or "").split("\n\n[task]")[0] == "请查一下天气"
         ]
         assert user_msgs, "submit 消息必须以 user 角色落盘"
     finally:
@@ -185,7 +185,7 @@ async def test_submit_busy_stays_queued_then_drains_at_ring_top(make_agent):
         # 释放忙碌 → 消费（环顶 drain 或空闲 kick 二路皆可）
         agent._run_active = False
         await p.run.wake()
-        contents = [m.get("content", "") for m in agent.state.conversation.messages]
+        contents = [(m.get("content", "") or "").split("\n\n[task]")[0] for m in agent.state.conversation.messages]
         assert "运行中的补充" in contents
         assert not jobs.has_pending_wake()
     finally:
@@ -202,7 +202,7 @@ async def test_submit_multiple_burst_merges(make_agent):
         assert await p.run.submit("第二条") == "queued"
         await asyncio.wait_for(p._wake_kick_task, timeout=2.0)
 
-        contents = [m.get("content", "") for m in agent.state.conversation.messages]
+        contents = [(m.get("content", "") or "").split("\n\n[task]")[0] for m in agent.state.conversation.messages]
         assert "第一条" in contents and "第二条" in contents
         assert len(calls) == 1, "burst 应合并为 1 轮 LLM 调用"
     finally:
