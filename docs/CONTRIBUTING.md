@@ -76,6 +76,31 @@ export LLM_MODEL=deepseek-chat
 fp --version
 ```
 
+### ⚠️ 环境约定：pip 是唯一入口，不要在仓库根用 `uv run`
+
+本仓是**多包源码树**（5 个可安装包），根 `pyproject.toml` 只登记构建后端和 ruff/pytest 配置——
+**没有 `[project]`、没有 `requires-python`、没有依赖**。这给 `uv` 留下了一个安静的陷阱：
+
+| 你以为 | 实际发生 |
+|---|---|
+| `uv run pytest` 只是换个前缀跑测试 | uv 按默认 `>=3.13` 新建一个**空** `.venv`，再把 `.venv/bin` 前置到 `PATH` |
+| 往 `.venv` 里 `uv pip install` 补齐就能用 | 下次 `uv run` 的隐式 `uv sync`（精确模式）把它剪回空壳 |
+| `uv run pyright` 也一样只是前缀 | pyright 按 `PATH` 上的 `python` 判定解析环境 → 空 venv → 61 个 Import 未解析，级联成**上千个 strict 假错** |
+
+而 `.venv/` 与 `uv.lock`（52 字节空壳）都被 `.gitignore` 忽略，于是它成了一套**看不见的第二环境**。
+2026-11-14 就发生过这样的事故：`pyright` 从 0 错跳到 1027 错，一度误判为“仓库积了大量类型债”，
+实际是 `uv run` 造的野 venv 在 `PATH` 上被 pyright 当成了依赖来源。
+
+因此本仓的约定是：
+
+- **依赖只走 pip**（上方搭建步骤）。测试与门禁命令**一律不加 `uv run` 前缀**：
+  `pytest`、`ruff check .`、`pyright`、`pre-commit run --files ...`。
+- 想引入 uv 之前，先把根 `pyproject.toml` 补成真项目（`[project]` + `requires-python` +
+  dev 依赖组 + `[tool.uv]` workspace 收编 5 个包），并在 `pyrightconfig.json` 里显式写
+  `venvPath` / `venv` 固定解析环境。**没有这一步就不要用 uv**——半配置比不配置更糟。
+- 排障口诀：门禁或 `pyright` 突然爆出成百上千个错误时，先 `which python` 看 `PATH` 首位有没有
+  野生 venv，再裸跑一次 `pyright` 对照；**先怀疑环境，别先改代码**。
+
 ## 代码风格
 
 ### Python

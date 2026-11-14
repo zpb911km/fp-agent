@@ -91,6 +91,9 @@ ruff check . && ruff format .                  # 代码风格
 python -m pytest packages/fp-core/tests -q     # 测试（conftest.py autouse fixture 隔离会话目录，不写真实数据）
 ```
 
+> 本仓依赖只用 pip 管理，**不要**在仓库根加 `uv run` 前缀（会造出空 `.venv` 并让 `pyright`
+> 假报上千个错）。原因与排障见 [CONTRIBUTING 的环境约定](docs/CONTRIBUTING.md#️-环境约定pip-是唯一入口不要在仓库根用-uv-run)。
+
 ## 🏗️ 项目结构
 
 ```
