@@ -133,7 +133,14 @@ def render_subgraph(m: TaskMap, center: str, radius: int = 2) -> str:
 
 
 def summary(maps: list[TaskMap], limit: int = 3) -> str | None:
-    """紧凑提醒。仅非终态 map; 无则返回 None。"""
+    """极简提醒(节拍器, 不是看板): `▶#18 n5 todo:1`。仅非终态 map; 无则返回 None。
+
+    只留寻址所必需的四个字段: 状态 emoji / 任务 id / 当前节点 id / 待办数。
+    **标题、目标、节点描述、待澄清一律不进提醒**——它们属 `task_read`/`task_list`
+    的职责, 每轮重复注入只是纯冗余(历史教训: 带回 title+节点 desc 后实测单任务
+    [task] 提醒 295 字符、三任务 854 字符, 且标题里出现 "[task]" 会与标记前缀撞车)。
+    预算: 单任务 ≤ 20 字符 / 三任务 ≤ 70, 由 tests/test_task_system_plugin.py 锁定。
+    """
     live = [m for m in maps if m.status not in (MapStatus.COMPLETED, MapStatus.SUPERSEDED)]
     if not live:
         return None
@@ -142,11 +149,8 @@ def summary(maps: list[TaskMap], limit: int = 3) -> str | None:
     for m in live[:limit]:
         icon = {"delivered": "⏸", "paused": "⏳", "blocked": "❗"}.get(m.status.value, "▶")
         active = m.active_nodes()
-        act = f" 进行:{active[0].id}({active[0].desc})" if active else ""
-        todo = len(m.frontier())
-        q = len(m.open_questions())
-        qs = f" ❓{q}" if q else ""
-        parts.append(f"{icon}#{m.id} {m.title}{act} · 待办:{todo}{qs}")
+        act = f" {active[0].id}" if active else ""
+        parts.append(f"{icon}#{m.id}{act} todo:{len(m.frontier())}")
     if len(live) > limit:
         parts.append(f"…(+{len(live) - limit})")
     return " | ".join(parts)

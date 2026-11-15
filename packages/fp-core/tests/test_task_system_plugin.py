@@ -289,9 +289,25 @@ class TestRender(unittest.TestCase):
     def test_summary(self):
         m = _new_map()
         s = render.summary([m])
-        assert s and "#1" in s and "待办" in s
+        assert s and "#1" in s and "todo:" in s
+        assert len(s) <= 20, f"单任务提醒超预算: {s!r}"
+        assert "修扬声器" not in s, "标题不该进提醒(冗余, 属 task_read 职责)"
         m.status = MapStatus.COMPLETED
         assert render.summary([m]) is None
+
+    def test_summary_budget_multi(self):
+        """多任务也守预算: 极简提醒不得长出看板。"""
+        maps = [_new_map() for _ in range(3)]
+        for i, x in enumerate(maps, start=1):
+            x.id = i
+        s = render.summary(maps)
+        assert s and s.count("todo:") == 3
+        assert len(s) <= 70, f"三任务提醒超预算: {s!r}"
+        # 超过 limit 折叠成计数
+        more = [_new_map() for _ in range(2)]
+        for i, x in enumerate(more, start=4):
+            x.id = i
+        assert "…(+2)" in (render.summary(maps + more) or "")
 
 
 class TestTools(unittest.IsolatedAsyncioTestCase):
@@ -394,7 +410,7 @@ class TestPlugin(unittest.IsolatedAsyncioTestCase):
         TaskMapStore().create("演示")
         ctx = await lc.emit(LifecycleHook.ON_BEFORE_LLM_CALL, messages=[{"role": "system", "content": "S"}], tools=[])
         mod = ctx.data.get("modified_messages")
-        assert mod and "[task] ▶#1 演示" in mod[-1]["content"]
+        assert mod and "[task] ▶#1 todo:" in mod[-1]["content"]
 
     async def test_before_llm_call_no_tasks(self):
         lc = LifecycleManager()
