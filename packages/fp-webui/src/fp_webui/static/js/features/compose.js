@@ -5,6 +5,7 @@
 
 import { messagesEl, inputEl, sessionId, autoResize, addUserMessage, addAssistantMessage, clearUI, setProcessing, setPendingBacktrack, showError, sessionLabel, closeCmdPalette, navigateCmdList, confirmCmdSelection, toggleCmdPalette, ws } from '../ui.js';
 import { authFetch } from '../core/http.js';
+import { isTouchUI } from '../core/env.js';
 import { store } from '../core/store.js';
 import { replyAsk } from './ask.js';
 import { loadSessionsList } from './sessions.js';
@@ -117,10 +118,20 @@ export function handleKeyDown(event) {
     }
   }
 
-  // Enter 发送
+  // Enter 的语义取决于有没有 Shift 键（见 core/env.js）：
+  //   桌面 → Enter 发送、Shift+Enter 换行
+  //   触屏 → Enter 换行（移动端无 Shift 键，否则永远打不出多行），发送靠 ➤
+  // 中文输入法用 Enter 确认候选词时（isComposing / 229）不是"发送"语义，
+  // 必须放行给 IME，否则选词回车会误发半截消息。
+  if (event.isComposing || event.keyCode === 229) return;
+
   if (event.key === 'Enter' && !event.shiftKey) {
-    event.preventDefault();
-    sendMessage();
+    if (!isTouchUI()) {
+      event.preventDefault();
+      sendMessage();
+    }
+    // 触屏：不 preventDefault，交给浏览器插入换行 → oninput → autoResize
+    return;
   }
   // Ctrl+Shift+C 中断
   if (event.ctrlKey && event.shiftKey && (event.key === 'C' || event.key === 'c')) {

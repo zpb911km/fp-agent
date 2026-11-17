@@ -49,6 +49,7 @@ Object.assign(window, {
 
    registerRenderer 暴露于此是为了验证自举能力：e2e 在运行时
    注册定制渲染器，证明"新增工具卡无需改 ui.js 源码"。 */
+import { initBuildHint } from './core/build.js';
 import { registerRenderer, registeredTools } from './core/renderers.js';
 import { store } from './core/store.js';
 
@@ -63,6 +64,10 @@ import { fetchToolMeta, toolCardCount, toolCardNames, isLoaded, getToolCard } fr
    app.js 的 initApp() —— 登录成功后的唯一入口。
 
    本模块只负责把接口暴露到测试接缝，供 e2e 断言后端下发量。 */
+/* 前端构建戳：此刻（登录前）就是本页的基准——页面若停在旧模块上，
+   后续任何一次 WS 连上/重连都会对比出"磁盘更新了"，在状态栏露出刷新入口。 */
+initBuildHint();
+
 window.__fp_test = {
   closeSocket: closeSocket,
   // #228：连接代际/建连计数快照——e2e 用它断言「重连期不并行开第二条」

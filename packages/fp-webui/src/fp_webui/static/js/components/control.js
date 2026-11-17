@@ -9,6 +9,7 @@ import { messagesEl, inputEl, sendBtn, setLastGroupEl, setLiveMsgIndex, setToolC
 import { setSb, updateStatusBar } from './statusbar.js';
 import { clearQueuedFlags, resetQueue } from './messages.js';
 import { removeThinking } from './thinking.js';
+import { detachStreamDom } from './stream.js';
 import { resetToolCards } from './tools.js';
 import { handlers } from '../core/handlers.js';
 import { store } from '../core/store.js';
@@ -47,6 +48,10 @@ export function setProcessing(state) {
 
 export function clearUI() {
   messagesEl.innerHTML = '';
+  // 流式轮的 DOM 引用随 innerHTML 一起作废，必须同步摘掉：否则后续 token/chunk
+  // 继续写进已脱离文档的「幽灵卡」——写是成功了，用户一个字也看不到
+  //（重连 resync、agent 忙时切会话这两种场景都会撞上）。
+  detachStreamDom();
   setLastGroupEl(null);
   setLiveMsgIndex(0);  // 重置索引计数器，后续由 fetchSessionHistory 重新设置
   resetToolCards();  // 清空工具卡片映射表

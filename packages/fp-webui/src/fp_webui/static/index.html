@@ -176,7 +176,10 @@
           <div class="cmd-palette-list" id="cmdList"></div>
         </div>
         <div class="input-hint">
-          <span><kbd>Enter</kbd> 发送 · <kbd>Shift+Enter</kbd> 换行</span>
+          <!-- Enter 的语义按环境切换（core/env.js 判定，CSS 二选一）：
+               桌面有 Shift → Enter 发送；触屏无 Shift → Enter 换行、➤ 发送 -->
+          <span class="hint-keyboard"><kbd>Enter</kbd> 发送 · <kbd>Shift+Enter</kbd> 换行</span>
+          <span class="hint-touch"><kbd>Enter</kbd> 换行 · <kbd>➤</kbd> 发送</span>
           <!-- #227：初始态不再硬编码「🟢 已连接」（那是谎报，且在 spinner 旁形成第二重提示）；
                真实状态一律由 ws.js 在 onopen/onclose 写入 -->
           <span id="connectionStatus" aria-live="polite">⚪ 未连接</span>
@@ -187,6 +190,10 @@
           <span class="status-item tools" id="sbTools">⚙ 0</span>
           <span class="status-item msgs" id="sbMsgs">✎ 0</span>
           <span class="status-item state" id="sbState">○ idle</span>
+          <!-- 前端构建戳过期时才露（core/build.js）：磁盘上的前端比本页新 →
+               点击重新导航即换新模块。默认 hidden，不参与任何常态提示。 -->
+          <button type="button" class="status-item build-hint" id="buildHint" hidden
+                  title="磁盘上的前端代码比本页新，点击重新加载">🔄 前端已更新 · 点击刷新</button>
         </div>
       </div>
     </div>

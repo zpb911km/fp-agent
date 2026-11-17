@@ -35,13 +35,41 @@ def _mtime(rel: str) -> str:
     return str(int(os.path.getmtime(os.path.join(main._static_dir, rel))))
 
 
-def test_index_stamp_is_real_mtime() -> None:
-    """index.html 里每个 ?_t= 都等于该文件真实 mtime（不是原样的占位 1）。"""
+def _tree_stamp() -> str:
+    """整棵 static 树内前端资产（js/css/html）的最大 mtime —— 测试侧独立算。"""
+    newest = 0.0
+    for root, _dirs, files in os.walk(main._static_dir):
+        for fn in files:
+            if fn.endswith((".js", ".css", ".html")):
+                newest = max(newest, os.path.getmtime(os.path.join(root, fn)))
+    return str(int(newest))
+
+
+def test_index_stamp_css_is_own_mtime() -> None:
+    """CSS 的戳是本文件 mtime：改哪个失效哪个，细粒度缓存不被牵连。"""
     html = _client().get("/").text
     stamps = dict(_TS_RE.findall(html))
-    assert stamps, "index.html 里没有带 ?_t= 的 css/js 引用"
-    for rel, ts in stamps.items():
+    css = {rel: ts for rel, ts in stamps.items() if rel.endswith(".css")}
+    assert css, "index.html 里没有带 ?_t= 的 css 引用"
+    for rel, ts in css.items():
         assert ts == _mtime(rel), f"{rel} 的缓存戳 {ts} != 真实 mtime {_mtime(rel)}"
+
+
+def test_index_stamp_js_is_whole_tree() -> None:
+    """JS 入口的戳是**整棵树**的最大 mtime，不是该文件自身的。
+
+    ESM import 图里 index.html 只引 main.js，而改动十有八九落在叶子
+    （features/wire.js、components/*.js）。若按文件自身 mtime 打戳，版本串
+    对它恒定不变 → core/build.js 的"资产版本自检"（信号②）完全瞎掉，
+    「改了前端、页面还是老行为」就又不透明了。
+    """
+    html = _client().get("/").text
+    stamps = dict(_TS_RE.findall(html))
+    js = {rel: ts for rel, ts in stamps.items() if rel.endswith(".js")}
+    assert js, "index.html 里没有带 ?_t= 的 js 引用"
+    tree = _tree_stamp()
+    for rel, ts in js.items():
+        assert ts == tree, f"{rel} 的缓存戳 {ts} 应为整树戳 {tree}"
 
 
 def test_index_stamps_esm_entry_modules() -> None:

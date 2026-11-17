@@ -36,9 +36,11 @@ function buildAskCard(card, data) {
 
   var foot = document.createElement('div');
   foot.className = 'ask-foot';
+  // 键位说明交给下方的 .input-hint（按 touch/keyboard 切换），
+  // 这里只讲"可以做什么"，否则触屏上「直接回车采纳」是错的说法
   foot.textContent = suggest
-    ? '💡 推荐：' + suggest + '（直接回车采纳）'
-    : '输入你的回答后回车';
+    ? '💡 推荐：' + suggest + '（或点上方按钮）'
+    : '输入你的回答，或点上方选项';
   card.appendChild(foot);
 }
 
@@ -51,7 +53,7 @@ function renderAskCard(state) {
     if (card) card.remove();
     _askContentEl = null;
     _askSig = null;
-    inputEl.placeholder = '输入消息... (Enter 发送)';
+    inputEl.placeholder = '输入消息...';
     return;
   }
 
@@ -71,8 +73,8 @@ function renderAskCard(state) {
   buildAskCard(card, data);
 
   inputEl.placeholder = data.suggest
-    ? ('回车采纳「' + data.suggest + '」，或输入回答...')
-    : '输入回答... (Enter 发送)';
+    ? ('采纳「' + data.suggest + '」，或输入回答...')
+    : '输入回答...';
   inputEl.focus();
   scrollToBottom(true);
 }

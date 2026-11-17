@@ -49,6 +49,14 @@ fp-webui --reload             # 开发用：uvicorn 热重载
   卡片的展示元信息由后端 `/api/ui/schema` 的 `tool_cards` 动态下发，新增工具前端零改动。
 - **消息只由事件渲染** — 一切用户消息（直发 / 排队消费 / 命令回显）都走 `user_message`
   事件，前端不做乐观渲染；多设备开同一端口看到同一份消息流，且与历史 REST 视图一致。
+- **输入语义随设备** — `core/env.js` 用媒体查询（`pointer: coarse` 且无 `any-pointer: fine`）
+  判触屏并写 `html[data-input-mode]`：桌面 `Enter` 发送 / `Shift+Enter` 换行，触屏 `Enter`
+  换行、发送只走 ➤；`isComposing` / keyCode 229 的回车一律不发送。输入框高度上限读 CSS
+  `max-height`（`min(240px, 40dvh)`），量高时保留 `scrollTop`、`touch-action: pan-y` 让框内
+  滚动不被外层抢走。
+- **重连保序** — 全量重拉的先用 `DocumentFragment` 建好、`insertBefore(firstChild)` 锚定最前，
+  实时卡片随后接续；编号基准唯一（历史末条 index → `renumberLiveMessages` 按文档序重排），
+  清屏时 `detachStreamDom` 只摘 DOM 保留累积文本。重拉不受 `processing` 阻断，并带请求代次。
 - **会话侧栏** — 常驻左侧，`☰` 折叠；搜索、切换、删除、清空、重算关键词（kw），
   并可对历史消息做内容检索（返回真实文件行号）。空跑会话被后端过滤，不占列表。
 - **文件中枢** — 双向哑管道：上传落 `fp_inbox/`（原名、撞名覆盖），agent 产物放
@@ -58,7 +66,8 @@ fp-webui --reload             # 开发用：uvicorn 热重载
   重连带 `?seq=&run_id=` 协商，能重放走环形缓冲（`replay`），溢出或换轮则 `resync` 让前端全量重拉。
 - **热重载 / 新建实例** — 命令面 `/reload` 走 execve 原启动命令；`POST /api/agent/new` 只换内存实例（409 拒绝忙时调用）。
 - **外观** — 深/浅主题（`localStorage.webui_theme`）、迭代器光环与投影装饰（`localStorage.webui_halo`，默认关闭省 GPU）。
-- **前端无构建** — 纯 HTML + CSS + 原生 ESM，无打包步骤；静态引用 `?_t=` 由服务端按**子目录相对路径**取真实 mtime 改写，改完即生效。
+- **前端无构建** — 纯 HTML + CSS + 原生 ESM，无打包步骤；静态引用 `?_t=` 由服务端按**子目录相对路径**取真实 mtime 改写，改完即生效。ESM 入口的版本串取**前端目录树整体状态**（不只是 `index.html` 自身 mtime），否则只改 `js/features/wire.js` 时入口戳不变、浏览器继续用旧模块图。
+- **前端过期可视化** — `core/build.js` 在启动与每次 WS 连上做双信号探测（有 `/api/build` 比 `build` 串，否则比入口 `?_t=`），确认过期才在状态栏亮 `🔄 前端已更新 · 点击刷新`；探测失败不报警，离线/旧后端不制造噪声。连接态与重载完成态**一律只由状态栏承载**，消息流不再挂「已重新连接 / 会话内容已重新同步 / Agent 重载完成」任何一条 🔄 横幅（同一时刻只说一遍；重拉期留白由 `LoadingState` 占位兜住），只保留动作回执「🔄 正在热重启（进程级）…」。
 - **静态资源强制重验证** — `/static/*` 一律回 `Cache-Control: no-cache`（配 ETag 走 304，代价近零）。只靠 `?_t=` 不够：前端是 ESM import 图，`import './features/x.js'` 的 URL 写死在模块里无法逐个打戳，而 `StaticFiles` 不发 `Cache-Control` 时浏览器按启发性新鲜期（≈`(now - Last-Modified)`×10%，文件越旧缓存越久）缓存——症状是「磁盘 `/static` 与接口全对，用户刷新后界面仍是旧行为」。契约由 `tests/test_static_cache.py` 钉死。
 
 ## API 与协议

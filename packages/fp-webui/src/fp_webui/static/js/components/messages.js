@@ -187,6 +187,48 @@ export function consumeQueuedBubble(content, ephemeral) {
   return false;
 }
 
+/* ── 实时消息索引校准（历史落地后以 DOM 顺序为准重排）─────────────
+   索引徽章在创建时就烧进 innerHTML，而「历史还在路上」时创建的卡片根本不知道
+   自己的真实位置（clearUI 已把 liveMsgIndex 归 0）：重连 resync / 切会话触发
+   clearUI 后若 agent 正忙，chunk 会先建出卡片并打上 #1，等历史返回把基准改成 3
+   时它仍然是 #1——用户看到的正是「历史在、实时消息却从 #1 重新编号」。
+   修法：历史落位后按**文档序**重排全部实时索引位。
+     · 索引消耗者有两类：消息卡（.msg-side 里的徽章）、工具行（行内 standalone
+       徽章——后端 tool 消息同样占一个 non_system 索引位）。
+     · 历史恒锚定容器最前、实时卡片一律追加 → 文档序 == 事件序，逐个 +1 即与
+       后端索引对齐。
+     · 历史节点自带权威编号（[data-fp-history]），一律跳过。 */
+export function renumberLiveMessages(base) {
+  var n = base || 0;
+  var badges = messagesEl.querySelectorAll('.msg-index-badge');
+  for (var i = 0; i < badges.length; i++) {
+    var badge = badges[i];
+    if (badge.closest('[data-fp-history]')) continue;
+    n += 1;
+    badge.textContent = '#' + n;
+    var row = badge.closest('.tool-row');
+    if (row) {
+      row.dataset.msgIndex = String(n);   // 工具行：/back 索引挂在行上
+      // 行内回溯按钮是**另一份**索引副本（addToolCall 建行时烧进 data-index）：
+      // 只改徽章会让「徽章 #5 / 点 ↩ 却回到 #2」——比不显示更坏（回溯错位＝丢内容）。
+      var tbtn = row.querySelector('.backtrack-btn');
+      if (tbtn) {
+        tbtn.dataset.index = String(n);
+        tbtn.setAttribute('aria-label', '回溯到位置 ' + n);
+      }
+      continue;
+    }
+    var msg = badge.closest('.msg');
+    var btn = msg && msg.querySelector('.msg-header .backtrack-btn');
+    if (btn) {
+      btn.dataset.index = String(n);
+      btn.setAttribute('aria-label', '回溯到位置 ' + n);
+    }
+  }
+  setLiveMsgIndex(n);   // 后续新消息从校准后的位置继续累加
+  return n;
+}
+
 export function clearQueuedFlags() {
   document.querySelectorAll('.queued-flag').forEach(function (el) { el.remove(); });
 }

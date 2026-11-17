@@ -3,7 +3,7 @@
    ═══════════════════════════════════════════════════════════ */
 // @ts-nocheck
 
-import { _pendingBacktrack, _pendingHistoryRefresh, setPendingBacktrack, setPendingHistoryRefresh, clearUI, setLiveMsgIndex, renderHistoryMessages } from '../ui.js';
+import { _pendingBacktrack, _pendingHistoryRefresh, setPendingBacktrack, setPendingHistoryRefresh, clearUI, renderHistoryMessages } from '../ui.js';
 import { authFetch } from '../core/http.js';
 import { LoadingState } from '../core/spinner.js';
 
@@ -26,34 +26,37 @@ export function flushPendingHistoryRefresh(sid) {
   setTimeout(function() { fetchSessionHistory(sid); }, 100);
 }
 
+// 历史请求代次：只认最新一次（见 fetchSessionHistory）
+var _histReqSeq = 0;
+
 export function fetchSessionHistory(sid) {
-  // 二次修改①：打开会话拉历史的等待期不再是空白（switchSession/重连重拉/轮次收尾刷新均汇聚于此）
+  // 二次修改①：打开会话拉历史的等待期不再是空白
+  //（switchSession/重连重拉/轮次收尾刷新均汇聚于此）
   var mainArea = document.getElementById('messagesContainer');
   if (mainArea) LoadingState.show(mainArea, '加载会话内容…');
   function done() { if (mainArea) LoadingState.hide(mainArea); }   // renderHistoryMessages 若整体替换内容，hide 幂等兜底
+  // 请求代次：连通重拉 / 切会话 / history_changed 可能并发（甚至会话不同）。
+  // 慢响应的旧请求若照样渲染，会把 A 会话的历史盖到 B 会话视图上——只认最新一次。
+  var req = ++_histReqSeq;
   authFetch('/api/sessions/' + sid + '/messages')
     .then(function(r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
     })
     .then(function(data) {
+      if (req !== _histReqSeq) return;   // 已被更新的请求取代：不碰 DOM、不撤占位
       var msgs = data.messages || [];
-      if (msgs.length > 0) {
-        // 从尾部找最后一个有效 index（跳过 system 消息的 null index）
-        setLiveMsgIndex(0);
-        for (var i = msgs.length - 1; i >= 0; i--) {
-          if (msgs[i].index != null) {
-            setLiveMsgIndex(msgs[i].index);
-            break;
-          }
-        }
-      }
+      // 编号基准不在这里算：renderHistoryMessages 落地后按「历史末尾 index +
+      // 文档序」统一校准实时索引（唯一权威，见 components/messages.js
+      // renumberLiveMessages）。此前这里另设一次 setLiveMsgIndex，两处各算一遍，
+      // 谁后跑谁说了算——历史在路上时建出的实时卡片没有一处能纠正它。
       if (msgs.length > 0) {
         renderHistoryMessages(sid, msgs);
       }
       done();
     })
     .catch(function(err) {
+      if (req !== _histReqSeq) return;
       console.warn('[History] 加载历史失败:', err.message);
       // 返工①：失败≠「加载完成且为空」，不得落入 :empty::after 空态（误导用户
       // "没有消息可回复"）。仅当容器无真实内容时插一行失败提示（占位不计入——

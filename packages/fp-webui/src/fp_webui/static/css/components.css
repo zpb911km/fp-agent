@@ -1058,11 +1058,22 @@
   resize: none;
   outline: none;
   min-height: var(--touch-min);
-  max-height: 240px;
+  max-height: 240px;                     /* 老浏览器兜底 */
+  max-height: min(240px, 40dvh);         /* 视口矮（横屏/小屏）时跟着收 */
   line-height: 1.5;
   transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
   box-shadow: var(--shadow-inset-sm);
   border-radius: 0;
+  /* 超过 max-height 后内容在框内滚动（长指令/多行草稿）：
+     touch-action 显式声明"竖向手势归我"——否则移动端滑动会被
+     外层滚动容器/浏览器手势抢走，表现为"输入框滑不动"。
+     注意**不要**加 overscroll-behavior: contain：它会在滑到尽头时
+     掐断滚动链，手指仍按住框内时页面完全不动，反而更像"卡死"。 */
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  scrollbar-width: thin;
 }
 .input-field::placeholder {
   color: var(--text-muted);
@@ -1239,6 +1250,12 @@
   border: 1px solid var(--border);
   border-bottom-width: 2px;
 }
+
+/* 输入提示按环境二选一（core/env.js 写 html[data-input-mode]）：
+   触屏没有 Shift 键 → Enter 是换行，发送靠 ➤；桌面则相反。
+   提示文案必须跟着 Enter 的真实语义走，不能只在 JS 里改行为。 */
+html[data-input-mode="touch"] .hint-keyboard { display: none; }
+html:not([data-input-mode="touch"]) .hint-touch { display: none; }
 
 /* ═══════════════════════════════════════════════════════════════
    登录遮罩层 v2
@@ -1745,6 +1762,39 @@
 }
 .status-item.state.processing {
   color: var(--accent);
+}
+/* 构建戳过期提示（core/build.js 置 hidden=false 才出现）：
+   唯一的动作是重新导航，故做成按钮形态、配色取 accent 而非告警黄——
+   "该刷新了"不是故障，别和 ⚠️ 抢同一个视觉词。 */
+/* 隐藏态必须显式写 [hidden]{display:none}：上面的 `.status-item{display:flex}`
+   是**作者**样式，会压过 UA 的 `[hidden]` 规则（同一陷阱本仓已踩过两次，见
+   sidebar.css 下拉把手、.session-item-menu）。缺这一行 = 这条提示常驻，
+   从"该刷新了"退化成一条永不消失的噪声（e2e test_19 正是这样逮到它的）。 */
+.status-item[hidden] {
+  display: none;
+}
+.status-item.build-hint {
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 0 5px;
+  margin-left: 6px;
+  animation: buildHintIn 0.25s ease-out;
+}
+.status-item.build-hint:hover {
+  background: rgba(0,188,212,0.12);
+}
+.status-item.build-hint:last-child {
+  border-right: 1px solid var(--accent);   /* 别被 :last-child 的 border-right:none 抹掉边框 */
+  margin-left: 6px;
+}
+@keyframes buildHintIn {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: none; }
 }
 
 /* ═══════════════════════════════════════════════════════════════

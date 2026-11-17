@@ -355,7 +355,9 @@ app = FastAPI(
 
 # ── 认证中间件 ──────────────────────────────────────────
 
-_AUTH_WHITELIST = {"/api/auth", "/api/health"}
+# /api/build：只回一个 mtime 整数（前端构建戳），不含任何会话/模型信息，
+# 且必须在登录前就能取——那正是它当基准的时刻（见 core/build.js）。
+_AUTH_WHITELIST = {"/api/auth", "/api/health", "/api/build"}
 
 
 @app.middleware("http")
@@ -491,6 +493,46 @@ async def health_check() -> dict[str, Any]:
         "processing": session_runtime.is_running,
         "run_id": event_bus.run_id,
     }
+
+
+# ── 前端构建戳（"我改了代码，你的页面还是老模块"要能被看见）──────────
+# ESM import 图的模块 URL 是写死的相对路径，改文件不会改 URL；只靠 no-cache
+# 也只在**重新导航**时生效——agent 热重启、WS 断线重连、手机端 bfcache 回前台
+# 都不会重新下载模块。于是"改完没生效"极易被误读成"没改好"（发生过多轮）。
+# 前端启动时取一次、每次 WS 连上再取一次：戳变了就在状态栏露一个「点击刷新」。
+_BUILD_STAMP_CACHE: dict[str, float | int] = {"at": 0.0, "value": 0}
+
+
+def _compute_build_stamp() -> int:
+    """static 树内前端资产（js/css/html）的最大 mtime，秒级。"""
+    newest = 0.0
+    for root, _dirs, files in os.walk(_static_dir):
+        for fn in files:
+            if fn.endswith((".js", ".css", ".html")):
+                try:
+                    newest = max(newest, os.path.getmtime(os.path.join(root, fn)))
+                except OSError:
+                    continue
+    return int(newest)
+
+
+def _tree_stamp() -> int:
+    """``_compute_build_stamp`` 的 1 秒缓存版。
+
+    调用点有两处且都高频：``/api/build`` 探询（启动 + 每次连上）与 ``/`` 的
+    资源版本改写（每次导航）。缓存住，避免反复 walk 磁盘。
+    """
+    now = time.time()
+    if now - float(_BUILD_STAMP_CACHE["at"]) > 1.0:
+        _BUILD_STAMP_CACHE["value"] = _compute_build_stamp()
+        _BUILD_STAMP_CACHE["at"] = now
+    return int(_BUILD_STAMP_CACHE["value"])
+
+
+@app.get("/api/build")
+async def build_stamp() -> dict[str, Any]:
+    """前端构建戳（"本页是不是老模块"的权威信号）。"""
+    return {"stamp": _tree_stamp()}
 
 
 @app.post("/api/files")
@@ -1558,6 +1600,12 @@ def _stamp_cache(html: str) -> str:
             rel = rel[len("static/") :]
         path = os.path.join(_static_dir, rel)
         try:
+            if rel.endswith(".js"):
+                # 模块入口打**整棵树**的戳：ESM import 图里 index.html 只引 main.js，
+                # 而实际改动十有八九落在叶子（features/wire.js、components/*.js）。
+                # 按文件自身 mtime 打戳时 version 串恒定 → 前端的"资产版本自检"
+                # （core/build.js 信号②）对这类改动完全瞎掉，又回到"改了没生效"。
+                return f"{m.group(1)}?_t={_tree_stamp()}"
             return f"{m.group(1)}?_t={int(os.path.getmtime(path))}"
         except OSError:
             return m.group(0)

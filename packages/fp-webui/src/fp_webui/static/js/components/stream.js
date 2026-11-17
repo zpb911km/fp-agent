@@ -224,3 +224,23 @@ export function finalizeStreamRoundForDone(finalContent) {
   return shown;
 }
 
+/** clearUI 配套：摘掉流式轮的 DOM 引用（卡片随容器被清空，已成幽灵节点）。
+
+    为什么不能只清容器：`_stream` 是轮次级状态（终轮不销毁，迟到 token 要并入），
+    它攥着 thinkEl / contentEl 两个 DOM 引用。`messagesEl.innerHTML = ''` 之后这两个
+    引用指向脱离文档的元素，而 streamContentChunk 看到 contentEl 已存在就不再建卡——
+    于是后续所有正文都写进无人可见的幽灵卡：**看起来 agent 卡死、其实一直在输出**。
+    重连 resync / history_changed 重拉 / agent 忙时切会话，都是这条路径。
+
+    只摘 DOM、**保留累积文本**（thinkText / contentText）：下一个 token 到达时
+    `if (!_stream.contentEl)` 会重建卡片，节流 flush 把累积全文一次写进去，
+    已生成的内容不会因为清屏而丢。 */
+export function detachStreamDom() {
+  if (!_stream) return;
+  if (_stream.thinkTimer) { clearTimeout(_stream.thinkTimer); _stream.thinkTimer = null; }
+  if (_stream.contentTimer) { clearTimeout(_stream.contentTimer); _stream.contentTimer = null; }
+  stopThinkTicker(_stream);
+  _stream.thinkEl = null;
+  _stream.contentEl = null;
+}
+

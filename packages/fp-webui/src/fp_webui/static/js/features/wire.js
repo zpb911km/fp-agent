@@ -10,9 +10,18 @@ import { showAskCard, clearAskCard } from './ask.js';
 import { flushPendingHistoryRefresh, fetchSessionHistory } from './history.js';
 import { LoadingState } from '../core/spinner.js';   // 返工①：connected/重拉间隙的主区占位收场
 import { conn } from './ws.js';
+import { checkBuild } from '../core/build.js';   // 前端构建戳：本页是否已落后于磁盘
 
 // ── 避免 done.final_content 与 llm_end.content 重复渲染 ──
 var _finalContentAlreadyShown = false;
+
+// ── 消息流横幅口径（#227「同一场景只留一处提示」）─────────────────
+// 「连接态」（建连中/已断开/已连接/已重载）**只**由状态栏 #connectionStatus
+// （spinner + 文本）表达；消息流只承载内容层事实（新消息、工具、错误、任务仍在跑）。
+// 历史上这里曾补过两条「重连/重同步」横幅，用户两次指出：spinner 下方再挂一条
+// 同义横幅就是重复，于是全部删掉（具体文案见 git 历史与 docs/CHANGELOG.md #227）。
+// 一段时期本行注释里仍写着那两句原文，导致 grep / 源码探针反复误报"横幅还在"——
+// 故此处只留结论，不复述文案。
 // ── WS 事件分发：on() 注册表（原 27-case switch，2026 迁移）──────────
 // 每事件一个独立注册，顺序无关；未知类型由 core/events.js 兜底 warn。
 // 契约测试从本文件抽取注册，三方不变量保持不变。
@@ -33,24 +42,30 @@ on('connected', function (data) {
   statusEl.textContent = '🟢 已连接';
 
   // ── 全量重拉：缓冲溢出或服务端重启，事件流不可续 ──
+  // 提示口径见文件顶部：任何「已重连/已同步」横幅都不再出现，连接态交给状态栏。
   var needHistory = false;
   if (data.resync) {
+    // 事件流不可续（缓冲溢出/服务端重启）→ 重放不会来补内容，历史是唯一来源。
+    // 必须 clearUI：残留片段与后端已失配，且 seq 空间已换（旧序号无意义）。
     clearUI();
     needHistory = true;
-    addSystemMessage('🔄 已重新连接，会话已重新同步');
   } else if (wasConnected && !data.processing && sessionId) {
     // 二次修改③：重连成功后必须完全重新请求一次会话内容——
     // 此前仅 resync/DOM空 才重拉，断线重连后 DOM 里残留的片段无法向上翻阅；
     // 现 clearUI + 全量重拉（复用 resync 同款安全路径），processing 中不打断流式（由重放续传）
     clearUI();
     needHistory = true;
-    addSystemMessage('🔁 已重新连接，正在重新加载会话内容…');
   }
-  // DOM 为首屏占位/空（首屏/重开页/刚清空）且无进行中任务 → 补一次权威历史。
+  // DOM 为首屏占位/空（首屏/重开页/刚清空）→ 补一次权威历史。
   // 返工①修复：initApp 接力的行内占位本身也是 children——用「非占位子元素」判真空，
   // 否则占位会让 children.length===0 恒假、首拉被跳过（回归陷阱）。
   var hasRealContent = messagesEl.querySelector(':scope > :not([data-fp-loading])') !== null;
-  if (!data.processing && sessionId && (needHistory || !hasRealContent)) {
+  // processing **不再是**跳过条件：需要重拉时容器刚被 clearUI 清空，此时若因
+  // "agent 正在跑"跳过，界面就停在空白直到本轮结束——用户实测的「重连后历史不显示、
+  // 实时消息又从 #1 重新编号」正是这条路径（编号基准只能由历史对齐，没有历史
+  // 就只能从 0 数起，回溯索引整体错位）。
+  // 流式与历史不冲突：历史锚定容器最前（components/history.js），流式卡片追加在后。
+  if (sessionId && (needHistory || !hasRealContent)) {
     fetchSessionHistory(sessionId);   // 其 show 幂等接管 initApp 接力的占位
   } else {
     // 返工①：无历史可拉的分支必须显式收场——否则 initApp 接力的行内占位永挂。
@@ -60,20 +75,22 @@ on('connected', function (data) {
   }
 
   // ── 运行时快照：任务没死，恢复"处理中"状态机 ──
-  if (data.processing) {
-    setProcessing(true);
-    if (wasConnected) addSystemMessage('🔁 已重连，后台任务继续运行中');
-  } else {
-    setProcessing(false);
-  }
+  // 不再往消息流里补「🔁 后台任务继续运行中」：这条事实已有三处表达——状态栏的
+  // 状态位（◎ processing）、发送键变 ⏹️、以及正在流的卡片本身。用户对"spinner
+  // 下方再挂一条同义横幅"明确反感两次，故一律只留**状态栏**这一个出口。
+  setProcessing(!!data.processing);
   // ask 等待回复跨连接存续：v2 携带完整元数据 → 恢复整个问答卡片
   // （v2 之前只有布尔，降级为仅恢复输入提示）
   if (data.pending_ask && typeof data.pending_ask === 'object') {
     showAskCard(data.pending_ask);
   } else if (data.pending_ask) {
-    inputEl.placeholder = '输入回复... (Enter 发送)';
+    inputEl.placeholder = '输入回复...';
     inputEl.focus();
   }
+
+  // 每次连上（含重连）核一次构建戳：agent 热重启会换后端代码，前端若也改过，
+  // 本页跑的仍是老模块——这里把"该刷新了"变成状态栏里一个可点的入口。
+  checkBuild();
 
   fetch('/api/health')
     .then(function(r) { return r.json(); })
@@ -281,9 +298,9 @@ on('shutdown', function (data) {
 
 on('reload', function (data) {
 
+  // 「Agent 重建中/即将断开」是**连接态**：口径见文件顶部——只由状态栏说。
   statusEl.textContent = '🟠 Agent 重建中...';
   setProcessing(false);
-  addSystemMessage('🔄 Agent 正在新建，连接即将断开...');
 });
 
 on('reload_done', function (data) {
@@ -295,7 +312,8 @@ on('reload_done', function (data) {
     sessionLabel.textContent = '📄 ' + data.session_id;
   }
   if (data.model) { modelBadge.textContent = data.model; }
-  addSystemMessage('🔄 Agent 重载完成，新代码已生效');
+  // 同上：状态栏此刻正是「🟢 已连接（已重载）」——消息流再挂一条 🔄「重载完成」
+  // 就是把同一句话说了两遍（用户对这类重复横幅已指出两次）。
 });
 
 on('ask', function (data) {

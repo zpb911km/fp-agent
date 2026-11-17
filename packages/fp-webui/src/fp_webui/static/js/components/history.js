@@ -5,7 +5,7 @@
    ═══════════════════════════════════════════════════════════ */
 // @ts-nocheck
 
-import { copyMsgContent, toggleToolRow, buildThinkBlock } from './messages.js';
+import { copyMsgContent, toggleToolRow, buildThinkBlock, renumberLiveMessages } from './messages.js';
 import { renderMarkdown, renderMath } from './markdown.js';
 import { scrollToBottom } from './scroll.js';
 import { escapeHtml } from './util.js';
@@ -14,10 +14,16 @@ import { escapeHtml } from './util.js';
 
 export function renderHistoryMessages(sid, messages) {
   var container = document.getElementById('messagesContainer');
+  if (!container) return;
+  // 历史块先建在 DocumentFragment 里，最后一次性插到容器最前（见函数末尾）。
+  // 「先 append 到容器」的写法在异步 + 流式并发下会错序：REST 返回之前插进来的
+  // 实时卡片/系统提示都在容器里，历史一 append 就落到了它们后面。
+  var frag = document.createDocumentFragment();
   var sep = document.createElement('div');
   sep.className = 'history-separator';
   sep.textContent = '📜 历史记录';
-  container.appendChild(sep);
+  sep.dataset.fpHistory = '1';
+  frag.appendChild(sep);
 
   var allRendered = [];
 
@@ -50,6 +56,7 @@ export function renderHistoryMessages(sid, messages) {
   messages.forEach(function(msg) {
     var group = document.createElement('div');
     group.className = 'msg-group';
+    group.dataset.fpHistory = '1';   // 幂等重建的凭据：重渲染前整批摘掉
     group.dataset.rhythm = 'compact';
     group.style.borderBottom = 'none';
     group.style.padding = '1px 0';
@@ -70,7 +77,7 @@ export function renderHistoryMessages(sid, messages) {
           '</div>' +
         '</div>';
       group.appendChild(msgDiv);
-      container.appendChild(group);
+      frag.appendChild(group);
       return;
     }
 
@@ -134,7 +141,7 @@ export function renderHistoryMessages(sid, messages) {
         // 无宿主：单独成组的裸行（不带头像/回溯，仅兜底展示）
         row.style.marginLeft = '12px';
         group.appendChild(row);
-        container.appendChild(group);
+        frag.appendChild(group);
       }
       return;
 
@@ -197,8 +204,27 @@ export function renderHistoryMessages(sid, messages) {
       }
     }
 
-    container.appendChild(group);
+    frag.appendChild(group);
   });
+
+  // ── 落位：历史永远锚定容器最前 ────────────────────────────
+  // 语义上历史是「更早的内容」，而实时卡片/系统提示一律 appendChild（更晚）。
+  // 只要落位是 insertBefore(firstChild)，顺序就与「REST 何时返回、期间谁插了
+  // 什么」彻底解耦——agent 忙时切会话（历史还在路上，新 chunk 先建了卡）
+  // 也不会再出现「新消息出现在『📜 历史记录』横幅上方」的倒置。
+  // 幂等：先摘掉上一次渲染的历史节点，避免重连重拉叠加出第二套历史。
+  var stale = container.querySelectorAll('[data-fp-history]');
+  for (var s = 0; s < stale.length; s++) stale[s].remove();
+  container.insertBefore(frag, container.firstChild);
+
+  // ── 编号基准：历史末尾 index → 校准实时索引 ────────────────
+  // 历史落地前建出来的实时卡片（agent 忙时 chunk 抢在 REST 之前）拿的是 clearUI
+  // 归零后的临时号（#1、#2…），必须以历史末尾为基准重排，否则回溯索引整体错位。
+  var base = 0;
+  for (var m = messages.length - 1; m >= 0; m--) {   // 跳过 system 消息（index 为 null）
+    if (messages[m].index != null) { base = messages[m].index; break; }
+  }
+  renumberLiveMessages(base);
 
   // 批量渲染公式
   if (allRendered.length > 0) {
