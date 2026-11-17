@@ -575,8 +575,8 @@ ws://host:port/ws/chat?token=your_token
 | `llm_start` | — | Agent 开始调用 LLM（前端：起流式轮次 + spinner） |
 | `thinking` | `status`: `start`/`stop` | 思考阶段开始/结束（与 `llm_start`/`llm_end` 配对，动画指示用） |
 | `thinking_content` | `token` | **思考 token 批**（后端 WebSocketIO 已合并：攒 512 字符或 50ms 发一批）。**空批不下发**（provider 的 `reasoning_content=""` 空帧在 core 即被丢弃，否则前端会凭空长出「思考 0 字」空块）。前端渲染为可折叠思考块：正文未到时展开流式显示，状态行「思考中 · N 字 · Xs」随 token 实时刷新（200ms 走表，模型停顿时字数不动、时长照走）；首个**非空**正文批到达、**或本轮结束**（纯思考+工具调用的轮次没有正文批，由 `llm_end`/`tool_select` 兜底）即折叠为「思考 N 字 · Xs」单行——字数取块内全文、时长定格于折叠时刻（基准是首个思考 token，不含首字延迟），点击可展开全文。历史回看经 `reasoning_content` 渲染同构折叠块（无时长：未落盘） |
-| `chunk` | `content` | **正文 token 批**（同 512 字符/50ms 合并），**空批不下发**——空 `content` 帧若下传会被当成「正文已到」而提前折叠思考栏。前端流式渲染 markdown；末批可能晚于 `llm_end`（fire-and-forget 发布），前端并入当前轮次不新建块 |
-| `stream_end` | — | 一轮流式输出结束（后端已先冲刷缓冲再发；可能迟到于 `done`，前端为 no-op，仅 `llm_end`/`done` 负责终渲染去重） |
+| `chunk` | `content` | **正文 token 批**（同 512 字符/50ms 合并），**空批不下发**——空 `content` 帧若下传会被当成「正文已到」而提前折叠思考栏。前端流式渲染 markdown。**顺序保证**：后端在收尾前 `await io.drain()`，故末批 `chunk` 必先于 `stream_end`/`llm_end` 到达；前端另有防线——迟到帧若正是「最近 4 轮某轮已落定正文的尾段」直接丢弃（终渲染以 `llm_end`/`done` 的 `final_content` 为权威全文），跨轮时不会另长一张卡 |
+| `stream_end` | — | 一轮流式输出结束（后端先冲刷缓冲再发，并在交棒前 drain，故必先于 `llm_end`/`done`；前端为 no-op，仅 `llm_end`/`done` 负责终渲染去重） |
 | `llm_end` | `content`, `has_tool_calls`, `tool_names` | LLM 返回结果（流式已渲染正文时前端跳过重复渲染） |
 | `tool_select` | `tools: string[]` | Agent 选择要调用的工具（前端只确保宿主卡片存在，不单独渲染卡片） |
 | `tool_call` | `name`, `args` | 工具开始执行——前端建紧凑工具行并展开显示参数 |
@@ -621,9 +621,12 @@ ws://host:port/ws/chat?token=your_token
 ```
 
 > 注：`thinking_content`/`chunk`/`stream_end` 由 WebSocketIO 发布，
-> token 已按 512 字符/50ms 合并成批；`stream_end`（及末批 token）经
-> fire-and-forget 发布，时序上可能**晚于** `llm_end`/`done` 到达，
-> 前端将其并入当前轮次（closed 轮次语义），不重复渲染。
+> token 已按 512 字符/50ms 合并成批。这些帧在通道里是**排队**发出的
+> （`ensure_future`），而 `llm_end`/`done` 走 EventBridge 是**同步落地**——
+> 历史上因此出现过 `llm_end → done → chunk` 的帧序，跨轮时让同一段答案
+> 落进下一轮的卡片（用户看到「同一条最终回复显示两次」）。现由生产者在
+> 交棒前 `await io.drain()` 钉住 `chunk… → stream_end → llm_end → done`；
+> 前端仍保留迟到帧识别作为防线，但不依赖它保正确性。
 
 ### 6.5 断连、重连与事件重放
 

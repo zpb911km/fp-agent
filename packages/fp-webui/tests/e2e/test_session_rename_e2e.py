@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.request
 from pathlib import Path
@@ -23,21 +24,61 @@ pytestmark = pytest.mark.e2e
 _LAST_USER = "撤销后应回到这条原始消息"
 _NEW_NAME = "e2e 人工标题"
 
+# 与 e2e/conftest.py 的 ``_DIR_VARS`` 同源（那边是私有名，不从 conftest 里抠）。
+# 漏一个变量的后果是「复用外部服务时卡片永远不出现」，跑一次就能发现。
+_DIR_VARS = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "APPDATA", "LOCALAPPDATA")
 
-def _sessions_dir() -> Path:
-    """**服务器子进程**的会话目录。
+# 本用例该往哪个目录造会话文件——由下面的 autouse 夹具算好。
+# 为什么要夹具：判断「要不要摘掉钉住的目录变量」得读 ``server.external``，而
+# ``_make_session`` / ``_drop_session`` 是普通辅助函数，拿不到 ``server``。
+_SESSIONS_DIR: Path | None = None
+
+
+@pytest.fixture(autouse=True)
+def _pin_sessions_dir(server):
+    """每例开头算一次「服务器子进程实际用的会话目录」，供无 server 参数的辅助函数"""
+    global _SESSIONS_DIR
+    _SESSIONS_DIR = _compute_sessions_dir(external=server.external)
+    try:
+        yield
+    finally:
+        _SESSIONS_DIR = None
+
+
+def _compute_sessions_dir(*, external: bool) -> Path:
+    """算出**服务器子进程**的会话目录。
 
     不能读 ``fp_core.core.session.SESSIONS_DIR``：根 conftest 的 autouse fixture
     （``_isolate_sessions_dir``）把测试进程的这个常量 patch 到 tmp_path，而 e2e
-    服务器是**子进程**，不继承该 patch，用的是真实数据目录。用 ``get_data_dir()``
-    现算（它本身不读被 patch 的 ``_FP_DATA_DIR``），两边才指同一处；否则造出的
-    会话文件服务器根本看不见（实测症状：卡片永远不出现）。
+    服务器是**子进程**，不继承该 patch。用 ``get_data_dir()`` 现算（它每次读 env，
+    无缓存），两边才指同一处；否则造出的会话文件服务器根本看不见（实测症状：
+    卡片永远不出现）。
+
+    ``external=True``（复用外部开发服务）时**必须摘掉根 conftest 钉住的目录变量**：
+    根 ``conftest.py`` 现在**覆盖写** ``XDG_DATA_HOME`` 等四个变量（每 run 一个
+    mkdtemp）。我们自己起的服务器子进程继承同一份 env → 两边一致；但外部服务是从
+    **干净 shell** 起的（真实用户目录），本进程算出来的是临时目录，会话文件就写到
+    了服务器看不见的地方（实测症状同上：卡片永远不出现，且只在复用外部服务时红）。
     """
     from fp_core.config import get_data_dir
 
-    d = Path(get_data_dir()) / "sessions"
+    if external:
+        saved = {k: os.environ.pop(k, None) for k in _DIR_VARS}
+        try:
+            d = Path(get_data_dir()) / "sessions"
+        finally:
+            for k, v in saved.items():
+                if v is not None:
+                    os.environ[k] = v
+    else:
+        d = Path(get_data_dir()) / "sessions"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _sessions_dir() -> Path:
+    assert _SESSIONS_DIR is not None, "_pin_sessions_dir 夹具未生效（辅助函数须在用例内调用）"
+    return _SESSIONS_DIR
 
 
 def _make_session(tmp_title: str = "e2e 原始标题") -> str:

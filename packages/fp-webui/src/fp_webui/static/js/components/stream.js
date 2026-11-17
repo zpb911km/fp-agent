@@ -27,6 +27,17 @@ var _stream = null;
 // 序号（_stream.turnSeq）。_stream 终轮**不销毁**（迟到 token 要并入本轮元素），
 // 于是它天然会活过轮次边界——没有序号就无法区分「本轮卡片」与「N 轮前的卡片」。
 var _turnSeq = 0;
+// 最近若干轮已渲染的正文字（finalizeStreamRound 落定的权威全文，滚动窗口）：
+// 用来识别「更早轮次迟到的正文帧」。后端 _pub 是 fire-and-forget，末批 token 曾
+// 排在 llm_end 之后，若此时下一轮已 startStreamRound，这批文本就落进**新卡片**
+// → 同一条回复显示两次（后端侧已由 io.drain() 从源头钉住顺序，这里是前端侧防线）。
+//
+// 为什么是**窗口**而不是"最后一个"：迟到帧未必只晚一轮。实测形状是「第 2 轮已
+// done，第 1 轮的末批 token 才刷出」——只存最后一轮的话，判据已被第 2 轮覆盖，
+// 这段文本就漏检并另起一张卡（e2e `late_tail_chunk_into_next_round` 抓到的正是
+// 这个）。窗口取 4 轮足够覆盖批量缓冲可能积压的轮数，且成本可忽略。
+var _sealedTexts = [];
+var SEALED_WINDOW = 4;
 var THINK_FLUSH_MS = 50;    // 思考文本 DOM flush 节流
 var CONTENT_FLUSH_MS = 100; // 正文 markdown 重渲染节流
 
@@ -153,6 +164,19 @@ export function streamContentChunk(chunk) {
   // 思考栏在思考仍在进行时就被折叠（用户看到的就是「思考栏没展开/提前收起」）。
   // 只让步进真实文本的 chunk 承担折叠与建卡。
   if (!chunk) return;
+  // 迟到帧防御（见 _sealedTexts 注释）：本轮还没有任何正文字，且这批文本正是
+  // **某个已落定轮次**全文的**尾段** → 它是那一轮的末批 token，丢掉即可。
+  // 丢弃是安全的：即使误判（新一轮首帧恰好与上轮尾段同文），该轮 llm_end 的
+  // finalContent 会整段重渲染权威全文，用户看到的正文不会少字。
+  // 单字符/两字符的 chunk（换行、"。"）尾段匹配没有分辨力，不参与判定。
+  if (chunk.length >= 3 && (!_stream || !_stream.contentText)) {
+    for (var i = 0; i < _sealedTexts.length; i++) {
+      if (_sealedTexts[i].slice(-chunk.length) === chunk) {
+        console.debug('[stream] 丢弃已落定轮次的迟到正文帧', chunk.length);
+        return;
+      }
+    }
+  }
   if (!_stream) startStreamRound();
   // 正文到达 → 思考块折叠（用户决策：正文前展开，正文流式时折叠）
   if (_stream.thinkEl) foldThinkEl(_stream);
@@ -203,6 +227,12 @@ export function finalizeStreamRound(finalContent) {
     s.contentEl.innerHTML = renderMarkdown(finalContent);
     renderMath();
   }
+  // 落定本轮正文字：供 streamContentChunk 识别「更早轮次的迟到帧」
+  var sealed = finalContent != null ? finalContent : s.contentText;
+  if (sealed) {
+    _sealedTexts.push(sealed);
+    if (_sealedTexts.length > SEALED_WINDOW) _sealedTexts.shift();
+  }
   scrollToBottom();
   return shown;
 }
@@ -242,5 +272,8 @@ export function detachStreamDom() {
   stopThinkTicker(_stream);
   _stream.thinkEl = null;
   _stream.contentEl = null;
+  // 容器已清空：历史会由 REST 重拉权威渲染，旧轮次的正文字不再作判据
+  // （留着会把新一轮首帧误判成迟到帧——虽然终渲染能兜住，但没必要冒险）。
+  _sealedTexts = [];
 }
 

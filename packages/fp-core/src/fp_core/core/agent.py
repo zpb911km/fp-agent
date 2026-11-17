@@ -490,6 +490,12 @@ class Agent:
                 # 无论异常与否都结束流
                 with contextlib.suppress(Exception):
                     io.stream_end()
+                    # 把已排队的 token/stream_end 真正发完再交棒：紧随其后的
+                    # ON_AFTER_LLM_CALL → EventBridge(llm_end) 是同步落地的，
+                    # 不等就会越过它们先到前端（真机帧序曾是 llm_end → done
+                    # → chunk → stream_end；前端只能把迟到正文并进"当前轮"，
+                    # 跨轮时同一条回复显示两次）。
+                    await io.drain()
 
         if assistant_msg is None:
             # 流结束但没拿到 done 事件（异常分支）

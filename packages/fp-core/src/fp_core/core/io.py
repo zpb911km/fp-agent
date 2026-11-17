@@ -84,6 +84,19 @@ class IOChannel:
     def stream_reset(self):
         """异常恢复：强制重置流式输出状态（默认无操作）"""
 
+    async def drain(self) -> None:
+        """等待「已排队但未落地」的输出全部发送完毕（默认无操作）。
+
+        为什么需要：本类通道多为**异步投递**（WebSocketIO 的 _pub 是
+        `ensure_future`，见下），调用方把 token 交出去的那一刻它们只是"排队"。
+        若调用方紧接着用**同步落地**的通道发布收尾事件（EventBridge 的
+        llm_end 就是 `await publish`），收尾事件会越过还在排队的 token 先到达
+        前端：实测真机帧序曾是 `llm_end → done → thinking_content → chunk →
+        stream_end`，前端只能把迟到的正文并进"当前轮"，跨轮时就成了同一条
+        回复显示两次。由生产者在自己交棒前 `await drain()`，可把顺序钉成
+        逻辑顺序（token → stream_end → llm_end → done）。
+        """
+
     # ── 工具调用展示 ─────────────────────────────────
 
     def tool_call(self, name: str, args: dict[str, Any]):
@@ -153,6 +166,9 @@ class WebSocketIO(IOChannel):
     # 攒满 _BATCH_CHARS 或距首个未刷 token _BATCH_SECONDS 秒即发一批。
     _BATCH_CHARS = 512
     _BATCH_SECONDS = 0.05
+    # drain() 等待「在途投递落地」的总预算：正常情况只需几毫秒（一批 flush），
+    # 超预算即视为有订阅者卡死，放手继续（见 drain 文档）。
+    _DRAIN_BUDGET_S = 2.0
 
     def __init__(self, event_bus: EventBus):
         # EventBus 已下沉至 core（fp_core.core.events），此处为强类型引用；
@@ -167,6 +183,10 @@ class WebSocketIO(IOChannel):
         self._think_buf: list[str] = []
         self._write_buf: list[str] = []
         self._flush_handle: asyncio.TimerHandle | None = None
+        # 在途投递：_pub 的 fire-and-forget 任务登记在此，供 drain() 等待。
+        # 不登记就无法回答「我刚才交出去的 token 到底落地了没有」，
+        # 收尾事件（llm_end/done）于是可能越过它们先到前端（见 drain 文档）。
+        self._pending_pubs: set[asyncio.Task[Any]] = set()
 
     # ── 供 WebSocket 处理器调用 ─────────────────────────
 
@@ -206,8 +226,34 @@ class WebSocketIO(IOChannel):
     # ── IO 接口 ─────────────────────────────────────────
 
     def _pub(self, type_: str, **data: Any) -> None:
-        """向 EventBus 发布事件（fire-and-forget）"""
-        asyncio.ensure_future(self._event_bus.publish({"type": type_, **data}))
+        """向 EventBus 发布事件（fire-and-forget，但在途任务登记供 drain 等待）"""
+        task = asyncio.ensure_future(self._event_bus.publish({"type": type_, **data}))
+        self._pending_pubs.add(task)
+
+        def _retire(t: asyncio.Task[Any]) -> None:
+            self._pending_pubs.discard(t)
+            if not t.cancelled():
+                t.exception()  # 取走异常，免得报 "Task exception was never retrieved"
+
+        task.add_done_callback(_retire)
+
+    async def drain(self) -> None:
+        """等待已排队但未落地的输出全部发送完毕（见 IOChannel.drain 的缘由）。
+
+        EventBus.publish 内部还会再广播给订阅者，等待期间可能排入新任务，所以按轮
+        清空而不是 gather 一次。**必须有总预算**：某个订阅者若永久挂起（卡住的
+        WebSocket 写、死锁的插件订阅），无限等会把整轮对话一起拖死——宁可漏等，
+        也不能卡住生产者，故超预算就放手（未完成的任务留在背景继续，不影响本轮）。
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._DRAIN_BUDGET_S
+        while self._pending_pubs:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            batch = list(self._pending_pubs)
+            await asyncio.wait(batch, timeout=remaining)
+            self._pending_pubs.difference_update(batch)
 
     def info(self, text: str):
         self._pub("info", content=text)
