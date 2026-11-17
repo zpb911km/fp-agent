@@ -20,6 +20,7 @@ from pathlib import Path
 from fp_core.logger import get_logger
 from fp_core.plugins.zeta.discovery import default_peers_dir
 from fp_core.plugins.zeta.domain import normalize_peer_name
+from fp_core.plugins.zeta.identity import ensure_private_dir
 
 logger = get_logger()
 
@@ -64,9 +65,15 @@ class DirTransport:
         return self.root / f"{self._inbox_name(name)}.inbox"
 
     def deliver(self, to: str, text: str) -> str:
-        """投递一条消息（原子写）。返回 msg_id。对方离线也成立。"""
+        """投递一条消息（原子写）。返回 msg_id。对方离线也成立。
+
+        **收件箱必须是私有的（0700）**：它是注入面——能写进来的进程就能往对方的
+        上下文里塞一条 ``user`` 消息。过去目录是 775（同组可写），等于把注入面
+        开放给同组所有人。
+        """
         d = self.inbox_dir(to)
-        d.mkdir(parents=True, exist_ok=True)
+        if ensure_private_dir(d):
+            logger.warning(f"[zeta] 收件箱权限过宽已收紧为 0700：{d}")
         msg_id = uuid.uuid4().hex
         target = d / f"msg-{msg_id}.json"
         tmp = target.with_name(target.name + ".tmp")
@@ -75,10 +82,17 @@ class DirTransport:
         return msg_id
 
     def drain(self, name: str) -> list[str]:
-        """取走自己 inbox 里全部待处理消息（消费即移入 .processed/）。"""
+        """取走自己 inbox 里全部待处理消息（消费即移入 .processed/）。
+
+        **收件方也收紧权限**（收件方自愈）：``deliver`` 只保护"经我手投出去的信"，
+        而历史遗留的 775 目录、或是别人别处写进来的 inbox，只有**读的那一刻**才
+        一定在收件方手里。防御性重复一次，代价是一年几次 ``chmod``。
+        """
         d = self.inbox_dir(name)
         if not d.exists():
             return []
+        if ensure_private_dir(d):
+            logger.warning(f"[zeta] 收件箱权限过宽已收紧为 0700：{d}")
         done = d / ".processed"
         done.mkdir(exist_ok=True)
         out: list[str] = []

@@ -107,8 +107,23 @@ fp_core/
 ├── tools/           # __init__.py（ToolRegistry）+ core.py（核心工具）+ extensions/
 ├── plugins/         # base/plugin.py（Plugin/PluginRegistry）+ memory/ task_system/ shortcircuit/ zeta/
 ├── commands/  prompts/  api/     # 斜杠命令实现、系统提示词模板、portal.py 对外门面
+├── spawn.py         # spawn 契约唯一模块：FP_SPAWN_DEPTH 深度判据｜child_env 子进程环境｜declare_entry 入口声明
 └── taskmap/         # 任务图模型、渲染、存取
 ```
+
+## spawn 契约（`fp_core.spawn`）
+
+核心**不含**任何派遣工具，只含「一个实例被另一个实例拉起」这件事的契约。它是纯函数/常量模块，谁都能用，核心不知道有谁在用：
+
+| 接口 | 作用 |
+|------|------|
+| `declare_entry(argv)` / `entry()` | 前端声明「我被这样拉起」——替代写死 `-m fp_cli.main`，让派遣方无需知道前端是谁（依赖倒置） |
+| `depth()` / `MAX_DEPTH` / `can_spawn()` | 当前实例被拉起的层级；超限拒绝再拉（防自我复刻雪崩） |
+| `child_env(...)` | 构造子进程环境（不含全局 `os.environ` 污染，只带本契约字段） |
+| `is_spawned()` / `source()` / `parent_sid()` / `current_sid()` | 消费方判据：我是不是被拉起的、谁拉的我、上一级会话 |
+| `SILENT_ENV` / `QUIET_ENV` | 子实例静默约定：被拉起时不抢终端输出 |
+
+前端经 `fp_core.api.spawn` 转出（协议 §5 只许导入 `fp_core.api`），核心侧与 L4 资产直接导入 `fp_core.spawn`。
 
 ## 文档
 

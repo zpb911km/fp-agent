@@ -30,6 +30,7 @@ from typing import Any
 from fp_core.core.handoff import perform_exec_reload
 from fp_core.core.state import get_current_state
 from fp_core.platform_utils import get_data_dir
+from fp_core.spawn import is_spawned
 
 TOKEN_TTL = 900  # 动态口令有效期（秒）：15 分钟，一次性
 
@@ -79,7 +80,7 @@ async def execute(params: dict[str, Any]) -> str:
     token = str(params.get("token") or "").strip()
 
     # 子进程内禁止 reload：exec 会破坏父子 stdout 回传契约
-    if os.environ.get("FP_IS_SUBAGENT") == "1":
+    if is_spawned():
         return "🚫 子 agent 内禁止 reload（exec 会破坏父子进程契约）。请在主实例执行。"
 
     data_dir = get_data_dir()

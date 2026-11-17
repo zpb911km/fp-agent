@@ -27,7 +27,7 @@ def _render(
 ) -> list[str]:
     """调用 shutdown_panel 并捕获输出行"""
     buf = io.StringIO()
-    env = {k: v for k, v in os.environ.items() if k != "FP_SUBAGENT_SILENT"}
+    env = {k: v for k, v in os.environ.items() if k != "FP_SILENT"}
     with patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(buf):
         shutdown_panel(
             summary=summary,

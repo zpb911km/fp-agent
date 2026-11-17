@@ -32,7 +32,7 @@ fp --keys             # 启动即打开键位面板（无 TTY 时打印键位表
 | 条件 | 降级原因 |
 |------|---------|
 | `FP_NO_TUI=1` | 显式关闭 TUI |
-| `FP_IS_SUBAGENT=1` | subagent 子进程 |
+| `FP_SPAWN_DEPTH>=1` | 被拉起的子实例（不继承父的交互前端） |
 | stdin 或 stdout 不是 TTY | 管道 / 重定向 |
 | `TERM=dumb` | 终端不支持交互渲染 |
 | 未安装 `textual` | 依赖缺失 |

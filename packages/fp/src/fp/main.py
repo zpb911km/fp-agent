@@ -93,6 +93,18 @@ def main():
 
     portal.ctl.bootstrap()
 
+    # ── 声明「怎么把我再拉起一次」（spawn 契约，依赖倒置）──
+    # 组合根是最适合知道「子实例长什么样」的位置：它本就同时认识所有前端。
+    # 各前端可以在自己的 main() 里覆盖（fp_cli 就是这么做的），但**核心与扩展
+    # 一律不得写死拉起命令**——那会让派遣能力绑死在某个具体前端上。
+    #
+    # 用长选项 ``--message`` 而不是 ``-m``：顶层 `-m` 有双义（`-m cli` 是模式，
+    # `-m 你好` 是消息），子任务文本恰好是 "cli"/"webui"/"acp" 时会被误判成模式。
+    # `--message` 不被顶层预扫描改写，原样透传，没有这个歧义。
+    from fp_core.api.spawn import declare_entry
+
+    declare_entry([sys.executable, "-m", "fp.main", "--message"])
+
     # ── 子命令前置路由：fp ext / fp docs 在顶层 argparse 之前识别 ──
     # 若在 parse_known_args 之后才识别，`fp ext -h` 的 -h 会被顶层解析劫持，
     # 显示顶层帮助而非子命令帮助。前置路由让子命令拿到原始参数。

@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from zeta_signing import make_svc
+
 from fp_core.plugins.zeta import codec
 from fp_core.plugins.zeta.discovery import SharedDirBackend, build_card
 from fp_core.plugins.zeta.domain import (
@@ -19,13 +21,12 @@ from fp_core.plugins.zeta.peer import PeerService
 from fp_core.plugins.zeta.transport import DirTransport
 
 
-def _svc(name: str, root: Path, injected: list[tuple[str, str]]) -> PeerService:
-    return PeerService(
-        name=name,
-        backend=SharedDirBackend(root),
-        transport=DirTransport(root),
-        inject=lambda k, c, *, wake=False: injected.append((k, c)),
-    )
+def _svc(name: str, root: Path, injected: list[tuple[str, str]], *, publish: bool = True) -> PeerService:
+    """带密钥、带名片、带审计落 tmp 的实例（签名路径即生产路径，见 zeta_signing）。
+
+    ``publish=False`` = 只起服务不发名片：用于"对方还没上线/已搬走"的场景。
+    """
+    return make_svc(name, root, lambda k, c, *, wake=False: injected.append((k, c)), publish=publish)
 
 
 # ── codec 往返 ──────────────────────────────────────────
@@ -97,7 +98,7 @@ def test_offline_leave_message(tmp_path: Path):
     """对方离线：消息仍投（留话），上线后能收到——邻居搬家无所谓。"""
     injected: list[tuple[str, str]] = []
     a = _svc("A", tmp_path, injected)
-    b = _svc("B", tmp_path, injected)
+    b = _svc("B", tmp_path, injected, publish=False)  # 还没上线：名字查不到
 
     _msg_id, online = a.send("B", "在吗？", topic="chat")
     assert online is False, "B 未发布名片 → 判定离线"

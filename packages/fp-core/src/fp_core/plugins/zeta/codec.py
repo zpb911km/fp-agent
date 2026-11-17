@@ -115,6 +115,7 @@ def envelope_to_wire(env: Envelope) -> dict[str, Any]:
         "payload": payload_to_wire(env.payload),
         "codec_meta": env.codec_meta,
         "sig": env.sig,
+        "hops": env.hops,
     }
 
 
@@ -132,6 +133,7 @@ def envelope_from_wire(d: dict[str, Any]) -> Envelope:
         sent_at=float(d.get("sent_at") or 0.0),
         codec_meta=cast("dict[str, Any] | None", d.get("codec_meta")),
         sig=d.get("sig"),
+        hops=int(d.get("hops") or 0),
     )
 
 
@@ -142,3 +144,18 @@ def encode(env: Envelope) -> str:
 
 def decode(text: str) -> Envelope:
     return envelope_from_wire(cast("dict[str, Any]", json.loads(text)))
+
+
+def signing_payload(env: Envelope) -> bytes:
+    """签名覆盖的字节：wire 去掉 ``sig`` 自身后的规范化 JSON。
+
+    **为什么在 codec 而不在 identity**：签的是"这封信在线上长什么样"，那是 codec
+    的知识；密钥怎么用是 identity 的知识。两边各懂一半、在 peer 处接起来，任何
+    一边换实现（换 codec / 换算法）都不会逼另一边跟着改。
+
+    去掉 ``sig`` 是自指消除：签名不能覆盖自己。``canonical_json`` 保证同一封信
+    在双方得到同一串字节（否则验签恒失败）。
+    """
+    wire = envelope_to_wire(env)
+    wire.pop("sig", None)
+    return canonical_json(wire).encode("utf-8")

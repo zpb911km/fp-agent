@@ -67,13 +67,12 @@ def test_is_interactive_rejects_noninteractive_flags(monkeypatch):
     assert setup._is_interactive("cli", ["--message=hi"]) is False
 
 
-def test_is_interactive_rejects_subagent(monkeypatch):
+def test_is_interactive_rejects_spawned(monkeypatch):
     monkeypatch.setattr(sys, "stdin", _TTY())
-    monkeypatch.setenv("FP_IS_SUBAGENT", "1")
-    assert setup._is_interactive("cli", []) is False
-    monkeypatch.delenv("FP_IS_SUBAGENT")
-    monkeypatch.setenv("FP_SUBAGENT_ROLE", "{}")
-    assert setup._is_interactive("cli", []) is False
+    monkeypatch.delenv("FP_SPAWN_DEPTH", raising=False)
+    assert setup._is_interactive("cli", []) is True  # 顶层：tty 就交互
+    monkeypatch.setenv("FP_SPAWN_DEPTH", "1")
+    assert setup._is_interactive("cli", []) is False  # 被 spawn 的子实例不进向导
 
 
 # ═══════════════════════════════════════════════════════════════

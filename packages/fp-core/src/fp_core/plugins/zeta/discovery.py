@@ -343,10 +343,13 @@ def build_card(
     status: PeerStatus = PeerStatus.IDLE,
     current_task: str | None = None,
     kind: NeighborKind = NeighborKind.FP_INSTANCE,
+    identity: dict[str, str] | None = None,
 ) -> NeighborCard:
     """构造一张自洽的名片（hash 已算好，可直接 publish）。
 
     ``workspace`` 是项目归属（路由键）；缺省回退 ``cwd``（C(a)：workspace = 启动目录）。
+    ``identity`` 是本实例公钥三元组（见 identity.py）——只有公钥进卡片，私钥永不出本机。
+    它参与 ``card_hash``，所以改公钥必然改 hash（改卡即事件，接收方的 TOFU 会看见）。
     """
     now = time.time()
     card = NeighborCard(
@@ -368,6 +371,7 @@ def build_card(
             skills=list(tags or []),
         ),
         roles=list(roles or []),
+        identity=dict(identity) if identity else None,
         heartbeat=now,
         issued_at=now,
     )

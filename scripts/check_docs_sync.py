@@ -170,6 +170,9 @@ DOC_RULES: list[tuple[str, list[str], list[str]]] = [
     # CI 工作流（矩阵 / 平台覆盖变化 → 测试文档同步；结构变更另确认贡献指南）
     (".github/workflows/*.yml", ["docs/dev/测试.md"], ["docs/CONTRIBUTING.md"]),
     ("pyproject.toml", ["docs/dev/测试.md"], []),
+    # 包级 pyproject：pytest.pythonpath / 测试依赖 / 构建元数据都会影响「怎么跑测试」
+    # （曾漏登记 → `packages/fp-core/pyproject.toml` 加 pythonpath 时门禁静默放行）
+    ("packages/*/pyproject.toml", ["docs/dev/测试.md"], []),
 ]
 
 # ── 反向关联：文档 → 关联代码文件（相对仓库根） ────────────────────────

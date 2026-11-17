@@ -188,6 +188,7 @@ class NeighborCard:
     capabilities: Capabilities = field(default_factory=Capabilities)
     roles: list[str] = field(default_factory=list[str])  # 自我声明立场（非指派）
     trust: TrustLevel = TrustLevel.STRANGER
+    identity: dict[str, str] | None = None  # 公钥三元组 {alg, kid, pub}（见 identity.py；只发公钥）
     heartbeat: float = 0.0
     issued_at: float = 0.0
     card_hash: str = ""
@@ -211,6 +212,7 @@ class NeighborCard:
             "capabilities": self.capabilities.to_dict(),
             "roles": list(self.roles),
             "trust": self.trust.value,
+            "identity": dict(self.identity) if self.identity else None,
             "heartbeat": self.heartbeat,
             "issued_at": self.issued_at,
             "card_hash": self.card_hash,
@@ -241,6 +243,9 @@ class NeighborCard:
             capabilities=Capabilities.from_dict(d.get("capabilities") or {}),
             roles=list(d.get("roles") or []),
             trust=TrustLevel(d.get("trust", TrustLevel.STRANGER.value)),
+            identity={str(k): str(v) for k, v in cast("dict[str, Any]", d["identity"]).items()}
+            if isinstance(d.get("identity"), dict)
+            else None,
             heartbeat=float(d.get("heartbeat") or 0.0),
             issued_at=float(d.get("issued_at") or 0.0),
             card_hash=str(d.get("card_hash") or ""),
@@ -271,7 +276,8 @@ def verify_card(card: NeighborCard) -> list[str]:
     - card_hash 必须与内容一致（防篡改/半写）；
     - 必填字段非空；
     - 端点地址合法（非空）；
-    签名验证（sig）留待 P3 引入密钥设施；STRANGER 互访时强制。
+    名片 ``sig`` 的验证在收件路径（``identity.verify_sig``）做——本函数只做结构判定，
+    因为它同时被「还没拿到对方公钥」的场景调用（首次发现时）。
     """
     issues: list[str] = []
     if not card.name:
@@ -344,7 +350,8 @@ class Envelope:
     ttl: Ttl = field(default_factory=Ttl)
     sent_at: float = 0.0
     codec_meta: dict[str, Any] | None = None  # codec 专属，IR 视为不透明 kv
-    sig: str | None = None
+    sig: str | None = None  # 归属签名 "ed25519:<kid>:<b64>"，覆盖 canonical(信封去 sig)
+    hops: int = 0  # 已被转发次数（本实例**永不**转发；收到 hops>=1 即拒收）
 
     def should_inject(self) -> bool:
         """只有 SEMANTIC 注入实例；MECHANICAL 由网关直接应答（红线 #2）。"""

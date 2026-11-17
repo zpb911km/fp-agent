@@ -27,6 +27,7 @@ import tempfile
 from collections.abc import Iterable
 from typing import Any
 
+from fp_core.api.spawn import is_spawned
 from fp_core.platform_utils import restrict_file_permissions
 
 
@@ -84,7 +85,7 @@ def _is_interactive(mode: str, passthrough: Iterable[str]) -> bool:
     """
     if mode == "acp":
         return False
-    if os.environ.get("FP_IS_SUBAGENT") == "1" or os.environ.get("FP_SUBAGENT_ROLE"):
+    if is_spawned():
         return False
     for tok in passthrough:
         if tok == "--headless" or tok == "--message" or tok.startswith("--message="):

@@ -17,9 +17,10 @@ from typing import Any, cast
 from fp_cli.appearance import tui_glyph
 from fp_cli.style import apply_style, color_supported, truncate
 from fp_core.api import TokenUsage
+from fp_core.api.spawn import SILENT_ENV
 
 # ── 静默模式：子 agent 执行时抑制所有终端输出 ──────────
-_FP_SILENT = os.environ.get("FP_SUBAGENT_SILENT") == "1"
+_FP_SILENT = os.environ.get(SILENT_ENV) == "1"
 
 
 def _silent() -> bool:

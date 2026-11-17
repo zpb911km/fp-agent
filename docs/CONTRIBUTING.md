@@ -297,7 +297,9 @@ echo "你是谁" | fp                   # 测试系统提示词
   与 `packages/fp-terminal/tests/*.py` 变更会要求 [dev/测试.md](dev/测试.md)
   确认（尤其新增测试文件时，文件清单表需同步）。WebUI 前端静态资源
   （`static/*.js|css|html`）关联 [guide/WebUI手册.md](guide/WebUI手册.md)，
-  根 `pyproject.toml`（工具链配置）同样关联测试文档。
+  根 `pyproject.toml`（工具链配置）同样关联测试文档；**包级** `packages/*/pyproject.toml`
+  同理（`pytest.pythonpath`、测试依赖、构建元数据都会影响「怎么跑测试」——这条规则曾
+  漏登记，某次给 `packages/fp-core/pyproject.toml` 加 `pythonpath` 时门禁静默放行）。
 - **类型门禁（pyright strict）**：pre-commit 钩子 `pyright` 以
   [pyrightconfig.json](../pyrightconfig.json)（`typeCheckingMode: strict`、
   Python 3.14）做**全仓**判定（`pass_filenames: false`，不按本次文件切片），

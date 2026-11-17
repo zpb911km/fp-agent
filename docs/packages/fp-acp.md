@@ -28,6 +28,10 @@ JSON-RPC 报文（FP 自身日志与显示层被重定向到 `stderr`，故 IDE 
 
 - 离开 IDE 直接手敲 `fp-acp` 会看到它静待 `stdin` 输入——这是正常行为，不是卡死。
 - 无 TCP 监听、无 `--host/--port`、无 `tcp://`：安全性由「只能被父进程通过管道驱动」保证。
+- 构造期以 `os.environ.setdefault` 置 `FP_QUIET=1`（不渲染 Logo/提示）。变量名取自
+  `fp_core.api.spawn.QUIET_ENV`，**不硬编码字符串**——quiet/silent 这族变量原先散落在
+  各前端各写一遍，改名必漏一处，故统一收进 spawn 契约模块（该模块是 L3 前端 ↔ L4 资产
+  的公开接口）。用户的显式设置优先（`setdefault`，不自作主张覆盖）。
 
 ## 协议
 

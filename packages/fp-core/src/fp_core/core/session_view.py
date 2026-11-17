@@ -15,6 +15,7 @@
 import re
 from typing import Any, cast
 
+from fp_core.core.session import is_derived_session
 from fp_core.core.session_keywords import TOP_SHOW
 from fp_core.core.state import State
 
@@ -85,7 +86,7 @@ def session_list_text(state: State, *, main_only: bool = False, terms: list[str]
     current_sid = state.session_id
     items: list[tuple[int, str, dict[str, Any]]] = []
     for i, (sid, meta) in enumerate(sorted_items, 1):
-        if main_only and meta.get("source") == "subagent":
+        if main_only and is_derived_session(meta):
             continue
         if terms and not matches(meta, terms, sid):
             continue
@@ -94,10 +95,10 @@ def session_list_text(state: State, *, main_only: bool = False, terms: list[str]
     if not items:
         if terms:
             return f"🔍 没有匹配 `{' '.join(terms)}` 的会话（共 {len(sorted_items)} 个）"
-        return "没有主会话（当前全部为 subagent 子任务会话）"
+        return "没有主会话（当前全部为派生子任务会话）"
 
     if main_only:
-        header = ["## 📂 主会话列表（已过滤 subagent，序号不连续属正常）"]
+        header = ["## 📂 主会话列表（已过滤派生会话，序号不连续属正常）"]
     elif terms:
         header = [f"## 🔍 筛选 `{' '.join(terms)}`：{len(items)}/{len(sorted_items)} 个会话"]
     else:
@@ -114,7 +115,7 @@ def session_list_text(state: State, *, main_only: bool = False, terms: list[str]
         summary = meta.get("summary", "") or "(无摘要)"
         msg_count = meta.get("message_count", 0)
         marker = " ⬅" if sid == current_sid else ""
-        tag = "🔹 " if meta.get("source") == "subagent" else ""
+        tag = "🔹 " if is_derived_session(meta) else ""
         lines.append(f"- **[{i}]** {tag}{escape_md(summary)}{kw_suffix(meta)} ({msg_count}条, `{sid}`){marker}")
     return "\n".join(lines)
 
@@ -174,7 +175,7 @@ def render_search(state: State, terms: list[str]) -> str:
     for i, meta, snippets in entries[:DISPLAY_LIMIT]:
         summary = meta.get("summary", "") or "(无摘要)"
         marker = " ⬅" if meta.get("id") == current_sid else ""
-        tag = "🔹 " if meta.get("source") == "subagent" else ""
+        tag = "🔹 " if is_derived_session(meta) else ""
         lines.append(
             f"- **[{i}]** {tag}{escape_md(summary)}{kw_suffix(meta)} ({meta.get('message_count', 0)}条){marker}"
         )

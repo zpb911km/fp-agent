@@ -1868,10 +1868,12 @@ def tui_available() -> tuple[bool, str]:
     import os
     import sys
 
+    from fp_core.api.spawn import is_spawned
+
     if os.environ.get("FP_NO_TUI"):
         return False, "FP_NO_TUI 已设置"
-    if os.environ.get("FP_IS_SUBAGENT") == "1":
-        return False, "subagent 子进程"
+    if is_spawned():
+        return False, "被 spawn 的子进程"
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         return False, "非 TTY（管道/重定向）"
     if os.environ.get("TERM", "") == "dumb":

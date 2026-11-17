@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from zeta_signing import make_svc
 
 from fp_core.plugins.zeta.discovery import SharedDirBackend
 from fp_core.plugins.zeta.domain import normalize_peer_name
@@ -19,12 +20,7 @@ from fp_core.plugins.zeta.transport import DirTransport
 
 
 def _svc(name: str, root: Path, injected: list[tuple[str, str]]) -> PeerService:
-    return PeerService(
-        name=name,
-        backend=SharedDirBackend(root),
-        transport=DirTransport(root),
-        inject=lambda k, c, *, wake=False: injected.append((k, c)),
-    )
+    return make_svc(name, root, lambda k, c, *, wake=False: injected.append((k, c)))
 
 
 # ── 归一化本身 ──────────────────────────────────────────

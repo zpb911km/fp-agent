@@ -36,6 +36,7 @@ from fp_core.core.token_tracker import TokenTracker
 from fp_core.core.tool_executor import ToolExecutor
 from fp_core.logger import get_logger
 from fp_core.plugins.base.plugin import PluginRegistry
+from fp_core.spawn import QUIET_ENV, SILENT_ENV
 
 # ── 上下文 local IO 通道（防并发竞态） ─────────────────
 # ⚠️  contextvars 在 asyncio 中跨 Task 不会自动传播。
@@ -199,7 +200,7 @@ class Agent:
         # ConversationState：上下文状态的唯一所有者
         self._conv = ConversationState(initial_prompt)
 
-        if not os.environ.get("FP_SUBAGENT_QUIET"):
+        if not os.environ.get(QUIET_ENV):
             self.io.info(f"📂 新会话：{self.session.session_id}")
 
         # 从会话文件恢复历史
@@ -940,7 +941,7 @@ class Agent:
             )
 
         # ── 子 agent 静默模式：抑制 spinner / LLM 流等 UI 输出 ──
-        _silent = os.environ.get("FP_SUBAGENT_SILENT") == "1"
+        _silent = os.environ.get(SILENT_ENV) == "1"
 
         while True:
             # ── 中断检查（支持 signal handler 和 cancel() 两种途径） ──
@@ -1348,7 +1349,7 @@ class Agent:
     # ── #55 LLM 瞬时错误重试的可见性外抛（LLMService.on_retry 回调）──
     def _log_llm_retry(self, attempt: int, max_retries: int, exc: BaseException, delay: float) -> None:
         """重试发生时的告警（无人值守时便于事后定位抖动；子 agent 静默模式不刷屏）"""
-        if os.environ.get("FP_SUBAGENT_SILENT") == "1":
+        if os.environ.get(SILENT_ENV) == "1":
             return
         with contextlib.suppress(Exception):
             self.io.warning(f"↻ LLM 调用失败，{delay:.1f}s 后重试（第 {attempt}/{max_retries} 次）: {exc}")

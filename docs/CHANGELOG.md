@@ -7,6 +7,12 @@
 
 ### Added
 
+- **Zeta 归属签名（P0）：`from_` 不再只是自称，是签名**（`plugins/zeta/identity.py`）: 此前信封里的 `from_` 是发送方**自报**的字符串，任何进程都能写成邻居 B 的名字——「谁在说话」全靠自觉，收件侧所有信任判断都建立在这个自报值上。现每实例一对密钥（`kid` = 公钥指纹，钥落 `peers/` 0700），信封带 `identity{alg,kid,pub}` 与覆盖信封主体的 HMAC；收件侧 TOFU：首见即 pin，之后换钥**降档且不自动重 pin**（否则「换钥」就成了永久冒充入口），本地 `repin` 才能恢复。验签失败 / 缺 sig / 他钥冒充一律 `sig_fail` 留痕，正文按 `UNTRUSTED` 处理——**只许 chat、注入前截断**。身份与 sids 的锚点关系见协议 §4.3。
+- **Zeta 预算硬闸（P0）**（`plugins/zeta/budget.py` + `audit.py`）: 邻居的消耗只有「注入我的上下文」这一条通道，故闸门就设在这条通道上，三条**互相独立**（任一条单独拉满都不牵连另两条）：单条信封字节上限、滑动窗口配额 `Quota(msgs, nbytes, window)`（每邻居一份 + 全实例一份，一个发飙的邻居不会饿死其他邻居）、待注入堆积条数上限（堆积到顶就停铃，不靠无限入队撑爆内存）。超限**不注入**但必留审计条目（「没收到」和「被拒了」是两件事，混为一谈会让排查无从下手）；**被拒的消息不记账**——否则一次洪水会把配额吃满到窗口尽头，邻居正常发言也被连坐。配额只能由**本地人类**改 `FP_ZETA_BUDGET` 并重启生效，远程零续期入口：LLM 不能授予 LLM 权力。
+- **Zeta 入口形状闸门（P1）**（`plugins/zeta/peer.py` + `codec.py`）: 收件五道闸门的顺序被固定下来（协议 §4.4 有图），关键是**超限信封在解码前就拒**——先 `json.loads` 再量大小的做法，等于让对端自己决定我花多少 CPU/内存。同时补：`hops` 上限（转发来信 `hops >= max_hops` 一律拒，我方发信恒 `hops = 0`，不自举放大）、入站长字段截断、`ContentTrust` 贯通到 `poll()` 出口（降档信息不再在传输层丢掉）、机械消息永不注入。外部 A2A 例外放行但恒标 `UNVERIFIED`。
+- **对等置换测试**（`tests/test_zeta_parity.py`）: 把「对等」从口号变成可执行判定——**对等 = 动作集在 `from_` ↔ `to` 置换下封闭**。任何只在「我是收方」或「我是发方」一侧存在的动作，都说明这个实现里有一方是特权方，测试直接红。
+- **spawn 契约模块 `fp_core.spawn`**（核心**不含**任何派遣工具，只含「一个实例被另一个拉起」这件事的契约）: `declare_entry(argv)` / `entry()` —— 由**前端自己**声明「我怎么被拉起」，替代原先写死的 `-m fp_cli.main`（那是 L2→L3 反向依赖，换前端即失效），派遣方无需知道前端是谁；`depth()` / `MAX_DEPTH` / `can_spawn()` 防自我复刻雪崩；`child_env()` 只构造本契约字段、不整份 `os.environ` 外泄；`is_spawned()` / `source()` / `parent_sid()` / `current_sid()` 供消费方判据。前端经 `fp_core.api.spawn` 转出（协议 §5 只许导入 `fp_core.api`）。
+- **`generate_sid()` 能力公开化**（`core/session.py`）: 给「父进程预知子会话 sid」的场景用（spawned worker、外部编排器）——父进程先分配、再当启动参数传给子进程，则无论子进程怎么退出（含 SIGKILL）父进程都能兜底补写它的 meta。纯粹是把已有的 `_generate_sid` 提到正门，不是新增逻辑。
 - **会话可人工重命名（`summary_locked` 锁定语义）**: 新增 `SessionManager.set_summary(sid, summary)`（经接口组正门 `portal.ctl.sessions.rename`、WebUI `POST /api/sessions/{sid}/rename` 暴露），可改**任意**会话的摘要显示名。关键在于「写入即锁定」——`meta.summary_locked` 置位后，三条自动派生路径（`save_and_summarize` / `_refresh_summary` / `list_sessions` 的摘要回填）全体让路；否则用户刚起的名字会被下一条消息改回「末条 user 前 20 字」，改名有效期只有一个回合。`summary` 传空串 = 显式撤销（解锁并按末条 user 重算派生值）；改名不碰 `updated`（排序位不动）、不创建会话文件、`sid` 做形态校验防路径穿越。WebUI 侧栏会话卡 `⋯ → ✎ 重命名` 就地编辑（`Enter` 保存 / `Esc` 取消 / 失焦保存，上限读后端下发的 `summary_limit`），只局部更新单卡不重绘列表。列表端点新增下发 `summary_locked`，供前端决定预填内容（锁定的填当前名、未锁定的填空，避免误以为自动摘要是自己起的）。
 
 ### Fixed
@@ -23,6 +29,8 @@
 
 ### Changed
 
+- **subagent 从核心移出 → public 可选资产（依赖倒置）**: 派遣工具原在 `fp_core/tools/extensions/subagent_plugin.py`，于是「核心」里躺着一个只有部分用户需要、且要拉起一个**新实例**的 L4 能力——它必须知道前端是谁（写死 `python -m fp_cli.main`），也把核心绑到了「一定会 spawn」这个假设上。现降为 public 扩展资产；核心只剩 `fp_core.spawn` 契约（见 Added），资产靠 `declare_entry` 声明的入口去拉起子实例。回归 `test_subagent_asset.py`：**本机装了资产就测真实实现，没装就跳过**（不做「测一个假资产」那种自我安慰）。
+- **`FP_IS_SUBAGENT` → `FP_SPAWN_DEPTH`（数值语义）**: 布尔量表达不了「我被拉起了几层」，而 `MAX_DEPTH` 与 `can_spawn()` 都需要深度。现由 `fp_core.spawn.depth()` 统一判据，`FP_IS_SUBAGENT` 全局删除；同时「被 spawn 的子实例**不再自禁入网**」——zeta 的「完全对等」要求被拉起的实例照常是邻居。
 - **`[task]` 提醒回归极简（节拍器，不是看板）**: taskmap 重构（2.0.0）后提醒把任务 `title` 和活动节点的整段 `desc` 一并注入，而它由 `ON_BEFORE_LLM_CALL` **每轮**注入——真实任务数据实测单任务 295 字符、三任务并行 854 字符，其中一段节点描述原文 277 字被逐轮重复。现只留寻址必需的四个字段 `▶#id 节点 todo:n`（`⏸`/`❗`/`⏳` 表交付待批/阻塞/暂停），实测单任务 14 字符、三任务 48 字符；标题/目标/节点描述/待澄清一律留给 `task_read`/`task_list`。测试加长度预算断言（单 ≤20、三 ≤70）锁死防复发。
 - **`TOP_K=3` → `TOP_STORE=12` / `TOP_SHOW=5`**: 3 个词同时承担「列表展示」与「检索指纹」，目标相反。实测「蓝牙」在 kw 中出现 0 次不是抽不出来，是挤不进前 3。现在存储 12 个、列表渲染前 5 个、检索吃全 12 个。
 - **列表展示分工**: `kw_suffix()` 渲染 `kw[:TOP_SHOW]`（5 个）。summary 与 kw **不同源**（一个是末条 user 原话、一个是检索指纹），故后缀不再排除任何词，「同一个词不重复显示」的约束随之取消。

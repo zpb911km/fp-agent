@@ -5,9 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from zeta_signing import make_svc, publish_self, sign_env
+
 from fp_core.plugins.zeta import codec
 from fp_core.plugins.zeta.contracts import ContractExchange, contract_digest
-from fp_core.plugins.zeta.discovery import SharedDirBackend, build_card
 from fp_core.plugins.zeta.domain import Envelope, MsgKind, Payload
 from fp_core.plugins.zeta.peer import PeerService, encode_contract_msg
 from fp_core.plugins.zeta.transport import DirTransport
@@ -43,19 +44,14 @@ def _svc(
     injected: list[tuple[str, str]],
     exchange: ContractExchange | None = None,
 ) -> PeerService:
-    return PeerService(
-        name=name,
-        backend=SharedDirBackend(root),
-        transport=DirTransport(root),
-        inject=lambda k, c, *, wake=False: injected.append((k, c)),
-        exchange=exchange,
-    )
+    """带密钥/名片的实例：契约协商在生产里必然走签名路径，测试不该绕过它。"""
+    return make_svc(name, root, lambda k, c, *, wake=False: injected.append((k, c)), exchange=exchange)
 
 
 def _online(root: Path, *names: str) -> None:
-    backend = SharedDirBackend(root)
+    """按名发布（带公钥的）名片——与实例启动时同一套密钥。"""
     for nm in names:
-        backend.publish(build_card(name=nm, cwd=str(root), business="test"))
+        publish_self(nm, root)
 
 
 # ── propose：本地自检 → 投递 → 对方机器校验 ──────────────
@@ -106,6 +102,10 @@ def test_tampered_hash_is_detected_on_receipt(tmp_path: Path) -> None:
         payload=Payload(topic="contract", body=body),
         sent_at=1.0,
     )
+    # A 必须先发名片再盖章：收件方要靠**名片里的公钥**验签，没名片就只能判未验证
+    # （未验证只许 chat，contract 会被归属闸拒收，hash 校验根本轮不到执行）。
+    publish_self("A", tmp_path)
+    sign_env(env, "A", tmp_path)
     DirTransport(tmp_path).deliver("B", codec.encode(env))
     b.poll()
     answer = b.answer()

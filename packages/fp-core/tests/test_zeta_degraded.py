@@ -12,6 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, cast
 
+from zeta_signing import make_svc
+
 from fp_core.plugins.zeta import codec
 from fp_core.plugins.zeta.a2a_codec import (
     FP_PROFILE_URI,
@@ -41,12 +43,7 @@ def _contract(contract_id: str = "ctr-01J") -> dict[str, Any]:
 
 
 def _svc(name: str, root: Path, injected: list[tuple[str, str]]) -> PeerService:
-    return PeerService(
-        name=name,
-        backend=SharedDirBackend(root),
-        transport=DirTransport(root),
-        inject=lambda k, c, *, wake=False: injected.append((k, c)),
-    )
+    return make_svc(name, root, lambda k, c, *, wake=False: injected.append((k, c)))
 
 
 def _extern_a2a(name: str, url: str = "http://127.0.0.1:9999", *, fp_profile: bool = False) -> dict[str, Any]:

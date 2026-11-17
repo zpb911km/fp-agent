@@ -66,7 +66,7 @@ def test_two_instances_negotiate_contract_end_to_end(monkeypatch: pytest.MonkeyP
     peers = tmp_path / "peers"
     monkeypatch.setenv("FP_ZETA_PEERS_DIR", str(peers))
     monkeypatch.delenv("FP_ZETA_DISABLE", raising=False)
-    monkeypatch.delenv("FP_IS_SUBAGENT", raising=False)
+    monkeypatch.delenv("FP_SPAWN_DEPTH", raising=False)
 
     ws_a, ws_b = tmp_path / "ws-a", tmp_path / "ws-b"
     ws_a.mkdir()
@@ -177,7 +177,7 @@ def test_two_instances_display_prefix_in_to_still_rings(monkeypatch: pytest.Monk
     peers = tmp_path / "peers"
     monkeypatch.setenv("FP_ZETA_PEERS_DIR", str(peers))
     monkeypatch.delenv("FP_ZETA_DISABLE", raising=False)
-    monkeypatch.delenv("FP_IS_SUBAGENT", raising=False)
+    monkeypatch.delenv("FP_SPAWN_DEPTH", raising=False)
 
     ws_a, ws_b = tmp_path / "ws-a", tmp_path / "ws-b"
     ws_a.mkdir()

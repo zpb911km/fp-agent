@@ -35,6 +35,9 @@ exclude = ["*.md"]
 [tool.pytest.ini_options]
 pythonpath = [
   "packages/fp-core/src",
+  # 测试共享脚手架（如 zeta_signing：带密钥/名片的实例装配）。pytest 9 不再把
+  # 测试目录本身塞进 sys.path，故显式声明，否则 `from zeta_signing import ...` 失败。
+  "packages/fp-core/tests",
   "packages/fp/src",
   "packages/fp-terminal/src",
   "packages/fp-webui/src",

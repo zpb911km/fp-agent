@@ -39,6 +39,7 @@ from importlib.metadata import version as _pkg_version
 from typing import Any, cast
 
 from fp_core.api import ExitReason, HookContext, IOChannel, LifecycleHook, portal
+from fp_core.api.spawn import QUIET_ENV
 
 # ═══════════════════════════════════════════════════════════
 # ACP v1 常量
@@ -296,7 +297,7 @@ class ACPServer:
         实例生命周期归 portal.ctl（本类不再持有 Agent 引用）；
         open 在 start() 中调用（构造需 await ensure_initialized）。
         """
-        os.environ.setdefault("FP_SUBAGENT_QUIET", "1")
+        os.environ.setdefault(QUIET_ENV, "1")
 
         # ── 保存真正的 stdout 引用（JSON-RPC 通道） ──
         self._stdout = sys.stdout

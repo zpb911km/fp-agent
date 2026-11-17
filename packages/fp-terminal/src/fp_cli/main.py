@@ -12,6 +12,15 @@ from typing import Any
 
 from fp_core import config
 from fp_core.api import IOChannel, portal
+from fp_core.api.spawn import (
+    QUIET_ENV,
+    SILENT_ENV,
+    current_sid,
+    declare_entry,
+    is_spawned,
+    parent_sid,
+    source,
+)
 from fp_core.logger import Logger, set_logger
 
 from . import display
@@ -78,7 +87,7 @@ def _raw_sigterm_handler(signum: int, frame: FrameType | None):
 
 async def _send_single(message: str) -> None:
     """单次消息：发一条并回显（-m 与 --headless 组合共用通路）"""
-    if os.environ.get("FP_SUBAGENT_SILENT"):
+    if os.environ.get(SILENT_ENV):
         response = await portal.run.send(message)
         print(response.content, end="")
     else:
@@ -133,6 +142,11 @@ async def main():
     """主入口"""
     import argparse
 
+    # 依赖倒置：由**前端自己**声明「怎么把我再拉起一次」，供任意派遣方读用。
+    # 核心与扩展都不得写死 `-m fp_cli.main`——那是 L2→L3 反向依赖，且换前端即失效。
+    # 覆盖组合根 fp.main 的默认声明：直连 fp_cli 少一跳，且不经顶层 -m 双义预扫描。
+    declare_entry([sys.executable, "-m", "fp_cli.main", "--message"])
+
     parser = argparse.ArgumentParser(description="FP - AI Agent 命令行界面")
     parser.add_argument("-m", "--message", help="单次消息模式")
     parser.add_argument(
@@ -170,22 +184,13 @@ async def main():
     # 漏了这步，display/cli_io 的 tui_glyph() 会静默用内置默认（配置不生效）。
     install_appearance()
 
-    # 角色注入（多智能体编排器）：FP_SUBAGENT_ROLE 传 JSON。
-    # 实例以 getattr 盲取 role 属性（duck-typed），故用 SimpleNamespace 还原即可，
-    # 无需引入核心 AgentRole 类依赖。
+    # 角色注入（role）：仅经 portal.ctl.open(role=) 的公开 API 传入。
+    # 旧的 FP_SUBAGENT_ROLE 环境变量通道已删除——它的生产方（多智能体编排器）
+    # 随 0323da6 裁撤消失，判据恒为假，留着只有"看似可配"的误导。
     _role: Any = None
-    _role_json = os.environ.get("FP_SUBAGENT_ROLE")
-    if _role_json:
-        import json as _json
-        from types import SimpleNamespace as _SimpleNamespace
 
-        try:
-            _role = _SimpleNamespace(**_json.loads(_role_json))
-        except (ValueError, TypeError):
-            _role = None
-
-    # subagent 子进程：使用父进程预生成的会话 ID（父进程据此兜底补写 meta）
-    _sub_sid = os.environ.get("FP_SUBAGENT_SID") or None
+    # 被 spawn 的子实例：使用父进程预生成的会话 ID（父进程据此兜底补写 meta）
+    _sub_sid = current_sid() or None
 
     # ── 前端模式决策（L0 TUI / L1 经典 REPL）── 必须在 ctl.open(io=) 之前 ──
     # L2（headless/-m/管道）不进交互前端，走 CLIIO 打印通路。
@@ -219,12 +224,14 @@ async def main():
         # L1 降级可见性：用户应知道当前不在 TUI（排障第一现场）
         display.hint(f"{tui_glyph('paused')} 经典 REPL（{_tui_reason}）")
 
-    # subagent 标记：子进程自身先写 source + parent_sid（父进程会在结束时兜底）
-    if os.environ.get("FP_IS_SUBAGENT") == "1":
-        _parent_sid = os.environ.get("FP_SUBAGENT_PARENT_SID") or ""
-        _sub_meta: dict[str, Any] = {"source": "subagent"}
-        if _parent_sid:
-            _sub_meta["parent_sid"] = _parent_sid
+    # 子会话标记：子进程自身先写 source + parent_sid（派遣方会在结束时兜底）。
+    # source 由**派遣方**自报（FP_SPAWN_SOURCE），核心不认识任何具体派遣工具。
+    if is_spawned():
+        _sub_meta: dict[str, Any] = {}
+        if source():
+            _sub_meta["source"] = source()
+        if parent_sid():
+            _sub_meta["parent_sid"] = parent_sid()
         # create=False：只标记内存 meta，随首条消息一起落盘；
         # 没产出内容的子会话不该留下 0 长度会话文件
         portal.ctl.sessions.update_meta(create=False, **_sub_meta)
@@ -238,7 +245,7 @@ async def main():
     #   通过 asyncio.all_tasks().cancel() 注入 CancelledError。
     # agent._stream_chat 的 try/except 负责优雅捕获中断。
     signal.signal(signal.SIGINT, _raw_sigint_handler)
-    # SIGTERM 同样走优雅取消：父进程 subagent 超时先 terminate()，
+    # SIGTERM 同样走优雅取消：派遣方超时先 terminate()，
     # 让子进程有机会走 finally → shutdown → save_and_summarize 写摘要。
     # 使用专用软中断 handler（不 cancel task，否则 finally 里的 await 会中断）。
     # 平台语义（#170）：Windows 能装 SIGTERM 处理器，但系统从不投递该信号
@@ -246,7 +253,7 @@ async def main():
     signal.signal(signal.SIGTERM, _raw_sigterm_handler)
 
     # headless 无交互语境，logo 只会污染驻留日志；TUI 有自己的欢迎屏
-    if not os.environ.get("FP_SUBAGENT_QUIET") and not args.headless and not _use_tui:
+    if not os.environ.get(QUIET_ENV) and not args.headless and not _use_tui:
         display.print_logo(model=portal.run.status.model, resume=args.resume)
 
     try:
@@ -271,7 +278,7 @@ async def main():
             display.info(f"{tui_glyph('reload')} reload 续接：已恢复会话，继续上一轮对话…")
             print()
             resp = await portal.run.continue_()
-            if os.environ.get("FP_SUBAGENT_SILENT") and resp.content:
+            if os.environ.get(SILENT_ENV) and resp.content:
                 print(resp.content, end="")
 
         if args.message and not _reloaded:
@@ -285,7 +292,7 @@ async def main():
             # prompt_toolkit 已退场：裸 input（executor 不阻塞事件循环），无补全/历史
             # 版本更新提示（安全点之一）：读本地缓存，零网络等待；
             # headless/-m 不走这里，静默/安静环境也不打扰。
-            if not os.environ.get("FP_SUBAGENT_QUIET") and not os.environ.get("FP_SUBAGENT_SILENT"):
+            if not os.environ.get(QUIET_ENV) and not os.environ.get(SILENT_ENV):
                 _notice = display.take_update_notice()
                 if _notice:
                     display.hint(_notice)
@@ -337,7 +344,7 @@ async def main():
             except KeyboardInterrupt:
                 print()
     finally:
-        # 保证关闭一定执行：subagent 子进程无论何种退出路径
+        # 保证关闭一定执行：被 spawn 的子进程无论何种退出路径
         # 都能走到 save_and_summarize（生成摘要 + 保存上下文）
         await portal.ctl.close()
 

@@ -97,6 +97,53 @@ def session_file_path(sid: str) -> str:
     return _session_path(sid)
 
 
+def generate_sid() -> str:
+    """公开：生成一个尚未占用的会话 ID。
+
+    给「父进程预知子会话 sid」的场景用（spawned worker、外部编排器）：
+    由父进程先分配、再作为启动参数传给子进程，则无论子进程如何退出
+    （含 SIGKILL），父进程都能兜底补写它的 meta。
+
+    这是**能力公开化**，不是新增逻辑——底层仍是 ``_generate_sid``。
+    """
+    return _generate_sid()
+
+
+def tagged_summary(source: Any, summary: str) -> str:
+    """给非主会话的摘要加来源标签（``[<source>] …``），已带则原样返回。
+
+    **不认具体名字**：过去这里硬编码 ``source == "subagent"``，等于让核心
+    记住某个可选扩展的名字——扩展一旦搬出核心（或换名），标签逻辑就漂移。
+    现在标签由 ``source`` 值本身决定，任何扩展自报的 source 都能正确标注。
+    """
+    if not summary or not source:
+        return summary
+    tag = f"[{source}] "
+    return summary if summary.startswith(tag) else f"{tag}{summary}"
+
+
+def is_derived_session(meta: Any) -> bool:
+    """该会话是否**由别的会话派生**（被 spawn 出去跑子任务），而非用户直接开的。
+
+    判据是结构事实，不是名字：有 ``parent_sid``，或自报了 ``source``。
+    过去各消费方写 ``meta.get("source") == "subagent"``——核心因此记住了一个
+    可选扩展的名字，扩展一搬走（或改名），`/resume --main` 的过滤与 🔹 标记
+    就一起静默失效。改成认结构后，任何 spawn 方自报的 source 都被同等对待。
+    """
+    if not isinstance(meta, dict):
+        return False
+    known = cast("dict[str, Any]", meta)
+    return bool(known.get("parent_sid") or known.get("source"))
+
+
+def derived_tag(meta: Any) -> str:
+    """派生会话的来源标签（``"subagent"`` 之类），无来源时返回 ``""``。"""
+    if not isinstance(meta, dict):
+        return ""
+    src = cast("dict[str, Any]", meta).get("source")
+    return src if isinstance(src, str) and src else ""
+
+
 def session_trash_dir() -> str:
     """公开：空会话清理的回收目录（`{SESSIONS_DIR}/.trash/`）。
 
@@ -159,7 +206,14 @@ summary 是列表里一行一个的「路标」，不是摘要——它必须短
 """
 
 # 注入型前缀：这些开头的 user 消息是系统塞进来的，不是用户意图
-_SUMMARY_INJECTED = ("[背景信息]", "⁂", "[子图]", "[subagent]", "[任务]", "[铃声]", "[task]", "【")
+# 注：来源标签（`[subagent] ` 这类）不在此列——它们由 `tagged_summary()` 按
+# `source` **值本身**生成，核心不认识任何具体名字。判定见 `_ASCII_TAG_RE`。
+_SUMMARY_INJECTED = ("[背景信息]", "⁂", "[子图]", "[任务]", "[铃声]", "[task]", "【")
+
+# 来源标签的通用形状：`[<ascii-identifier>] `。ASCII 标识符是 FP 自己写的，
+# 中文方括号标签（`[重要]`）是用户写的——这条界线让「剥自己的标签」与
+# 「不碰用户文案」同时成立，而无需枚举扩展名。
+_ASCII_TAG_RE = re.compile(r"^\[[A-Za-z][A-Za-z0-9_.-]{0,23}\]\s")
 
 SUMMARY_LOCKED = "summary_locked"
 """meta 键：摘要已被**人工重命名**锁定（见 ``SessionManager.set_summary``）。
@@ -214,8 +268,12 @@ def _strip_injection(text: str) -> str:
         if not body or label.startswith("铃声") or body.startswith(("[铃声]", "⁂")):
             return ""
         return body
-    if s.startswith(("⁂", "[铃声]", "[subagent]", "[task]", "[任务]")):
+    if s.startswith(("⁂", "[铃声]", "[task]", "[任务]")):
         return ""
+    if _ASCII_TAG_RE.match(s):
+        # 只剩来源标签（`[subagent] ` 后无正文）：纯标记，无语义可剥
+        rest = _ASCII_TAG_RE.sub("", s, count=1).strip()
+        return rest
     return s
 
 
@@ -627,8 +685,7 @@ class SessionManager:
             # 哪怕它此刻为空（空名字是用户的表达，不是缺陷）。
             summary = derive_summary(None, last_user)
             if summary:
-                if meta.get("source") == "subagent" and not summary.startswith("[subagent] "):
-                    summary = f"[subagent] {summary}"
+                summary = tagged_summary(derived_tag(meta), summary)
                 healed = dict(meta)
                 healed["summary"] = summary
                 healed["message_count"] = out["message_count"]
@@ -805,8 +862,7 @@ class SessionManager:
         summary = derive_summary(None, _last_user_text(messages))
         if not summary:
             return
-        if self._meta.get("source") == "subagent" and not summary.startswith("[subagent] "):
-            summary = f"[subagent] {summary}"
+        summary = tagged_summary(derived_tag(self._meta), summary)
         self._meta["summary"] = summary
 
     def save_context(self, context: list[dict[str, Any]], meta_updates: dict[str, Any] | None = None) -> None:
@@ -995,8 +1051,8 @@ class SessionManager:
         source = (meta or {}).get("source")
         if source is None and target_sid == self._session_id:
             source = self._meta.get("source")
-        if summary and source == "subagent" and not summary.startswith("[subagent] "):
-            summary = f"[subagent] {summary}"
+        if summary:
+            summary = tagged_summary(source, summary)
 
         if meta is None:
             if not summary:

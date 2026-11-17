@@ -2,6 +2,11 @@
 
 > ACP（Agent Communication Protocol）是本项目的 JSON-RPC 2.0 远程调用协议，
 > 由 `fp-acp` 子包实现。
+>
+> **静默约定**：`ACPServer` 构造期以 `os.environ.setdefault` 置 `FP_QUIET=1`，
+> 不渲染 Logo/提示（`stdout` 只许出 JSON-RPC 报文）。变量名引自
+> `fp_core.api.spawn.QUIET_ENV` 而非硬编码——quiet/silent 这族跨层环境变量统一由
+> spawn 契约模块供给，避免「改名漏一处」的静默失效。用户显式设置优先。
 
 ## 📄 文档
 
