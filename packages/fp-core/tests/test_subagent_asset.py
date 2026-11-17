@@ -30,12 +30,28 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from fp_core.config import user_dirs
+from fp_core.config import EXT_LAYOUTS, EXT_SOURCES, user_dirs
+
+
+def _asset_roots() -> list[str]:
+    """三来源目录；外加「本机真实用户目录」下的同三来源（若根 conftest 给了）。
+
+    为什么需要后半截：根 ``conftest.py`` 会把用户目录钉到本次 run 的临时目录
+    （见 ``docs/dev/测试.md`` § 隔离用户目录），于是 ``user_dirs()`` 只剩空目录。
+    但本文件的语义恰恰是「**本机装了**资产就测真实实现，没装就跳过」——隔离不该
+    把它变成恒跳过（一次全量跑实测：23 个用例从 passed 静默变 skipped）。
+    根 conftest 钉住前会把真实数据根导出到 ``FP_TEST_REAL_DATA_DIR``，这里补进来。
+    """
+    roots = list(user_dirs("tools"))
+    real = os.environ.get("FP_TEST_REAL_DATA_DIR")
+    if real:
+        roots += [os.path.join(real, s, *EXT_LAYOUTS["tools"]) for s in EXT_SOURCES]
+    return roots
 
 
 def _load_asset():
     """按三来源优先级（private → public → fetched）加载磁盘上的 subagent 资产。"""
-    for d in reversed(user_dirs("tools")):
+    for d in reversed(_asset_roots()):
         path = os.path.join(d, "subagent_plugin.py")
         if not os.path.isfile(path):
             continue

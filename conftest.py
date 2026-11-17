@@ -13,7 +13,11 @@ Agent 构造时 check_llm_config() 拒绝 → 70 个用例连环挂。
 优先级 JSON > 环境变量，故开发者本机 config.json 照常生效，此默认值只兜底。
 """
 
+import atexit
+import importlib.util as _ilu  # 下方「可选依赖缺位」段用它探测 playwright（import 必须在顶部：E402）
 import os
+import shutil
+import tempfile
 from collections.abc import Generator
 from unittest.mock import patch
 
@@ -34,6 +38,43 @@ os.environ.setdefault("GIT_COMMITTER_EMAIL", "fp-tests@local")
 
 
 # ══════════════════════════════════════════════════════════════
+# 用户目录隔离：在这里**钉死**，别让「谁先 import」决定数据目录
+# ══════════════════════════════════════════════════════════════
+# 背景（2026-11-17 实测）：三个测试模块（fp-core/tests/test_config.py、
+# test_llm_providers.py、fp/tests/test_setup.py）在**模块 import 期**执行
+# `os.environ.setdefault("XDG_DATA_HOME", /tmp/fp_test_data)`，本意是「在
+# import config 之前隔离用户目录」。但 pytest 在**收集阶段**就 import 所有测试
+# 模块（远早于任何 fixture 运行）→ 整个 session 的 os.environ 被永久改写：
+# 这不是 monkeypatch，不会回滚，`platform_utils.get_data_dir()` 从此全进程
+# 返回 /tmp/fp_test_data/fp。两处真实伤害：
+#   1. 那个路径是**跨 run 共享**的固定常量 → 上一次跑的残留（token、会话、
+#      资产）会喂给下一次，红/绿取决于历史，不取决于代码。
+#   2. e2e 的 `server` fixture 起/复用一个 WebUI **子进程**后要读它的 token，
+#      而 token 落在服务器真正用的数据目录里；一旦两边理解不一致
+#      （复用人工起的 8899 服务时必然不一致）→ 401「Token 无效」或
+#      FileNotFoundError，且只在全量跑时复现、分包单跑全绿。
+# 根 conftest 的 import 早于一切测试模块，在这里钉死即让那三处 setdefault
+# 退化为 no-op。它们**保留**不动：`pytest packages/fp-core/tests` 时
+# rootdir=packages/fp-core，pytest 只从 rootdir 向下加载 conftest，本文件
+# 不参与，那时仍需模块级兜底（同 §_isolate_* 的 rootdir 边界说明）。
+# 每次 run 一个**全新**临时目录：跨 run 不串味。
+# 钉住之前先把「这台机器真实的数据根」记下来，导出给测试：少数用例的语义本
+# 就是「本机装了什么就测什么」（fp-core/tests/test_subagent_asset.py 动态加载
+# 已安装的 subagent 资产），隔离不该顺手把它们全变成「没装」而静默跳过。
+try:
+    from fp_core.platform_utils import get_data_dir as _real_get_data_dir
+
+    os.environ["FP_TEST_REAL_DATA_DIR"] = _real_get_data_dir()
+except Exception:  # 拿不到就不给旁证：那几个用例按「未安装」跳过，不影响其余
+    pass
+
+_TEST_ENV_DIR = tempfile.mkdtemp(prefix="fp_pytest_env_")
+for _var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "APPDATA", "LOCALAPPDATA"):
+    os.environ[_var] = _TEST_ENV_DIR
+atexit.register(shutil.rmtree, _TEST_ENV_DIR, True)  # ignore_errors：干净退出即可，清不掉不算失败
+
+
+# ══════════════════════════════════════════════════════════════
 # 可选依赖缺位时整目录不收集（e2e 需 playwright）
 # ══════════════════════════════════════════════════════════════
 # playwright 既不在各包 pyproject，也不在 docs/dev/测试.md 的测试依赖清单里
@@ -43,8 +84,7 @@ os.environ.setdefault("GIT_COMMITTER_EMAIL", "fp-tests@local")
 # 未装则整目录不收集：装了的本机照常跑 e2e，没装的环境静默跳过而非崩。
 # 注：`-m "not e2e"` 救不了——标记过滤发生在**导入之后**，模块顶层 import 已经炸；
 # `--ignore=...` 同为收集期忽略、能救，但要人手写每条命令，易漏 → 用 find_spec 自动判。
-import importlib.util as _ilu
-
+# （`_ilu` 的 import 在文件顶部：本文件的引导语句都在 import 之后执行，import 放这里会 E402）
 if _ilu.find_spec("playwright") is None:
     collect_ignore = ["packages/fp-webui/tests/e2e"]
 
