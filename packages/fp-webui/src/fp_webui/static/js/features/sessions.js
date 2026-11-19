@@ -442,7 +442,11 @@ function switchSession(sid) {
         var msg = document.createElement('div');
         msg.className = 'msg-group';
         msg.style.borderBottom = 'none';
-        msg.innerHTML = '<div class="msg" style="justify-content:center;padding:8px 0"><span style="color:var(--text-dim);font-size:12px">📂 已切换到 ' + sid.slice(0, 8) + '... 可发送消息继续对话</span></div>';
+        // cwd 是会话属性：跨项目切会话会把相对路径基准一起换掉，必须让用户看见
+        var dirNote = data.cwd_changed && data.cwd
+          ? '<br><span style="color:var(--text-dim);font-size:12px">ℹ️ 工作目录 → ' + escapeHtml(data.cwd) + '</span>'
+          : '';
+        msg.innerHTML = '<div class="msg" style="justify-content:center;padding:8px 0"><span style="color:var(--text-dim);font-size:12px">📂 已切换到 ' + sid.slice(0, 8) + '... 可发送消息继续对话</span>' + dirNote + '</div>';
         document.getElementById('messagesContainer').appendChild(msg);
         scrollToBottom(true);
       }

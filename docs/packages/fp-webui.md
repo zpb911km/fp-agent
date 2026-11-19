@@ -64,7 +64,7 @@ fp-webui --reload             # 开发用：uvicorn 热重载
   渲染器识别为下载链接（带 `Authorization` 头上传下载，token 不进 URL），404 就地转失效态。
 - **断连续传** — 连接只是传输层：断连只清推送任务与订阅，处理任务归属会话级 runtime 继续跑；
   重连带 `?seq=&run_id=` 协商，能重放走环形缓冲（`replay`），溢出或换轮则 `resync` 让前端全量重拉。
-- **本轮重放** — 会话文件在**轮次结束**才落盘，所以轮次进行中 REST `/messages` 里没有本轮。新开页
+- **本轮重放** — 会话文件在**轮次结束**才落盘，所以轮次进行中 GET `/messages` 里没有本轮。新开页
   （`seq=0`）或 `resync` 重连时若本轮仍在跑，服务端按 `SessionRuntime.turn_base_seq` 把
   `(turn_base_seq, 快照点]` 的整轮事件补发，并在 `connected.replay_base` 告知起点——前端据此把
   `lastSeq` **退回**该值（不是对齐到 `data.seq`），否则整批事件会被去重器丢弃。缺了它，agent 忙时

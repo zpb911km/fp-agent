@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Any, cast
 
 from fp_core import config
+from fp_core.core.cwd import current_cwd
 
 # 派生文件名
 INDEX_FILE = "_index.md"
@@ -49,8 +50,8 @@ def purpose_of(category: str) -> str:
 
 
 def local_root_dir() -> str:
-    """本地树根（项目内 .fp/memory）"""
-    return os.path.join(os.getcwd(), config.MEMORY_DIR_LOCAL)
+    """本地树根（项目内 .fp/memory）—— 按**会话** cwd 解析，不是进程 cwd"""
+    return os.path.join(current_cwd(), config.MEMORY_DIR_LOCAL)
 
 
 def global_root_dirs() -> list[str]:

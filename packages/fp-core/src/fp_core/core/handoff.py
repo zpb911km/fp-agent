@@ -41,6 +41,7 @@ import sys
 import time
 from typing import TYPE_CHECKING, Any
 
+from fp_core.core.cwd import current_cwd
 from fp_core.core.lifecycle import LifecycleHook
 from fp_core.platform_utils import restart_self
 
@@ -69,7 +70,9 @@ def capture_launch_command() -> None:
     """
     os.environ.setdefault(
         "FP_LAUNCH_JSON",
-        json.dumps({"argv": sys.argv, "cwd": os.getcwd()}),
+        # 会话 cwd 优先：reload 是 exec 重启，新进程得回到同一目录（这里
+        # 是唯一需要**进程级** chdir 的地方，见 perform_exec_reload）。
+        json.dumps({"argv": sys.argv, "cwd": current_cwd()}),
     )
 
 
@@ -201,6 +204,16 @@ async def perform_exec_reload(state: State, *, kind: str, tool_result_text: str 
         env = dict(os.environ)
         env["FP_RELOAD_HANDOFF"] = hp
         env["FP_RELOAD_SID"] = sid
+        # 启动目录要**跟随会话**，而不是钉在首次启动那一刻：
+        # `capture_launch_command()` 用 setdefault（重启链恒为首次 argv/cwd），
+        # 于是「在 B 启动 → /resume A 的会话 → reload」会把新进程拉回 B。
+        # core 侧 `_bind_session_cwd` 还能兜住相对路径，但进程级 os.getcwd()
+        # 的消费者（zeta 的 workspace 归属、子进程继承）就错到另一个仓库去了。
+        # 这里覆写快照里的 cwd —— argv 仍保持首次的（那才是可执行入口）。
+        here = current_cwd()
+        if os.path.isdir(here):
+            launch["cwd"] = here
+            env["FP_LAUNCH_JSON"] = json.dumps(launch)
     except OSError as e:
         if snapshot is not None:
             conv.replace_all(snapshot)

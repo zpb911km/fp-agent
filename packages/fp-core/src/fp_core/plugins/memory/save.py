@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any, cast
 
 from fp_core import config
+from fp_core.core.cwd import current_cwd
 
 from . import index as memory_index
 from . import tree as memory_tree
@@ -82,7 +83,7 @@ async def execute(params: dict[str, Any]) -> str:
 
     # ── 确定物理目录（树布局：全局=三来源最高优先级 private/memory，本地=项目 .fp/memory）──
     root_label = "~" if root == "~" else "."
-    base_dir = config.user_dirs("memory")[-1] if root == "~" else os.path.join(os.getcwd(), config.MEMORY_DIR_LOCAL)
+    base_dir = config.user_dirs("memory")[-1] if root == "~" else os.path.join(current_cwd(), config.MEMORY_DIR_LOCAL)
     memory_dir = os.path.join(base_dir, category)
 
     # ── 安全文件名 ──

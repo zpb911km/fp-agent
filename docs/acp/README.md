@@ -53,7 +53,10 @@ v2 目前是 Draft，客户端请求 v2 时按协商规则回退到 v1（客户�
 | 能力 | 说明 |
 |---|---|
 | 版本协商 | `initialize` 回显可支持版本，`agentInfo.version` 取包元数据 |
-| `session/new` + `cwd` | `cwd` 为 required，作为会话根生效（`chdir`），缺失 → `-32602` |
+| `session/new` + `cwd` | `cwd` 为 required，登记为**会话属性**（会话根）；缺失/目录不存在 → `-32602`。**不 chdir**：相对路径基准由 `fp_core.core.cwd` 的 contextvar 按 Task 承载 |
+| `session/list` | 请求四字段（`cwd`/`cursor`/`additionalDirectories`/`_meta`）**全可选**，发 `{}` 必须成功；`cwd` 按**每条会话自己的** cwd 过滤（realpath 归一，尾斜杠/软链等价）；键值游标分页（`_LIST_PAGE_SIZE=50`，末页无 `nextCursor`）；`updatedAt` 转 ISO 8601。老会话（meta 无 `cwd`）不带 `cwd` 时可见但 `cwd` 为空、`_meta.cwdUnknown=true` |
+| 多会话并存 | 同一连接 `_sessions[sid]` 会话表；第二个 `session/new` **不顶掉**第一个；`session/prompt` 未知 sid → `-32602`；turn 内通知带**该会话自己**的 sid；`session/cancel` 只作用于目标会话 |
+| 跨会话并发 | **排队**而非拒绝：`_turn_lock` 串行占用 core 执行槽（规范无「必须并发」的 MUST）。同会话并发仍是客户端 bug → `-32600` |
 | `session/load` 历史回放 | 响应**之前**用 `user_message_chunk`/`agent_message_chunk` 回放全量历史；会话不存在 → `-32602`；已 `session/new` 但未落盘的内存态空会话可正常 load（回放为空） |
 | `resource_link` | baseline MUST，转为「仅引用未附带内容」提示，不再静默丢弃 |
 | `ToolKind` | 只发 schema 枚举内取值（`bash→execute`、未知→`other`） |
@@ -62,22 +65,33 @@ v2 目前是 Draft，客户端请求 v2 时按协商规则回退到 v1（客户�
 | `toolCallId` | 按 fp-core 传入的真实 call id 配对，并行同名工具不错配 |
 | `messageId` | 整轮共享一个 id（id 变化 = 新消息开始） |
 | `plan` 生命周期 | `pending/in_progress/completed` 三态，结束时发空 `entries` 收尾 |
-| 错误语义 | 并发 prompt → `-32600`（不用 `stopReason:"cancelled"`，那是 `session/cancel` 专属） |
+| 错误语义 | **同会话**并发 prompt → `-32600`（不用 `stopReason:"cancelled"`，那是 `session/cancel` 专属）；跨会话并发走排队不报错 |
 
 **未实现（已知缺口，二期）**：
 
-- 多会话模型：`_session_id` 仍是单例，第二個 `session/new` 会顶掉第一个；
-  `session/prompt` 已校验 `sessionId` 防串话，但并行会话尚不支持。
 - `session/request_permission`：IDE 的「危险命令确认」UI 不生效。
 - `usage_update`（上下文用量/费用）、`session/set_config_option`、`session/delete|resume|close`、
   `elicitation` 之外的 `logout`。
-- `session/list` 的 `cwd` **过滤**与 `cursor` 分页：会话 meta 尚未持久化 `cwd`，
-  目前只接受参数并回填，返回全量会话。
+- **执行不并发**：跨会话是排队而非并行（`_turn_lock` 串行占用 core 唯一执行槽）。
+  真并发（每会话一个 Agent / 或进程级隔离）未做；cwd 已改用 contextvar 按 Task 承载，
+  是放开并发的前置条件，但不等于已支持并发。
 - `session/set_mode`：未声明 `modes/availableModes`，故**不提供**伪实现（调用回 `-32601`）。
 
 > 纪律：这些是「线上形状」硬约束，改动 `server.py` 的相关分支必须同步
 > `tests/test_acp_wire.py`，否则接口漂移不可观测（历史上同类修复曾被一次重复的
 > `def send` 静默抵消）。规范：https://agentclientprotocol.com/protocol/v1
+>
+> 关于 cwd：**不要**用 `os.chdir` 承载会话 cwd。那是进程级全局可变状态，正确性只能靠
+> 「同一时刻只有一个会话在跑」这条纪律兜着，任何新代码（后台 job、subagent、插件里
+> `await` 之后顺手 chdir）都会把正在跑的会话带到别的项目里，且没有异常/日志/测试会红。
+> 会话路径一律走 `fp_core.core.cwd`（`current_cwd()` / `resolve_path()` / `set_cwd()`）。
+>
+> 绑定点是**唯一**的：`SessionManager._load_meta_from_session()` 装载会话时调
+> `_bind_session_cwd()` 把基准切到 `meta.cwd`（`__init__`/`create_session`/`resume_latest`/
+> `switch_session` 全走它），所以 CLI `/resume`、WebUI 切会话、ACP `session/load` 行为一致。
+> 前端**无需**自己设基准；ACP 只在客户端声明的 cwd ≠ 落盘 meta 时做本轮覆盖。
+> `cwd` 的持久化也因此提前到 `create_session`（`_ensure_file`）——只放内存的话切走即丢，
+> 切回来只能按当前基准瞎猜，那正是「resume 旧会话落在启动目录」的根因。
 
 ## 🔗 快速链接
 

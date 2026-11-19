@@ -327,6 +327,45 @@ class TestSessionOps:
         # 切到不存在的会话 → None（前端决定 404/自动新建）
         assert switch_to(state, "s_nonexistent") is None
 
+    def test_session_info_carries_cwd(self, state, tmp_path):
+        """SessionInfo 必须带 `cwd` / `previous_cwd` —— 前端的「目录变了」提示全靠它。
+
+        为什么是 API 契约而不是内部实现：cwd 是**会话属性**（`_bind_session_cwd`），
+        切会话会把相对路径基准整条换掉。前端不提示就是静默跳目录：文件写进另一个
+        项目、不报错、不写日志。缺字段 → 前端要么猜（读 `os.getcwd()`，多会话下
+        必错），要么什么都不说。变异敏感：删掉 SessionInfo 的 cwd 赋值 → 必红。
+        """
+        import os as _os
+
+        from fp_core.api.cwd import current_cwd, reset_cwd, set_cwd
+        from fp_core.core.session_ops import fork_new, switch_to
+
+        a = str(tmp_path / "projA")
+        b = str(tmp_path / "projB")
+        _os.makedirs(a, exist_ok=True)
+        _os.makedirs(b, exist_ok=True)
+
+        tok = set_cwd(b)
+        try:
+            # 基准 B 上建一个「根在 A」的会话：previous_cwd / cwd 各自记录
+            info_a = fork_new(state, cwd=a)
+            assert _os.path.abspath(info_a.cwd) == _os.path.abspath(a)
+            assert _os.path.abspath(info_a.previous_cwd) == _os.path.abspath(b)
+
+            # 再在 B 建一个，然后切回 A —— 切回时基准跟着 A 走，且两条都报得出来
+            info_b = fork_new(state, cwd=b)
+            assert _os.path.abspath(info_b.cwd) == _os.path.abspath(b)
+
+            back = switch_to(state, info_a.session_id)
+            assert back is not None
+            assert _os.path.abspath(back.cwd) == _os.path.abspath(a)
+            assert _os.path.abspath(back.previous_cwd) == _os.path.abspath(b)
+            assert _os.path.abspath(current_cwd()) == _os.path.abspath(a)
+            # 前端判据：cwd_changed = cwd != previous_cwd
+            assert back.cwd != back.previous_cwd
+        finally:
+            reset_cwd(tok)
+
     def test_rebuild_replays_prompt_appends(self, state):
         """重建后插件注入不丢失（原 webui 独有补丁，现归核）"""
         from fp_core.core.session_ops import fork_new

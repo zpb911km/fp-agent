@@ -20,6 +20,8 @@ from datetime import datetime
 from typing import Any, cast
 
 from fp_core import config
+from fp_core.core.cwd import current_cwd, set_cwd
+from fp_core.logger import get_logger
 
 SESSIONS_DIR = config.SESSIONS_DIR
 
@@ -60,11 +62,20 @@ SYSTEM_PROMPT_FIELD = "system_prompt"
 SYSTEM_PROMPT_AT_FIELD = "system_prompt_at"
 
 
-def _default_meta(sid: str) -> dict[str, Any]:
+def _default_meta(sid: str, cwd: str | None = None) -> dict[str, Any]:
+    """新会话的 meta 骨架。
+
+    `cwd` 是**该会话的工作目录**（会话根）。为什么必须落盘：ACP 的
+    `session/list` 要按 cwd 过滤，而 cwd 是会话属性、不是进程属性——
+    ACP 一次连接里可以并存多个会话、各自 cwd 不同，所以不能靠
+    `os.getcwd()` 在列会话时现推。调用方（如 ACP 的 session/new）应**显式**
+    传入会话根，不要依赖进程当前目录（P2 起 chdir 会被彻底移除）。
+    """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return {
         "__meta__": True,
         "id": sid,
+        "cwd": os.path.abspath(cwd) if cwd else current_cwd(),
         "created": now,
         "updated": now,
         "summary": "",
@@ -538,14 +549,45 @@ class SessionManager:
         sid = sid or self._session_id
         return _session_path(sid)
 
-    def _load_meta_from_session(self, sid: str | None = None) -> dict[str, Any]:
-        """从会话文件读取 meta。"""
+    def _load_meta_from_session(self, sid: str | None = None, cwd: str | None = None) -> dict[str, Any]:
+        """从会话文件读取 meta；文件不存在时按 `cwd` 生成默认 meta（惰性）。
+
+        **装载即绑定**：返回前把相对路径基准切到 `meta.cwd`（见
+        `_bind_session_cwd`）。所有会话装载路径（`__init__` / `create_session` /
+        `resume_latest` / `switch_session`）都经过这里，所以「cwd 是会话属性」
+        只有这一个实现点 —— CLI 的 `/resume`、WebUI 的会话切换、ACP 的
+        `session/load` 都自动跟随，无须各自 chdir。
+        """
         sid = sid or self._session_id
         path = self._session_path(sid)
         meta = _read_meta_from_file(path)
         if meta is None:
-            meta = _default_meta(sid)
+            meta = _default_meta(sid, cwd)
+        self._bind_session_cwd(meta)
         return meta
+
+    @staticmethod
+    def _bind_session_cwd(meta: dict[str, Any]) -> None:
+        """把相对路径基准切到该会话的 cwd —— 会话是 cwd 的所有者。
+
+        三种情况**保持当前基准不动**：
+          - 老会话没记 `cwd`：无从得知，别乱猜（向后兼容）；
+          - 目录已被删/改名：设进去只会让后续每个工具都撞 ENOENT，
+            保留当前基准更能用，但要留告警；
+          - 已经是它：省一次 contextvar 写入。
+        """
+        target = meta.get("cwd")
+        if not isinstance(target, str) or not target:
+            return
+        target = os.path.abspath(target)
+        if target == current_cwd():
+            return
+        if not os.path.isdir(target):
+            get_logger().warning(
+                f"会话 {meta.get('id', '?')} 的工作目录已不存在：{target}（保持当前目录 {current_cwd()}）"
+            )
+            return
+        set_cwd(target)
 
     def _write_meta(self, meta: dict[str, Any] | None = None) -> None:
         """将 meta 写回文件第一行。"""
@@ -705,14 +747,24 @@ class SessionManager:
         self._sync_token_tracker()  # token 累计随之对齐到目标会话
         return True
 
-    def create_session(self, sid: str | None = None) -> str:
-        """创建新会话并切换过去（惰性文件创建）。
+    def create_session(self, sid: str | None = None, cwd: str | None = None) -> str:
+        """创建新会话并切换过去（元信息立即落盘，正文惰性）。
 
         Args:
             sid: 可指定 sid（如 subagent 预生成），None 时自动生成
+            cwd: 该会话的工作目录（会话根）。None → 继承当前基准（首个会话
+                 即进程启动目录）。前端若能让会话根与进程 cwd 不同
+                 （如 ACP 多会话），必须显式传。
+
+        **为什么 meta 不再惰性**（`_ensure_file`）：`cwd` 是会话身份的一部分。
+        只放内存的话，切到别的会话就被 `self._meta` 覆盖 —— 切回来时文件不存在
+        → 只能按「当前基准」重新猜一个根，于是 resume 旧会话会落在错误目录。
+        空会话的列表可见性由 `list_sessions()` 的 0 长度过滤保证（非当前会话
+        不显示），所以不需要靠「不写文件」来压列表 —— 持久性与可见性解耦了。
         """
         self._session_id = self._allocate_session(sid)
-        self._meta = self._load_meta_from_session()
+        self._meta = self._load_meta_from_session(cwd=cwd)
+        self._ensure_file()  # 固化会话根（cwd）等身份字段，正文仍惰性
         _register_current_session(self._session_id)  # 同步进程级「当前会话」
         self._sync_token_tracker()  # 新会话无用量 → tracker 归零，不继承旧会话
         return self._session_id
@@ -737,10 +789,16 @@ class SessionManager:
         「清一个本就空的会话」不该凭空造出 0 长度会话文件（这正是会话
         列表被占位文件刷屏的来源之一）。当前会话在列表中的可见性由
         `list_sessions()` 合并在内存 meta 保证，不再依赖占位文件。
+
+        **cwd 要显式续命**：`_default_meta()` 缺省会取 `current_cwd()`，
+        看似等价，但会话目录已被删（装载时 `_bind_session_cwd` 跳过绑定）
+        这种情形下当前基准 ≠ 会话根 —— 直接重建 meta 就会把会话身份里的
+        `cwd` 悄悄改写成进程目录。清消息不该动身份，故显式传回旧的。
         """
         keep_prompt = self.get_system_prompt()
         keep_at = self.get_system_prompt_at()
-        self._meta = _default_meta(self._session_id)
+        keep_cwd = self._meta.get("cwd")
+        self._meta = _default_meta(self._session_id, keep_cwd if isinstance(keep_cwd, str) and keep_cwd else None)
         # 清空的是「消息」，不是「会话的 system prompt 固化」——保留它，
         # 否则 /clear 之后 prefix 会悄悄换成新构建的版本（多付一次全量）。
         if keep_prompt:
@@ -953,6 +1011,18 @@ class SessionManager:
         """获取当前会话的 meta 信息（只读视图）"""
         return dict(self._meta)
 
+    def session_root(self) -> str | None:
+        """当前会话的工作目录（相对路径基准）；老会话没记则 None。
+
+        两处用法：
+          - 前端在**本轮开始时**把这值设进 `fp_core.core.cwd`（turn 边界的
+            唯一兜底，见 `portal.Portal._turn_cwd`）——因为 contextvar 按 Task
+            隔离，切换会话时设的值到不了「下一个请求」的新 Task；
+          - reload 前覆写启动快照的 cwd（见 `handoff.perform_exec_reload`）。
+        """
+        root = self._meta.get("cwd")
+        return root if isinstance(root, str) and root else None
+
     # ── 固化的 system prompt ─────────────────────
 
     def get_system_prompt(self) -> str | None:
@@ -1088,7 +1158,14 @@ class SessionManager:
         except Exception:
             return None
 
-    def update_meta(self, sid: str | None = None, *, create: bool = True, **kwargs: Any) -> None:
+    def update_meta(
+        self,
+        sid: str | None = None,
+        *,
+        create: bool = True,
+        touch_updated: bool = True,
+        **kwargs: Any,
+    ) -> None:
         """更新指定会话的内嵌 meta 字段。
 
         与模块级 update_session_meta 对齐：会话文件不存在时默认自动创建
@@ -1101,6 +1178,10 @@ class SessionManager:
                 （当前会话）或直接放弃（非当前会话）——用于「标记类」写入
                 （token_usage、source 标记）不该给空会话凭空造出一个
                 0 长度会话文件。
+            touch_updated: 是否刷新 ``updated`` 时间戳（默认 True）。
+                **补全类**写入要传 False：给老会话回填 ``cwd`` 这类缺失字段
+                不该让它在列表里跳到最前面（列表排序键就是 updated，纪律同
+                ``set_summary``）。
         """
         sid = sid or self._session_id
         path = _session_path(sid)
@@ -1109,7 +1190,8 @@ class SessionManager:
             if not create:
                 if sid == self._session_id:
                     self._meta.update(kwargs)
-                    self._meta["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    if touch_updated:
+                        self._meta["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 return
             meta = _default_meta(sid)
             try:
@@ -1118,7 +1200,8 @@ class SessionManager:
             except Exception:
                 return
         meta.update(kwargs)
-        meta["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if touch_updated:
+            meta["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         _write_meta_to_file(path, meta)
         if sid == self._session_id:
             self._meta = meta

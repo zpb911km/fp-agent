@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Any
 
 from fp_core import config
+from fp_core.core.cwd import current_cwd
 
 from . import index as memory_index
 from . import tree as memory_tree
@@ -175,7 +176,7 @@ async def execute(params: dict[str, Any]) -> str:
     all_scan: bool = bool(params.get("all"))
 
     loop = asyncio.get_running_loop()
-    local_dir = os.path.join(os.getcwd(), config.MEMORY_DIR_LOCAL)
+    local_dir = os.path.join(current_cwd(), config.MEMORY_DIR_LOCAL)
 
     # ── 入口⑤：all=true — 全量扫描（先于其它判断，与 name/path/query 可并存时优先级最低）──
     if all_scan and not any([name, path, query]):

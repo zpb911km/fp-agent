@@ -14,6 +14,8 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
+from fp_core.core.cwd import current_cwd
+
 if TYPE_CHECKING:
     from fp_core.core.state import State
 
@@ -25,11 +27,19 @@ SessionMeta = dict[str, Any]
 
 @dataclass(frozen=True)
 class SessionInfo:
-    """会话操作结果（fork_new / switch_to 返回）"""
+    """会话操作结果（fork_new / switch_to 返回）
+
+    `cwd` 是**操作完成后生效的**相对路径基准（即该会话自己的工作目录）。
+    前端必须读它来做提示：切换会话会**带着目录一起切**，若目标会话的 cwd
+    与原来不同，用户的相对路径语义就此改变 —— 不告知就是静默跳目录
+    （文件会写进另一个项目，且不报错）。
+    """
 
     session_id: str
     previous_sid: str | None = None
     summary: str = ""
+    cwd: str = ""
+    previous_cwd: str = ""
 
 
 def _save_current(state: State) -> str:
@@ -43,21 +53,36 @@ def _save_current(state: State) -> str:
     return state.session.save_and_summarize(state.conversation.to_serializable(), old_sid)
 
 
-def fork_new(state: State) -> SessionInfo:
+def fork_new(state: State, cwd: str | None = None, sid: str | None = None) -> SessionInfo:
     """新建空白会话：落盘当前 → 分配新 sid → 重建上下文（含插件注入重放）
 
     语义对齐原 commands/new.py，补 webui 的空会话摘要回填。
+
+    Args:
+        cwd: 新会话的工作目录（会话根）；None → 进程当前目录。ACP 多会话
+             场景必须显式传（会话根不再等价于进程 cwd）。
+        sid: 预分配的会话 ID；None → 现场生成。多会话前端需要先把 sid 发给
+             客户端、稍后才真正建档（见 fp-acp 的 _enter_session）。
     """
     old_sid = state.session_id
+    prev_cwd = current_cwd()
     summary = _save_current(state)
-    new_sid = state.session.create_session()
+    new_sid = state.session.create_session(sid=sid, cwd=cwd)
     # 新会话无历史可续，天然要付一次前缀 → 直接取最新构建的提示词
     state.rebuild_system_prompt(refresh=True)
     state.conversation.reset(state.conversation.system_prompt)
-    # 惰性 sid：新会话先不落盘（clear_session_file 对不存在的文件是 no-op），
-    # 列表可见性由 list_sessions() 合并在内存 meta 保证——不再靠占位文件
+    # 元信息已由 create_session 落盘（会话根 cwd 属于身份，不能只放内存——
+    # 切走即丢，切回来只能按当前基准瞎猜）。这里只把正文清空：
+    # `clear_session_file` 对已存在文件重写首行 meta（保留 cwd/system prompt），
+    # 之后正文仍惰性，0 长度会话的**列表可见性**由 `list_sessions()` 过滤。
     state.session.clear_session_file()
-    return SessionInfo(session_id=new_sid, previous_sid=old_sid, summary=summary)
+    return SessionInfo(
+        session_id=new_sid,
+        previous_sid=old_sid,
+        summary=summary,
+        cwd=current_cwd(),
+        previous_cwd=prev_cwd,
+    )
 
 
 def switch_to(state: State, sid: str) -> SessionInfo | None:
@@ -71,6 +96,7 @@ def switch_to(state: State, sid: str) -> SessionInfo | None:
       - webui/acp 在目标为空会话时残留旧会话消息（set_messages 统一覆盖，空即清空）
     """
     old_sid = state.session_id
+    prev_cwd = current_cwd()
     summary = _save_current(state)
     if not state.session.switch_session(sid):
         return None
@@ -78,7 +104,13 @@ def switch_to(state: State, sid: str) -> SessionInfo | None:
     prompt = state.conversation.system_prompt
     saved = state.session.load_context(prompt)
     state.conversation.set_messages(prompt, saved)  # 空 saved → 仅剩 system prompt
-    return SessionInfo(session_id=sid, previous_sid=old_sid, summary=summary)
+    return SessionInfo(
+        session_id=sid,
+        previous_sid=old_sid,
+        summary=summary,
+        cwd=current_cwd(),
+        previous_cwd=prev_cwd,
+    )
 
 
 def clear(state: State) -> None:

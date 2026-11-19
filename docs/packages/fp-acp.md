@@ -77,9 +77,16 @@ Agent → 客户端的推送与请求（同一条 `stdout` 上反向流动）：
 
 ## 会话语义
 
-- **`cwd` 是会话根**：`session/new` 与 `session/load` 都要求绝对路径 `cwd`，
-  服务端对其 `chdir`，使 FP 工具的**相对路径**落在项目目录内（绝对路径不受影响）。
-  这是防止「在项目 A 对话、却写到 agent 进程自身目录」的关键。`cwd` 缺失/不存在 → `-32602`。
+- **`cwd` 是会话根（会话属性，不是进程状态）**：`session/new` 与 `session/load` 都要求绝对路径 `cwd`，
+  服务端把它登记进会话表，**不调 `os.chdir`**。转 turn 时由 `fp_core.core.cwd` 的
+  `ContextVar` 承载基准目录（asyncio 按 Task 隔离），于是 bash 的 `cwd=`、文件工具的
+  相对路径解析都落在**该会话自己的**项目目录内（绝对路径不受影响）。
+  这是防止「在项目 A 对话、却写到 agent 进程自身目录」的关键，也使得两个会话并存时
+  互不污染。`cwd` 缺失/目录不存在 → `-32602`。
+  绑定动作其实由 **core** 完成：`SessionManager` 装载会话时就把基准切到 `meta.cwd`
+  （`_bind_session_cwd`），所以 CLI `/resume`、WebUI 切会话同样落在会话自己的根目录。
+  ACP 只在**一种**情况下覆盖——客户端在 `session/load` 声明的 cwd 与落盘 meta 不一致时
+  以客户端为准，且仅本轮有效（turn 结束复位）。
 - **`session/new`** 建会话后**先回 `sessionId`，再**推 `available_commands_update`——
   顺序不能反：IDE 要先拿到 `sessionId` 才能归属命令列表。未注册的 `/` 命令会被 IDE 拦截。
 - **`session/load`** 按规范 MUST 在响应**之前**用 `user_message_chunk` / `agent_message_chunk`
@@ -89,8 +96,12 @@ Agent → 客户端的推送与请求（同一条 `stdout` 上反向流动）：
   `messageId`（id 变化 = 新消息开始）。同一时刻只允许一个 prompt 在跑，并发请求 →
   `-32600`（不用 `cancelled` 冒充，那是 `session/cancel` 的专属语义）。
 - **`session/cancel`** 是通知：立即取消当前 prompt task，不等下一个中断检查点。
-- **单会话限制**：`_session_id` 仍为单例，第二个 `session/new` 会顶掉第一个；
-  `session/prompt` 已校验 `sessionId` 防串话，但并行多会话尚未支持。
+- **多会话并存**：同一连接维护 `_sessions[sid]` 会话表，第二个 `session/new` **不会顶掉**第一个；
+  `session/prompt` 遇到未知 `sessionId` → `-32602`；turn 内所有通知都带**该会话自己的** sid；
+  `session/cancel` 只作用于目标会话。
+- **跨会话并发 = 排队**：`_turn_lock` 串行占用 core 的唯一执行槽，两个会话同时要跑时第二个排队等待
+  （规范只要求「会话可并存」，没有「必须并发」的 MUST）。**同会话**并发 prompt 仍是客户端 bug → `-32600`。
+  真并发（每会话独立 Agent / 进程级隔离）未做，属二期。
 - **reload 续接**：`reload` 经 `execve` 重启而 stdio 连接不变，客户端不会重发 `initialize`——
   协商到的客户端能力存入 `FP_ACP_CLIENT_CAPS` 随 exec 继承，挂起的 `session/prompt` 由新实例补发 chunk
   与 `stopReason`，客户端无需重试。详见索引文档。

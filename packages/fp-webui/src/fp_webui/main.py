@@ -1290,7 +1290,11 @@ async def search_session_messages(session_id: str, body: dict[str, Any]) -> dict
 
 @app.post("/api/sessions/{session_id}/switch")
 async def switch_session_endpoint(session_id: str):
-    """切换到指定会话"""
+    """切换到指定会话
+
+    返回 `cwd` / `cwd_changed`：cwd 是**会话属性**，切换会带着相对路径基准一起换。
+    前端据此提示「工作目录已切到 X」——否则用户的文件会静默写进另一个项目。
+    """
     await ensure_agent()
     info = portal.ctl.sessions.load(session_id)
     if info is None:
@@ -1298,6 +1302,8 @@ async def switch_session_endpoint(session_id: str):
     return {
         "session_id": info.session_id,
         "status": "switched",
+        "cwd": info.cwd,
+        "cwd_changed": bool(info.cwd and info.cwd != info.previous_cwd),
     }
 
 

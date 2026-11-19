@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from fp_core.core import jobs
+from fp_core.core.cwd import current_cwd
 from fp_core.core.lifecycle import HookContext, LifecycleHook, LifecycleManager
 from fp_core.core.session import get_current_session_id
 from fp_core.logger import get_logger
@@ -235,7 +236,7 @@ class ZetaPlugin(Plugin):
     def _start(self, sid: str = "") -> bool:
         if self._service is not None:  # 重复初始化（同插件对象再次 ON_INIT）：先停旧，免双服务循环
             self._stop()
-        ws = Path(os.getcwd())
+        ws = Path(os.getcwd())  # 进程级 workspace：zeta 实例归属按进程固定，不随会话变
         name = derive_instance_name(ws, sid)
         self._instances = InstanceRegistry(ws, name, single=os.environ.get("FP_ZETA_SINGLE") == "1")
         try:
@@ -379,9 +380,15 @@ class ZetaPlugin(Plugin):
         else:
             append.append(ZETA_DESCRIPTION)
             if self._workspace_mismatch:
+                # 两个目录必须分开说，别混成一个词：workspace 是**进程级**的
+                # （邻居身份按进程固定，`_start` 仍用 os.getcwd()），而记忆/文件
+                # 是**会话级**的（P2 起按 `current_cwd()` 解析）。把它们都叫
+                # 「当前 workspace」会让模型拿着错的坐标去找 `.fp/`。
                 append.append(
                     f"（注意：本会话原属于 workspace {self._workspace_mismatch}，"
-                    f"当前 workspace 为 {os.getcwd()} —— 记忆读取当前目录的 .fp/。"
+                    f"本进程 workspace 为 {os.getcwd()}（邻居身份按进程固定，不随会话变）。"
+                    f"而记忆/文件按**会话目录**解析：当前为 {current_cwd()}，"
+                    f"即读取 {current_cwd()}/.fp/。"
                     "这是 sid 与 workspace 解耦后的错配提示。）"
                 )
         return ctx

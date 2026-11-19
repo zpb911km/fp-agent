@@ -22,7 +22,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
-from collections.abc import Awaitable, Callable, Sequence
+import os
+from collections.abc import Awaitable, Callable, Generator, Sequence
+from contextvars import Token
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -37,6 +39,7 @@ from fp_core.api.types import (
     SessionInfo,
     SessionMeta,
 )
+from fp_core.core.cwd import cwd_bound, reset_cwd, set_cwd
 from fp_core.core.events import EventBridge, EventBus
 from fp_core.core.io import IOChannel
 from fp_core.core.messages import Response
@@ -134,7 +137,8 @@ class RunPlane:
         agent = self._portal._require()
         if io is not None:
             self._portal._active_io = io  # 登记活跃通道，供 reply() 转发 ask 应答
-        return await agent.process(text, io=io)
+        with self._portal._turn_cwd():
+            return await agent.process(text, io=io)
 
     async def continue_(self, io: IOChannel | None = None) -> Response:
         """续接上一轮未完成对话（仅供 reload handoff，契约见 ctl.take_reload）
@@ -145,7 +149,8 @@ class RunPlane:
         if io is not None:
             self._portal._active_io = io
         try:
-            return await agent.continue_conversation(io=io)
+            with self._portal._turn_cwd():
+                return await agent.continue_conversation(io=io)
         finally:
             agent.state._pending_continue = None  # pyright: ignore[reportPrivateUsage] 核内协议，由本层消化
 
@@ -157,7 +162,8 @@ class RunPlane:
 
     async def command(self, line: str) -> tuple[bool, str]:
         """执行一条斜杠命令（原 agent.handle_command）"""
-        return await self._portal._require().handle_command(line)
+        with self._portal._turn_cwd():
+            return await self._portal._require().handle_command(line)
 
     # ── ask 带内应答 ─────────────────────────────────────────
 
@@ -419,17 +425,46 @@ class SessionCtl:
     def __init__(self, portal: Portal) -> None:
         self._portal = portal
 
-    def new(self) -> SessionInfo:
-        """新建空白会话（落盘当前 → 分配新 sid → 重建上下文）"""
+    def new(self, cwd: str | None = None, sid: str | None = None) -> SessionInfo:
+        """新建空白会话（落盘当前 → 分配新 sid → 重建上下文）
+
+        Args:
+            cwd: 新会话的工作目录（会话根）；None → 进程当前目录。
+                 ACP 多会话场景必须显式传，否则会话 meta 会记错目录。
+            sid: 预分配的会话 ID（由 `generate_sid()` 取得）。多会话前端要先
+                 把 id 发给客户端、稍后才真正建档，所以这个参数不能省：父层
+                 得先说得出「这条会话属于哪个目录」，才轮到在合适时机进入它
+                 （ACP 的 `session/new` 即如此）。None → 现场生成。
+        """
         from fp_core.core.session_ops import fork_new
 
-        return fork_new(self._portal._require().state)
+        # 兜底绑定：`/new` 无参时「继承当前 cwd」的前提是**当前基准是对的**。
+        # WebUI 的这次请求是新 Task、收不到切换时的 set_cwd，不兜就会把「进程
+        # 启动目录」当成父会话的根，新会话从此钉在错误目录上。
+        with self._portal._turn_cwd():
+            return fork_new(self._portal._require().state, cwd=cwd, sid=sid)
+
+    def generate_sid(self) -> str:
+        """生成一个尚未占用的会话 ID（不改变任何会话状态）。
+
+        能力公开化：前端要「先告诉客户端 sessionId、稍后才建档」就得先拿到
+        sid（ACP 的 session/new 只登记不切 core，见 fp-acp 的 _enter_session）。
+        """
+        from fp_core.core.session import generate_sid
+
+        return generate_sid()
 
     def load(self, sid: str) -> SessionInfo | None:
-        """切换到历史会话；目标不存在返回 None（前端决定 404 或自动新建）"""
+        """切换到历史会话；目标不存在返回 None（前端决定 404 或自动新建）
+
+        `SessionInfo.previous_cwd` 要在**正确的基准**上取：跨 Task 的新请求里
+        上下文是空的，不兜底的话 `previous_cwd` 会退化成进程启动目录，
+        前端据此判断「目录是否变了」就会误报/漏报。
+        """
         from fp_core.core.session_ops import switch_to
 
-        return switch_to(self._portal._require().state, sid)
+        with self._portal._turn_cwd():
+            return switch_to(self._portal._require().state, sid)
 
     def clear(self) -> None:
         """清空当前会话文件并重建上下文"""
@@ -478,13 +513,23 @@ class SessionCtl:
         """删除指定会话文件"""
         return self._portal._require().state.session.delete_session(sid)
 
-    def update_meta(self, sid: str | None = None, *, create: bool = True, **kwargs: Any) -> None:
+    def update_meta(
+        self,
+        sid: str | None = None,
+        *,
+        create: bool = True,
+        touch_updated: bool = True,
+        **kwargs: Any,
+    ) -> None:
         """更新会话 meta（sid 缺省 = 当前会话）
 
         `create=False` → 文件不存在时只改内存 meta、不落盘：标记类写入
         （subagent source、token_usage）不该给空会话凭空造 0 长度会话文件。
+
+        `touch_updated=False` → 不刷新 ``updated``：**补全类**写入（如 ACP
+        给老会话回填 ``cwd``）不该让它在会话列表里跳到最前面。
         """
-        self._portal._require().state.session.update_meta(sid, create=create, **kwargs)
+        self._portal._require().state.session.update_meta(sid, create=create, touch_updated=touch_updated, **kwargs)
 
     def path(self, sid: str) -> str:
         """会话文件路径（供前端只读文件端点；文件不存在也返回路径）"""
@@ -601,6 +646,33 @@ class Portal:
         if self._agent is None:
             raise InstanceNotOpenError()
         return self._agent
+
+    # ── 会话 cwd 的 turn 级兜底 ───────────────────────────────
+
+    @contextlib.contextmanager
+    def _turn_cwd(self) -> Generator[None, None, None]:
+        """本轮相对路径基准的**最后一道保险**：上下文没指定就用当前会话根。
+
+        为什么需要它（否则 WebUI 静默落在启动目录里）：cwd 用 ContextVar 承载
+        （`fp_core.core.cwd`），按 Task 隔离——WebUI 切会话发生在 `/switch` 请求
+        Task 里，用户下一条消息是**另一个**请求 Task，根本收不到那次 `set_cwd`。
+        于是「切到另一个项目的会话」在 WebUI 里表现为：提示一切正常，工具却仍在
+        启动目录里读写；没有异常、没有日志。CLI 不受影响（同一上下文），ACP 自己
+        在 turn Task 里设过（客户端声明的 cwd 优先）故也不会被覆盖。
+
+        判据是 `cwd_bound()`（真的设过 vs 回落进程目录），不是「值相不相等」：
+        后者会把「兜底」和「显式指定」混为一谈，ACP 的客户端优先语义会被打掉。
+        """
+        token: Token[str | None] | None = None
+        if not cwd_bound():
+            root = self._require().state.session.session_root()
+            if root and os.path.isdir(root):
+                token = set_cwd(root)
+        try:
+            yield
+        finally:
+            if token is not None:
+                reset_cwd(token)
 
     # ── 空闲泵（唤醒调度） ────────────────────────────────────
 

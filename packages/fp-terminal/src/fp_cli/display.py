@@ -645,6 +645,27 @@ def _scan_color(i: int, scan_line: float, total: int) -> str:
     return f"\033[38;2;{r};{g};{b}m"
 
 
+def _startup_dir_line() -> str:
+    """启动面板里的工作目录行（仅当会话根 ≠ 进程启动目录时出现）。
+
+    cwd 是**会话属性**：`fp --resume <跨项目会话>` / reload 续接 时，进程在
+    B 启动但会话根是 A。不提示就是静默跳目录（用户的相对路径语义被换掉，
+    文件写进另一个仓库而毫无报错）。终端里提前亮一行，比事后排查便宜得多。
+    """
+    try:
+        from fp_core.api.cwd import current_cwd
+
+        root = current_cwd()
+    except Exception:  # pragma: no cover - 自举失败不该阻挡启动
+        return ""
+    launch = os.getcwd()
+    if os.path.abspath(root) == os.path.abspath(launch):
+        return ""
+    inner = 46 - len("Dir:  ")
+    shown = root if len(root) <= inner else "…" + root[-(inner - 1) :]
+    return f"Dir:  {shown}"
+
+
 def _build_startup_frame(model: str, resume: bool) -> tuple[list[str], int]:
     """构建启动信息面板的文本行"""
     try:
@@ -668,6 +689,7 @@ def _build_startup_frame(model: str, resume: bool) -> tuple[list[str], int]:
         right = inner - left - len(text)
         return f"  |{' ' * left}{text}{' ' * right}|"
 
+    dir_line = _startup_dir_line()
     lines = [
         BORDER,
         content_line(""),
@@ -677,6 +699,7 @@ def _build_startup_frame(model: str, resume: bool) -> tuple[list[str], int]:
         content_line(""),
         content_line(f"Model:  {model_display}"),
         content_line(f"Status: {status}"),
+        *([content_line(dir_line)] if dir_line else []),
         content_line(""),
         BORDER,
     ]

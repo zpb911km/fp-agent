@@ -26,6 +26,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, TypedDict
 
+from fp_core.core.cwd import current_cwd, resolve_path
 from fp_core.platform_utils import find_bash, kill_process_tree
 
 # ── OpenAI function calling schema 类型（精确声明，替代裸 dict） ──────────
@@ -525,10 +526,15 @@ async def _execute_bash(
             # 显式用 bash 而非 create_subprocess_shell（后者走 /bin/sh，
             # Linux 上常为 dash：不支持 ${var:0:6}、[[ ]]、heredoc 差异等
             # bash 语法，曾导致部署脚本反复 Bad substitution 返工）
+            # 显式传 cwd 而非依赖进程 cwd：会话级 cwd 由 `fp_core.core.cwd` 的
+            # contextvar 承载（按 Task 隔离），进程 cwd 只是单会话前端的回落。
+            # 若这里省略 cwd=，子进程会继承**进程**目录 —— 多会话并存时就会
+            # 把 A 的命令跑在 B 的仓库里，且没有任何异常可循。
             proc = await asyncio.create_subprocess_exec(
                 bash_path,
                 "-c",
                 command,
+                cwd=current_cwd(),
                 stdout=out_f,
                 stderr=err_f,
                 start_new_session=True,
@@ -593,18 +599,24 @@ async def _execute_bash(
                 err_f.close()
 
 
-def _suggest_paths(file_path: str) -> str:
+def _suggest_paths(file_path: str, as_typed: str | None = None) -> str:
     """为 read_file 的 FileNotFoundError 生成候选提示。
 
     策略：
       - 相对路径 → 提示当前工作目录（read_file 应使用绝对路径）
       - 绝对路径且父目录不存在 → 向上找最近存在的目录，用输入各路径段模糊匹配候选
       - 父目录存在但文件缺失 → 模糊匹配同目录相似文件名，或提示先 ls 确认
+
+    `as_typed`：用户**原样**传入的路径。P2 起相对路径在入口即被
+    `resolve_path` 按会话 cwd 解析成绝对路径，所以「是否相对」只能看原始输入
+    —— 否则这里永远判成绝对路径，那条提示会静默消失（会把用户引向
+    「明明报错却说不出当前目录」的死胡同）。
     """
     lines: list[str] = []
-    cwd = os.getcwd()
+    cwd = current_cwd()
+    raw = as_typed if as_typed is not None else file_path
 
-    if not os.path.isabs(file_path):
+    if not os.path.isabs(raw):
         lines.append(f"提示：read_file 应使用绝对路径；当前工作目录: {cwd}")
 
     probe = os.path.dirname(file_path) if os.path.isabs(file_path) else cwd
@@ -644,6 +656,11 @@ async def _execute_read_file(file_path: str, offset: int | None = None, limit: i
     """异步读取文件。末尾附带文件哈希（6字符），供 edit_file 陈旧检测。"""
     if not file_path:
         raise ValueError("read_file 需要 file_path 参数")
+
+    # 相对路径按**会话** cwd 解析（而非进程 cwd）：注册进 _file_registry 的
+    # 路径因此总是绝对路径，edit_file 靠哈希取回时不会二次歧义。
+    as_typed = file_path
+    file_path = resolve_path(file_path)
 
     try:
         loop = asyncio.get_running_loop()
@@ -695,7 +712,7 @@ async def _execute_read_file(file_path: str, offset: int | None = None, limit: i
         return await loop.run_in_executor(None, _read)
     except FileNotFoundError:
         msg = f"错误：文件不存在 {file_path}"
-        hint = _suggest_paths(file_path)
+        hint = _suggest_paths(file_path, as_typed=as_typed)
         return f"{msg}\n{hint}" if hint else msg
     except Exception as e:
         return f"错误：{e}"
@@ -705,6 +722,8 @@ async def _execute_write_file(file_path: str, content: str) -> str:
     """异步写入文件"""
     if not file_path:
         raise ValueError("write_file 需要 file_path 和 content 参数")
+
+    file_path = resolve_path(file_path)
 
     try:
         loop = asyncio.get_running_loop()

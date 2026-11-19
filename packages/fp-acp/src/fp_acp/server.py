@@ -26,6 +26,7 @@ ACP Server — Agent Client Protocol 实现 (v1 兼容)
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import os
@@ -34,11 +35,15 @@ import sys
 import traceback
 import uuid
 from collections.abc import Awaitable, Callable
+from contextvars import Token
+from dataclasses import dataclass, field
+from datetime import datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from typing import Any, cast
 
 from fp_core.api import ExitReason, HookContext, IOChannel, LifecycleHook, portal
+from fp_core.api.cwd import current_cwd, reset_cwd, set_cwd
 from fp_core.api.spawn import QUIET_ENV
 
 # ═══════════════════════════════════════════════════════════
@@ -70,6 +75,83 @@ def _agent_version() -> str:
         return _pkg_version("fp-acp")
     except PackageNotFoundError:  # 源码树直跑（未安装）时的兜底
         return "0.0.0+source"
+
+
+# ── session/list 的分页与时间格式（形状以 ACP v1 schema 为准）──
+# 请求 zListSessionsRequest: {_meta?, additionalDirectories?, cursor?, cwd?}
+#   —— **全部可选**；客户端在拿不到工作目录时直接发 `{}`
+#   （如 formulahendry.acp-client：`const params = {}; if (opts.cwd) params.cwd = ...`）。
+# 响应 zListSessionsResponse: {_meta?, nextCursor?, sessions: SessionInfo[]}
+# SessionInfo: {_meta?, additionalDirectories?, cwd: string(必填), sessionId, title?, updatedAt?}
+_LIST_PAGE_SIZE = 50
+
+
+def _norm_cwd(path: str) -> str:
+    """会话根归一：realpath 消软链/`..`/尾斜杠，用于 cwd 过滤比对。
+
+    客户端传的 cwd 与落盘的 cwd 可能一个走软链、一个走实体路径，
+    直接字符串比较会把同一目录判成两个（如 /media/x → /dev/sdb1）。
+    """
+    try:
+        return os.path.realpath(os.path.abspath(path))
+    except (OSError, ValueError):
+        return os.path.abspath(path)
+
+
+def _to_iso8601(ts: Any) -> str | None:
+    """会话 meta 的本地时间串 → ISO 8601（ACP 约定 updatedAt 为 ISO 时间）。
+
+    meta 存的是 `%Y-%m-%d %H:%M:%S`（naive 本地时间）。`astimezone()` 为
+    naive 时间补本地时区偏移 → `2026-11-19T21:12:11+08:00`。已是 ISO 的
+    （或格式未知的）原样返回，保证幂等。
+    """
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").astimezone().isoformat()
+    except ValueError:
+        return ts
+
+
+def _encode_cursor(updated: str, sid: str) -> str:
+    """分页游标：不透明字符串（规范要求客户端只能原样回传、不得解析）。
+
+    游标里带 (updated, sid) 排序键而非 offset —— 翻页期间若有新会话写入，
+    offset 会漏/重，键值游标不会。
+    """
+    raw = json.dumps([updated, sid], ensure_ascii=False)
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+
+def _decode_cursor(cursor: str) -> tuple[str, str] | None:
+    """解析游标；非法/被改写（规范禁止，但防一手）→ None（当作第一页）。"""
+    try:
+        updated, sid = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+        return (str(updated), str(sid))
+    except Exception:
+        return None
+
+
+@dataclass
+class _SessionState:
+    """本连接上一条 ACP 会话的**活跃状态**（协议里的 sessionId 是地址，不是当前指针）。
+
+    为什么需要这张表：客户端切 thread 时**不发任何协议消息**（连接没断，
+    sessionId 一直有效），它假设 agent 同时记着 N 条对话。旧实现只存一个
+    `_session_id`，第二个会话一来就把第一个顶掉 → 两个面板串台、
+    回到旧 thread 直接 -32602。
+
+    `cwd` / `busy` / `task` 都按会话隔离：
+      - cwd：会话根，相对路径基准（P2 起经 contextvar 生效，不再 chdir 进程）
+      - busy：同会话内并发 prompt 属于客户端 bug（跨会话则是排队，见 `_turn_lock`）
+      - task：该会话的 turn 任务，session/cancel 只作用于它
+    """
+
+    sid: str
+    cwd: str
+    message_count: int = 0
+    busy: bool = False
+    task: asyncio.Task[Any] | None = field(default=None, repr=False)
 
 
 # ── ACP v1 ToolKind 枚举（schema 强约束，只允许这 10 个值）──
@@ -302,9 +384,20 @@ class ACPServer:
         # ── 保存真正的 stdout 引用（JSON-RPC 通道） ──
         self._stdout = sys.stdout
 
+        # ── 会话表（多会话并存）──
+        # ACP 一次连接可并存多条会话（各带自己的 cwd/历史），客户端切 thread 时
+        # 不发协议消息。所以「当前会话」不是一个指针，而是这张表 + 每条会话的状态。
+        self._sessions: dict[str, _SessionState] = {}
+        # 最近聚焦的会话（new/load/prompt 更新）：仅用于「客户端没带 sessionId」时的
+        # 缺省值，不参与路由判定（路由一律按 params.sessionId 查表）。
         self._session_id: str | None = None
-        # 会话根目录（ACP params.cwd）：相对路径解析基准，与进程 cwd 概念上无关
-        self._session_cwd: str | None = None
+        # 正在跑 turn 的会话：turn 内所有通知（tool_call/plan/chunk）的 sid 来源。
+        # core 的执行槽只有一个，故 turn 天然互斥，单变量即准确。
+        self._active: _SessionState | None = None
+        # ── 跨会话串行闸门（core 只有一个执行槽/一套上下文）──
+        # 排队而非拒绝：客户端并发发 prompt 是合法的，先到先跑，
+        # 后来者只看到「还在等」（协议允许，没有必须并发的 MUST）。
+        self._turn_lock = asyncio.Lock()
 
         # ── 工具调用追踪（配对 call ↔ result 通知） ──
         self._tool_call_counter = 0
@@ -316,10 +409,12 @@ class ACPServer:
         self._last_write_path: str | None = None  # write_file 路径，用于 result 展示内容
 
         # ── 当前 prompt 处理 task（用于取消） ──
-        self._current_task: asyncio.Task[Any] | None = None
+        # 按会话记录：session/cancel 只中断 params.sessionId 那一轮
+        # （见 _SessionState.task）。
 
         # ── 并发 prompt 防护 ──
-        self._processing_prompt = False
+        # 按会话判定（_SessionState.busy）：同会话并发是客户端 bug（-32600）；
+        # 跨会话并发合法，经 _turn_lock 排队，不再全局拒绝。
 
         # ── agent→client 请求（elicitation 等）：JSON-RPC id → 等待响应 Future ──
         self._pending_requests: dict[int, asyncio.Future[dict[str, Any]]] = {}
@@ -423,7 +518,8 @@ class ACPServer:
         直接用作 ACP 的 toolCallId → call/result 天然配对，并行同名工具不会互相错配。
         """
         # ── 会话未就绪时跳过（start() 之前触发的钩子） ──
-        if self._session_id is None:
+        sid = self._turn_sid()
+        if sid is None:
             return
 
         # ── 解析参数 ──
@@ -482,7 +578,7 @@ class ACPServer:
         if locations:
             update["locations"] = locations
 
-        self._send_notification("session/update", {"sessionId": self._session_id, "update": update})
+        self._send_notification("session/update", {"sessionId": sid, "update": update})
 
     # ── 工具标题和 input 构建 ────────────────────────────
 
@@ -613,7 +709,8 @@ class ACPServer:
         """
 
         # ── 会话未就绪时跳过 ──
-        if self._session_id is None:
+        sid = self._turn_sid()
+        if sid is None:
             return
 
         status = "failed" if "❌" in str(result)[:10] else "completed"
@@ -692,7 +789,7 @@ class ACPServer:
         if content_blocks:
             update["content"] = content_blocks
 
-        self._send_notification("session/update", {"sessionId": self._session_id, "update": update})
+        self._send_notification("session/update", {"sessionId": sid, "update": update})
 
     def _tool_call_id(self, tool_name: str, tool_call_id: str = "") -> str:
         """toolCallId：优先用 fp-core 传入的真实 call id（与 ON_TOOL_RESULT 同值）→ 天然配对。
@@ -784,12 +881,14 @@ class ACPServer:
             return
 
         sid = self._session_id
-        self._processing_prompt = True
+        # 续接的这一轮同样要进会话表：turn 内的 tool_call/chunk 通知靠 _turn_sid
+        # 取 sid（不进表就会被静默丢掉），session/cancel 也靠表定位要中断的那一轮。
+        st = self._adopt_session(sid) if sid else None
         acp_io = self._make_acp_io(sid)
         self._log("🔄 reload 续接：恢复会话并继续上一轮对话…")
         try:
-            self._current_task = asyncio.create_task(portal.run.continue_(io=acp_io))
-            response = await self._current_task
+            self._active = st
+            response = await portal.run.continue_(io=acp_io)
             buf = acp_io.flush_text()
             reply_text = response.content or ""
             if buf.strip():
@@ -801,8 +900,7 @@ class ACPServer:
                 self._send_result(pending_req, {"stopReason": "end_turn"})
                 self._log("🔄 已为挂起的 prompt 请求补发 result")
         finally:
-            self._current_task = None
-            self._processing_prompt = False
+            self._active = None
 
     async def start(self) -> None:
         """启动 ACP 服务器，从 stdin 读取 JSON-RPC 消息"""
@@ -811,6 +909,10 @@ class ACPServer:
             await portal.ctl.open(enable_log=False, resume=os.environ.get("FP_RELOAD_SID") or None)
         self._register_follow_hooks()
         self._session_id = portal.run.status.session_id
+        # 启动即持有的会话（reload 恢复的那个）先入表：客户端可能不给 load
+        # 直接发 prompt（连接没断，它认为会话一直活着）。
+        if self._session_id:
+            self._adopt_session(self._session_id)
 
         # ── reload handoff：在进入消息循环前完成上一轮对话的续接 ──
         await self._reload_continue()
@@ -942,13 +1044,7 @@ class ACPServer:
     async def _handle_notification(self, method: str, params: dict[str, Any]) -> None:
         """处理通知（无 id 的请求）"""
         if method == "session/cancel":
-            self._log("⏹️  收到取消通知，正在中断 agent...")
-            portal.run.cancel()
-            # 主动取消当前正在执行的 prompt task，让 agent 立即停止
-            # 而不是等到下一个中断检查点（可能在 LLM 调用或工具执行中，会等很久）
-            if self._current_task is not None and not self._current_task.done():
-                self._current_task.cancel()
-                self._log("  → 已取消当前处理 task")
+            self._handle_cancel(params)
         elif method == "initialized":
             self._log("客户端已初始化")
             # 不在此处注册命令——此时只有默认 sessionId（IDE 不认识它），
@@ -1046,23 +1142,142 @@ class ACPServer:
             "authMethods": [],
         }
 
-    def _apply_session_cwd(self, cwd: str) -> None:
-        """记录并应用会话根目录（规范：cwd 是会话根、相对路径解析基准）。
+    # ═══════════════════════════════════════════════════════
+    # 会话表与路由（多会话并存）
+    # ═══════════════════════════════════════════════════════
 
-        此前实现完全忽略 params.cwd，导致 IDE 在项目 A 里对话、工具却在 agent
-        自身进程 cwd 里读写文件（跨项目误伤）。此处 chdir 到会话根，使相对路径
-        落在 cwd 之下；绝对路径不受影响。
+    def _turn_sid(self) -> str | None:
+        """当前 turn 的会话 id（通知路由的唯一真源）。
+
+        turn 内的 tool_call / plan / chunk 通知必须带**该轮自己的** sid：
+        用「最近聚焦会话」会在用户切 thread 后把 A 的输出打到 B 的面板上。
+        turn 之外（如 job 里的工具）回落聚焦会话——此时没有更好的真源。
         """
+        if self._active is not None:
+            return self._active.sid
+        return self._session_id
+
+    def _validate_session_cwd(self, cwd: Any, method: str) -> str:
+        """校验会话根目录，**不产生任何副作用**（不 chdir、不动 core）。
+
+        与 `_enter_session` 分开的意义：cwd 合法性是请求级校验，可以立刻
+        回答客户端；而「进入会话」会改写 core 的上下文，必须串行（见 _turn_lock）。
+        旧实现把两者焊在一起（_apply_session_cwd），于是 session/new 也得抢执行槽。
+        """
+        if not isinstance(cwd, str) or not cwd:
+            raise _ACPRPCError(_RPC_INVALID_PARAMS, f"{method} 缺少必填参数 cwd（会话根目录绝对路径）")
         target = os.path.abspath(cwd)
         if not os.path.isdir(target):
             raise _ACPRPCError(_RPC_INVALID_PARAMS, f"会话 cwd 不存在或不是目录: {cwd}")
-        if os.getcwd() != target:
+        return target
+
+    def _adopt_session(self, sid: str, cwd: str | None = None) -> _SessionState | None:
+        """把一条**已存在**的会话纳入会话表（幂等）；来源按可信度排序。
+
+        收养顺序：本次连接登记过 → 客户端声明的 cwd → 磁盘 meta 的 cwd →
+        core 当前会话（reload/内存态）。都证明不了就返回 None（调用方报 -32602）。
+
+        为什么允许「没 load 过就收养」：客户端切 thread 不发消息，agent 进程
+        重启后它也不会补发 load，但它手上的 sessionId 仍然有效。
+        """
+        st = self._sessions.get(sid)
+        if st is not None:
+            if cwd:  # 客户端当下声明是唯一可信来源（项目可能被移动）
+                st.cwd = cwd
+            return st
+
+        known_cwd: str | None = cwd
+        if known_cwd is None:
             try:
-                os.chdir(target)
-            except OSError as e:
-                raise _ACPRPCError(_RPC_INTERNAL_ERROR, f"无法切换到会话 cwd {target}: {e}") from e
-        self._session_cwd = target
-        self._log(f"会话 cwd: {target}")
+                meta = portal.ctl.sessions.list().get(sid) or {}
+                raw = meta.get("cwd")
+                known_cwd = raw if isinstance(raw, str) and raw else None
+            except Exception:
+                known_cwd = None
+        if known_cwd is None:
+            if sid != portal.run.status.session_id:
+                return None
+            known_cwd = current_cwd()  # 兜底：core 当前会话所属上下文（P2 起不再是进程 cwd）
+        st = _SessionState(sid=sid, cwd=os.path.abspath(known_cwd))
+        self._sessions[sid] = st
+        return st
+
+    def _resolve_session(self, params: dict[str, Any], method: str) -> _SessionState:
+        """按 params.sessionId 路由；缺省回落到最近聚焦会话（老客户端兼容）。"""
+        raw = params.get("sessionId") or params.get("session_id")
+        sid = raw if isinstance(raw, str) and raw else self._session_id
+        if not sid:
+            raise _ACPRPCError(_RPC_INVALID_PARAMS, f"{method} 缺少必填参数 sessionId")
+        st = self._sessions.get(sid)
+        if st is None:
+            raise _ACPRPCError(
+                _RPC_INVALID_PARAMS,
+                f"未知会话: {sid}（本连接已登记的会话: {sorted(self._sessions) or '无'}）",
+            )
+        return st
+
+    def _enter_session(self, st: _SessionState) -> Token[str | None] | None:
+        """**进入**一条会话：core 上下文切到它、cwd 成为相对路径基准。
+
+        返回 cwd 的复位令牌，调用方（turn 循环）必须在同一 Task 内复位。
+        必须在 `_turn_lock` 内调用：core 只有一个执行槽/一套上下文，
+        并发进入会让两条会话的消息写进同一个 conversation。
+
+        为什么不把「切 core」放在 session/new：客户端常在 A 还在输出时
+        开新 thread（Zed 的 New Thread），此时切 core 会把 A 的对话对象
+        重置，A 这一轮的回答就落到 B 的历史里。
+        """
+        cur = portal.run.status.session_id
+        if cur != st.sid:
+            info = portal.ctl.sessions.load(st.sid)
+            if info is None:
+                # 盘上还没有它（session/new 后没产生过消息 → 文件惰性创建）。
+                # 用预分配的 sid 建档：core 的 create_session 接受指定 sid，
+                # 这样 cwd 能随会话落盘，session/list 才过滤得准。
+                info = portal.ctl.sessions.new(cwd=st.cwd, sid=st.sid)
+            self._log(f"进入会话: {st.sid}（cwd={st.cwd}）")
+        return self._session_cwd_apply(st)
+
+    def _session_cwd_apply(self, st: _SessionState) -> Token[str | None] | None:
+        """让相对路径基准 = 会话 cwd（P2：contextvar，**不再 chdir**）。
+
+        `os.chdir` 是进程级全局可变状态，用它承载会话 cwd 意味着正确性只能靠
+        「同一时刻只有一个会话在跑」这条纪律。改成 `fp_core.core.cwd` 的
+        ContextVar 后正确性来自语言机制（按 Task 隔离），即使将来放开并发
+        也不会把 A 的相对路径解析到 B 的仓库里。
+
+        **通常不需要它**：core 的 `_load_meta_from_session` 在装载会话时已把
+        基准绑到 `meta.cwd`（cwd 是会话属性）。这里只处理一种偏离——客户端在
+        `session/load` 里声明的 cwd 与落盘 meta 不一致时，以客户端为准做**本轮**
+        覆盖。返回 None 表示无需复位。
+        """
+        target = os.path.abspath(st.cwd)
+        if current_cwd() == target:
+            return None
+        return set_cwd(target)
+
+    def _handle_cancel(self, params: dict[str, Any]) -> None:
+        """取消**指定会话**的那一轮（cancel 通知也算 session-scoped 操作）。
+
+        旧实现无脑 `portal.run.cancel()`：一旦有多条会话，取消 B 会把正在跑的
+        A 也打断。故只在「被取消的正是当前执行槽持有者」时才置 core 中断标志。
+        """
+        raw = params.get("sessionId") or params.get("session_id")
+        sid = raw if isinstance(raw, str) and raw else self._session_id
+        st = self._sessions.get(sid) if sid else None
+        if st is None:
+            self._log(f"⏹️  忽略未知会话的取消: {sid}")
+            return
+        self._log(f"⏹️  收到取消通知（会话 {st.sid}），正在中断 agent...")
+
+        task = st.task
+        if task is not None and not task.done():
+            task.cancel()
+            self._log("  → 已取消该会话的处理 task")
+        # core 中断标志是全局的：只有取消「正在跑的那一轮」时才能碰，
+        # 否则会误伤另一条会话正在执行的 turn。
+        if self._active is st:
+            portal.run.cancel()
 
     def _replay_history(self, session_id: str) -> None:
         """把历史会话回放给客户端（session/load 响应之前必须完成）。
@@ -1113,95 +1328,143 @@ class ACPServer:
         参考: https://agentclientprotocol.com/protocol/v1/session-setup
         """
         # 规范 MUST：cwd 是会话根目录，决定相对路径解析基准
-        cwd = params.get("cwd")
-        if not isinstance(cwd, str) or not cwd:
-            raise _ACPRPCError(_RPC_INVALID_PARAMS, "session/new 缺少必填参数 cwd（会话根目录绝对路径）")
-        self._apply_session_cwd(cwd)
+        cwd = self._validate_session_cwd(params.get("cwd"), "session/new")
 
-        info = portal.ctl.sessions.new()
-        self._session_id = info.session_id
-        self._log(f"创建新会话: {info.session_id}")
+        # 只登记，**不碰 core**：客户端常在 A 还在输出时开新 thread，
+        # 此刻切 core 会把 A 的对话对象重置（A 的回答落进 B 的历史）。
+        # 真正「进入」推迟到该会话的首次 prompt，由 _turn_lock 串行保证。
+        sid = portal.ctl.sessions.generate_sid()
+        self._sessions[sid] = _SessionState(sid=sid, cwd=cwd)
+        self._session_id = sid
+        self._log(f"创建新会话: {sid}（cwd={cwd}，首次 prompt 时进入）")
 
         # 注意：命令注册通知在 _dispatch 中响应之后发送，
         # 以确保 IDE 先拿到 sessionId 再处理命令列表。
-        return {"sessionId": info.session_id}
+        return {"sessionId": sid}
 
     async def _handle_session_load(self, params: dict[str, Any]) -> dict[str, Any]:
         """
         ACP v1 恢复已有会话。
 
-        如果会话不存在，自动创建新的空会话返回（而不是报错让 IDE 崩溃）。
+        会话不存在时报错（旧实现静默新建空会话，IDE 以为历史已恢复）。
 
         参考: https://agentclientprotocol.com/protocol/v1/session-setup#loading-sessions
+
+        同样是**只登记 + 回放**，不切 core：load 之后这条会话只是「可寻址」，
+        真正进入要等它的下一次 prompt（否则 load A 会把正在跑的 B 顶掉）。
         """
         # ACP v1 使用 camelCase
         session_id = params.get("sessionId") or params.get("session_id", "")
         if not session_id:
             raise _ACPRPCError(_RPC_INVALID_PARAMS, "session/load 缺少必填参数 sessionId")
 
-        cwd = params.get("cwd")
-        if not isinstance(cwd, str) or not cwd:
-            raise _ACPRPCError(_RPC_INVALID_PARAMS, "session/load 缺少必填参数 cwd（会话根目录绝对路径）")
-        self._apply_session_cwd(cwd)
+        cwd = self._validate_session_cwd(params.get("cwd"), "session/load")
 
-        info = portal.ctl.sessions.load(session_id)
-        if info is None:
-            # 当前内存会话尚未落盘（session/new 后还没产生消息，文件惰性创建）：
-            # 它是合法会话，只是历史为空 —— 若在此报「不存在」，IDE 重连恢复
-            # 一个刚建的空会话会直接失败。
-            if session_id == portal.run.status.session_id:
-                self._session_id = session_id
-                self._log(f"恢复内存态会话（历史为空）: {session_id}")
-                return {"sessionId": session_id}
+        # 盘上文件存在 ⇔ read_messages 非 None（惰性创建：新会话还没产生消息）
+        on_disk = portal.ctl.sessions.read_messages(session_id) is not None
+
+        # 「恢复」的前提是这条会话**真的存在**：磁盘上有历史，或本次连接登记过
+        # （session/new 的惰性会话），或它就是 core 当前会话（reload/内存态）。
+        # 客户端声明 cwd **不能**当作存在性证明 —— 否则 load 退化成静默新建空
+        # 会话（旧 bug：IDE 以为历史已恢复，实际打开空白对话）。
+        if session_id not in self._sessions and not on_disk and session_id != portal.run.status.session_id:
+            raise _ACPRPCError(_RPC_INVALID_PARAMS, f"会话不存在: {session_id}")
+
+        st = self._adopt_session(session_id, cwd=cwd)
+        if st is None:
             # 规范：真正不存在的会话应报错（此前静默新建空会话，IDE 以为历史已恢复）。
             raise _ACPRPCError(_RPC_INVALID_PARAMS, f"会话不存在: {session_id}")
 
-        self._session_id = info.session_id
-        self._log(f"恢复会话: {info.session_id}")
+        self._session_id = st.sid
+        self._log(f"恢复会话: {st.sid}（cwd={st.cwd}，{'历史回放' if on_disk else '空会话'}）")
+
+        # 会话 meta 的 cwd 回填/校正：本次 load 时客户端声明的会话根是
+        # **唯一可信来源**——老会话（P0 之前创建）meta 里没有 cwd，而 session/list
+        # 要按它过滤；项目被移动时也应以客户端当下的声明为准。
+        # touch_updated=False：补全字段不该让它在会话列表里跳到最前面。
+        # 文件不存在时**不补**：不为了写一个 cwd 字段凭空造出 0 长度会话文件。
+        if on_disk:
+            try:
+                known_cwd = (portal.ctl.sessions.list().get(st.sid) or {}).get("cwd")
+                if _norm_cwd(str(known_cwd or "")) != _norm_cwd(st.cwd):
+                    portal.ctl.sessions.update_meta(st.sid, create=False, touch_updated=False, cwd=st.cwd)
+                    self._log(f"会话 cwd 回填: {st.sid} → {st.cwd}（原 {known_cwd or '未知'}）")
+            except Exception as e:  # 回填失败不影响恢复语义
+                self._log(f"会话 cwd 回填失败（忽略）: {e}")
+
         # 规范 MUST：响应之前回放全部历史（见 _replay_history）
-        self._replay_history(info.session_id)
+        self._replay_history(st.sid)
         # 注意：命令注册通知在 _dispatch 中响应之后发送
-        return {"sessionId": info.session_id}
+        return {"sessionId": st.sid}
 
     async def _handle_session_list(self, params: dict[str, Any]) -> dict[str, Any]:
         """
-        ACP v1 列出所有历史会话。
+        ACP v1 列出历史会话。
 
         参考: https://agentclientprotocol.com/protocol/v1/session-list
+
+        schema（zListSessionsRequest/zListSessionsResponse/zSessionInfo）：
+          - 请求**四个字段全可选**。此前把 cwd 当必填并抛 -32602，导致客户端
+            按 schema 发 `{}` 时直接失败（该扩展只在知道 cwd 时才带参数）。
+          - 请求 cwd 若给出，按**会话自己的** cwd 过滤（realpath 归一）。
+            此前把当前会话的 cwd 回填给所有条目，等于谎报：别的项目的会话
+            也会出现在本项目的历史列表里。
+          - `cursor` 不透明游标 + `nextCursor` 分页（_LIST_PAGE_SIZE 一页）。
+          - `updatedAt` 用 ISO 8601（meta 里存的是 `%Y-%m-%d %H:%M:%S`）。
+
+        老会话（本版之前创建、meta 无 cwd）无法证明归属哪个目录：给 cwd 传
+        参数时它们不出现；不传时出现但 `cwd` 为空、`_meta.cwdUnknown=true`
+        —— 宁可缺字段，不拿当前目录冒充它的工作目录。
         """
-        # 规范：cwd 为必填参数（用于按工作目录过滤会话）。
-        # 限制：会话 meta 目前未持久化 cwd，无法真正按目录过滤，此处只接受并
-        # 回填当前会话 cwd；过滤能力待 fp-core 在 meta 中记录 cwd 后补（二期）。
-        cwd = params.get("cwd")
-        if not isinstance(cwd, str) or not cwd:
-            raise _ACPRPCError(_RPC_INVALID_PARAMS, "session/list 缺少必填参数 cwd（会话根目录绝对路径）")
-        list_cwd = self._session_cwd or os.path.abspath(cwd)
+        req_cwd = params.get("cwd")
+        want = _norm_cwd(req_cwd) if isinstance(req_cwd, str) and req_cwd else None
+        cursor = params.get("cursor")
+        after = _decode_cursor(cursor) if isinstance(cursor, str) and cursor else None
 
         all_sessions = portal.ctl.sessions.list()
         current_sid = portal.run.status.session_id
 
+        # ① 归一成 (updated, sid, meta, 会话自己的 cwd)
+        rows: list[tuple[str, str, dict[str, Any], str]] = []
+        for sid, meta in all_sessions.items():
+            updated = str(meta.get("updated") or meta.get("created") or "")
+            meta_cwd = meta.get("cwd")
+            rows.append((updated, sid, meta, meta_cwd if isinstance(meta_cwd, str) else ""))
+
+        # 排序键必须与游标键完全一致（updated desc，sid 作稳定次序），
+        # 否则翻页会跳过或重复条目。
+        rows.sort(key=lambda r: (r[0], r[1]), reverse=True)
+
+        # ② 按会话自己的 cwd 过滤（不拿当前会话目录冒充别人的）
+        if want is not None:
+            rows = [r for r in rows if r[3] and _norm_cwd(r[3]) == want]
+
+        # ③ 游标：只保留严格排在游标之后的条目
+        if after is not None:
+            rows = [r for r in rows if (r[0], r[1]) < after]
+
+        # ④ 取一页
+        page = rows[:_LIST_PAGE_SIZE]
         sessions_list: list[dict[str, Any]] = []
-        for sid, meta in sorted(
-            all_sessions.items(),
-            key=lambda x: x[1].get("updated", x[1].get("created", "")),
-            reverse=True,
-        ):
+        for updated, sid, meta, meta_cwd_s in page:
             title = meta.get("summary", "") or ""
-            msg_count = meta.get("message_count", 0)
-
-            session_entry = {
+            sessions_list.append({
                 "sessionId": sid,
-                "cwd": list_cwd,
+                "cwd": meta_cwd_s,
                 "title": title[:80] if title else None,
-                "updatedAt": meta.get("updated", meta.get("created", "")),
+                "updatedAt": _to_iso8601(updated),
                 "_meta": {
-                    "messageCount": msg_count,
+                    "messageCount": meta.get("message_count", 0),
                     "isCurrent": sid == current_sid,
+                    "cwdUnknown": not meta_cwd_s,
                 },
-            }
-            sessions_list.append(session_entry)
+            })
 
-        return {"sessions": sessions_list}
+        result: dict[str, Any] = {"sessions": sessions_list}
+        # 还有剩余 → 发下一页游标；不带 nextCursor 表示到底
+        if len(rows) > len(page) and page:
+            result["nextCursor"] = _encode_cursor(page[-1][0], page[-1][1])
+        return result
 
     async def _handle_session_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
         """
@@ -1223,67 +1486,93 @@ class ACPServer:
         if user_prompt is None:
             raise ValueError("No prompt provided. Use 'prompt' (ACP format) or 'messages' (OpenAI format)")
 
-        # ── 并发防护：同一时间只能处理一个 prompt ──
-        if self._processing_prompt:
-            self._log("⚠️  并发 prompt 请求被拒绝")
-            # stopReason="cancelled" 只能由 session/cancel 产生；并发冲突是请求
-            # 错误，回 cancelled 会让客户端误判「用户取消了本次回答」。
-            raise _ACPRPCError(_RPC_INVALID_REQUEST, "已有 prompt 正在处理中，请先 session/cancel 或等待完成")
-        self._processing_prompt = True
+        # ── 按 sessionId 路由（协议里 sessionId 是地址，不是「当前会话指针」）──
+        st = self._resolve_session(params, "session/prompt")
+        sid = st.sid
 
-        # ── 校验并快照 sessionId，防止在异步处理期间被 session/new 修改 ──
-        # 此前完全忽略 params.sessionId（全局单一会话），多会话必然串话。
-        req_sid = params.get("sessionId")
-        if isinstance(req_sid, str) and req_sid and self._session_id and req_sid != self._session_id:
-            raise _ACPRPCError(_RPC_INVALID_PARAMS, f"未知会话: {req_sid}（当前会话 {self._session_id}）")
-        sid = self._session_id
+        # ── 同会话并发：客户端 bug，回请求错误 ──
+        # stopReason="cancelled" 只能由 session/cancel 产生；并发冲突回 cancelled
+        # 会让客户端误判「用户取消了本次回答」。
+        # 注意这里只管**同一会话**：跨会话并发是合法的，走 _turn_lock 排队。
+        if st.busy:
+            self._log(f"⚠️  会话 {sid} 已有 prompt 在处理，拒绝并发")
+            raise _ACPRPCError(_RPC_INVALID_REQUEST, "该会话已有 prompt 正在处理中，请先 session/cancel 或等待完成")
 
+        st.busy = True
+        # 尽早挂上 task：排队期间也要能被 session/cancel 定位并取消
+        st.task = asyncio.current_task()
+        self._session_id = sid
         try:
-            # ── 发送 plan 通知 ──
-            self._send_plan_notification(session_id=sid)
+            # ── 跨会话排队：core 只有一个执行槽/一套上下文 ──
+            # 排队而非拒绝 —— 客户端并发发 prompt 是合规的，先到先跑，
+            # 后来者只看到「还在等」（规范没有必须并发的 MUST）。
+            async with self._turn_lock:
+                self._active = st
+                cwd_token: Token[str | None] | None = None
+                try:
+                    cwd_token = self._enter_session(st)
+                    return await self._run_turn(st, user_prompt)
+                finally:
+                    # 复位必须在同一 Task 内（_run_turn 是 await，未跨 Task 边界）；
+                    # 失败也要复位，否则本 Task 残留 cwd 会污染后续同 Task 的代码。
+                    if cwd_token is not None:
+                        reset_cwd(cwd_token)
+                    self._active = None
+        finally:
+            st.busy = False
+            st.task = None
 
-            # ── 调用 Agent 核心 ──
-            # 使用 ACPIO 缓冲输出，并在累积到阈值时自动推送 agent_message_chunk
-            #
-            # 注意：send_chunk 回调捕获了 sid 快照，避免 race；
-            # 客户端声明 elicitation.form 时同时注入带内 elicit。
-            acp_io = self._make_acp_io(sid)
+    async def _run_turn(self, st: _SessionState, user_prompt: str) -> dict[str, Any]:
+        """跑一轮对话（调用方已持有 _turn_lock 且已进入该会话）。
 
-            self._log(f"发送给 Agent: {user_prompt[:120]}")
-            self._current_task = asyncio.create_task(portal.run.send(user_prompt, io=acp_io))
-            try:
-                response = await self._current_task
-            except asyncio.CancelledError:
-                self._log("⏹️  Agent 处理已被用户取消")
-                # 清理中断标记，确保下次 prompt 正常工作
-                portal.run.reset_cancelled()
-                # 取消后仍然 flush 缓冲区，确保用户看到已生成的内容
-                buf = acp_io.flush_text()
-                if buf.strip():
-                    self._send_message_notification(buf, session_id=sid)
+        拆出来的理由：`_handle_session_prompt` 负责协议层（路由/排队/取消登记），
+        这里负责「把一轮跑完并把输出推给客户端」，两件事的失败模式完全不同。
+        """
+        sid = st.sid
+        # ── 发送 plan 通知 ──
+        self._send_plan_notification(session_id=sid)
 
-                self._clear_plan(sid)
-                return {"stopReason": "cancelled"}
-            finally:
-                self._current_task = None
+        # ── 调用 Agent 核心 ──
+        # 使用 ACPIO 缓冲输出，并在累积到阈值时自动推送 agent_message_chunk
+        #
+        # 注意：send_chunk 回调捕获了 sid 快照，避免 race；
+        # 客户端声明 elicitation.form 时同时注入带内 elicit。
+        acp_io = self._make_acp_io(sid)
 
-            # ── 处理剩余文本（流式推送后缓冲区可能已空） ──
-            # 设计原则：io 负责展示，return 负责状态传递
-            # - IO 通道有内容（命令场景）→ 由 IO 负责展示，不重复推 response.content
-            # - IO 通道无内容（对话/工具场景）→ fallback 到 response.content
+        self._log(f"发送给 Agent: {user_prompt[:120]}")
+        turn = asyncio.create_task(portal.run.send(user_prompt, io=acp_io))
+        try:
+            response = await turn
+        except asyncio.CancelledError:
+            self._log("⏹️  Agent 处理已被用户取消")
+            # 清理中断标记，确保下次 prompt 正常工作
+            portal.run.reset_cancelled()
+            # 取消后仍然 flush 缓冲区，确保用户看到已生成的内容
             buf = acp_io.flush_text()
-            reply_text = response.content or ""
-
             if buf.strip():
                 self._send_message_notification(buf, session_id=sid)
-            elif reply_text:
-                self._send_message_notification(reply_text, session_id=sid)
 
-            # plan 条目必须走完生命周期，不能只发开始态
             self._clear_plan(sid)
-            return {"stopReason": "end_turn"}
+            return {"stopReason": "cancelled"}
         finally:
-            self._processing_prompt = False
+            if not turn.done():
+                turn.cancel()
+
+        # ── 处理剩余文本（流式推送后缓冲区可能已空） ──
+        # 设计原则：io 负责展示，return 负责状态传递
+        # - IO 通道有内容（命令场景）→ 由 IO 负责展示，不重复推 response.content
+        # - IO 通道无内容（对话/工具场景）→ fallback 到 response.content
+        buf = acp_io.flush_text()
+        reply_text = response.content or ""
+
+        if buf.strip():
+            self._send_message_notification(buf, session_id=sid)
+        elif reply_text:
+            self._send_message_notification(reply_text, session_id=sid)
+
+        # plan 条目必须走完生命周期，不能只发开始态
+        self._clear_plan(sid)
+        return {"stopReason": "end_turn"}
 
     async def _handle_session_ping(self, params: dict[str, Any]) -> dict[str, Any]:
         """ACP v1 心跳保持"""
@@ -1449,7 +1738,7 @@ class ACPServer:
         PlanEntryStatus 枚举只有 pending/in_progress/completed（旧实现的 "running" 非法，
         会让客户端 schema 校验失败）。计划条目必须走完生命周期，不能只发开始态。
         """
-        sid = session_id or self._session_id
+        sid = session_id or self._turn_sid()
         if status not in self._PLAN_STATUSES:
             status = "in_progress"
         self._send_notification(
@@ -1474,7 +1763,7 @@ class ACPServer:
         self._send_notification(
             "session/update",
             {
-                "sessionId": session_id or self._session_id,
+                "sessionId": session_id or self._turn_sid(),
                 "update": {"sessionUpdate": "plan", "entries": []},
             },
         )
@@ -1488,7 +1777,7 @@ class ACPServer:
         故由 _make_acp_io 为每个用户回合生成一个 id 并全程复用 —— 旧实现每 chunk 新建
         uuid，会把一条回复在客户端切成多条独立消息。
         """
-        sid = session_id or self._session_id
+        sid = session_id or self._turn_sid()
         mid = message_id or f"msg_{uuid.uuid4().hex[:12]}"
         self._send_notification(
             "session/update",
@@ -1606,7 +1895,7 @@ class ACPServer:
         rid, fut = self._send_request(
             "elicitation/create",
             {
-                "sessionId": session_id or self._session_id,
+                "sessionId": session_id or self._turn_sid(),
                 "mode": "form",
                 "message": prompt,
                 "requestedSchema": schema,

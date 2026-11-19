@@ -13,6 +13,7 @@
 
 import os
 
+from fp_core.api.cwd import current_cwd
 from fp_core.core.session_view import render_search, session_list_text, sorted_sessions
 from fp_core.core.state import State
 
@@ -35,6 +36,18 @@ def _resolve_sid(state: State, raw: str, exclude_current: bool = False) -> str |
             return pool[i - 1][0]
         return None
     return raw  # 当作 sid 直接返回
+
+
+def _dir_notice(prev: str, cur: str) -> str:
+    """切换会话后若工作目录跟着变了，回一行提示。
+
+    cwd 是**会话属性**（见 core/session.py `_bind_session_cwd`）：resume 一个
+    在别的项目里建的会话，相对路径基准会整条换掉。这不是错误，但**必须可见**
+    ——否则用户以为还在 B，文件却写进了 A，全程无异常无日志。
+    """
+    if not prev or not cur or os.path.abspath(prev) == os.path.abspath(cur):
+        return ""
+    return f"\nℹ️ 工作目录随会话切换：`{prev}` → `{cur}`"
 
 
 def _rebuild_context(state: State) -> None:
@@ -112,13 +125,17 @@ async def execute(state: State, arg: str) -> tuple[bool, str]:
 
     # ── /resume latest ─────────────────────────────────────────
     if arg == "latest":
+        prev_cwd = current_cwd()
         # 保存当前会话的上下文和摘要，再切换
         state.session.save_and_summarize(
             state.conversation.to_serializable(), meta_updates=state.token_tracker.meta_fragment()
         )
         if state.session.resume_latest():
             _rebuild_context(state)
-            return (True, f"📂 已切换到最新会话: `{state.session_id}`")
+            return (
+                True,
+                f"📂 已切换到最新会话: `{state.session_id}`" + _dir_notice(prev_cwd, current_cwd()),
+            )
         return (True, "❌ 没有可切换的会话")
 
     # ── /resume <sid|序号> ─────────────────────────────────────
@@ -142,6 +159,7 @@ async def execute(state: State, arg: str) -> tuple[bool, str]:
         return (True, render_search(state, arg.split()))
 
     # 保存当前会话的上下文和摘要，再切换
+    prev_cwd = current_cwd()
     state.session.save_and_summarize(
         state.conversation.to_serializable(), meta_updates=state.token_tracker.meta_fragment()
     )
@@ -151,6 +169,9 @@ async def execute(state: State, arg: str) -> tuple[bool, str]:
         # updated 刷成了当前时刻 —— 不落盘新会话，崩溃窗口内重启会回退到旧会话，
         # 本次 /resume 静默失效。与 back/compact/fork 对称：改 ctx 者自落盘。
         state.session.save_context(state.conversation.to_serializable())
-        return (True, f"📂 已切换到会话: `{sid}`")
+        return (
+            True,
+            f"📂 已切换到会话: `{sid}`" + _dir_notice(prev_cwd, current_cwd()),
+        )
     else:
         return (True, f"❌ 会话 `{sid}` 不存在。使用 `/resume list` 查看可用会话")
