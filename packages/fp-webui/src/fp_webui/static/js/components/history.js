@@ -97,11 +97,13 @@ export function renderHistoryMessages(sid, messages) {
       var argsPreview = histArgs ? histArgs.replace(/\s+/g, ' ').trim() : '';
       if (argsPreview.length > 80) argsPreview = argsPreview.slice(0, 80) + '…';
 
-      // 宿主：前一张助手卡片的 msg-body；缺失（历史截断）→ 兜底独立成组
-      var hostBody = _histToolHost;
-      if (!hostBody || !document.body.contains(hostBody)) {
-        hostBody = null;
-      }
+      // 宿主：前一张助手卡片的 msg-body；缺失（历史截断）→ 兜底独立成组。
+      // ⚠️ 判据必须是 frag.contains，**不能**是 document.body.contains：本函数把整批
+      //    历史建在脱离文档的 DocumentFragment 里（末尾才 insertBefore 落位），此刻
+      //    body.contains 恒为 false → 每一条工具行都被判成「无宿主」，裸挂到卡片外。
+      //    真机症状：历史里工具行全部漏出助手卡片（#244）。反向验证见
+      //    test_webui_history_tool_nesting_e2e.py::test_25。
+      var hostBody = (_histToolHost && frag.contains(_histToolHost)) ? _histToolHost : null;
 
       var row = document.createElement('div');
       row.className = 'tool-row collapsed';
@@ -189,6 +191,10 @@ export function renderHistoryMessages(sid, messages) {
         if (msg.tool_calls && msg.tool_calls.length > 0 && !msg.content) {
           contentEl.classList.add('stream-pending');
         }
+      } else {
+        // user 消息：宿主作废。历史被截断（tool 消息的助手卡片缺失）时，孤儿工具行
+        // 只能走裸行兜底——若沿用更早轮次的卡片，就会挂到**别人的**卡片里（错挂）。
+        _histToolHost = null;
       }
       // 思考块：已落盘的 reasoning_content → 折叠态插在正文前（n4 历史回看）
       if (msg.reasoning_content) {

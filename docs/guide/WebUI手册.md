@@ -131,6 +131,14 @@ fp-webui
   编号只认一个基准：历史落地后由历史最后一条的 index 决定 `base`，`renumberLiveMessages`
   按**文档序**统一重排实时卡片（含工具行内徽章），不在两处各算一遍。清屏时流式轮的 DOM
   引用会被摘掉但累积文本保留（`detachStreamDom`），下个 token 到达即重建卡片并补写全文
+- **历史里的工具行必须内嵌助手卡片**（`components/history.js`）：宿主是「前一张助手卡片的
+  `.msg-body`」，并行 `tool_calls` 共用同一张卡。**两个判据都是有来历的坑**：① 查宿主是否
+  仍可用只能用 `frag.contains()`，**不能用 `document.body.contains()`**——整批历史建在脱离
+  文档的 `DocumentFragment` 里（末尾才 `insertBefore` 落位），用后者在建卡期恒为 false，
+  会把每条工具行都判成「无宿主」而裸挂到卡片外（节点自带 `margin-left:12px`，肉眼即
+  「工具漏出来了」）；② 遇到 user 消息必须清空宿主——历史被截断（tool 消息的助手卡片缺失）
+  时，孤儿工具行应走裸行兜底，沿用旧宿主就会挂进**别人的**卡片。回归锚点：
+  `fp-webui/tests/e2e/test_webui_history_tool_nesting_e2e.py`（DOM 祖先 + 几何盒子双判据）
 - **回溯按钮**：每条消息右侧的 `↩ 回溯` 按钮（工具行展开态也有），可回到该
   位置重新对话
 - **自动跟随滚动**：会话列表贴底（<80px）时新内容自动滚到底；上滑解除跟随
