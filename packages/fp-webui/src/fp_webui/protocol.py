@@ -64,6 +64,12 @@ EVENTS: list[dict[str, Any]] = [
             _f("session_id", "str|None", "当前会话"),
             _f("replay", "bool", "True=按 seq 从环形缓冲重放"),
             _f("resync", "bool", "True=缓冲溢出或换轮，前端须清屏并 REST 全量重拉"),
+            _f(
+                "replay_base",
+                "int|None",
+                "非 null=随后补发本轮(尚未落盘)事件，起点即此序号；"
+                "前端须把 lastSeq 退回它，否则这批事件被去重器整批丢弃",
+            ),
             _f("snapshot", "object", "运行时快照 {processing, pending_ask}", True),
         ],
         "emitter": "main.py:1039 (SessionRuntime.snapshot)",
@@ -388,6 +394,9 @@ SCHEMA: dict[str, Any] = {
         "replay_field": "replay",
         "resync_field": "resync",
         "dedupe": "前端丢弃 seq <= lastSeq；connected 豁免",
+        # 本轮重放（agent 忙时新开页/resync）：会话文件在轮次结束才落盘，
+        # REST 历史里没有本轮 —— 只能由服务端补发，且必须告知起点让前端退号。
+        "turn_replay_field": "replay_base",
         "heartbeat": {"server_ping_s": 30, "client_ping_s": 10, "idle_close_s": 90},
     },
     "events": EVENTS,

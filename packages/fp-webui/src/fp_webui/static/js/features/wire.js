@@ -30,10 +30,16 @@ on('connected', function (data) {
   // run_id：服务端重启后变化 → 旧 seq 作废，对齐新序号空间
   var wasConnected = !!conn.runId;
   var canReplay = !!data.replay && data.run_id === conn.runId;
+  // 本轮重放起点（服务端 main.py「本轮重放」）：非 null 表示服务端随后会把
+  // 「本轮至今」的全部事件补发过来——新开页(seq=0)/resync 时轮次还没落盘，
+  // REST 历史里没有本轮，只有这批事件能让页面看见本轮提问、已生成正文与工具行。
+  var replayBase = (typeof data.replay_base === 'number') ? data.replay_base : null;
   if (data.run_id) conn.runId = data.run_id;
   // 无法重放时把本地序号对齐服务端当前值（对齐放在重放事件到达前，
-  // 重放分支保持 conn.lastSeq 不动，让随后到达的重放事件通过去重器）
-  if (!canReplay) conn.lastSeq = data.seq || 0;
+  // 重放分支保持 conn.lastSeq 不动，让随后到达的重放事件通过去重器）。
+  // 有本轮重放时**必须**对齐到 replay_base 而非 data.seq：本轮事件的 seq 全都
+  // ≤ 快照点，对齐到 data.seq 会让它们一进 onmessage 就被去重器整批丢掉。
+  if (!canReplay) conn.lastSeq = replayBase !== null ? replayBase : (data.seq || 0);
 
   if (data.session_id) {
     setSessionId(data.session_id);
@@ -45,7 +51,8 @@ on('connected', function (data) {
   // 提示口径见文件顶部：任何「已重连/已同步」横幅都不再出现，连接态交给状态栏。
   var needHistory = false;
   if (data.resync) {
-    // 事件流不可续（缓冲溢出/服务端重启）→ 重放不会来补内容，历史是唯一来源。
+    // 事件流不可续（缓冲溢出/服务端重启）→ 已过去的轮次只能靠历史；
+    // 正在跑的本轮由随后的「本轮重放」补（replay_base，见上方）。
     // 必须 clearUI：残留片段与后端已失配，且 seq 空间已换（旧序号无意义）。
     clearUI();
     needHistory = true;

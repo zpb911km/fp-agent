@@ -583,7 +583,7 @@ ws://host:port/ws/chat?token=your_token
 
 | type | 字段 | 触发时机 |
 |------|------|----------|
-| `connected` | `sub_id`, `run_id`, `seq`, `session_id`, `processing`, `pending_ask`, `replay`, `resync` | 连接成功 + 运行时快照 + 重放协商（见 6.5） |
+| `connected` | `sub_id`, `run_id`, `seq`, `session_id`, `processing`, `pending_ask`, `replay`, `resync`, `replay_base` | 连接成功 + 运行时快照 + 重放协商（见 6.5） |
 | `ping` | — | 心跳（30 秒超时保活） |
 | `llm_start` | — | Agent 开始调用 LLM（前端：起流式轮次 + spinner） |
 | `thinking` | `status`: `start`/`stop` | 思考阶段开始/结束（与 `llm_start`/`llm_end` 配对，动画指示用） |
@@ -652,6 +652,21 @@ ws://host:port/ws/chat?token=your_token
   改用 `GET /api/sessions/<id>/messages` 全量重拉权威历史
 - `run_id` 变化（服务端已重启）→ 同样 `resync: true`，
   旧 `seq` 作废
+
+**本轮重放（`replay_base`）——两个分支都覆盖不到的那一段**：会话文件在
+**轮次结束**才落盘，因此轮次进行中 `GET /messages` 里只有上一轮及更早的内容。
+新开页面（`seq=0`，无从协商）与 `resync` 这两条路径于是都拿不到本轮——用户看到
+「重连后卡在一条消息上、列表不流式刷新，刷新网页也没用，只有等 agent 空闲再刷
+才完整」。故服务端在 `SessionRuntime.start()` 记下本轮起点 `turn_base_seq`，
+新连/resync 时若本轮仍在跑，就把 `(turn_base_seq, 快照点]` 的本轮事件**全部补发**，
+并让 `connected.replay_base` 告知起点：
+
+- 前端见到 `replay_base` 非 `null` 时，`lastSeq` 对齐到它而**不是** `data.seq`——
+  这批事件的 `seq` 全都 ≤ 快照点，对齐到 `data.seq` 会被去重器（`seq <= lastSeq
+  即丢弃`）**整批静默丢掉**，症状与没修一样
+- 本轮起点已被挤出环形缓冲（`events_since` 返回 `None`）→ 放弃补发，退回
+  「历史-only」，比拿半截事件重建出残缺卡片更诚实
+- 与 `replay`/`resync` 互斥：`seq > 0` 且能重放时，缺失区间本就含本轮事件，不重复补
 
 **重拉的三条硬约束**（重连时 agent 正忙是最容易翻车的场景，三条缺一都会错乱）：
 

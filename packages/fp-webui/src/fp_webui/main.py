@@ -86,6 +86,11 @@ class SessionRuntime:
     def __init__(self):
         self.active_task: asyncio.Task[None] | None = None
         self.current_io: WebSocketIO | None = None
+        # 本轮起点 seq（本轮第一件事之前的序号）。新页面(seq=0) / resync 重连时，
+        # 服务端据此把「本轮至今的全部事件」重放给这个连接——会话文件在轮次结束前
+        # 不落盘，REST 历史里没有本轮，只有重放能让刷新后的页面看见本轮提问、
+        # 已生成正文与工具行，并接上后续流式（见 websocket_chat 的重放协商）。
+        self.turn_base_seq: int | None = None
 
     @property
     def is_running(self) -> bool:
@@ -95,6 +100,9 @@ class SessionRuntime:
     def start(self, io: WebSocketIO, coro: Any) -> asyncio.Task[None]:
         """启动处理任务并登记 IO 通道（会话级唯一活跃任务）"""
         self.current_io = io
+        # 本轮起点：此刻的序号之后才有本轮事件（user_message 是本轮第一件）。
+        # 必须在 create_task 之前取——任务一旦开始跑，首个 await 就可能发布事件。
+        self.turn_base_seq = event_bus.current_seq
         self.active_task = asyncio.create_task(coro)
         return self.active_task
 
@@ -112,6 +120,7 @@ class SessionRuntime:
     def release(self) -> None:
         """任务结束后释放登记（由处理任务的 finally 调用）"""
         self.current_io = None
+        self.turn_base_seq = None
 
     async def shutdown(self) -> None:
         """服务端关闭：取消活跃任务并等待其收尾（唯一非用户主动的取消点）"""
@@ -1353,10 +1362,12 @@ async def websocket_chat(
 
     服务器通过 WebSocket 推送实时事件：
       {"type": "connected", "run_id", "seq", "session_id",
-       "processing", "pending_ask", "replay", "resync", ...}
+       "processing", "pending_ask", "replay", "resync", "replay_base", ...}
         ← 连接确认 + 运行时快照 + 重放协商
         ← replay=true 时随后紧跟重放缓冲事件（带 seq）
         ← resync=true 表示缓冲溢出/服务端已重启，前端应 REST 全量重拉
+        ← replay_base 非 null：随后补发**本轮**（尚未落盘，REST 历史里没有）
+          的事件，前端须把 lastSeq 退回该值，否则会被去重器整批丢弃
       {"type": "llm_start", "ts": ...}
       {"type": "llm_end", "content": "...", "has_tool_calls": ..., "tool_names": [...]}
       {"type": "tool_call", "name": "...", "args": "..."}
@@ -1409,6 +1420,25 @@ async def websocket_chat(
         else:
             resync = True  # 服务端已重启，seq 空间不同，无法重放
     will_replay = replay is not None
+
+    # ── 本轮重放（新页面 seq=0 / resync 重连）────────────────────────
+    # 会话文件在轮次结束前不落盘 → REST 历史里没有本轮（实测：第 2 轮进行中，
+    # /messages 只返回到第 1 轮）。于是新开页面或 resync 重连会丢掉本轮提问、
+    # 已生成正文与工具行：用户看到「刷新后卡在一条消息上，等 agent 空闲再刷新
+    # 会话才完整」。这里把「本轮至今」的事件补给它，起点取自 SessionRuntime
+    # 在 start() 时记下的 turn_base_seq；前端凭 replay_base 对齐本地序号，
+    # 因此这批事件不会被去重器丢掉，也不会被当成「全量重放」。
+    turn_replay: list[dict[str, Any]] | None = None
+    replay_base: int | None = None
+    if session_runtime.is_running and (seq == 0 or resync):
+        base = session_runtime.turn_base_seq
+        if base is not None:
+            events = event_bus.events_since(base)
+            # None = 缓冲溢出（本轮起点已被挤出环形缓冲）：放弃本轮重放，
+            # 退回「历史-only」的老行为——比拿半截事件重建出残缺卡片更诚实。
+            if events:
+                turn_replay, replay_base = events, base
+
     sub_id, event_queue = event_bus.subscribe()
 
     # 客户端读活性时间戳（休眠/静默断链检测，由主接收循环刷新）
@@ -1427,10 +1457,17 @@ async def websocket_chat(
             "session_id": portal.run.status.session_id,
             "replay": will_replay,
             "resync": resync,
+            # 本轮重放的起点 seq：非 null 时随后会补发 (replay_base, 快照点] 的本轮
+            # 事件。前端必须把本地 lastSeq 退回 replay_base（而不是对齐到 data.seq），
+            # 否则这批事件的 seq 全 ≤ lastSeq，会被去重器整批丢掉。
+            "replay_base": replay_base,
             **session_runtime.snapshot(),
         })
         if replay:
             for ev in replay:
+                await websocket.send_json(ev)
+        if turn_replay:
+            for ev in turn_replay:
                 await websocket.send_json(ev)
 
         # 后台任务：读取 EventBus 并推送至 WebSocket

@@ -64,6 +64,11 @@ fp-webui --reload             # 开发用：uvicorn 热重载
   渲染器识别为下载链接（带 `Authorization` 头上传下载，token 不进 URL），404 就地转失效态。
 - **断连续传** — 连接只是传输层：断连只清推送任务与订阅，处理任务归属会话级 runtime 继续跑；
   重连带 `?seq=&run_id=` 协商，能重放走环形缓冲（`replay`），溢出或换轮则 `resync` 让前端全量重拉。
+- **本轮重放** — 会话文件在**轮次结束**才落盘，所以轮次进行中 REST `/messages` 里没有本轮。新开页
+  （`seq=0`）或 `resync` 重连时若本轮仍在跑，服务端按 `SessionRuntime.turn_base_seq` 把
+  `(turn_base_seq, 快照点]` 的整轮事件补发，并在 `connected.replay_base` 告知起点——前端据此把
+  `lastSeq` **退回**该值（不是对齐到 `data.seq`），否则整批事件会被去重器丢弃。缺了它，agent 忙时
+  刷新页面会「卡在一条消息上、只有等空闲再刷才完整」。
 - **热重载 / 新建实例** — 命令面 `/reload` 走 execve 原启动命令；`POST /api/agent/new` 只换内存实例（409 拒绝忙时调用）。
 - **外观** — 深/浅主题（`localStorage.webui_theme`）、迭代器光环与投影装饰（`localStorage.webui_halo`，默认关闭省 GPU）。
 - **前端无构建** — 纯 HTML + CSS + 原生 ESM，无打包步骤；静态引用 `?_t=` 由服务端按**子目录相对路径**取真实 mtime 改写，改完即生效。ESM 入口的版本串取**前端目录树整体状态**（不只是 `index.html` 自身 mtime），否则只改 `js/features/wire.js` 时入口戳不变、浏览器继续用旧模块图。
@@ -92,7 +97,7 @@ WebSocket `ws://host:port/ws/chat?token=<token>&seq=<int>&run_id=<str>`：
 
 - 客户端 → 服务端：`message`（`{type,content}`，运行中自动转 `submit` 入队）、`cancel`、`ping`
 - 服务端 → 客户端（全表 31 个 type，单一事实源 `fp_webui/protocol.py`；主要项）：
-  - 连接：`connected`（含 `sub_id`/`run_id`/`seq`/`replay`/`resync`/`processing`/`pending_ask`）、`ping`/`pong`
+  - 连接：`connected`（含 `sub_id`/`run_id`/`seq`/`replay`/`resync`/`replay_base`/`processing`/`pending_ask`）、`ping`/`pong`
   - 流式：`llm_start`、`thinking_content`、`chunk`、`stream_end`、`llm_end`、`info`、`warning`
   - 工具：`tool_select`、`tool_call`、`tool_result`
   - 交互：`ask`（schema v2：version/ask_id/prompt/options/suggest）、`user_message`、`queued`、`queue_error`
