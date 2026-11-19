@@ -5,7 +5,7 @@
    ═══════════════════════════════════════════════════════════ */
 // @ts-nocheck
 
-import { messagesEl, inputEl, sendBtn, setLastGroupEl, setLiveMsgIndex, setToolContainerEl } from './state.js';
+import { messagesEl, inputEl, sendBtn, stopBtn, setLastGroupEl, setLiveMsgIndex, setToolContainerEl } from './state.js';
 import { setSb, updateStatusBar } from './statusbar.js';
 import { clearQueuedFlags, resetQueue } from './messages.js';
 import { removeThinking } from './thinking.js';
@@ -16,31 +16,44 @@ import { store } from '../core/store.js';
 
 // processing 已迁 store.processing（读点走 store.getState().processing），
 // 本模块只保留写入器 setProcessing。
+// ⏹️ 的点击绑定：与 sendBtn 的内联 onclick 不同，中断走 handlers 注册表
+//（cancelMessage 在 ws.js，control 不能反向 import），查表延后到点击时求值。
+stopBtn.onclick = function () { if (handlers.cancel) handlers.cancel(); };
+
+// 忙时提示文案：只在触屏露出（CSS 管可见性，这里只管语义状态）
+var busyHint = document.getElementById('busyHint');
+
 export function setProcessing(state) {
   store.setState({ processing: state });
   // 运行中输入框保持可用（#158 排队发送），仅在结束时清除 ⏳ 标记
   if (!state) { clearQueuedFlags(); }
 
+  // 忙/闲只切换「中断」按钮的可见性，➤ 本体永远是「发送」。
+  // 曾经的写法是忙时把 ➤ 顶替成 ⏹️：桌面上还有 Enter 这条暗路可发（排队），
+  // 触屏没有 Shift 键、Enter 只能换行 → agent 忙时**没有任何发送入口**。
+  // 两个动作语义不同（一个是不可撤销的中断，一个是可排队的发送），
+  // 就该是两个键；➤ 固定在最右，忙闲切换时位置不漂移。
   if (state) {
-    // 处理中 → 按钮变为中断按钮 ⏹️
     setSb({ state: 'processing' });
     sendBtn.disabled = false;
-    sendBtn.textContent = '⏹️';
-    sendBtn.style.background = '#8b3a3a';
-    sendBtn.style.borderLeftColor = '#5a2a2a';
-    sendBtn.onclick = function () { if (handlers.cancel) handlers.cancel(); };
-    sendBtn.title = '中断 (Ctrl+Shift+C)';
-    sendBtn.setAttribute('aria-label', '中断');
+    sendBtn.textContent = '➤';
+    sendBtn.title = '发送（agent 忙时排队，本回合结束后投递）';
+    sendBtn.setAttribute('aria-label', '发送消息（忙时排队）');
+    // 中断键出现在 ➤ 左侧：可撤销的动作就近，不可撤销的靠里、需多伸一点
+    stopBtn.hidden = false;
+    stopBtn.disabled = false;
+    stopBtn.textContent = '⏹️';
+    if (busyHint) busyHint.hidden = false;
   } else {
-    // 空闲 → 恢复为发送按钮 ➤
     setSb({ state: 'idle' });
     sendBtn.disabled = false;
     sendBtn.textContent = '➤';
-    sendBtn.style.background = '';
-    sendBtn.style.borderLeftColor = '';
-    sendBtn.onclick = function () { if (handlers.send) handlers.send(); };
     sendBtn.title = '发送 (Enter)';
     sendBtn.setAttribute('aria-label', '发送消息');
+    stopBtn.hidden = true;
+    stopBtn.disabled = false;
+    stopBtn.textContent = '⏹️';
+    if (busyHint) busyHint.hidden = true;
     inputEl.focus();
   }
   updateStatusBar();

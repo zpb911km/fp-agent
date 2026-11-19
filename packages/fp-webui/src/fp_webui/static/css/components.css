@@ -1128,6 +1128,24 @@
   box-shadow: var(--shadow-brutal-sm) !important;
 }
 
+/* 中断键（agent 忙时才出现，位于 ➤ 左侧）：
+   与 ➤ 同形不同色——同形是为了不挤动输入区布局，
+   异色是为了「不可撤销」这个语义一眼可辨（复用 .send-btn 的几何与本文件的 :disabled 规则）。 */
+/* ⚠️ [hidden] 必须显式写：.send-btn 自带 display:flex，作者层会压过 UA 的
+   [hidden]{display:none} —— 不加这条，空闲态的中断键照样显示（e2e test_23 抓的）。
+   同款坑本仓在 .status-item 上已踩过一次。 */
+.send-btn[hidden] { display: none; }
+.stop-btn {
+  background: #8b3a3a;
+  border-color: #5a2a2a;
+  color: var(--text-primary);
+}
+.stop-btn:hover {
+  background: #a04646;
+  border-color: #a04646;
+  color: #fff;
+}
+
 /* 运行中排队消息的 ⏳ 标记（#158） */
 .queued-flag {
   margin-left: 0.6em;
@@ -1256,6 +1274,13 @@
    提示文案必须跟着 Enter 的真实语义走，不能只在 JS 里改行为。 */
 html[data-input-mode="touch"] .hint-keyboard { display: none; }
 html:not([data-input-mode="touch"]) .hint-touch { display: none; }
+
+/* 忙时补充提示（➤ 此时语义是「排队」）：只给触屏看——桌面 Enter 一直是可用的，
+   按钮变义不必额外解释；触屏失去 Enter 后这是唯一入口，必须写清楚。
+   ⚠️ 必须显式给 [hidden] 写 display:none：作者层的 display 会压过
+   UA 的 [hidden]{display:none}（本仓已在 .status-item 上踩过同款坑）。 */
+.hint-busy { display: none; }
+html[data-input-mode="touch"] .hint-busy:not([hidden]) { display: inline; }
 
 /* ═══════════════════════════════════════════════════════════════
    登录遮罩层 v2

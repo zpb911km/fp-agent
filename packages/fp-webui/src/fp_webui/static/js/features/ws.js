@@ -3,7 +3,7 @@
    ═══════════════════════════════════════════════════════════ */
 // @ts-nocheck
 
-import { ws, setWs, reconnectTimer, setReconnectTimer, statusEl, sendBtn, updateStatusBar, setProcessing, setSb } from '../ui.js';
+import { ws, setWs, reconnectTimer, setReconnectTimer, statusEl, stopBtn, updateStatusBar, setProcessing, setSb } from '../ui.js';
 import { getToken } from '../core/http.js';
 import { dispatch } from '../core/events.js';
 import { store } from '../core/store.js';
@@ -45,11 +45,10 @@ export function cancelMessage() {
   // 发送取消请求 → 后端 task.cancel() 注入 CancelledError
   ws.send(JSON.stringify({ type: 'cancel' }));
 
-  // 按钮临时禁用，等待后端 cancelled 事件返回后再恢复
-  sendBtn.disabled = true;
-  sendBtn.textContent = '⏳';
-  sendBtn.style.background = '#555';
-  sendBtn.style.borderLeftColor = '#555';
+  // 只禁中断键（➤ 保持可用）：取消在途时用户正想「停掉重说」，
+  // 此时打的新消息应当能排队；cancelled 事件后 setProcessing 会复位本键
+  stopBtn.disabled = true;
+  stopBtn.textContent = '⏳';
 
   // 安全网：5 秒后如果后端没响应，强制恢复
   var cancelTimeout = setTimeout(function() {

@@ -43,6 +43,7 @@ export function setLiveMsgIndex(v) { liveMsgIndex = v; }
 export const messagesEl = document.getElementById('messagesContainer');
 export const inputEl = document.getElementById('inputField');
 export const sendBtn = document.getElementById('sendBtn');
+export const stopBtn = document.getElementById('stopBtn');
 export const sessionLabel = document.getElementById('sessionLabel');
 export const modelBadge = document.getElementById('modelBadge');
 export const statusEl = document.getElementById('connectionStatus');
