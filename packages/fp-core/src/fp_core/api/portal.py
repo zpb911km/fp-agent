@@ -553,6 +553,15 @@ class SessionCtl:
 
         return read_messages(sid)
 
+    def meta_of(self, sid: str) -> dict[str, Any]:
+        """读取**任意会话**的 meta（只读；会话不存在 → 空字典）
+
+        与 ``list()`` 的区别：那个要扫描并**回填**全部会话文件，用在「每轮结束
+        读一下本轮标题」这种高频只读路径上代价过大、还有写副作用。前端（ACP
+        每轮推 session_info_update）不允许直连核内 session 模块，能力经此暴露。
+        """
+        return self._portal._require().state.session.meta_of(sid)
+
     def refresh_keywords(self, sid: str) -> list[str]:
         """重算指定会话的 ``meta.kw`` 关键词并返回新值（纯本地 KL 统计，零 LLM 调用）
 

@@ -44,9 +44,10 @@ camelCase（`sessionId` / `agentCapabilities` / `agentInfo`），`protocolVersio
 | 方法 | 类型 | 必需参数 | 返回 `result` |
 |---|---|---|---|
 | `initialize` | 请求 | `protocolVersion`（可选 `clientInfo` `clientCapabilities`） | `protocolVersion` `agentCapabilities` `agentInfo` `authMethods` |
-| `session/new` | 请求 | `cwd` | `sessionId` |
-| `session/load` | 请求 | `sessionId` `cwd` | `sessionId`（**响应前**回放全量历史） |
+| `session/new` | 请求 | `cwd`（可选 `mcpServers`） | `sessionId` |
+| `session/load` | 请求 | `sessionId` `cwd`（可选 `mcpServers`） | `sessionId`（**响应前**回放全量历史） |
 | `session/list` | 请求 | `cwd` | `sessions[]` |
+| `session/close` | 请求 | `sessionId` | `{}`（释放本连接侧状态，**不删磁盘历史**） |
 | `session/prompt` | 请求 | `sessionId` `prompt[]`（兼容 `messages[]`） | `stopReason` |
 | `session/commands` | 请求 | — | `commands[]`（`name` 不含 `/` 前缀） |
 | `session/ping` | 请求 | — | `pong: true` |
@@ -56,7 +57,8 @@ camelCase（`sessionId` / `agentCapabilities` / `agentInfo`），`protocolVersio
 Agent → 客户端的推送与请求（同一条 `stdout` 上反向流动）：
 
 - `session/update` 通知：`sessionUpdate` 取 `agent_message_chunk` / `tool_call` /
-  `tool_call_update` / `plan` / `available_commands_update`；
+  `tool_call_update` / `plan` / `available_commands_update` / `compaction_update` /
+  `session_info_update`（后两者见下文「上下文改写与标题通知」，均按客户端能力门控）；
 - `elicitation/create` 请求：仅当客户端在 `initialize` 中声明了
   `clientCapabilities.elicitation.form` 时才发起（`ask_user` 的带内问答）。
 
@@ -68,7 +70,7 @@ Agent → 客户端的推送与请求（同一条 `stdout` 上反向流动）：
 ```json
 {"protocolVersion": 1,
  "agentCapabilities": {"loadSession": true,
-   "sessionCapabilities": {"list": {}},
+   "sessionCapabilities": {"list": {}, "close": {}},
    "promptCapabilities": {"image": false, "audio": false, "embeddedContext": true},
    "mcpCapabilities": {"http": false, "sse": false}},
  "agentInfo": {"name": "fp", "title": "FP", "version": "<包元数据>"},
@@ -102,6 +104,23 @@ Agent → 客户端的推送与请求（同一条 `stdout` 上反向流动）：
 - **多会话并存**：同一连接维护 `_sessions[sid]` 会话表，第二个 `session/new` **不会顶掉**第一个；
   `session/prompt` 遇到未知 `sessionId` → `-32602`；turn 内所有通知都带**该会话自己的** sid；
   `session/cancel` 只作用于目标会话。
+- **`mcpServers` 是会话私有**：`session/new` / `session/load` 里的 `mcpServers` 只对**声明它的
+  那条会话**可见（IDE 的 Settings → MCP Servers 配的 server 不会污染其它 thread）。
+  可见性由插件侧按执行期会话过滤（与 `cwd` 同一套 contextvar 范式），`mcp_list` / `mcp_call`
+  也按会话裁决，模型在 B 会话里点名 A 的 server 会被拒绝。仅支持 **stdio** 传输；
+  `http`/`sse` 型会被**明确拒绝并记日志**（不静默丢弃）。同名 server 在两会话里互不覆盖。
+- **`session/close`** 释放本连接侧状态与该会话的私有 MCP 子进程，**不删磁盘历史**
+  （之后仍可 `session/load` 打开），且**幂等**。会话表另有上限 `_MAX_SESSIONS`（64），
+  超出时淘汰最久未用者（跳过当前聚焦与正在输出的会话，一并回收其私有 server）——
+  防长连接跑几十个 thread 时登记只增不减。
+- **上下文改写与标题通知**：客户端在 `initialize` 声明 `clientCapabilities.session.compaction`
+  （**必须是对象**，`true`/字符串等噪声一律视为未声明）时，`/compact` 会推
+  `compaction_update`（`in_progress` → `completed`|`failed`|`cancelled`，开态与终态**同
+  `compactionId`**）。是否真压缩按**上下文指纹**（条数 + 内容哈希）判定：`handled` 但内容
+  一字未改 → `cancelled`，不伪造 `completed`；条数不变而内容被改写（小历史边界上的真压缩）
+  仍判 `completed`。摘要文本恒省略（`compaction_summary_chunk` 不发），避免与模型实际看到
+  的上下文不一致。会话标题（`meta.summary`）在一轮结束时真变了才推 `session_info_update`，
+  `updatedAt` 为带时区的 ISO 8601。
 - **跨会话并发 = 排队**：`_turn_lock` 串行占用 core 的唯一执行槽，两个会话同时要跑时第二个排队等待
   （规范只要求「会话可并存」，没有「必须并发」的 MUST）。**同会话**并发 prompt 仍是客户端 bug → `-32600`。
   真并发（每会话独立 Agent / 进程级隔离）未做，属二期。

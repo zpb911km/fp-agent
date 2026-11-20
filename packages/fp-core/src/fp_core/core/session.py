@@ -1011,6 +1011,22 @@ class SessionManager:
         """获取当前会话的 meta 信息（只读视图）"""
         return dict(self._meta)
 
+    def meta_of(self, sid: str) -> dict[str, Any]:
+        """读取**任意会话**的 meta（只读，不写盘）；会话不存在返回空字典。
+
+        与 ``meta`` 的区别：那个只认当前会话。前端需要「非当前会话」的某个
+        字段时（如 ACP 每轮结束时读本轮会话的标题），既不能 switch 过去
+        （有副作用，还会打断正在进行的会话），也不该用 ``list_sessions()``
+        ——后者会扫描并**回填**全部会话文件，作为读路径代价过大且有副作用。
+        """
+        sid = (sid or "").strip()
+        # 防路径穿越：sid 来自协议参数/HTTP path，不许带分隔符
+        if not sid or "/" in sid or "\\" in sid or sid in (".", ".."):
+            return {}
+        if sid == self._session_id:
+            return dict(self._meta)
+        return dict(_read_meta_from_file(_session_path(sid)) or {})
+
     def session_root(self) -> str | None:
         """当前会话的工作目录（相对路径基准）；老会话没记则 None。
 

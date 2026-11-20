@@ -82,8 +82,13 @@ class _FakeSessions:
         load_result: Any = None,
         history: list[dict[str, Any]] | None = None,
         list_result: dict[str, dict[str, Any]] | None = None,
+        titles: dict[str, dict[str, Any]] | None = None,
     ):
         self._load_result = load_result
+        # 任意会话的 meta（真实实现是 SessionManager.meta_of，读盘、只读）。
+        # 刻意**不**提供 `meta` 属性：那是 property（零参、只认当前会话），
+        # server 侧若误用 `.meta(sid)` 会在这里抛错——桩不能替它把错误吞掉。
+        self._titles = titles or {}
         # None 表示「盘上无此会话」（真实实现 read_messages 的语义），
         # 不可退化成 []——否则 session/load 的存在性判断在桩下永远为真。
         self._history = history
@@ -95,6 +100,10 @@ class _FakeSessions:
     def generate_sid(self) -> str:
         """预分配 sid（session/new 只登记、不切 core 时需要先拿到 id）。"""
         return "sess_new"
+
+    def meta_of(self, sid: str) -> dict[str, Any]:
+        """任意会话的 meta（真实实现只读盘、不 switch）。"""
+        return dict(self._titles.get(sid) or {})
 
     def new(self, cwd: str | None = None, sid: str | None = None):
         self.new_called += 1
@@ -117,10 +126,23 @@ class _FakeSessions:
         return self._history
 
 
+class _FakePlugins:
+    """`ctl.plugins` 的最小桩：只实现 `get(name)`。"""
+
+    def __init__(self, mapping: dict[str, Any] | None = None):
+        self._mapping = mapping or {}
+        self.get_calls: list[str] = []
+
+    def get(self, name: str):
+        self.get_calls.append(name)
+        return self._mapping.get(name)
+
+
 class _FakePortal:
-    def __init__(self, sessions: _FakeSessions):
+    def __init__(self, sessions: _FakeSessions, plugins: Any = None):
         self.ctl = type("Ctl", (), {})()
         self.ctl.sessions = sessions  # type: ignore[attr-defined]
+        self.ctl.plugins = plugins if plugins is not None else _FakePlugins()  # type: ignore[attr-defined]
         self.run = type("Run", (), {"status": type("S", (), {"session_id": "sess_test"})()})()
 
 
@@ -630,3 +652,432 @@ async def test_unimplemented_method_returns_method_not_found(srv: ACPServer):
     await srv._dispatch({"jsonrpc": "2.0", "id": 9, "method": "session/set_mode", "params": {}})
     (msg,) = _messages(srv)
     assert msg["error"]["code"] == -32601
+
+
+# ── 客户端转发的 MCP server：会话私有（方案 B）───────────
+
+
+class _FakeMcpPlugin:
+    """mcp 插件的会话级接口桩，记录调用并可控拒绝。"""
+
+    def __init__(self, rejected: list[str] | None = None):
+        self.added: list[tuple[str, dict[str, Any]]] = []
+        self.dropped: list[str] = []
+        self._rejected = rejected or []
+
+    def add_session_servers(self, sid: str, servers: dict[str, Any]) -> list[str]:
+        self.added.append((sid, servers))
+        return self._rejected
+
+    def drop_session_servers(self, sid: str) -> None:
+        self.dropped.append(sid)
+
+
+@pytest.mark.asyncio
+async def test_session_new_registers_mcp_servers_as_session_private(srv: ACPServer, monkeypatch, tmp_path):
+    """IDE 传入的 mcpServers 必须**登记到该会话名下**，而不是全局。
+
+    这是方案 B 的核心断言：A 会话的 server 不能出现在 B 会话的工具面里。
+    """
+    plug = _FakeMcpPlugin()
+    fake = _FakeSessions()
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(fake, _FakePlugins({"mcp": plug})))
+    servers = {"fs": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-fs"]}}
+    await srv._handle_session_new({"cwd": str(tmp_path), "mcpServers": servers})
+    assert plug.added == [("sess_new", servers)], "必须带 sid 登记，否则退化成全局可见"
+
+
+@pytest.mark.asyncio
+async def test_session_new_without_mcp_servers_does_not_touch_plugin(srv: ACPServer, monkeypatch, tmp_path):
+    plug = _FakeMcpPlugin()
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(_FakeSessions(), _FakePlugins({"mcp": plug})))
+    await srv._handle_session_new({"cwd": str(tmp_path)})
+    assert plug.added == []
+
+
+@pytest.mark.asyncio
+async def test_session_load_registers_mcp_servers_as_session_private(srv: ACPServer, monkeypatch, tmp_path):
+    """`session/load` 也要登记：IDE 切 thread 时同样会带 mcpServers。
+
+    只测 session/new 不足以守护 load 分支——两处调用互相独立，删掉 load 那句
+    session/new 的用例照样绿，而真实使用里「恢复已有 thread」才是最常走的路径。
+    """
+    plug = _FakeMcpPlugin()
+    fake = _FakeSessions(load_result=type("_I", (), {"session_id": "sess_old"})(), history=[])
+
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(fake, _FakePlugins({"mcp": plug})))
+    servers = {"db": {"command": "uvx", "args": ["mcp-db"]}}
+    origin = os.getcwd()
+    try:
+        await srv._handle_session_load({"sessionId": "sess_old", "cwd": str(tmp_path), "mcpServers": servers})
+    finally:
+        os.chdir(origin)
+    assert plug.added == [("sess_old", servers)], "load 路径必须按该会话 sid 登记"
+
+
+@pytest.mark.asyncio
+async def test_session_close_reachable_via_dispatch(srv: ACPServer, monkeypatch):
+    """`session/close` 必须真的挂进 dispatch 表。
+
+    直接调 `_handle_session_close` 只能证明逻辑对；漏掉 dispatch 表里的那一行，
+    handler 就成了死代码，客户端一调就是 -32601（方法不存在），而所有单测仍绿。
+    """
+    plug = _FakeMcpPlugin()
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(_FakeSessions(), _FakePlugins({"mcp": plug})))
+    srv._sessions["sess_x"] = srv_mod._SessionState(sid="sess_x", cwd="/tmp")
+    await srv._dispatch({"jsonrpc": "2.0", "id": 11, "method": "session/close", "params": {"sessionId": "sess_x"}})
+    (msg,) = _messages(srv)
+    assert "error" not in msg, f"session/close 未接线 → {msg.get('error')}"
+    assert msg["result"] == {}
+    assert plug.dropped == ["sess_x"]
+
+
+@pytest.mark.asyncio
+async def test_session_new_actually_triggers_eviction(srv: ACPServer, monkeypatch, tmp_path):
+    """`session/new` 这条**调用路径**必须真的走到淘汰。
+
+    `test_evict_sessions_keeps_current_and_busy` 直接调 `_evict_sessions()`，
+    只证明淘汰逻辑对；把 session/new 里那句调用删掉它照样绿（变异实测存活）。
+    长连接靠的就是「每建一条新会话顺手淘汰一次」，漏掉接线则 `_sessions`
+    在真实使用里照旧只增不减 —— 逻辑正确但从未执行，等于没做。
+    """
+    plug = _FakeMcpPlugin()
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(_FakeSessions(), _FakePlugins({"mcp": plug})))
+    monkeypatch.setattr(srv_mod, "_MAX_SESSIONS", 2)
+    # 先摊一条「旧」会话与一条当前会话（busy 与当前都不可淘汰，此处留出可淘汰位）
+    srv._sessions.update({
+        "old": srv_mod._SessionState(sid="old", cwd="/tmp"),
+        "cur": srv_mod._SessionState(sid="cur", cwd="/tmp"),
+    })
+    srv._session_id = "cur"
+
+    await srv._handle_session_new({"cwd": str(tmp_path)})
+
+    assert "sess_new" in srv._sessions
+    assert "old" not in srv._sessions, "session/new 未触发淘汰 → 长连接会话登记只增不减"
+    assert plug.dropped == ["old"], "被淘汰会话的私有 MCP 也必须一起回收"
+
+
+@pytest.mark.asyncio
+async def test_session_new_tolerates_missing_mcp_plugin(srv: ACPServer, monkeypatch, tmp_path):
+    """未加载 mcp 插件时（或 ctl.plugins 不可用），session/new 不得因此失败。"""
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(_FakeSessions(), _FakePlugins({})))
+    result = await srv._handle_session_new({"cwd": str(tmp_path), "mcpServers": {"fs": {"command": "x"}}})
+    assert result["sessionId"] == "sess_new"
+
+
+@pytest.mark.asyncio
+async def test_session_close_drops_session_mcp(srv: ACPServer, monkeypatch):
+    plug = _FakeMcpPlugin()
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(_FakeSessions(), _FakePlugins({"mcp": plug})))
+    srv._sessions["sess_x"] = srv_mod._SessionState(sid="sess_x", cwd="/tmp")
+    await srv._handle_session_close({"sessionId": "sess_x"})
+    assert plug.dropped == ["sess_x"], "关闭会话必须回收其私有 server 进程"
+    assert "sess_x" not in srv._sessions
+
+
+@pytest.mark.asyncio
+async def test_session_close_is_idempotent(srv: ACPServer, monkeypatch):
+    """重复 close 不报错（客户端重试/多路关闭都合法）。"""
+    plug = _FakeMcpPlugin()
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(_FakeSessions(), _FakePlugins({"mcp": plug})))
+    await srv._handle_session_close({"sessionId": "nope"})
+    await srv._handle_session_close({"sessionId": "nope"})
+    assert plug.dropped == ["nope", "nope"]
+
+
+@pytest.mark.asyncio
+async def test_session_close_requires_session_id(srv: ACPServer, monkeypatch):
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(_FakeSessions()))
+    with pytest.raises(_ACPRPCError) as ei:
+        await srv._handle_session_close({})
+    assert ei.value.code == -32602
+
+
+@pytest.mark.asyncio
+async def test_session_close_advertised(srv: ACPServer, monkeypatch):
+    """声明了 sessionCapabilities.close 才允许客户端调用。"""
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(_FakeSessions()))
+    monkeypatch.setattr(srv, "_send_available_commands", lambda: None)
+    caps = await srv._handle_initialize({"protocolVersion": 1})
+    assert "close" in caps["agentCapabilities"]["sessionCapabilities"]
+
+
+@pytest.mark.asyncio
+async def test_evict_sessions_keeps_current_and_busy(srv: ACPServer, monkeypatch):
+    """超过上限时淘汰最久未用者，但不动当前聚焦会话与正在输出的会话。
+
+    注意 **busy 必须排在插入序首位**：`_evict_sessions` 用 next() 取第一个
+    可淘汰者，若把 busy 放在 "old" 之后，即使删掉 `not st.busy` 判断也仍然
+    先挑到 "old"，这条测试就永远杀不掉那个变异（实测存活过）。
+    """
+    plug = _FakeMcpPlugin()
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(_FakeSessions(), _FakePlugins({"mcp": plug})))
+    monkeypatch.setattr(srv_mod, "_MAX_SESSIONS", 3)
+    srv._sessions.clear()
+    srv._session_id = "cur"
+    srv._sessions.update({
+        "busy": srv_mod._SessionState(sid="busy", cwd="/tmp", busy=True),
+        "old": srv_mod._SessionState(sid="old", cwd="/tmp"),
+        "cur": srv_mod._SessionState(sid="cur", cwd="/tmp"),
+    })
+    srv._evict_sessions()  # 3 条 == 上限，不淘汰
+    assert set(srv._sessions) == {"old", "busy", "cur"}
+    srv._sessions["new4"] = srv_mod._SessionState(sid="new4", cwd="/tmp")
+    srv._evict_sessions()  # 4 > 3 → 跳过 busy/cur，淘汰 "old"
+    assert set(srv._sessions) == {"busy", "cur", "new4"}
+    assert plug.dropped == ["old"], "被淘汰会话的私有 MCP 必须回收"
+
+
+# ── 上下文改写通知（session.compaction）─────────────────────
+
+# 协议枚举（v1 agent.rs CompactionStatus）
+VALID_COMPACTION_STATUSES = {"in_progress", "completed", "failed", "cancelled"}
+
+
+def _ctx(n_user: int, *, summary: bool = False) -> list[dict[str, Any]]:
+    """造一份会话上下文（含 1 条 system 头），n_user 条 user 消息。"""
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "SOUL"}]
+    if summary:
+        msgs.append({"role": "system", "content": "以下是压缩后的对话历史摘要…"})
+    msgs += [{"role": "user", "content": f"msg-{i}"} for i in range(n_user)]
+    return msgs
+
+
+@pytest.mark.asyncio
+async def test_compaction_emits_in_progress_then_completed(srv: ACPServer):
+    """真压缩：in_progress → completed，且**同一个 compactionId**。
+
+    客户端按 id 就地打补丁；换 id 会在时间线上留下两条实体（一条永远卡在
+    in_progress），这是 ACP 里最典型的错误用法。
+    """
+    srv._client_compaction = True
+    before = _ctx(20)
+    after = _ctx(4, summary=True)
+    await srv._on_compact_start(None, name="/compact", messages=before)
+    await srv._on_compact_end(None, name="/compact", messages=after, handled=True, output="**📦**")
+    ups = _updates(srv)
+    assert [u["status"] for u in ups] == ["in_progress", "completed"]
+    assert all(u["sessionUpdate"] == "compaction_update" for u in ups)
+    assert ups[0]["compactionId"] == ups[1]["compactionId"], "开态与终态必须同 id"
+    assert set(u["status"] for u in ups) <= VALID_COMPACTION_STATUSES
+
+
+@pytest.mark.asyncio
+async def test_compaction_cancelled_when_context_untouched(srv: ACPServer):
+    """handled=True 但上下文一字未改（历史太短）= cancelled，不伪造 completed。"""
+    srv._client_compaction = True
+    ctx = _ctx(3)
+    await srv._on_compact_start(None, name="/compact", messages=ctx)
+    await srv._on_compact_end(None, name="/compact", messages=ctx, handled=True, output="无需压缩")
+    assert [u["status"] for u in _updates(srv)] == ["in_progress", "cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_compaction_completed_when_count_unchanged_but_content_rewritten(
+    srv: ACPServer,
+):
+    """条数不变但内容被改写 → 必须 completed。
+
+    compact 在小历史边界上会「1 条早期换成摘要 + 保留 4 条」，条数与原来**相同**。
+    只用条数判别会把真压缩误报成 cancelled —— 这正是把判据换成内容指纹的原因。
+    """
+    srv._client_compaction = True
+    before = _ctx(5)
+    after = _ctx(4, summary=True)
+    assert len(before) == len(after), "构造前提：条数相同"
+    await srv._on_compact_start(None, name="/compact", messages=before)
+    await srv._on_compact_end(None, name="/compact", messages=after, handled=True, output="✅")
+    assert [u["status"] for u in _updates(srv)] == ["in_progress", "completed"]
+
+
+@pytest.mark.asyncio
+async def test_compaction_failed_carries_error_text(srv: ACPServer):
+    """handled=False（摘要失败）= failed，并带出可展示原因。"""
+    srv._client_compaction = True
+    await srv._on_compact_start(None, name="/compact", messages=_ctx(20))
+    await srv._on_compact_end(None, name="/compact", messages=_ctx(20), handled=False, output="压缩失败: 429")
+    ups = _updates(srv)
+    assert [u["status"] for u in ups] == ["in_progress", "failed"]
+    assert "429" in ups[1]["error"], "failed 必须带 error，否则客户端只能显示一个空失败"
+
+
+@pytest.mark.asyncio
+async def test_compaction_not_sent_when_client_did_not_declare(srv: ACPServer):
+    """规范硬约束：客户端未声明 session.compaction 时 MUST NOT 发任何 compaction_update。"""
+    srv._client_compaction = False
+    await srv._on_compact_start(None, name="/compact", messages=_ctx(20))
+    await srv._on_compact_end(None, name="/compact", messages=_ctx(4, summary=True), handled=True)
+    assert _updates(srv) == []
+
+
+@pytest.mark.asyncio
+async def test_compaction_ignores_other_commands(srv: ACPServer):
+    """/new 也会改上下文，但它不是压缩：不能借 compaction_update 上报。"""
+    srv._client_compaction = True
+    await srv._on_compact_start(None, name="/new", messages=_ctx(20))
+    await srv._on_compact_end(None, name="/new", messages=_ctx(0), handled=True)
+    assert _updates(srv) == []
+
+
+@pytest.mark.asyncio
+async def test_compaction_id_not_reused_across_rounds(srv: ACPServer):
+    """两次压缩必须是两个 id（同一 id 二次使用会让客户端把第二次当补丁打到第一条上）。"""
+    srv._client_compaction = True
+    for _ in range(2):
+        await srv._on_compact_start(None, name="/compact", messages=_ctx(20))
+        await srv._on_compact_end(None, name="/compact", messages=_ctx(4, summary=True), handled=True)
+    ids = [u["compactionId"] for u in _updates(srv)]
+    assert len(ids) == 4
+    assert len({ids[0], ids[2]}) == 2, "每轮压缩都要新 id"
+
+
+@pytest.mark.asyncio
+async def test_compaction_end_without_start_sends_nothing(srv: ACPServer):
+    """没有配对的开态（如客户端中途才声明能力）→ 不发孤立终态。"""
+    srv._client_compaction = True
+    await srv._on_compact_end(None, name="/compact", messages=_ctx(4), handled=True)
+    assert _updates(srv) == []
+
+
+def test_client_compaction_capability_requires_object(srv: ACPServer):
+    """session.compaction 是 Option<结构体>：只有「值是对象」才算声明。"""
+    srv._apply_client_capabilities({"session": {"compaction": {}}})
+    assert srv._client_compaction is True
+    for noise in (None, True, False, "supported", [], 1):
+        srv._apply_client_capabilities({"session": {"compaction": noise}})
+        assert srv._client_compaction is False, f"{noise!r} 不是结构体，不得当成已声明"
+
+
+# ── 会话元信息通知（session_info_update）──────────────────
+
+
+@pytest.mark.asyncio
+async def test_session_info_update_sent_when_title_changes(srv: ACPServer, monkeypatch):
+    """标题变化 → session_info_update，updatedAt 必须是带时区的 ISO 8601。"""
+    fake = _FakeSessions(titles={"sess_test": {"summary": "旧标题"}})
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(fake))
+    srv._title_before["sess_test"] = "旧标题"
+    fake._titles["sess_test"] = {"summary": "新标题"}
+    srv._notify_session_info("sess_test")
+    ups = _updates(srv)
+    assert len(ups) == 1
+    assert ups[0]["sessionUpdate"] == "session_info_update"
+    assert ups[0]["title"] == "新标题"
+    dt = datetime.datetime.fromisoformat(ups[0]["updatedAt"])
+    assert dt.tzinfo is not None, "规范要求带时区，naive 时间会被判非法"
+
+
+@pytest.mark.asyncio
+async def test_session_info_update_silent_when_title_unchanged(srv: ACPServer, monkeypatch):
+    """标题没变就不发：每轮都发会让 IDE 线程列表无谓重渲染。"""
+    fake = _FakeSessions(titles={"sess_test": {"summary": "同一标题"}})
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(fake))
+    srv._title_before["sess_test"] = "同一标题"
+    srv._notify_session_info("sess_test")
+    assert _updates(srv) == []
+
+
+@pytest.mark.asyncio
+async def test_session_info_update_on_first_turn(srv: ACPServer, monkeypatch):
+    """新会话首轮：turn 前无标题，core 派生出来后必须推送。"""
+    fake = _FakeSessions(titles={"sess_test": {"summary": "帮我改个 bug"}})
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(fake))
+    srv._title_before["sess_test"] = ""  # _run_turn 开头的快照
+    srv._notify_session_info("sess_test")
+    assert [u["title"] for u in _updates(srv)] == ["帮我改个 bug"]
+
+
+def test_session_title_reads_any_session_not_just_current(srv: ACPServer, monkeypatch):
+    """标题必须能读**非当前**会话：跨会话并发时本轮会话未必是 core 的当前会话。"""
+    fake = _FakeSessions(titles={"other": {"summary": "别的会话"}})
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(fake))
+    assert srv._session_title("other") == "别的会话"
+    assert srv._session_title("unknown") == ""
+
+
+@pytest.mark.asyncio
+async def test_run_turn_snapshots_title_before_prompt(srv: ACPServer, monkeypatch):
+    """快照必须取在 turn **之前**，否则一轮跑完再读就与「新标题」比较，永远不推。
+
+    这条守护的是 _run_turn 里那一行 `_title_before[sid] = …`：删掉它，
+    session_info_update 会静默失效（首轮尤其明显，新会话标题永远是空的）。
+    """
+    fake = _FakeSessions(titles={"sess_t": {"summary": "旧标题"}})
+    portal_stub = _FakePortal(fake)
+    seen: list[str | None] = []
+
+    async def _fake_send(prompt: str, io: Any = None):
+        seen.append(srv._title_before.get("sess_t"))
+        fake._titles["sess_t"] = {"summary": "新标题"}  # core 在 turn 内派生标题
+
+        class _Resp:
+            content = ""
+
+        return _Resp()
+
+    portal_stub.run.send = _fake_send  # type: ignore[attr-defined]
+    monkeypatch.setattr(srv_mod, "portal", portal_stub)
+
+    st = srv_mod._SessionState(sid="sess_t", cwd=os.getcwd())
+    srv._sessions[st.sid] = st
+    srv._active = st
+    await srv._run_turn(st, "hi")
+
+    assert seen == ["旧标题"], "turn 开始时就该拿到旧标题快照"
+    titles = [u["title"] for u in _updates(srv) if u.get("sessionUpdate") == "session_info_update"]
+    assert titles == ["新标题"]
+
+
+# ── 钩子接线：逻辑对 ≠ 真的被挂上 ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_start_registers_compaction_hooks(srv: ACPServer, monkeypatch):
+    """`start()` 必须真的把压缩钩子挂进全局生命周期。
+
+    所有压缩用例都直接调 `_on_compact_start/_end`，把 `start()` 里那句
+    `_register_compaction_hooks()` 删掉它们全绿——但真实进程里钩子从未注册，
+    compaction_update 永远不发。与淘汰接线同一类失败：逻辑正确但从未执行。
+    """
+    registered: list[tuple[Any, str]] = []
+
+    class _Hooks:
+        def register(self, hook: Any, fn: Any, name: str = "", priority: int = 0) -> None:
+            registered.append((hook, name))
+
+    stub = _FakePortal(_FakeSessions())
+    stub.ctl.hooks = _Hooks()  # type: ignore[attr-defined]
+
+    async def _noop_open(**kwargs: Any) -> None:
+        return None
+
+    async def _noop_continue() -> None:
+        return None
+
+    async def _noop_loop(reader: Any) -> None:
+        return None
+
+    async def _noop_shutdown() -> None:
+        return None
+
+    stub.ctl.open = _noop_open  # type: ignore[attr-defined]
+    stub.run.status.session_id = ""  # 不进入 _adopt_session 分支
+    stub.run.status.model = "stub/model"  # type: ignore[attr-defined]
+    monkeypatch.setattr(srv_mod, "portal", stub)
+    monkeypatch.setattr(srv, "_reload_continue", _noop_continue)
+    monkeypatch.setattr(srv, "_read_loop", _noop_loop)
+    monkeypatch.setattr(srv, "_shutdown_agent", _noop_shutdown)
+    # start() 会 connect_read_pipe(sys.stdin)：pytest 的假 stdin 没有真实 fd
+    r, w = os.pipe()
+    monkeypatch.setattr(srv_mod.sys, "stdin", io.TextIOWrapper(os.fdopen(r, "rb")))
+    try:
+        await srv.start()
+    finally:
+        os.close(w)
+
+    names = {name for _, name in registered}
+    assert {"acp_compaction_start", "acp_compaction_end"} <= names, f"压缩钩子未接线，实际注册: {sorted(names)}"
+    hooks = {hook: name for hook, name in registered}
+    assert hooks.get(srv_mod.LifecycleHook.ON_BEFORE_COMMAND) == "acp_compaction_start"
+    assert hooks.get(srv_mod.LifecycleHook.ON_COMMAND) == "acp_compaction_end"

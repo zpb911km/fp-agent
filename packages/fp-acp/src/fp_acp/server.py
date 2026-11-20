@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -52,6 +53,12 @@ from fp_core.api.spawn import QUIET_ENV
 ACP_PROTOCOL_VERSION = 1
 # 本端支持的协议版本（v2 仍为 Draft，客户端请求 v2 时回退到 v1）
 _SUPPORTED_PROTOCOL_VERSIONS = (1,)
+
+# 承载 MCP 的插件名（private 插件，未加载时 mcpServers 转发降级为记日志）
+_MCP_PLUGIN_NAME = "mcp"
+
+# 本连接上最多保留多少条会话登记（超出淘汰最久未用者，防长连接泄漏）
+_MAX_SESSIONS = 64
 
 # JSON-RPC 错误码（ACP v1 ErrorCode）
 _RPC_METHOD_NOT_FOUND = -32601
@@ -422,9 +429,24 @@ class ACPServer:
 
         # ── 客户端能力（initialize 时协商）：决定 ask_user 是否走带内 elicit ──
         self._client_elicitation: dict[str, bool] = {"form": False, "url": False}
+        # 客户端是否声明 session.compaction —— 规范硬约束：未声明则 MUST NOT
+        # 发 compaction_update（解析口径见 _apply_client_capabilities）。
+        self._client_compaction: bool = False
         # reload 后 Zed 不重发 initialize（stdio 连接不变、进程 exec 重启），
         # 由环境变量恢复上一连接协商的能力（initialize 时写入，见 _apply…）。
         self._restore_client_capabilities()
+
+        # ── 上下文压缩通知（session.compaction）的进程内配对表 ──
+        # compactionId 在会话内唯一且**不得复用**：in_progress 与终态必须同 id，
+        # 客户端按 id 对同一实体就地打补丁，换 id 会在时间线上变成两条实体。
+        self._compaction_ids: dict[str, str] = {}
+        # 压缩前的上下文指纹（sid → 指纹）：压缩是否**真的发生**的唯一判据。
+        # 不能靠输出文本判断（"对话历史较短，无需压缩" 也是 handled=True）；
+        # 也不能只靠条数——compact 在小历史边界上会「1 条换成摘要 + 保留 4 条」，
+        # 条数一模一样却是真压缩，条数判据会把它误报成 cancelled。
+        self._compaction_fp: dict[str, tuple[int, int]] = {}
+        # 每轮开始时的标题快照（sid → summary）：session_info_update 只在真变了才发。
+        self._title_before: dict[str, str] = {}
 
         # "Follow Agent" 钩子注册在 start()（须在 portal.ctl.open 之后）
 
@@ -439,6 +461,161 @@ class ACPServer:
         self._last_edit_args = None
         self._last_read_path = None
         self._last_write_path = None
+
+    # ═══════════════════════════════════════════════════════
+    # 上下文压缩通知（session.compaction）
+    # ═══════════════════════════════════════════════════════
+
+    # 唯一会在 core 里改写上下文的入口（commands/compact.py）。
+    # 注意 ON_BEFORE_COMMAND/ON_COMMAND 的 name 带斜杠（parts[0] 未剥前缀）。
+    _COMPACT_COMMAND = "/compact"
+
+    def _register_compaction_hooks(self) -> None:
+        """用命令生命周期钩子把「压缩发生」翻译成 ACP compaction_update。
+
+        为什么不改 core：压缩是命令层的策略，core 并没有「上下文被改写」的语义
+        事件（compact.py 直接 set_messages），而命令的前后钩子恰好覆盖了
+        「开始 / 结束」两个时刻，是现成的语义边界（不必新增事件类型）。
+        """
+        portal.ctl.hooks.register(
+            LifecycleHook.ON_BEFORE_COMMAND,
+            self._on_compact_start,
+            name="acp_compaction_start",
+            priority=1000,
+        )
+        portal.ctl.hooks.register(
+            LifecycleHook.ON_COMMAND,
+            self._on_compact_end,
+            name="acp_compaction_end",
+            priority=1000,
+        )
+
+    def _compaction_sid(self) -> str:
+        """压缩通知的目标会话（turn 内优先，命令轮一定有 turn）。"""
+        return self._turn_sid() or self._session_id or ""
+
+    async def _on_compact_start(self, ctx: Any, **kwargs: Any) -> Any:
+        """压缩开始：先发 in_progress（LLM 摘要可能要十几秒，静默等于卡死）。"""
+        if kwargs.get("name") != self._COMPACT_COMMAND or not self._client_compaction:
+            return ctx
+        sid = self._compaction_sid()
+        cid = f"cmp_{uuid.uuid4().hex[:12]}"
+        self._compaction_ids[sid] = cid
+        # 快照必须在 await LLM 之前取：钩子拿到的 `messages` 是会话上下文的
+        # **活引用**（agent 传的是 self._conv.messages），压缩后原地变了。
+        self._compaction_fp[sid] = self._ctx_fingerprint(kwargs.get("messages"))
+        self._send_compaction_update(sid, cid, "in_progress")
+        return ctx
+
+    @staticmethod
+    def _ctx_fingerprint(messages: object) -> tuple[int, int]:
+        """上下文指纹（条数 + 内容哈希）：判断「压缩是否真的改写了上下文」。
+
+        条数单独不够（见 `_compaction_fp` 的注释）；文本判别不可靠（会随文案漂移）。
+        直接对内容取哈希，语义就是协议要表达的那件事：上下文变了没有。
+        只有在 /compact 轮调用，且上下文至多几百条，开销可忽略。
+
+        入参是钩子给的活引用（`Any` 来源），此处显式窄化：只承诺「能算就行」，
+        不去猜消息结构——猜错会在压缩这种低频路径上静默算错指纹。
+        """
+        h = hashlib.blake2b(digest_size=8)
+        msgs: list[Any] = list(cast("list[Any]", messages)) if isinstance(messages, list) else []
+        for m in msgs:
+            if isinstance(m, dict):
+                d: dict[str, Any] = cast("dict[str, Any]", m)
+                h.update(str(d.get("role", "")).encode())
+                content = d.get("content")
+                h.update(b"\x00")
+                h.update(content.encode() if isinstance(content, str) else repr(content).encode())
+            else:
+                h.update(repr(m).encode())
+            h.update(b"\x01")
+        return (len(msgs), int.from_bytes(h.digest(), "big"))
+
+    async def _on_compact_end(self, ctx: Any, **kwargs: Any) -> Any:
+        """压缩结束：按 handled + 上下文指纹是否变化决定终态。"""
+        if kwargs.get("name") != self._COMPACT_COMMAND:
+            return ctx
+        sid = self._compaction_sid()
+        cid = self._compaction_ids.pop(sid, None)
+        before = self._compaction_fp.pop(sid, None)
+        if cid is None:  # 客户端没声明能力 / 无配对的开态：不发，避免孤立实体
+            return ctx
+
+        after = self._ctx_fingerprint(kwargs.get("messages"))
+        if not kwargs.get("handled"):
+            # 压缩失败：error 是**可展示**原因，直接带出命令输出
+            self._send_compaction_update(sid, cid, "failed", error=str(kwargs.get("output") or "")[:500])
+        elif before is not None and after != before:
+            # 上下文真被改写 = completed（含摘要文本为空等边界，只要内容变了）
+            self._send_compaction_update(sid, cid, "completed")
+        else:
+            # handled 但上下文一字未改 = 本来就没东西可压。协议只有四个状态，
+            # 用 cancelled 表示「开了但没成事」，不伪造 completed（否则客户端会
+            # 在时间线上留一个空压缩实体，用户以为历史被压过）。
+            self._send_compaction_update(sid, cid, "cancelled")
+        return ctx
+
+    def _send_compaction_update(
+        self,
+        sid: str,
+        compaction_id: str,
+        status: str,
+        *,
+        error: str | None = None,
+    ) -> None:
+        """发一条 compaction_update（summary 恒省略 = 不改动既有摘要）。
+
+        刻意不发 compaction_summary_chunk / summary：压缩产物的文本由命令层
+        拼进 system 消息，ACP 侧没有它的独立副本；伪造一段摘要反而会与
+        模型实际看到的上下文不一致。省略即「不修改」，是唯一诚实的选择。
+        """
+        update: dict[str, Any] = {
+            "sessionUpdate": "compaction_update",
+            "compactionId": compaction_id,
+            "status": status,
+        }
+        if error:
+            update["error"] = error
+        self._send_notification("session/update", {"sessionId": sid, "update": update})
+
+    # ═══════════════════════════════════════════════════════
+    # 会话元信息通知（session_info_update）
+    # ═══════════════════════════════════════════════════════
+
+    def _session_title(self, sid: str) -> str:
+        """读取会话标题（meta.summary）；读不到返回空串。
+
+        只用 meta 而不自己派生标题：标题派生策略在 core（跟随末条 user、
+        人工重命名锁定后让路），前端复制一份必然漂移。
+        """
+        try:
+            # meta_of(sid) 而非 meta（后者只认当前会话）：跨会话并发时本轮会话
+            # 未必是 core 的当前会话，用 meta 会读到别人的标题。
+            meta = portal.ctl.sessions.meta_of(sid) or {}
+        except Exception as e:  # noqa: BLE001 - 标题是增强，不该拖垮一轮对话
+            self._log(f"读取会话标题失败（忽略）: {e}")
+            return ""
+        return str(meta.get("summary") or "")
+
+    def _notify_session_info(self, sid: str) -> None:
+        """标题变了才发 session_info_update（每轮都发会让线程列表无谓重渲染）。"""
+        title = self._session_title(sid)
+        before = self._title_before.pop(sid, "")
+        if not title or title == before:
+            return
+        self._send_notification(
+            "session/update",
+            {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "session_info_update",
+                    "title": title,
+                    # 规范要求 ISO 8601（带时区）；本地 naive 时间会被判非法
+                    "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+                },
+            },
+        )
 
     # ═══════════════════════════════════════════════════════
     # "Follow Agent" — 让 IDE 跟踪 Agent 文件操作
@@ -908,6 +1085,7 @@ class ACPServer:
         with contextlib.redirect_stdout(sys.stderr):
             await portal.ctl.open(enable_log=False, resume=os.environ.get("FP_RELOAD_SID") or None)
         self._register_follow_hooks()
+        self._register_compaction_hooks()
         self._session_id = portal.run.status.session_id
         # 启动即持有的会话（reload 恢复的那个）先入表：客户端可能不给 load
         # 直接发 prompt（连接没断，它认为会话一直活着）。
@@ -1036,6 +1214,7 @@ class ACPServer:
             "session/load": self._handle_session_load,
             "session/prompt": self._handle_session_prompt,
             "session/list": self._handle_session_list,
+            "session/close": self._handle_session_close,
             "session/commands": self._handle_session_commands,
             "session/ping": self._handle_session_ping,
         }
@@ -1068,6 +1247,12 @@ class ACPServer:
             "form": elicit_d.get("form") is not None,
             "url": elicit_d.get("url") is not None,
         }
+        # session.compaction：schema 里是 Option<CompactionCapabilities>（结构体），
+        # 故只有「值是对象」才算声明。schema 的 serde 对 false/true/"supported"
+        # 这类噪声一律解析成 None（= 不支持），本端同口径：非 dict 即视为未声明。
+        sess = caps.get("session")
+        sess_d = cast("dict[str, Any]", sess) if isinstance(sess, dict) else {}
+        self._client_compaction = isinstance(sess_d.get("compaction"), dict)
 
     def _restore_client_capabilities(self) -> None:
         """reload 后从环境变量恢复连接级客户端能力（新实例收不到 initialize）。
@@ -1123,6 +1308,7 @@ class ACPServer:
                 "loadSession": True,
                 "sessionCapabilities": {
                     "list": {},
+                    "close": {},
                 },
                 "promptCapabilities": {
                     "image": False,
@@ -1318,6 +1504,85 @@ class ACPServer:
             replayed += 1
         self._log(f"会话历史回放: {replayed} 条")
 
+    # ── 客户端转发的 MCP server（会话私有）────────────────
+
+    def _register_session_mcp(self, sid: str, params: dict[str, Any]) -> None:
+        """把客户端经 `session/new`|`session/load` 转发的 `mcpServers` 登记为**会话私有**。
+
+        方案 B（会话私有）：IDE（如 Zed 的 Settings → MCP Servers）里配的 server
+        只对声明它的会话可见，不污染其它会话的工具面。可见性由插件侧 `_visible()`
+        从执行期 contextvar 取 session id 过滤 —— 与 cwd 同一范式。
+
+        本端只支持 **stdio** 传输；`http`/`sse` 型由插件明确拒绝并记日志，
+        不静默忽略（静默是本项目反复踩过的失败模式）。
+        """
+        raw = params.get("mcpServers")
+        if not isinstance(raw, dict) or not raw:
+            return
+        servers: dict[str, Any] = cast("dict[str, Any]", raw)
+        try:
+            plug: Any = portal.ctl.plugins.get(_MCP_PLUGIN_NAME)
+        except Exception as e:
+            self._log(f"客户端传入 {len(servers)} 个 mcpServers，但取不到 mcp 插件（{e}），已忽略")
+            return
+        if plug is None or not hasattr(plug, "add_session_servers"):
+            self._log(f"客户端传入 {len(servers)} 个 mcpServers，但本端未加载 mcp 插件，已忽略")
+            return
+        try:
+            rejected: list[str] = plug.add_session_servers(sid, servers)
+        except Exception as e:
+            self._log(f"mcpServers 登记失败: {type(e).__name__}: {e}")
+            return
+        msg = f"会话 {sid} 登记 MCP server: {sorted(servers)}"
+        if rejected:
+            self._log(f"⚠️ {msg}；拒绝: {rejected}")
+        else:
+            self._log(msg)
+
+    def _drop_session_mcp(self, sid: str) -> None:
+        """回收会话私有 MCP server（杀子进程）。未加载插件时静默跳过。"""
+        try:
+            plug: Any = portal.ctl.plugins.get(_MCP_PLUGIN_NAME)
+            if plug is not None and hasattr(plug, "drop_session_servers"):
+                plug.drop_session_servers(sid)
+        except Exception as e:  # noqa: BLE001 - 清理失败不该阻止会话关闭
+            self._log(f"回收 {sid} 的 MCP server 失败（忽略）: {e}")
+
+    def _evict_sessions(self) -> None:
+        """淘汰最久未用的会话登记，防 `_sessions` 只增不减（长连接跑几十个 thread 会泄漏）。
+
+        跳过当前聚焦会话与 busy（正在输出）会话；淘汰只清**本连接侧**状态 +
+        会话私有 MCP，**不删磁盘历史** —— 客户端再次 session/load 即可恢复。
+        """
+        while len(self._sessions) > _MAX_SESSIONS:
+            victim = next(
+                (s for s, st in self._sessions.items() if s != self._session_id and not st.busy),
+                None,
+            )
+            if victim is None:
+                return
+            self._sessions.pop(victim, None)
+            self._drop_session_mcp(victim)
+            self._log(f"淘汰会话登记: {victim}（超上限 {_MAX_SESSIONS}）")
+
+    async def _handle_session_close(self, params: dict[str, Any]) -> dict[str, Any]:
+        """ACP v1 关闭会话：释放本连接侧状态与会话私有 MCP server。
+
+        与 session/list 的 `delete` 不是一回事：close **不删磁盘历史**，
+        用户的对话仍然可以用 session/load 再打开。幂等（重复 close 不报错）。
+        """
+        sid = params.get("sessionId") or params.get("session_id", "")
+        if not sid:
+            raise _ACPRPCError(_RPC_INVALID_PARAMS, "session/close 缺少必填参数 sessionId")
+        existed = self._sessions.pop(sid, None) is not None
+        # 无论是否登记过都回收：会话私有 MCP 子进程是真实资源，泄漏比多杀一次更糟
+        self._drop_session_mcp(sid)
+        if self._session_id == sid:
+            # 回落到最后一条仍登记的会话，避免后续无 id 的通知失去目标
+            self._session_id = next(reversed(self._sessions), "") if self._sessions else ""
+        self._log(f"关闭会话: {sid}（{'已释放' if existed else '未登记，幂等清理'}）")
+        return {}
+
     async def _handle_session_new(self, params: dict[str, Any]) -> dict[str, Any]:
         """
         ACP v1 创建新会话。
@@ -1336,6 +1601,9 @@ class ACPServer:
         sid = portal.ctl.sessions.generate_sid()
         self._sessions[sid] = _SessionState(sid=sid, cwd=cwd)
         self._session_id = sid
+        # 客户端转发的 MCP server 登记为**本会话私有**（方案 B）
+        self._register_session_mcp(sid, params)
+        self._evict_sessions()
         self._log(f"创建新会话: {sid}（cwd={cwd}，首次 prompt 时进入）")
 
         # 注意：命令注册通知在 _dispatch 中响应之后发送，
@@ -1376,6 +1644,8 @@ class ACPServer:
             raise _ACPRPCError(_RPC_INVALID_PARAMS, f"会话不存在: {session_id}")
 
         self._session_id = st.sid
+        # 客户端转发的 MCP server 登记为**本会话私有**（方案 B）
+        self._register_session_mcp(st.sid, params)
         self._log(f"恢复会话: {st.sid}（cwd={st.cwd}，{'历史回放' if on_disk else '空会话'}）")
 
         # 会话 meta 的 cwd 回填/校正：本次 load 时客户端声明的会话根是
@@ -1529,6 +1799,11 @@ class ACPServer:
         这里负责「把一轮跑完并把输出推给客户端」，两件事的失败模式完全不同。
         """
         sid = st.sid
+        # 标题快照：本轮结束时用它判断 session_info_update 该不该发。
+        # 必须在 turn 之前取 —— 第一轮问答后 core 才派生标题，此时 before 是空串，
+        # 于是「新会话首轮」也能正常推送；若靠 _title_before 初值猜则首轮会漏。
+        self._title_before[sid] = self._session_title(sid)
+
         # ── 发送 plan 通知 ──
         self._send_plan_notification(session_id=sid)
 
@@ -1553,6 +1828,7 @@ class ACPServer:
                 self._send_message_notification(buf, session_id=sid)
 
             self._clear_plan(sid)
+            self._notify_session_info(sid)
             return {"stopReason": "cancelled"}
         finally:
             if not turn.done():
@@ -1572,6 +1848,7 @@ class ACPServer:
 
         # plan 条目必须走完生命周期，不能只发开始态
         self._clear_plan(sid)
+        self._notify_session_info(sid)
         return {"stopReason": "end_turn"}
 
     async def _handle_session_ping(self, params: dict[str, Any]) -> dict[str, Any]:

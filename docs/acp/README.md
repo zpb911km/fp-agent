@@ -66,12 +66,20 @@ v2 目前是 Draft，客户端请求 v2 时按协商规则回退到 v1（客户�
 | `messageId` | 整轮共享一个 id（id 变化 = 新消息开始） |
 | `plan` 生命周期 | `pending/in_progress/completed` 三态，结束时发空 `entries` 收尾 |
 | 错误语义 | **同会话**并发 prompt → `-32600`（不用 `stopReason:"cancelled"`，那是 `session/cancel` 专属）；跨会话并发走排队不报错 |
+| `session/close` | 释放本连接侧状态 + 该会话私有 MCP 子进程，**不删磁盘历史**（仍可 `session/load` 再开），幂等；`sessionCapabilities.close` 已声明 |
+| 会话登记淘汰 | `_MAX_SESSIONS=64`：`session/new` 后顺手淘汰最久未用者，跳过当前聚焦与 `busy` 会话，淘汰即回收其私有 MCP（防长连接只增不减） |
+| `mcpServers` 会话隔离 | 客户端经 `session/new`/`session/load` 转发的 server 为**会话私有**（`owner_sid`），可见性从执行期 contextvar 取 sid 过滤（与 cwd 同一范式）；`mcp_list`/`mcp_call` 按会话裁决，跨会话点名 → 拒绝。仅 stdio，`http`/`sse` 明确拒绝并记日志 |
+| `compaction_update` | 门控于 `clientCapabilities.session.compaction`（**必须是对象**）；`in_progress` → `completed`/`failed`/`cancelled`，开态与终态**同 id**（每轮新 id，不复用）；不发 `compaction_summary_chunk` |
+| 压缩判定（指纹） | 「是否真压缩」按**上下文指纹**（条数 + 内容哈希）判定，不靠文本也不只靠条数：`handled` 但内容未变 → `cancelled`（不伪造 `completed`）；条数相同而内容被改写 → `completed` |
+| `session_info_update` | 标题（`meta.summary`）在一轮结束时**真变了**才推，`updatedAt` 带时区 ISO 8601；读标题走 `sessions.meta_of(sid)`（任意会话、只读、不 switch、不写盘） |
 
 **未实现（已知缺口，二期）**：
 
 - `session/request_permission`：IDE 的「危险命令确认」UI 不生效。
-- `usage_update`（上下文用量/费用）、`session/set_config_option`、`session/delete|resume|close`、
-  `elicitation` 之外的 `logout`。
+- `usage_update`（上下文用量/费用）、`session/set_config_option`、`session/delete|resume`、
+  `elicitation` 之外的 `logout`、`configOptions`（**Zed 里因此选不了模型**：fp 没有 mode/
+  thought-level 这类可调面，只报 Model 一项才是诚实的上限，而这一项尚未做）。
+- `ToolCall.locations` 只发 `path`、不发 `line`（Follow 能打开文件，跳不到行）。
 - **执行不并发**：跨会话是排队而非并行（`_turn_lock` 串行占用 core 唯一执行槽）。
   真并发（每会话一个 Agent / 或进程级隔离）未做；cwd 已改用 contextvar 按 Task 承载，
   是放开并发的前置条件，但不等于已支持并发。
