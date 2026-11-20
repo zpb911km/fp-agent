@@ -1949,6 +1949,12 @@ html[data-input-mode="touch"] .hint-busy:not([hidden]) { display: inline; }
   padding: 6px 10px 0;
 }
 
+/* 作者样式的 display:flex 压过 UA 的 [hidden]，不显式关掉会常驻一条空白
+   （与 .status-item 同一坑，本仓第三次踩到）。 */
+.pending-files[hidden] {
+  display: none;
+}
+
 .pending-file {
   display: inline-flex;
   align-items: center;

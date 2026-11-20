@@ -9,6 +9,8 @@ import { dispatch } from '../core/events.js';
 import { store } from '../core/store.js';
 import { loadSessionsList } from './sessions.js';
 import { LoadingState } from '../core/spinner.js';
+/* 诊断环（core/diag）：帧记录 / 冻结门 / 连接事件。依赖方向 features → core。 */
+import { gateFrame, registerReplay, recvFrame, connEvent } from '../core/diag.js';
 
 // 连接期共享状态：wire.js(pong/connected)、本模块、app.js(visibilitychange)
 // 共读写 → 单一可变对象导出（ESM 导入绑定不可重新赋值，let 跨模块不够用）
@@ -58,6 +60,32 @@ export function cancelMessage() {
   window._cancelTimeout = cancelTimeout;
 }
 
+/* 收到一帧的唯一处理入口（实时与冻结补放共用）。
+   冻结门在最前面：指认模式下 DOM 必须静止，帧先进暂存队列，
+   解冻时由 diag.exitFreeze() 通过 registerReplay 逐帧回到这里。
+   注意 lastSeq 不与暂存同步——吞下的帧没被消费，补放时照常推进，
+   否则解冻后会因 seq 已顶高而把暂存帧全判为重复丢弃。 */
+function onRaw(event) {
+  if (gateFrame(event && event.data)) return;
+  try {
+    var data = JSON.parse(event.data);
+    recvFrame(data);
+    // 序号去重：重放/实时事件凡 seq ≤ 已消费序号一律丢弃（防重连重复渲染）
+    // connected 豁免：它携带服务端当前 seq 供对齐用，由其分支单独处理，
+    // 若在此过滤会把 conn.lastSeq 顶到最新，导致随后的重放事件全被误丢。
+    if (data && typeof data.seq === 'number' && data.type !== 'connected') {
+      if (data.seq <= conn.lastSeq) return;
+      conn.lastSeq = data.seq;
+    }
+    dispatch(data);
+  } catch (e) {
+    console.error('[WS] 解析失败:', e);
+  }
+}
+
+// 解冻补放：冻结期间暂存的原始帧按到达顺序回到 onRaw（此刻已解冻，门放行）
+registerReplay(function(raw) { onRaw({ data: raw }); });
+
 export function connectWebSocket() {
   if (ws) {
     if (ws.readyState === WebSocket.OPEN) return;        // 已有活连接：不重复建
@@ -84,6 +112,7 @@ export function connectWebSocket() {
 
   sock.onopen = function() {
     if (gen !== conn.gen) return;   // 过期连接：静默
+    connEvent('open', conn.gen);
     LoadingState.hide(statusEl);    // 先撤占位再改文本，避免「连接中…已连接」并存
     statusEl.textContent = '🟢 已连接';
     LoadingState.hidePage();   // 场景③收口：首屏启动占位在此结束
@@ -106,6 +135,7 @@ export function connectWebSocket() {
 
   sock.onclose = function() {
     if (gen !== conn.gen) return;   // 过期连接退场：不动状态、不排重连
+    connEvent('close', gen);
     // #228：区分「立即重连」与「3s 定时重连」——立即路径只有一帧，
     // 不该喊「3 秒后重连」也不该弹页面级遮罩（那正是用户看到的双重提示闪烁）
     var immediate = conn.immediateReconnect;
@@ -137,25 +167,14 @@ export function connectWebSocket() {
 
   sock.onerror = function() {
     if (gen !== conn.gen) return;
+    connEvent('error', gen);
     statusEl.textContent = '🔴 连接错误';
     LoadingState.show(statusEl, '重试中…');
   };
 
   sock.onmessage = function(event) {
     if (gen !== conn.gen) return;
-    try {
-      var data = JSON.parse(event.data);
-      // 序号去重：重放/实时事件凡 seq ≤ 已消费序号一律丢弃（防重连重复渲染）
-      // connected 豁免：它携带服务端当前 seq 供对齐用，由其分支单独处理，
-      // 若在此过滤会把 conn.lastSeq 顶到最新，导致随后的重放事件全被误丢。
-      if (data && typeof data.seq === 'number' && data.type !== 'connected') {
-        if (data.seq <= conn.lastSeq) return;
-        conn.lastSeq = data.seq;
-      }
-      dispatch(data);
-    } catch (e) {
-      console.error('[WS] 解析失败:', e);
-    }
+    onRaw(event);
   };
 }
 

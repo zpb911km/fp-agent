@@ -68,6 +68,18 @@ import { fetchToolMeta, toolCardCount, toolCardNames, isLoaded, getToolCard } fr
    后续任何一次 WS 连上/重连都会对比出"磁盘更新了"，在状态栏露出刷新入口。 */
 initBuildHint();
 
+/* ── 诊断环 + 指认式报障（core/diag + core/diagui）─────────────
+   ① 上传函数注入：core 不许反向依赖 features（依赖分层），故由入口把
+      uploadFile 递进去。复用 filehub 的待发标记——指认出的 json 会自动
+      挂在输入框上方，用户按 ➤ 即发，不新增任何流程。
+   ② 关闭开关：URL 加 ?diag=0（移动端无控制台时的唯一可行入口），
+      或 localStorage.fp_diag='0'（桌面）。关闭后 diagui 也一并不装。
+   ③ 顺序：diag 先于 diagui —— 前者装环与冻结门，后者的长按入口依赖它。 */
+import { init as diagInit } from './core/diag.js';
+import { init as diaguiInit } from './core/diagui.js';
+import { uploadFile } from './features/upload.js';
+if (diagInit({ upload: uploadFile })) diaguiInit();
+
 window.__fp_test = {
   closeSocket: closeSocket,
   // #228：连接代际/建连计数快照——e2e 用它断言「重连期不并行开第二条」

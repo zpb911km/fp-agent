@@ -17,18 +17,25 @@ export function onFileInputChange(ev) {
   ev.target.value = '';  // 允许重复选择同一文件
 }
 
-function uploadFile(file) {
+/* 上传一个文件到 inbox。返回 Promise：成功 resolve 服务端响应（含 ref），
+   失败 resolve null —— **不 reject**，因为 UI 主路径（选文件）不关心返回值，
+   reject 会变成 unhandledrejection 噪声；诊断模块（core/diag）靠 null 判定失败。 */
+export function uploadFile(file) {
   var fd = new FormData();
   fd.append('file', file, file.name);
   // withAuth 只加 Authorization；multipart 不能手动设 content-type
-  authFetch('/api/files', { method: 'POST', body: fd })
+  return authFetch('/api/files', { method: 'POST', body: fd })
     .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
     .then(function (res) {
-      if (!res.ok) { showError(res.d.detail || '上传失败'); return; }
+      if (!res.ok) { showError(res.d.detail || '上传失败'); return null; }
       _pendingFiles.push(res.d);
       renderPendingFiles();
+      return res.d;
     })
-    .catch(function (e) { if (e.message !== '未授权') showError('上传失败: ' + e.message); });
+    .catch(function (e) {
+      if (e.message !== '未授权') showError('上传失败: ' + e.message);
+      return null;
+    });
 }
 
 function removePendingFile(idx) {
