@@ -107,7 +107,11 @@ jobs:
           # 可编辑安装全部子包：依赖由各包 pyproject 的 dependencies 自动跟上，消除手写清单漂移
           pip install -e packages/fp -e 'packages/fp-core[kw]' -e packages/fp-acp -e packages/fp-terminal -e packages/fp-webui
           # 仅测试工具不进包依赖（见 docs/dev/测试.md）
-          pip install pytest pytest-asyncio
+          # cryptography：zeta 信封签名的可选后端；缺它产品侧降级（来信一律
+          # UNTRUSTED），而 tests/zeta_signing.py 刻意 assert 要求它存在——否则
+          # 归属类用例测的是一条生产里不签名的路径。ubuntu/macOS runner 不预装、
+          # Windows 预装，故该批用例曾只在 Windows 绿。
+          pip install pytest pytest-asyncio cryptography
 
       - name: 🧪 全量 pytest
         shell: bash
@@ -144,7 +148,11 @@ jobs:
           # 可编辑安装全部子包：依赖由各包 pyproject 的 dependencies 自动跟上，消除手写清单漂移
           pip install -e packages/fp -e 'packages/fp-core[kw]' -e packages/fp-acp -e packages/fp-terminal -e packages/fp-webui
           # 仅测试工具不进包依赖（见 docs/dev/测试.md）
-          pip install pytest pytest-asyncio
+          # cryptography：zeta 信封签名的可选后端；缺它产品侧降级（来信一律
+          # UNTRUSTED），而 tests/zeta_signing.py 刻意 assert 要求它存在——否则
+          # 归属类用例测的是一条生产里不签名的路径。ubuntu/macOS runner 不预装、
+          # Windows 预装，故该批用例曾只在 Windows 绿。
+          pip install pytest pytest-asyncio cryptography
 
       - name: 🧪 全量 pytest
         shell: bash
