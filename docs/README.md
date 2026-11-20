@@ -46,7 +46,7 @@
 | | [packages/fp-terminal.md](packages/fp-terminal.md) | 终端 TUI：交互键位、16 个内置命令、面板与显示 |
 | | [packages/fp-webui.md](packages/fp-webui.md) | Web 界面：流式对话、会话管理、文件中枢 |
 | | [packages/fp-acp.md](packages/fp-acp.md) | ACP v1 适配层：stdio JSON-RPC、能力协商、会话语义 |
-| 📋 **项目信息** | [CHANGELOG.md](CHANGELOG.md) | 版本历史：0.2.2（迭代记录见 CHANGELOG） |
+| 📋 **项目信息** | [CHANGELOG.md](CHANGELOG.md) | 版本历史：0.2.3（迭代记录见 CHANGELOG） |
 | | [CONTRIBUTING.md](CONTRIBUTING.md) | PR 流程、代码风格、Commit 规范 |
 
 ---
