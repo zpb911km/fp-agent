@@ -612,8 +612,7 @@ function showPill(reason) {
   removePill();
   var p = el('div', 'fp-diag-pill');
   var label = {
-    'js-error': '脚本报错', 'rejection': '异步异常',
-    'ws-close': '连接断开', 'ws-error': '连接出错', 'ws-half-open': '连接半开'
+    'js-error': '脚本报错', 'rejection': '异步异常'
   }[reason] || reason;
   p.innerHTML = '<b>⏸ 已自动冻结</b><span>' + label + ' · 屏幕已停在出事那一刻</span>' +
     '<button type="button">指认</button>' +

@@ -255,7 +255,10 @@ export function registerReplay(fn) { _replay = fn; }
    异常抛出的那一瞬就冻结，**不等任何手势**。此后页面静止在出错的那一屏，
    用户有的是时间指。8 秒无人理会则自动解冻，不耽误正常使用。
    和长按入口的关系：长按求"用户主动"，auto-latch 求"事故主动"，
-   两者共用同一条冻结/暂存通道，报告格式完全一致。 */
+   两者共用同一条冻结/暂存通道，报告格式完全一致。
+
+   触发源**只有 JS 异常与未捕获 Promise**。WS 断线/出错/半开一律不触发——那是
+   手机切后台、锁屏、frp 抖动下的常态，见 connEvent 的注释。 */
 var AUTO_LATCH_MS = 8000;
 var _autoTimer = null;
 var _autoReason = null;
@@ -313,13 +316,16 @@ export function recvFrame(data) {
        data.run_id || null);
 }
 
-/** 连接层事件：open / close / error / half-open —— frp 场景的高发源 */
+/** 连接层事件：open / close / error / half-open —— 只记录，不上闸。
+ *
+ * **断线不是事故，是常态**：手机端浏览器切后台/锁屏就无法保持 WS（系统挂起
+ * 页面），回来时必然走一次 close+重连。frp 链路上抖一下也一样。拿它上闸等于
+ * 用户每次切个 App 回来都看到「⏸ 已自动冻结」，那是噪音，不是帮助。
+ *
+ * 所以断线只进时间轴（`C close` 是定位「界面卡住/丢帧」的关键证据），
+ * 事故上闸只留给**真的抛了异常**那条路（js-error / rejection）。 */
 export function connEvent(name, detail) {
   push('C', name, detail === undefined ? null : detail);
-  // 断线/半开是 frp 场景最高发的事故源：那一刻就上闸，用户不必和 1.5 秒赛跑
-  if (name === 'close' || name === 'error' || name === 'half-open') {
-    autoLatch('ws-' + name);
-  }
 }
 
 /** 通用交互事件 */

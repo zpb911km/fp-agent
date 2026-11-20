@@ -179,6 +179,26 @@ def test_error_autolatches_then_pick(page, server):
     assert any(e[1] == "E" for e in rep["timeline"]), "时间轴里没有那条异常"
 
 
+def test_ws_disconnect_does_not_autolatch(page):
+    """断线**不得**自动上闸：手机切后台/锁屏必然掉 WS，那是常态不是事故。
+
+    回归：曾把 close/error/half-open 一并当事故源，于是用户每次切个 App 回来
+    都看到「⏸ 已自动冻结」+ 屏幕被冻住 8 秒——纯噪音，还把正常重连当成了 bug。
+    断线仍要进时间轴（`C close` 是定位「界面卡住/丢帧」的关键证据），所以这条
+    测试同时断言两件事：事件记下了、闸没动。
+    """
+    page.wait_for_function("() => window.__fp_diag && window.__fp_diag.ring().length > 0")
+    page.evaluate("() => window.__fp_test.closeSocket()")
+    # 等到 close 真的进了环再断言，否则断言可能跑在事件之前（假绿）
+    page.wait_for_function(
+        "() => window.__fp_diag.ring().some(e => e[1] === 'C' && e[2] === 'close')",
+        timeout=5000,
+    )
+    assert page.evaluate("() => window.__fp_diag.frozen()") is False, "断线把屏幕冻住了"
+    assert page.evaluate("() => window.__fp_diag.autoReason()") is None
+    assert page.locator(".fp-diag-pill").count() == 0, "断线后浮出了自动冻结小条"
+
+
 def test_alt_click_records_without_entering_mode(page, server):
     """桌面快捷：Alt+点击 一个元素直接记录，不进模式、不出遮罩。"""
     pos = page.evaluate(PROBE)
