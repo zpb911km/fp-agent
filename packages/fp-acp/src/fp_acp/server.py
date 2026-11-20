@@ -92,6 +92,11 @@ def _agent_version() -> str:
 # SessionInfo: {_meta?, additionalDirectories?, cwd: string(必填), sessionId, title?, updatedAt?}
 _LIST_PAGE_SIZE = 50
 
+# 定位 edit_file 落点时最多读的字节数。1 MiB 足以覆盖绝大多数源码文件；
+# 超大文件直接放弃定位（只发 path，不发 line）——follow-along 是提示性信息，
+# 不值得为它把整个大文件读进内存。
+_LOCATE_MAX_BYTES = 1 << 20
+
 
 def _norm_cwd(path: str) -> str:
     """会话根归一：realpath 消软链/`..`/尾斜杠，用于 cwd 过滤比对。
@@ -118,6 +123,154 @@ def _to_iso8601(ts: Any) -> str | None:
         return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").astimezone().isoformat()
     except ValueError:
         return ts
+
+
+# ── configOptions（Zed 里选模型的唯一通道）──
+# category 枚举（schema，snake_case）：mode / model / model_config / thought_level。
+# 本端只报 model：fp 没有 mode 概念（章程明确「无危险指令审批门」），
+# 也没有 reasoning_effort / thinking_budget 这类可调面 —— 假的选项比没有更糟，
+# 客户端会照单渲染成可点的下拉项。
+_CONFIG_MODEL_ID = "model"
+# 切换走**命令层**（public/commands/model.py，用户的扩展）：模型切换的全部语义
+# （就地换 client、同步 agent.client、写 ACTIVE_LLM、同步 config 模块内存态）
+# 只存在于那一处。ACP 若自己再实现一遍，等于两份会漂移的真相。
+_MODEL_COMMAND = "model"
+
+
+def _normalize_mcp_servers(raw: Any) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """ACP 线格式的 `mcpServers` → 插件要的 `{name: {command, args, env}}`。
+
+    线格式（schema v1 `McpServer`）：**数组**，元素 ``#[serde(tag = "type")]``，
+    其中 stdio 变体是 untagged（无 ``type`` 键、靠 ``command`` 认领）：
+      - stdio: ``{name, command, args?: [str], env?: [{name, value}]}``
+      - http/sse: ``{type: "http"|"sse", name, url, headers?}``
+    注意 ``env`` 是**对象数组**，不是 dict。
+
+    旧实现按 dict 解析（``isinstance(raw, dict)``），真实客户端发数组 →
+    整包被静默丢弃，连日志都没有。静默是本项目反复踩过的失败模式，
+    所以这里两种形态都收：数组按 schema，dict 视为旧形态直通（向后兼容）。
+
+    Returns:
+        (servers, rejected)：rejected 是给人看的拒绝说明（不做静默忽略）。
+    """
+    if isinstance(raw, dict) and raw:
+        # 旧形态 {name: {command, ...}}：整包直通，交给插件逐条校验
+        return cast("dict[str, dict[str, Any]]", dict(cast("dict[str, Any]", raw))), []
+    if not isinstance(raw, list):
+        return {}, []
+
+    servers: dict[str, dict[str, Any]] = {}
+    rejected: list[str] = []
+    for item in cast("list[Any]", raw):
+        if not isinstance(item, dict):
+            rejected.append(f"{item!r}: 不是对象")
+            continue
+        entry = cast("dict[str, Any]", item)
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            rejected.append(f"{entry.get('type', '?')}: 缺少 name")
+            continue
+        cmd = entry.get("command")
+        if not isinstance(cmd, str) or not cmd:
+            kind = entry.get("type")
+            rejected.append(f"{name}: 仅支持 stdio 传输（type={kind or '未知'}，无 command）")
+            continue
+        env = entry.get("env")
+        env_map: dict[str, str] | None = None
+        if isinstance(env, list):
+            # schema：env 是 [{name, value}] 对象数组
+            env_map = {}
+            for pair in cast("list[Any]", env):
+                if not isinstance(pair, dict):
+                    continue
+                # 显式窄化到 dict[str, Any]：直接 pair.get 会让 pyright 把 pair 当
+                # Unknown，报 reportUnknownMemberType（strict 下是错，不是警告）。
+                pair_map = cast("dict[str, Any]", pair)
+                pair_name = pair_map.get("name")
+                if isinstance(pair_name, str):
+                    env_map[pair_name] = str(pair_map.get("value") or "")
+        elif isinstance(env, dict):
+            env_map = {str(k): str(v) for k, v in cast("dict[str, Any]", env).items()}
+        cfg: dict[str, Any] = {"command": cmd}
+        args = entry.get("args")
+        if isinstance(args, list):
+            cfg["args"] = [str(a) for a in cast("list[Any]", args)]
+        if env_map:
+            cfg["env"] = env_map
+        servers[name] = cfg
+    return servers, rejected
+
+
+def _llm_config() -> Any:
+    """懒取 fp_core.config（延迟 import：本模块导入期不读用户配置）。"""
+    from fp_core import config as _cfg
+
+    return _cfg
+
+
+def _model_catalog() -> list[tuple[str, str]]:
+    """用户 `LLM_PROVIDERS` 表展平为有序 [(provider, model)]（只读，不写盘）。
+
+    顺序 = 配置表内的顺序，与 `/model` 列表序号一致（所见即所用）。
+    无表 / 配置损坏 → []（调用方据此**不报** configOptions，而不是给空选项）。
+    """
+    cfg_mod = _llm_config()
+    try:
+        with open(cfg_mod.USER_CONFIG_PATH, encoding="utf-8") as f:
+            raw: Any = json.load(f)
+    except (OSError, ValueError, TypeError):
+        return []
+    if not isinstance(raw, dict):
+        return []
+    providers = cfg_mod.normalize_providers(cast("dict[str, Any]", raw).get("LLM_PROVIDERS"))
+    return [(p, m) for p, pd in providers.items() for m in list(pd.get("models", {}))]
+
+
+def _current_model_id() -> str:
+    """当前激活的 `provider/model`（config 模块内存态是唯一真源：/model 刚改过）。"""
+    return str(getattr(_llm_config(), "LLM_ACTIVE_ID", "") or "")
+
+
+def _config_options(catalog: list[tuple[str, str]], active: str) -> list[dict[str, Any]]:
+    """把 (catalog, active) 渲染成 schema 的 `SessionConfigOption[]`。
+
+    select 变体的 payload 是 flatten 的（`type` 是判别键）：
+      ``{id, name, description?, category?, type:"select", currentValue, options:[{value,name,description?}]}``
+    模型名可跨 provider 重名，故 value 一律用 `provider/model`（与 ACTIVE_LLM 同形）。
+    """
+    if not catalog:
+        return []
+    options: list[dict[str, Any]] = [{"value": f"{p}/{m}", "name": m, "description": p} for p, m in catalog]
+    known = {o["value"] for o in options}
+    # currentValue 必须是 options 里的值（客户端按值选中）；激活项不在表里
+    # （如 --model/FP_MODEL 覆盖到表外模型）→ 把真实激活值补成一项，
+    # 避免 Zed 显示一个选不中的空选择。
+    if active and active not in known:
+        options.append({"value": active, "name": active, "description": "当前激活（不在配置表中）"})
+    current = active or options[0]["value"]
+    return [
+        {
+            "id": _CONFIG_MODEL_ID,
+            "name": "Model",
+            "description": "LLM 供应点（provider/model）",
+            "category": "model",
+            "type": "select",
+            "currentValue": current,
+            "options": options,
+        }
+    ]
+
+
+def _context_window_tokens() -> int:
+    """fp 的上下文预算（`MAX_CONTEXT_TOKENS`）—— usage_update 的 `size`。
+
+    这是 fp 自己的压缩阈值，不一定等于模型真实窗口：更小是常态（fp 会提前压缩）。
+    对客户端而言这才是诚实的「用量分母」——超过它就会触发压缩。
+    """
+    try:
+        return max(256, int(getattr(_llm_config(), "MAX_CONTEXT_TOKENS", 0) or 0))
+    except (TypeError, ValueError):
+        return 8000
 
 
 def _encode_cursor(updated: str, sid: str) -> str:
@@ -247,6 +400,7 @@ class ACPIO(IOChannel):
         self,
         send_chunk: Callable[[str], None] | None = None,
         elicit: Callable[[str, list[str], str], Awaitable[dict[str, Any]]] | None = None,
+        send_thought: Callable[[str, str], None] | None = None,
     ):
         """
         Args:
@@ -257,11 +411,19 @@ class ACPIO(IOChannel):
                     （入参 prompt/options/suggest，返回 elicitation 响应 result）。
                     存在时 ask() 走带内 elicit（accept→回答带内回流），
                     ask_deferred 置 False；缺省或请求失败则回退 deferred 文本推送。
+            send_thought: 可选：思考 token 的推送回调，接收 (text, message_id)，
+                          推 agent_thought_chunk。缺省时思考流被丢弃（旧行为）。
         """
         self._buffer: list[str] = []
         self._send_chunk: Callable[[str], None] | None = send_chunk
         self._elicit = elicit
         self._char_count = 0
+        # ── 思考流（独立缓冲 + 独立 messageId）──
+        # 为什么不共用 _buffer：思考与正文是两种 chunk（agent_thought_chunk vs
+        # agent_message_chunk），混在一个缓冲里会把推理内容当正文推出去。
+        self._send_thought = send_thought
+        self._think_buffer: list[str] = []
+        self._thought_id: str | None = None
         # 有带内 elicit 通道 → 回答带内回流，非 deferred；否则维持 deferred。
         self.ask_deferred = elicit is None
 
@@ -284,12 +446,60 @@ class ACPIO(IOChannel):
 
     def flush_text(self) -> str:
         """返回缓冲区剩余文本并清空（process 结束后调用）"""
+        # 先冲思考再冲正文：思考必须先于最终回答抵达客户端，
+        # 否则客户端会把推理展示在回答之后（顺序错乱）。
+        self.flush_thought()
         if not self._buffer:
             return ""
         merged = "\n".join(self._buffer)
         self._buffer.clear()
         self._char_count = 0
         return merged
+
+    # ── 思考流（agent_thought_chunk）─────────────────────
+    #
+    # 契约（ACP v1 ContentChunk）：{content: ContentBlock, messageId?: string}
+    # messageId 语义与 agent_message_chunk 相同：同一段思考的所有 chunk 共享
+    # 一个 id，id 变化 = 另一段思考。core 每次 LLM 调用会 thinking_start 一次，
+    # 多步工具循环里就有多段思考 —— 故 thinking_start 时把 id 置空，懒生成。
+
+    async def thinking_start(self, streaming: bool = False):
+        """新一轮思考开始：冲刷上一段残余，并作废旧 id（下一批 token 开新消息）。
+
+        为什么每次 LLM 调用重开一段：多步工具循环里模型会思考多次，
+        每段在客户端应显示为独立的思考块，而不是一条无限长的流。
+        """
+        self.flush_thought()
+        self._thought_id = None
+
+    async def thinking_stop(self):
+        """思考结束：立即冲刷残余 token（ACP 无「思考结束」通知，靠 chunk 收尾）。
+
+        必须是 async —— core 侧是 ``await io.thinking_stop()``，
+        写成同步方法会在 await 处抛 TypeError（非流式 mock 走不到才不易察觉）。
+        """
+        self.flush_thought()
+
+    def stream_think(self, token: str):
+        """接收思考 token；累计到阈值即推送一批 agent_thought_chunk。"""
+        if not token or not self._send_thought:
+            return
+        self._think_buffer.append(token)
+        if sum(len(t) for t in self._think_buffer) >= self._STREAM_THRESHOLD:
+            self.flush_thought()
+
+    def flush_thought(self) -> None:
+        """推送当前思考缓冲（空缓冲不发 —— 不发空 text 块）。"""
+        if not self._think_buffer or not self._send_thought:
+            self._think_buffer.clear()
+            return
+        text = "".join(self._think_buffer)
+        self._think_buffer.clear()
+        if not text:
+            return
+        if self._thought_id is None:
+            self._thought_id = f"tht_{uuid.uuid4().hex[:12]}"
+        self._send_thought(text, self._thought_id)
 
     def _emit_deferred(self, prompt: str, options: list[str] | None, suggest: str) -> None:
         """无带内通道（或 elicit 失败）时的回退：把问题推送为一条展示消息。"""
@@ -366,19 +576,29 @@ class ACPServer:
     通过 stdin/stdout 与 IDE 通信，每条消息为一行 JSON（newline-delimited JSON）。
 
     实现的方法:
-      initialize          协议握手，协商版本和能力
-      session/new         创建新对话会话
-      session/load        恢复已有会话
-      session/prompt      发送用户消息并获取 AI 回复（核心交互）
-      session/set_mode    切换 Agent 模式
+      initialize                协议握手，协商版本和能力
+      session/new               创建新对话会话（响应带 configOptions）
+      session/load              恢复已有会话（**先回放全部历史**再响应）
+      session/resume            挂上已有会话（不回放历史；能力位 resume）
+      session/delete            删除会话（磁盘历史一并删除；能力位 delete）
+      session/list              列出历史会话（按会话自己的 cwd 过滤 + 分页）
+      session/close             释放本连接侧会话状态（**不删**历史）
+      session/set_config_option 切换配置项（本端只有 model）
+      session/prompt            发送用户消息并获取 AI 回复（核心交互）
 
     实现的通知:
       session/cancel      取消当前操作
-      initialzed          客户端已就绪
+      initialized         客户端已就绪
 
     发出的通知:
       session/update      推送计划/工具调用/回复
-                          Follow Agent: 文件操作时通知 IDE 打开对应文件
+                          - agent_message_chunk / agent_thought_chunk（正文 / 思考）
+                          - tool_call / tool_call_update（含 locations = follow-along）
+                          - plan / available_commands_update
+                          - usage_update（上下文占用）、notice（门控 session.notices）
+                          - compaction_update（门控 session.compaction）、
+                            session_info_update（标题变化）、config_option_update（模型切换）
+                          Follow Agent: 文件操作时通知 IDE 打开对应文件（path + line）
     """
 
     def __init__(self) -> None:
@@ -432,6 +652,9 @@ class ACPServer:
         # 客户端是否声明 session.compaction —— 规范硬约束：未声明则 MUST NOT
         # 发 compaction_update（解析口径见 _apply_client_capabilities）。
         self._client_compaction: bool = False
+        # 客户端是否声明 session.notices —— 同上：未声明则 MUST NOT 发 notice
+        # （规范允许这种情形用 agent message 代替，见 _send_notice）。
+        self._client_notices: bool = False
         # reload 后 Zed 不重发 initialize（stdio 连接不变、进程 exec 重启），
         # 由环境变量恢复上一连接协商的能力（initialize 时写入，见 _apply…）。
         self._restore_client_capabilities()
@@ -447,6 +670,10 @@ class ACPServer:
         self._compaction_fp: dict[str, tuple[int, int]] = {}
         # 每轮开始时的标题快照（sid → summary）：session_info_update 只在真变了才发。
         self._title_before: dict[str, str] = {}
+        # 本轮上下文占用（sid → 最近一次 LLM 调用的 prompt_tokens）：
+        # usage_update 的 used 来源。由 ON_AFTER_LLM_CALL 钩子写入（见 _on_llm_usage），
+        # turn 结束时消费并清空 —— 一轮里的多次工具循环只报最后一次（= 当前上下文长度）。
+        self._usage_used: dict[str, int] = {}
 
         # "Follow Agent" 钩子注册在 start()（须在 portal.ctl.open 之后）
 
@@ -461,6 +688,42 @@ class ACPServer:
         self._last_edit_args = None
         self._last_read_path = None
         self._last_write_path = None
+
+    # ═══════════════════════════════════════════════════════
+    # 用量上报（usage_update）
+    # ═══════════════════════════════════════════════════════
+
+    def _register_usage_hook(self) -> None:
+        """用 ON_AFTER_LLM_CALL 抓「最近一次 prompt_tokens」→ usage_update。
+
+        为什么不从 core 取现成值：`TokenTracker` 是**累计**用量（历史所有调用的
+        和），拿它当「当前上下文占了多少」会越用越离谱；core 也没有暴露「上下文
+        长度」的只读出口。而 `usage.prompt_tokens` 恰好就是「这次请求实际塞了
+        多少 token 进上下文」——即客户端要的分母的真实测量值。
+        钩子是现成的语义边界，不必为此新增 core 事件。
+        """
+        portal.ctl.hooks.register(
+            LifecycleHook.ON_AFTER_LLM_CALL,
+            self._on_llm_usage,
+            name="acp_usage_capture",
+            priority=1000,
+        )
+
+    async def _on_llm_usage(self, ctx: Any, **kwargs: Any) -> Any:
+        """记录本会话最近一次 LLM 调用的 prompt_tokens（turn 结束时统一发通知）。
+
+        只在 turn 内记录（`_active` 非空）：turn 之外的隐性调用（总结、标题派生、
+        subagent）不属于任何一轮对话，拿它当用量会把数字挂到错误的 thread 上。
+        """
+        if self._active is None:
+            return ctx
+        usage = kwargs.get("usage")
+        if not isinstance(usage, dict):
+            return ctx
+        used = cast("dict[str, Any]", usage).get("prompt_tokens")
+        if isinstance(used, int) and used > 0:
+            self._usage_used[self._active.sid] = used
+        return ctx
 
     # ═══════════════════════════════════════════════════════
     # 上下文压缩通知（session.compaction）
@@ -646,14 +909,42 @@ class ACPServer:
             priority=1000,
         )
 
-    def _extract_file_path(self, tool_name: str, args: dict[str, Any]) -> str | None:
-        """
-        从工具调用参数中提取文件路径。
+    @staticmethod
+    def _line_of(file_path: str, needle: str) -> int | None:
+        """needle 在文件里首次出现的行号（1-based）；找不到/读不了返回 None。
 
-        支持的工具:
-          read_file/write_file/edit_file → file_path 参数
-          file_fingerprint/elf_analysis  → file_path 参数
-          bash                           → 从命令中猜测文件路径
+        为什么按内容找而不是按参数算：`edit_file` 只给 old_string/new_string，
+        真正的落点只能由文件内容决定。`read_file` 的 offset 是 0-based，换算在
+        调用处（见 `_extract_location`），两种语义不要混在一个函数里。
+
+        needle 可能是多行片段 → 用 find(count '\\n') 而不是逐行比对。
+        只用于「Follow 跳到哪一行」这种提示性场景：读不了/文件过大就返回 None，
+        让调用方只发 path —— 定位失败绝不能拖垮工具调用本身。
+        """
+        if not needle:
+            return None
+        try:
+            with open(file_path, encoding="utf-8", errors="replace") as f:
+                text = f.read(_LOCATE_MAX_BYTES)
+        except OSError:
+            return None
+        idx = text.find(needle)
+        if idx < 0:
+            return None
+        return text.count("\n", 0, idx) + 1
+
+    def _extract_location(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any] | None:
+        """从工具调用参数中提取 ToolCallLocation（`path` + 可选 `line`，1-based）。
+
+        line 是 Zed follow-along 真正需要的字段：只给 path 时编辑器能打开文件但
+        落到哪一行全凭它自己猜（通常落到第 1 行或上次光标处），于是「跟随 Agent」
+        在长文件里形同虚设。
+
+        支持的工具与行号来源:
+          read_file   → offset（0-based）→ line = offset + 1
+          edit_file   → old_string 在文件里的首行（**编辑前**定位）
+          write_file / file_fingerprint / elf_analysis → 只给 path
+          bash        → 从命令里猜路径，不给行号（命令行里的行语义不可靠）
 
         参数 args 应为已解析为 dict 的参数字典，由调用方保证。
         """
@@ -663,7 +954,20 @@ class ACPServer:
         # 直接有 file_path 参数的
         fp = args.get("file_path")
         if fp and isinstance(fp, str) and os.path.isfile(fp):
-            return os.path.abspath(fp)
+            path = os.path.abspath(fp)
+            line: int | None = None
+            if tool_name == "read_file":
+                off = args.get("offset")
+                if isinstance(off, int) and off >= 0:
+                    line = off + 1
+            elif tool_name == "edit_file":
+                old = args.get("old_string")
+                if isinstance(old, str):
+                    line = self._line_of(path, old)
+            loc: dict[str, Any] = {"path": path}
+            if line:
+                loc["line"] = line
+            return loc
 
         # bash 命令中尝试提取文件路径
         if tool_name == "bash":
@@ -673,7 +977,7 @@ class ACPServer:
                 if match:
                     potential = os.path.abspath(os.path.expanduser(match.group(1)))
                     if os.path.isfile(potential):
-                        return potential
+                        return {"path": potential}
 
         return None
 
@@ -718,7 +1022,8 @@ class ACPServer:
 
         # ── 构建通知 ──
         kind = self._get_tool_kind(tool_name)
-        file_path = self._extract_file_path(tool_name, args_dict)
+        location = self._extract_location(tool_name, args_dict)
+        file_path = str(location["path"]) if location else None
         title = self._build_tool_title(tool_name, args_dict, kind)
         # ── 构建 ToolCall（ACP v1 schema）──
         # content 是 ToolCallContent 数组，元素必须是 union 变体：
@@ -731,9 +1036,11 @@ class ACPServer:
             }
         ]
         # follow-along：locations 才是规范的「文件位置」通道（绝对路径）
+        # location 里带了 line 就必须原样带上：ToolCallLocation.line 是 1-based，
+        # 缺省时 IDE 只能自己猜落点，长文件里等于没用。
         locations: list[dict[str, Any]] = []
-        if file_path and os.path.isfile(file_path):
-            locations.append({"path": file_path})
+        if location and file_path and os.path.isfile(file_path):
+            locations.append(location)
             content.append({
                 "type": "content",
                 "content": {
@@ -966,6 +1273,21 @@ class ACPServer:
         if content_blocks:
             update["content"] = content_blocks
 
+        # ── locations 的三态补丁语义（schema 原文）──
+        #   省略 = 保持不变 ；null/[] = 清空 ；非空 = 全量替换
+        # 这里默认**省略**：call 阶段已经发过正确的 path(+line)，重复发只会让
+        # IDE 重算光标。唯一需要补发的是「call 阶段文件还不存在」的情形 ——
+        # write_file 新建文件时 os.path.isfile 为假、locations 为空，此时 IDE 里
+        # 这条工具没有 follow 链接；文件落盘后才补一条，且不带 line（新文件无落点语义）。
+        #
+        # 为什么不对 edit_file 补发：编辑后 old_string 可能已被移动/消失，也可能在
+        # 别处重复出现 —— 重新按内容定位会算出**错误**行号，把 follow 光标带偏。
+        # 定位错了比不定位更糟，所以 edit_file 一律沿用 call 阶段的定位。
+        if tool_name == "write_file" and status == "completed" and self._last_write_path:
+            wp = os.path.abspath(self._last_write_path)
+            if os.path.isfile(wp):
+                update["locations"] = [{"path": wp}]
+
         self._send_notification("session/update", {"sessionId": sid, "update": update})
 
     def _tool_call_id(self, tool_name: str, tool_call_id: str = "") -> str:
@@ -1086,6 +1408,7 @@ class ACPServer:
             await portal.ctl.open(enable_log=False, resume=os.environ.get("FP_RELOAD_SID") or None)
         self._register_follow_hooks()
         self._register_compaction_hooks()
+        self._register_usage_hook()
         self._session_id = portal.run.status.session_id
         # 启动即持有的会话（reload 恢复的那个）先入表：客户端可能不给 load
         # 直接发 prompt（连接没断，它认为会话一直活着）。
@@ -1185,10 +1508,12 @@ class ACPServer:
             if method == "session/prompt":
                 os.environ.pop("FP_ACP_PENDING_REQ", None)
 
-            # session/new 和 session/load 之后，等待 IDE 完全消化响应并注册 sessionId，
-            # 然后再发送 available_commands_update 通知。直接连续发送会导致 Zed
-            # 在处理通知时 session 尚未注册，报 "unknown session" 并丢弃命令列表。
-            if method in ("session/new", "session/load"):
+            # session/new、session/load 和 session/resume 之后，等待 IDE 完全消化
+            # 响应并注册 sessionId，然后再发送 available_commands_update 通知。直接
+            # 连续发送会导致 Zed 在处理通知时 session 尚未注册，报 "unknown session"
+            # 并丢弃命令列表。（resume 同样建立了一条「可寻址」的会话，客户端切到它
+            # 之后必须能打斜杠命令 —— 漏掉它会让切回来的 thread 命令全失效。）
+            if method in ("session/new", "session/load", "session/resume"):
                 await asyncio.sleep(0.05)
                 self._send_available_commands()
         except asyncio.CancelledError:
@@ -1215,6 +1540,9 @@ class ACPServer:
             "session/prompt": self._handle_session_prompt,
             "session/list": self._handle_session_list,
             "session/close": self._handle_session_close,
+            "session/resume": self._handle_session_resume,
+            "session/delete": self._handle_session_delete,
+            "session/set_config_option": self._handle_session_set_config_option,
             "session/commands": self._handle_session_commands,
             "session/ping": self._handle_session_ping,
         }
@@ -1253,6 +1581,9 @@ class ACPServer:
         sess = caps.get("session")
         sess_d = cast("dict[str, Any]", sess) if isinstance(sess, dict) else {}
         self._client_compaction = isinstance(sess_d.get("compaction"), dict)
+        # session.notices：同样是 Option<NoticesCapabilities>（空结构体），
+        # 只有「值是对象」才算声明。未声明时 MUST NOT 发 notice。
+        self._client_notices = isinstance(sess_d.get("notices"), dict)
 
     def _restore_client_capabilities(self) -> None:
         """reload 后从环境变量恢复连接级客户端能力（新实例收不到 initialize）。
@@ -1309,6 +1640,10 @@ class ACPServer:
                 "sessionCapabilities": {
                     "list": {},
                     "close": {},
+                    # resume：挂上已有会话但**不回放**历史（大历史切 thread 不必等回放）
+                    "resume": {},
+                    # delete：连磁盘历史一起删（close 只释放本连接侧状态，不删历史）
+                    "delete": {},
                 },
                 "promptCapabilities": {
                     "image": False,
@@ -1516,26 +1851,35 @@ class ACPServer:
         本端只支持 **stdio** 传输；`http`/`sse` 型由插件明确拒绝并记日志，
         不静默忽略（静默是本项目反复踩过的失败模式）。
         """
-        raw = params.get("mcpServers")
-        if not isinstance(raw, dict) or not raw:
+        # schema 里 mcpServers 是**数组**（stdio 元素 untagged、env 是 [{name,value}]），
+        # 旧实现按 dict 解析 → 真实客户端流量整包被丢。归一化见 _normalize_mcp_servers。
+        servers, rejected = _normalize_mcp_servers(params.get("mcpServers"))
+        if not servers and not rejected:
             return
-        servers: dict[str, Any] = cast("dict[str, Any]", raw)
+        if not servers:
+            self._log(f"mcpServers 全部无法使用: {rejected}")
+            self._send_notice("warning", "MCP server 未启用", "；".join(rejected))
+            return
         try:
             plug: Any = portal.ctl.plugins.get(_MCP_PLUGIN_NAME)
         except Exception as e:
             self._log(f"客户端传入 {len(servers)} 个 mcpServers，但取不到 mcp 插件（{e}），已忽略")
+            self._send_notice("warning", "MCP server 未启用", f"未加载 mcp 插件：{e}")
             return
         if plug is None or not hasattr(plug, "add_session_servers"):
             self._log(f"客户端传入 {len(servers)} 个 mcpServers，但本端未加载 mcp 插件，已忽略")
+            self._send_notice("warning", "MCP server 未启用", "本端未加载 mcp 插件")
             return
         try:
-            rejected: list[str] = plug.add_session_servers(sid, servers)
+            rejected += plug.add_session_servers(sid, servers) or []
         except Exception as e:
             self._log(f"mcpServers 登记失败: {type(e).__name__}: {e}")
+            self._send_notice("error", "MCP server 登记失败", f"{type(e).__name__}: {e}")
             return
         msg = f"会话 {sid} 登记 MCP server: {sorted(servers)}"
         if rejected:
             self._log(f"⚠️ {msg}；拒绝: {rejected}")
+            self._send_notice("warning", "部分 MCP server 被拒绝", "；".join(rejected))
         else:
             self._log(msg)
 
@@ -1583,6 +1927,109 @@ class ACPServer:
         self._log(f"关闭会话: {sid}（{'已释放' if existed else '未登记，幂等清理'}）")
         return {}
 
+    async def _handle_session_delete(self, params: dict[str, Any]) -> dict[str, Any]:
+        """ACP v1 删除会话：**连磁盘历史一起删**（与 close 的分界线）。
+
+        - close = 释放本连接侧状态 + 回收会话私有 MCP，历史还在，可再 load
+        - delete = 历史文件消失（不可恢复）；同时也要把本连接侧状态与 MCP 清掉，
+          否则「删掉的会话」还在吃内存和子进程
+
+        拒绝删除**当前打开**的会话：core 仍持有它，删完下一次保存会把文件写回来
+        （用户看到 thread「复活」，这比报错更让人困惑）。请客户端先切走。
+        """
+        raw = params.get("sessionId") or params.get("session_id", "")
+        if not raw or not isinstance(raw, str):
+            raise _ACPRPCError(_RPC_INVALID_PARAMS, "session/delete 缺少必填参数 sessionId")
+        sid = raw
+        if sid == portal.run.status.session_id:
+            raise _ACPRPCError(
+                _RPC_INVALID_REQUEST,
+                f"会话 {sid} 正在本端打开，无法删除（core 仍持有它会把它重新落盘）；请先切换到其他会话",
+            )
+        existed = self._sessions.pop(sid, None) is not None
+        # 无论是否登记过都回收：MCP 子进程是真实资源，泄漏比多杀一次更糟
+        self._drop_session_mcp(sid)
+        if self._session_id == sid:
+            self._session_id = next(reversed(self._sessions), "") if self._sessions else ""
+        try:
+            deleted = portal.ctl.sessions.delete(sid)
+        except Exception as e:
+            raise _ACPRPCError(_RPC_INTERNAL_ERROR, f"删除会话失败: {type(e).__name__}: {e}") from e
+        disk_note = "已删除" if deleted else "本就不存在"
+        link_note = "已释放" if existed else "未登记"
+        self._log(f"删除会话: {sid}（磁盘历史{disk_note}，连接侧{link_note}）")
+        return {}
+
+    async def _handle_session_set_config_option(self, params: dict[str, Any]) -> dict[str, Any]:
+        """ACP v1 切换配置项 —— 本端只有 ``configId="model"``（fp 无 mode/thought_level）。
+
+        顺序是「先验后改」：未知 configId / 未知 value 一律 -32602，绝不猜一个
+        最像的选项去执行 —— 静默选错模型会污染用户的钱包，比报错严重得多。
+
+        切换本身**委托命令层**（`/model <provider/model>`）：模型热切换的全部语义
+        （就地换 client、同步 `agent.client`、写 ACTIVE_LLM、同步 config 模块内存态）
+        只存在于那一个文件里。ACP 自己再实现一遍就是两份会漂移的真相。
+
+        不抢 `_turn_lock`：模型是进程级单例，别处正在跑的轮次已持有旧 client 对象，
+        就地换芯对它无害；而一旦抢锁，用户在长轮次期间点下拉框会一直转圈。
+
+        响应 MUST 回**完整** configOptions（schema：part of the response），
+        并另发 `config_option_update` 给所有已登记会话 —— 别的 thread 的模型
+        下拉框不跟着更新就会显示旧值（同进程只有一个激活模型）。
+        """
+        self._resolve_session(params, "session/set_config_option")  # 会话必须存在（地址有效性）
+        config_id = params.get("configId") or params.get("config_id")
+        if config_id != _CONFIG_MODEL_ID:
+            raise _ACPRPCError(
+                _RPC_INVALID_PARAMS,
+                f"不支持的 configId: {config_id!r}（本端只提供 {_CONFIG_MODEL_ID}）",
+            )
+        value = params.get("value")
+        if not isinstance(value, str) or not value:
+            # select 变体的 value 是 flatten 的字符串（SessionConfigOptionValue::ValueId）；
+            # 其它形态（如 {type:boolean,...}）不是本端提供的选项，明确拒绝而不是强转。
+            raise _ACPRPCError(_RPC_INVALID_PARAMS, "value 必须是选项 id 字符串（形如 provider/model）")
+
+        catalog = [f"{p}/{m}" for p, m in _model_catalog()]
+        current = _current_model_id()
+        if value not in catalog and value != current:
+            raise _ACPRPCError(
+                _RPC_INVALID_PARAMS,
+                f"未知模型: {value}（可选: {', '.join(catalog) or '无配置表'}）",
+            )
+        if value != current:
+            # 命令层可能没装（/model 是扩展命令：public/commands/model.py）。
+            # 缺它时**明确报错**，而不是让用户以为切换成功了 —— 下拉框点了没反应
+            # 是最难查的那类问题。
+            if _MODEL_COMMAND not in portal.run.commands:
+                raise _ACPRPCError(
+                    _RPC_INTERNAL_ERROR,
+                    f"本端未安装 /{_MODEL_COMMAND} 命令，无法切换模型（扩展缺失）",
+                )
+            _handled, output = await portal.run.command(f"/{_MODEL_COMMAND} {value}")
+            # 用**可观测状态**验收，而不是解析命令输出的文案（文案会随扩展漂移）：
+            # 真源是 config 模块的激活 id，命令成功时必然等于目标值。
+            if _current_model_id() != value:
+                raise _ACPRPCError(
+                    _RPC_INTERNAL_ERROR,
+                    f"切换模型失败（当前 {_current_model_id() or '未知'}）: {output.strip()[:300]}",
+                )
+            self._log(f"模型已切换: {value}（via /{_MODEL_COMMAND}）")
+
+        options = self._config_options_now()
+        # 广播：模型是进程级单例，所有已登记会话的下拉框都要跟着走。
+        # 顺序按 sid 排序只为测试可复现（客户端不关心顺序）。
+        for sid in sorted(set(self._sessions) | ({self._session_id} if self._session_id else set())):
+            self._send_notification(
+                "session/update",
+                {"sessionId": sid, "update": {"sessionUpdate": "config_option_update", "configOptions": options}},
+            )
+        return {"configOptions": options}
+
+    def _config_options_now(self) -> list[dict[str, Any]]:
+        """当前 configOptions 全量（模型是进程级单例，不按会话存）。"""
+        return _config_options(_model_catalog(), _current_model_id())
+
     async def _handle_session_new(self, params: dict[str, Any]) -> dict[str, Any]:
         """
         ACP v1 创建新会话。
@@ -1608,47 +2055,59 @@ class ACPServer:
 
         # 注意：命令注册通知在 _dispatch 中响应之后发送，
         # 以确保 IDE 先拿到 sessionId 再处理命令列表。
-        return {"sessionId": sid}
+        return self._session_setup_result(sid)
 
-    async def _handle_session_load(self, params: dict[str, Any]) -> dict[str, Any]:
+    def _session_setup_result(self, sid: str) -> dict[str, Any]:
+        """session/new | load | resume 的响应体：sessionId + 当前 configOptions。
+
+        configOptions 必须**建立会话时就带**（稳定面字段）：Zed 用它在会话头部
+        渲染模型下拉框，缺了它用户在 IDE 里根本看不到「有模型可选」。
+        没有配置表（无 LLM_PROVIDERS / 配置损坏）时整字段省略 —— 给空数组
+        在客户端语义是「有配置但没有选项」，比不报更糟。
         """
-        ACP v1 恢复已有会话。
+        payload: dict[str, Any] = {"sessionId": sid}
+        options = self._config_options_now()
+        if options:
+            payload["configOptions"] = options
+        return payload
 
-        会话不存在时报错（旧实现静默新建空会话，IDE 以为历史已恢复）。
+    def _attach_existing_session(self, params: dict[str, Any], method: str) -> tuple[_SessionState, bool]:
+        """校验「这条会话真的存在」并纳入会话表（load 与 resume 共用的唯一入口）。
 
-        参考: https://agentclientprotocol.com/protocol/v1/session-setup#loading-sessions
+        Returns:
+            (会话状态, 磁盘上是否有历史)
 
-        同样是**只登记 + 回放**，不切 core：load 之后这条会话只是「可寻址」，
-        真正进入要等它的下一次 prompt（否则 load A 会把正在跑的 B 顶掉）。
+        **只登记，不切 core**（load/resume 之后这条会话只是「可寻址」）：
+        真正进入要等它的下一次 prompt，否则 load A 会把正在跑的 B 顶掉。
+
+        存在性证明只有三条，客户端声明的 cwd **不能**算：
+          ① 本次连接登记过（session/new 的惰性会话）
+          ② 磁盘上有历史
+          ③ 它就是 core 当前会话（reload/内存态）
+        否则 session/load 会退化成「静默新建空会话」——IDE 以为历史已恢复，
+        用户打开的是空白对话（这是旧实现的真实 bug）。
         """
-        # ACP v1 使用 camelCase
-        session_id = params.get("sessionId") or params.get("session_id", "")
-        if not session_id:
-            raise _ACPRPCError(_RPC_INVALID_PARAMS, "session/load 缺少必填参数 sessionId")
-
-        cwd = self._validate_session_cwd(params.get("cwd"), "session/load")
+        raw = params.get("sessionId") or params.get("session_id", "")
+        if not raw or not isinstance(raw, str):
+            raise _ACPRPCError(_RPC_INVALID_PARAMS, f"{method} 缺少必填参数 sessionId")
+        session_id = raw
+        cwd = self._validate_session_cwd(params.get("cwd"), method)
 
         # 盘上文件存在 ⇔ read_messages 非 None（惰性创建：新会话还没产生消息）
         on_disk = portal.ctl.sessions.read_messages(session_id) is not None
 
-        # 「恢复」的前提是这条会话**真的存在**：磁盘上有历史，或本次连接登记过
-        # （session/new 的惰性会话），或它就是 core 当前会话（reload/内存态）。
-        # 客户端声明 cwd **不能**当作存在性证明 —— 否则 load 退化成静默新建空
-        # 会话（旧 bug：IDE 以为历史已恢复，实际打开空白对话）。
         if session_id not in self._sessions and not on_disk and session_id != portal.run.status.session_id:
             raise _ACPRPCError(_RPC_INVALID_PARAMS, f"会话不存在: {session_id}")
 
         st = self._adopt_session(session_id, cwd=cwd)
         if st is None:
-            # 规范：真正不存在的会话应报错（此前静默新建空会话，IDE 以为历史已恢复）。
             raise _ACPRPCError(_RPC_INVALID_PARAMS, f"会话不存在: {session_id}")
 
         self._session_id = st.sid
         # 客户端转发的 MCP server 登记为**本会话私有**（方案 B）
         self._register_session_mcp(st.sid, params)
-        self._log(f"恢复会话: {st.sid}（cwd={st.cwd}，{'历史回放' if on_disk else '空会话'}）")
 
-        # 会话 meta 的 cwd 回填/校正：本次 load 时客户端声明的会话根是
+        # 会话 meta 的 cwd 回填/校正：本次 load/resume 时客户端声明的会话根是
         # **唯一可信来源**——老会话（P0 之前创建）meta 里没有 cwd，而 session/list
         # 要按它过滤；项目被移动时也应以客户端当下的声明为准。
         # touch_updated=False：补全字段不该让它在会话列表里跳到最前面。
@@ -1661,11 +2120,40 @@ class ACPServer:
                     self._log(f"会话 cwd 回填: {st.sid} → {st.cwd}（原 {known_cwd or '未知'}）")
             except Exception as e:  # 回填失败不影响恢复语义
                 self._log(f"会话 cwd 回填失败（忽略）: {e}")
+        return st, on_disk
+
+    async def _handle_session_load(self, params: dict[str, Any]) -> dict[str, Any]:
+        """
+        ACP v1 恢复已有会话（**响应前回放全部历史**，规范 MUST）。
+
+        参考: https://agentclientprotocol.com/protocol/v1/session-setup#loading-sessions
+        """
+        st, on_disk = self._attach_existing_session(params, "session/load")
+        self._log(f"恢复会话: {st.sid}（cwd={st.cwd}，{'历史回放' if on_disk else '空会话'}）")
 
         # 规范 MUST：响应之前回放全部历史（见 _replay_history）
         self._replay_history(st.sid)
         # 注意：命令注册通知在 _dispatch 中响应之后发送
-        return {"sessionId": st.sid}
+        return self._session_setup_result(st.sid)
+
+    async def _handle_session_resume(self, params: dict[str, Any]) -> dict[str, Any]:
+        """
+        ACP v1 挂上已有会话 —— 与 session/load 的唯一差别是**不回放历史**。
+
+        schema 原文：``Resumes an existing session without returning previous
+        messages (unlike session/load).``
+
+        为什么值得单开一条路：大历史的会话 `session/load` 要把整段对话重发一遍，
+        客户端切 thread 会明显卡顿；resume 只建立寻址关系，客户端自己已有渲染
+        缓存（Zed 切回已打开的 thread 就是这种场景）。
+
+        存在性校验与 load 完全一致（见 _attach_existing_session）——「快」不能
+        以「不校验」为代价，否则 resume 又会变回静默新建空会话。
+        """
+        st, on_disk = self._attach_existing_session(params, "session/resume")
+        self._log(f"挂上会话: {st.sid}（cwd={st.cwd}，{'有历史，未回放' if on_disk else '空会话'}）")
+        # 注意：命令注册通知在 _dispatch 中响应之后发送
+        return self._session_setup_result(st.sid)
 
     async def _handle_session_list(self, params: dict[str, Any]) -> dict[str, Any]:
         """
@@ -1803,6 +2291,9 @@ class ACPServer:
         # 必须在 turn 之前取 —— 第一轮问答后 core 才派生标题，此时 before 是空串，
         # 于是「新会话首轮」也能正常推送；若靠 _title_before 初值猜则首轮会漏。
         self._title_before[sid] = self._session_title(sid)
+        # 用量快照同理：清掉上一轮的残留值，本轮没调 LLM（纯命令）时就不报用量
+        # （宁可这条通知缺席，也不要拿上一轮的数字冒充本轮）。
+        self._usage_used.pop(sid, None)
 
         # ── 发送 plan 通知 ──
         self._send_plan_notification(session_id=sid)
@@ -1829,6 +2320,8 @@ class ACPServer:
 
             self._clear_plan(sid)
             self._notify_session_info(sid)
+            # 取消也要报用量：用户中断时上下文已经涨了，客户端显示的占用得跟上
+            self._usage_update(self._usage_used.pop(sid, 0), session_id=sid)
             return {"stopReason": "cancelled"}
         finally:
             if not turn.done():
@@ -1849,6 +2342,8 @@ class ACPServer:
         # plan 条目必须走完生命周期，不能只发开始态
         self._clear_plan(sid)
         self._notify_session_info(sid)
+        # 用量放在最后：客户端此时已收完全部 chunk，进度条/占用数字不会与正文抢渲染
+        self._usage_update(self._usage_used.pop(sid, 0), session_id=sid)
         return {"stopReason": "end_turn"}
 
     async def _handle_session_ping(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2071,23 +2566,98 @@ class ACPServer:
             },
         )
 
+    def _send_thought_notification(
+        self, text: str, session_id: str | None = None, message_id: str | None = None
+    ) -> None:
+        """通过 agent_thought_chunk 推送一段思考（ACP v1 ContentChunk 形状）。
+
+        与 agent_message_chunk 的区别只在 sessionUpdate 取值：客户端据此把内容
+        渲染进「思考」区域而不是正文。缺了这条通道，模型的推理过程在 IDE 里
+        完全不可见（WebUI 侧一直有 thinking_content，ACP 侧此前一直丢弃）。
+        """
+        sid = session_id or self._turn_sid()
+        mid = message_id or f"tht_{uuid.uuid4().hex[:12]}"
+        self._send_notification(
+            "session/update",
+            {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "agent_thought_chunk",
+                    "messageId": mid,
+                    "content": {"type": "text", "text": text},
+                },
+            },
+        )
+
+    def _send_notice(self, severity: str, title: str, description: str | None = None) -> None:
+        """推送 notice（结构化告警，客户端可显示在通知区而不是正文流）。
+
+        门控：客户端未声明 `clientCapabilities.session.notices` 时 **MUST NOT** 发
+        notice。未声明时降级为 agent_message_chunk —— 规范允许（"MAY 用普通输出
+        代替"），且比静默丢弃好：用户至少能看到「MCP server 没起来」。
+
+        severity 取值：info / warning / error（schema 另有 `_` 前缀的实现扩展位，
+        本端不用 —— 客户端认不出的值只会被降级成普通文字）。
+        """
+        params = {"severity": severity, "title": title}
+        if description:
+            params["description"] = description
+        sid = self._turn_sid()
+        if self._client_notices:
+            self._send_notification(
+                "session/update",
+                {"sessionId": sid, "update": {"sessionUpdate": "notice", **params}},
+            )
+            return
+        icon = {"info": "ℹ️", "warning": "⚠️", "error": "❌"}.get(severity, "ℹ️")
+        text = f"{icon} {title}" + (f"：{description}" if description else "")
+        self._send_message_notification(text, session_id=sid)
+
+    def _usage_update(self, prompt_tokens: int, session_id: str | None = None) -> None:
+        """推送 usage_update：`used` = 本轮上下文占用，`size` = fp 的上下文预算。
+
+        `used` 取最近一次 LLM 调用的 prompt_tokens —— 它是**上下文实际长度**的
+        真实测量值（含 system prompt/历史/工具结果），比本地估算准。
+        `size` 用 fp 自己的压缩阈值（见 _context_window_tokens）：不是模型真实窗口，
+        但才是「用到多少会触发压缩」的分母。
+        cost 不发：fp 没有价格表，编一个数比不发更糟（schema 里 cost 可省略）。
+
+        prompt_tokens<=0（本轮没调过 LLM / 后端没回 usage）时**不发**：
+        used=0 在客户端是「上下文空着」，是假话。
+        """
+        sid = session_id or self._turn_sid()
+        if not sid or prompt_tokens <= 0:
+            return
+        size = max(prompt_tokens, _context_window_tokens())
+        self._send_notification(
+            "session/update",
+            {
+                "sessionId": sid,
+                "update": {"sessionUpdate": "usage_update", "used": prompt_tokens, "size": size},
+            },
+        )
+
     def _make_acp_io(self, sid: str | None) -> ACPIO:
         """构造 per-prompt ACPIO；客户端声明 elicitation.form 时注入带内 elicit 回调。
 
-        整轮共用一个 messageId（见 _send_message_notification 的语义说明）。
+        整轮共用一个 messageId（见 _send_message_notification 的语义说明）；
+        思考流另外自持 messageId（见 ACPIO.flush_thought）。
         """
         message_id = f"msg_{uuid.uuid4().hex[:12]}"
 
         def send(text: str) -> None:
             self._send_message_notification(text, session_id=sid, message_id=message_id)
 
+        def send_thought(text: str, thought_id: str) -> None:
+            self._send_thought_notification(text, session_id=sid, message_id=thought_id)
+
         if not self._client_elicitation.get("form"):
-            return ACPIO(send_chunk=send)
+            return ACPIO(send_chunk=send, send_thought=send_thought)
 
         async def _elicit(prompt: str, options: list[str], suggest: str) -> dict[str, Any]:
             return await self._elicit_form(sid, prompt, options, suggest)
 
-        return ACPIO(send_chunk=send, elicit=_elicit)
+        return ACPIO(send_chunk=send, elicit=_elicit, send_thought=send_thought)
 
     async def _shutdown_agent(self) -> None:
         """安全关闭实例（DISCARD：不留痕，删除当前会话）"""

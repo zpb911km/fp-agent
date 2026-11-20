@@ -174,7 +174,9 @@ async def test_mcp_call_refuses_other_sessions_server(plug: Any, as_session: Any
     plug.add_session_servers("A", {"fs": {"command": "npx"}})
     as_session("B")
     out = await plug._exec_mcp_call({"server": "fs", "tool": "read"})
-    assert "未配置" in out, f"应拒绝跨会话调用，实际: {out!r}"
+    # 断言「说清是会话可见性问题」而不只是「拒绝了」：同名 server 在别的会话里存在时，
+    # 报「未配置」会把模型/用户引向去改 servers.json（白费功夫），诊断性才是这层的要求。
+    assert "属于其它会话" in out, f"应说明是会话可见性问题，实际: {out!r}"
 
     as_session("A")
     assert await plug._exec_mcp_call({"server": "fs", "tool": "read"}) == "fs:read"

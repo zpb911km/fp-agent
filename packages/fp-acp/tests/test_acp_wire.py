@@ -96,6 +96,12 @@ class _FakeSessions:
         self.new_called = 0
         # 每次 new() 的实参，供断言「会话 cwd 是否随建档落盘」
         self.new_calls: list[dict[str, Any]] = []
+        # session/delete 的实参（真实实现 SessionCtl.delete → 删盘 + 删 meta）
+        self.deleted: list[str] = []
+        # 盘上实际存在、可被 delete 的会话 id；其余 delete 返回 False（语义同真实实现）
+        self.deletable: set[str] = set()
+        # update_meta 的调用（session/load|resume 的 cwd 回填路径用）
+        self.update_meta_calls: list[dict[str, Any]] = []
 
     def generate_sid(self) -> str:
         """预分配 sid（session/new 只登记、不切 core 时需要先拿到 id）。"""
@@ -125,6 +131,19 @@ class _FakeSessions:
         桩必须与其同构，否则 server 侧写错属性名会被桩静默掩盖。"""
         return self._history
 
+    def delete(self, sid: str) -> bool:
+        """真实实现 SessionCtl.delete：删磁盘历史 + meta，返回「原本是否存在」。"""
+        self.deleted.append(sid)
+        existed = sid in self.deletable
+        self.deletable.discard(sid)
+        self._list_result.pop(sid, None)
+        self._titles.pop(sid, None)
+        return existed
+
+    def update_meta(self, sid: str, **fields: Any) -> None:
+        self.update_meta_calls.append({"sid": sid, **fields})
+        self._list_result.setdefault(sid, {}).update({k: v for k, v in fields.items() if v is not None})
+
 
 class _FakePlugins:
     """`ctl.plugins` 的最小桩：只实现 `get(name)`。"""
@@ -139,11 +158,31 @@ class _FakePlugins:
 
 
 class _FakePortal:
-    def __init__(self, sessions: _FakeSessions, plugins: Any = None):
+    def __init__(
+        self,
+        sessions: _FakeSessions,
+        plugins: Any = None,
+        commands: dict[str, Any] | None = None,
+        on_command: Any = None,
+    ):
         self.ctl = type("Ctl", (), {})()
         self.ctl.sessions = sessions  # type: ignore[attr-defined]
         self.ctl.plugins = plugins if plugins is not None else _FakePlugins()  # type: ignore[attr-defined]
-        self.run = type("Run", (), {"status": type("S", (), {"session_id": "sess_test"})()})()
+        run = type("Run", (), {})()
+        run.status = type("S", (), {"session_id": "sess_test"})()
+        # 命令层：session/set_config_option 走 `run.command("/model <id>")`。
+        # commands 决定「/model 是否安装」，on_command 决定命令做了什么副作用。
+        run.commands = dict(commands or {})
+        run.command_calls = []
+        self.run = run
+
+        async def _command(text: str) -> tuple[bool, str]:
+            run.command_calls.append(text)
+            if on_command is not None:
+                return on_command(text)
+            return True, ""
+
+        run.command = _command
 
 
 # ── ToolKind：schema 枚举硬约束 ──────────────────────
@@ -1034,11 +1073,12 @@ async def test_run_turn_snapshots_title_before_prompt(srv: ACPServer, monkeypatc
 
 @pytest.mark.asyncio
 async def test_start_registers_compaction_hooks(srv: ACPServer, monkeypatch):
-    """`start()` 必须真的把压缩钩子挂进全局生命周期。
+    """`start()` 必须真的把压缩钩子与用量钩子挂进全局生命周期。
 
-    所有压缩用例都直接调 `_on_compact_start/_end`，把 `start()` 里那句
-    `_register_compaction_hooks()` 删掉它们全绿——但真实进程里钩子从未注册，
-    compaction_update 永远不发。与淘汰接线同一类失败：逻辑正确但从未执行。
+    所有压缩用例都直接调 `_on_compact_start/_end`、用量用例都直接调
+    `_on_llm_usage`，把 `start()` 里那两句 `_register_*_hooks()` 删掉它们全绿——
+    但真实进程里钩子从未注册，compaction_update / usage_update 永远不发。
+    与淘汰接线同一类失败：逻辑正确但从未执行。
     """
     registered: list[tuple[Any, str]] = []
 
@@ -1081,3 +1121,855 @@ async def test_start_registers_compaction_hooks(srv: ACPServer, monkeypatch):
     hooks = {hook: name for hook, name in registered}
     assert hooks.get(srv_mod.LifecycleHook.ON_BEFORE_COMMAND) == "acp_compaction_start"
     assert hooks.get(srv_mod.LifecycleHook.ON_COMMAND) == "acp_compaction_end"
+    # 用量钩子同理：删掉 `_register_usage_hook()` 后，所有 usage 用例仍绿，
+    # 而真实进程里 `_usage_used` 永远是空的 → usage_update 一次都不发。
+    assert hooks.get(srv_mod.LifecycleHook.ON_AFTER_LLM_CALL) == "acp_usage_capture"
+
+
+# ── follow-along：ToolCallLocation.line（1-based） ──────────
+#
+# ToolCallLocation = {_meta?, line?: u32(1-based), path: string(绝对路径)}
+# 只发 path 时 IDE 能打开文件但落点靠猜；line 才是「跟随 Agent」真正有用的那一半。
+
+
+def _write(tmp_path: Any, name: str, text: str) -> str:
+    p = tmp_path / name
+    p.write_text(text, encoding="utf-8")
+    return str(p)
+
+
+@pytest.mark.asyncio
+async def test_read_file_location_line_from_offset(srv: ACPServer, tmp_path):
+    """read_file 的 offset 是 0-based，ToolCallLocation.line 是 1-based。"""
+    path = _write(tmp_path, "a.py", "l1\nl2\nl3\nl4\nl5\n")
+    await srv._on_tool_call(
+        None, tool_name="read_file", tool_args=json.dumps({"file_path": path, "offset": 2}), tool_call_id="c1"
+    )
+    (upd,) = _updates(srv)
+    (loc,) = upd["locations"]
+    assert loc["path"] == path
+    assert loc["line"] == 3, "offset=2(0-based) 应换算为 line=3(1-based)"
+
+
+@pytest.mark.asyncio
+async def test_read_file_location_omits_line_without_offset(srv: ACPServer, tmp_path):
+    """没给 offset = 从文件头读，line 应为 1（offset 缺省的语义就是 0）。"""
+    path = _write(tmp_path, "b.py", "x\ny\n")
+    await srv._on_tool_call(None, tool_name="read_file", tool_args=json.dumps({"file_path": path}), tool_call_id="c1")
+    (upd,) = _updates(srv)
+    (loc,) = upd["locations"]
+    assert loc["path"] == path
+    assert "line" not in loc, "offset 缺省时不必塞 line（编辑器默认打开即首行）"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_location_line_locates_old_string(srv: ACPServer, tmp_path):
+    """edit_file 只给 old_string/new_string，落点必须按文件内容定位（编辑前）。"""
+    path = _write(tmp_path, "c.py", "alpha\nbeta\ngamma\n")
+    await srv._on_tool_call(
+        None,
+        tool_name="edit_file",
+        tool_args=json.dumps({"file_path": path, "old_string": "gamma", "new_string": "delta"}),
+        tool_call_id="c1",
+    )
+    (upd,) = _updates(srv)
+    (loc,) = upd["locations"]
+    assert loc["line"] == 3
+
+
+@pytest.mark.asyncio
+async def test_edit_file_location_multiline_needle(srv: ACPServer, tmp_path):
+    """old_string 可能是多行片段 → 用首次出现的起始行，而不是逐行比对。"""
+    path = _write(tmp_path, "d.py", "a\nb\nc\nd\ne\n")
+    await srv._on_tool_call(
+        None,
+        tool_name="edit_file",
+        tool_args=json.dumps({"file_path": path, "old_string": "c\nd", "new_string": "X"}),
+        tool_call_id="c1",
+    )
+    (upd,) = _updates(srv)
+    assert upd["locations"][0]["line"] == 3
+
+
+@pytest.mark.asyncio
+async def test_edit_file_location_missing_needle_sends_path_only(srv: ACPServer, tmp_path):
+    """定位失败绝不能拖垮工具调用：退化成只发 path，locations 仍然存在。"""
+    path = _write(tmp_path, "e.py", "one\ntwo\n")
+    await srv._on_tool_call(
+        None,
+        tool_name="edit_file",
+        tool_args=json.dumps({"file_path": path, "old_string": "NOT_THERE", "new_string": "x"}),
+        tool_call_id="c1",
+    )
+    (upd,) = _updates(srv)
+    (loc,) = upd["locations"]
+    assert loc["path"] == path
+    assert "line" not in loc
+
+
+@pytest.mark.asyncio
+async def test_write_file_location_has_no_line(srv: ACPServer, tmp_path):
+    """write_file 整篇覆盖，没有「落到哪一行」的语义 —— 只给 path。"""
+    path = _write(tmp_path, "f.py", "z\n")
+    await srv._on_tool_call(
+        None, tool_name="write_file", tool_args=json.dumps({"file_path": path, "content": "q"}), tool_call_id="c1"
+    )
+    (upd,) = _updates(srv)
+    (loc,) = upd["locations"]
+    assert "line" not in loc
+
+
+@pytest.mark.asyncio
+async def test_tool_call_update_omits_locations_after_edit(srv: ACPServer, tmp_path):
+    """tool_call_update 省略 locations = 保持不变（绝不自作聪明重算，会带偏光标）。"""
+    path = _write(tmp_path, "g.py", "old\ntail\n")
+    await srv._on_tool_call(
+        None,
+        tool_name="edit_file",
+        tool_args=json.dumps({"file_path": path, "old_string": "old", "new_string": "new"}),
+        tool_call_id="c1",
+    )
+    _updates(srv)
+    await srv._on_tool_result(None, tool_name="edit_file", result="done", tool_call_id="c1")
+    (upd,) = _updates(srv)
+    assert "locations" not in upd, "省略=保持不变；发 [] 会清空，发重算的行号可能错"
+
+
+@pytest.mark.asyncio
+async def test_tool_call_update_adds_location_for_newly_created_file(srv: ACPServer, tmp_path):
+    """新建文件：call 阶段文件不存在（无 locations），完成后补一条可 follow 的位置。"""
+    path = str(tmp_path / "brand_new.py")
+    await srv._on_tool_call(
+        None, tool_name="write_file", tool_args=json.dumps({"file_path": path, "content": "hi"}), tool_call_id="c1"
+    )
+    (call_upd,) = _updates(srv)
+    assert "locations" not in call_upd, "文件还不存在时不该发 follow 位置"
+
+    (tmp_path / "brand_new.py").write_text("hi", encoding="utf-8")
+    await srv._on_tool_result(None, tool_name="write_file", result="done", tool_call_id="c1")
+    (upd,) = _updates(srv)
+    (loc,) = upd["locations"]
+    assert loc["path"] == path
+    assert "line" not in loc
+
+
+@pytest.mark.asyncio
+async def test_tool_call_update_no_location_for_failed_write(srv: ACPServer, tmp_path):
+    """写失败时文件可能半成品/不存在 —— 不发 locations。"""
+    path = str(tmp_path / "fail.py")
+    await srv._on_tool_call(
+        None, tool_name="write_file", tool_args=json.dumps({"file_path": path, "content": "hi"}), tool_call_id="c1"
+    )
+    _updates(srv)
+    await srv._on_tool_result(None, tool_name="write_file", result="❌ 写入失败", tool_call_id="c1")
+    (upd,) = _updates(srv)
+    assert upd["status"] == "failed"
+    assert "locations" not in upd
+
+
+# ── agent_thought_chunk：让 IDE 显示推理过程 ──────────────────
+#
+# ACP v1 ContentChunk = {content: ContentBlock, messageId?: string}
+# sessionUpdate 取值 "agent_thought_chunk"。core 的 stream_think → 这里；
+# 此前 ACPIO 没实现 stream_think，推理 token 全部静默丢弃。
+
+
+@pytest.mark.asyncio
+async def test_thought_chunk_shape_and_message_id(srv: ACPServer):
+    """思考 token → agent_thought_chunk；同段思考共用一个 messageId。"""
+    acp_io = srv._make_acp_io("sess_test")
+    await acp_io.thinking_start(streaming=True)
+    acp_io.stream_think("先看")
+    acp_io.stream_think("一下目录")
+    await acp_io.thinking_stop()
+
+    (upd,) = _updates(srv)
+    assert upd["sessionUpdate"] == "agent_thought_chunk"
+    assert upd["content"] == {"type": "text", "text": "先看一下目录"}, "同段思考应合批，而不是一 token 一条"
+    assert upd["messageId"].startswith("tht_")
+
+    # 第二段思考 → messageId 必须变（客户端据此分块）
+    await acp_io.thinking_start(streaming=True)
+    acp_io.stream_think("再想想")
+    await acp_io.thinking_stop()
+    (upd2,) = _updates(srv)
+    assert upd2["messageId"] != upd["messageId"]
+
+
+@pytest.mark.asyncio
+async def test_thought_is_separate_from_message_channel(srv: ACPServer):
+    """推理绝不能漏进正文（agent_message_chunk），否则内容重复且语义错。"""
+    acp_io = srv._make_acp_io("sess_test")
+    await acp_io.thinking_start(streaming=True)
+    acp_io.stream_think("内部推理")
+    await acp_io.thinking_stop()
+    acp_io.say("给用户的回答")
+    leftover = acp_io.flush_text()
+
+    updates = _updates(srv)
+    kinds = [u["sessionUpdate"] for u in updates]
+    assert kinds == ["agent_thought_chunk"]
+    assert updates[0]["content"]["text"] == "内部推理"
+    assert leftover == "给用户的回答", "正文缓冲不应被思考污染"
+
+
+@pytest.mark.asyncio
+async def test_thought_flushed_before_final_text(srv: ACPServer):
+    """思考必须排在最终回答之前 —— 顺序颠倒会让客户端把推理显示在回答之后。"""
+    acp_io = srv._make_acp_io("sess_test")
+    await acp_io.thinking_start(streaming=True)
+    acp_io.stream_think("想好了")
+    acp_io.say("结果")  # 未达阈值，仍在缓冲
+    acp_io.flush_text()
+
+    updates = _updates(srv)
+    assert [u["sessionUpdate"] for u in updates] == ["agent_thought_chunk"]
+
+
+@pytest.mark.asyncio
+async def test_thought_not_sent_when_empty(srv: ACPServer):
+    """没有推理的轮次不得凭空长出空思考块。"""
+    acp_io = srv._make_acp_io("sess_test")
+    await acp_io.thinking_start(streaming=True)
+    await acp_io.thinking_stop()
+    acp_io.flush_text()
+    assert _updates(srv) == []
+
+
+@pytest.mark.asyncio
+async def test_thought_empty_token_ignored(srv: ACPServer):
+    """空 token 不入缓冲（否则会推送 text="" 的无效 ContentBlock）。"""
+    acp_io = srv._make_acp_io("sess_test")
+    await acp_io.thinking_start(streaming=True)
+    acp_io.stream_think("")
+    await acp_io.thinking_stop()
+    assert _updates(srv) == []
+
+
+@pytest.mark.asyncio
+async def test_thought_uses_per_turn_session_id(srv: ACPServer):
+    """思考块必须带当前会话 id（多会话并存时不能串到别的会话）。"""
+    acp_io = srv._make_acp_io("sess_other")
+    await acp_io.thinking_start(streaming=True)
+    acp_io.stream_think("x")
+    await acp_io.thinking_stop()
+    (msg,) = _messages(srv)
+    assert msg["params"]["sessionId"] == "sess_other"
+
+
+@pytest.mark.asyncio
+async def test_thought_threshold_batches_long_stream(srv: ACPServer):
+    """超过阈值立即成批推送（不等 thinking_stop），否则长思考在 IDE 里一直空白。"""
+    acp_io = srv._make_acp_io("sess_test")
+    await acp_io.thinking_start(streaming=True)
+    chunk = "字" * (acp_io._STREAM_THRESHOLD // 2)
+    acp_io.stream_think(chunk)
+    assert _updates(srv) == [], "未达阈值不应推送"
+    acp_io.stream_think(chunk)
+    (upd,) = _updates(srv)
+    assert len(upd["content"]["text"]) >= acp_io._STREAM_THRESHOLD
+
+
+@pytest.mark.asyncio
+async def test_thought_dropped_without_callback():
+    """未注入 send_thought 时静默丢弃（旧行为），不得抛错。"""
+    acp_io = srv_mod.ACPIO(send_chunk=None)
+    await acp_io.thinking_start(streaming=True)
+    acp_io.stream_think("x")
+    await acp_io.thinking_stop()
+    assert acp_io.flush_text() == ""
+
+
+# ── configOptions：Zed 里选模型的唯一通道 ─────────────────────
+#
+# SessionConfigOption(select) = {id, name, description?, category?, type:"select",
+#                                currentValue, options:[{value, name, description?}]}
+# category 枚举（schema，snake_case）：mode / model / model_config / thought_level
+VALID_CONFIG_CATEGORIES = {"mode", "model", "model_config", "thought_level"}
+
+
+@pytest.fixture
+def llm_cfg(tmp_path: Any, monkeypatch: Any) -> Any:
+    """把 LLM 配置表与内存态钉到临时值（不读写用户真实配置）。
+
+    `_model_catalog` 读 `USER_CONFIG_PATH` 文件，而 `_current_model_id` /
+    `_context_window_tokens` 读 config 模块的**内存态** —— 只钉路径不够，
+    内存态不钉则断言会随本机 ACTIVE_LLM / MAX_CONTEXT_TOKENS 漂移。
+    """
+    from fp_core import config as cfg
+
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps({
+            "LLM_PROVIDERS": {
+                # p1/m1 与 p2/m1 同名不同 provider —— value 必须是 provider/model，
+                # 否则 Zed 的下拉框里两项同值，选中会互相覆盖。
+                "p1": {"models": {"m1": {}, "m2": {}}},
+                "p2": {"models": {"m1": {}}},
+            }
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cfg, "USER_CONFIG_PATH", str(path))
+    monkeypatch.setattr(cfg, "LLM_ACTIVE_ID", "p1/m1")
+    monkeypatch.setattr(cfg, "MAX_CONTEXT_TOKENS", 8000)
+    return cfg
+
+
+@pytest.mark.asyncio
+async def test_session_new_response_carries_config_options(
+    srv: ACPServer, monkeypatch: Any, llm_cfg: Any, tmp_path: Any
+):
+    """session/new 的响应必须带 configOptions —— 缺了它 Zed 会话头部没有模型下拉框。"""
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(_FakeSessions()))
+    result = await srv._handle_session_new({"cwd": str(tmp_path)})
+
+    (opt,) = result["configOptions"]
+    assert opt["id"] == "model"
+    assert opt["type"] == "select"
+    assert opt["category"] in VALID_CONFIG_CATEGORIES
+    assert opt["currentValue"] == "p1/m1"
+    values = {o["value"] for o in opt["options"]}
+    assert values == {"p1/m1", "p1/m2", "p2/m1"}, "模型同名跨 provider，value 必须带 provider"
+    assert opt["currentValue"] in values, "currentValue 必须是可选中的值"
+
+
+@pytest.mark.asyncio
+async def test_session_new_omits_config_options_without_catalog(srv: ACPServer, monkeypatch: Any, tmp_path: Any):
+    """无配置表 → **整字段省略**。
+
+    空数组在客户端语义是「有配置但没有选项」（会渲染成空下拉框），比不报更糟。
+    """
+    from fp_core import config as cfg
+
+    monkeypatch.setattr(cfg, "USER_CONFIG_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(_FakeSessions()))
+    result = await srv._handle_session_new({"cwd": str(tmp_path)})
+    assert "configOptions" not in result
+
+
+def test_config_options_appends_active_model_outside_catalog(llm_cfg: Any):
+    """激活项不在配置表（--model / FP_MODEL 覆盖到表外模型）时必须补一项。
+
+    否则 `currentValue` 指向一个不存在的选项，Zed 显示成空选择 ——
+    用户以为「没有模型可用」，实际是在用的。
+    """
+    (opt,) = srv_mod._config_options(srv_mod._model_catalog(), "override/xyz")
+    values = [o["value"] for o in opt["options"]]
+    assert "override/xyz" in values
+    assert opt["currentValue"] == "override/xyz"
+
+
+@pytest.mark.asyncio
+async def test_set_config_option_rejects_unknown_config_id(srv: ACPServer, monkeypatch: Any, llm_cfg: Any):
+    """本端只有 model；thought_level/mode 一律 -32602（fp 没有这些可调面）。"""
+    portal_stub = _FakePortal(_FakeSessions())
+    monkeypatch.setattr(srv_mod, "portal", portal_stub)
+    srv._sessions["sess_test"] = srv_mod._SessionState(sid="sess_test", cwd="/tmp")
+
+    for config_id in ("thought_level", "mode", None):
+        with pytest.raises(_ACPRPCError) as ei:
+            await srv._handle_session_set_config_option({
+                "sessionId": "sess_test",
+                "configId": config_id,
+                "value": "p2/m1",
+            })
+        assert ei.value.code == -32602
+    assert portal_stub.run.command_calls == [], "参数非法时不得执行任何命令"
+
+
+@pytest.mark.asyncio
+async def test_set_config_option_rejects_non_string_value(srv: ACPServer, monkeypatch: Any, llm_cfg: Any):
+    """select 变体的 value 是字符串；布尔变体的对象形态本端不提供，明确拒绝而非强转。
+
+    断言**报错文案**而非只断言错误码：非法形态与「未知模型」都是 -32602，
+    但把 `{"type":"boolean",...}` 报成「未知模型: {'type': …}」会让排查者
+    以为模型名写错了。两者要能区分得开，这条测试才有意义。
+    """
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(_FakeSessions()))
+    srv._sessions["sess_test"] = srv_mod._SessionState(sid="sess_test", cwd="/tmp")
+    for bad in ({"type": "boolean", "value": True}, "", None, 1):
+        with pytest.raises(_ACPRPCError) as ei:
+            await srv._handle_session_set_config_option({"sessionId": "sess_test", "configId": "model", "value": bad})
+        assert ei.value.code == -32602
+        assert "选项 id 字符串" in ei.value.message, f"{bad!r} 被误报成模型名问题: {ei.value.message}"
+
+
+@pytest.mark.asyncio
+async def test_set_config_option_rejects_unknown_model(srv: ACPServer, monkeypatch: Any, llm_cfg: Any):
+    """未知模型不得「挑一个最像的」执行 —— 静默选错模型会污染用户钱包。"""
+    portal_stub = _FakePortal(_FakeSessions(), commands={"model": object()})
+    monkeypatch.setattr(srv_mod, "portal", portal_stub)
+    srv._sessions["sess_test"] = srv_mod._SessionState(sid="sess_test", cwd="/tmp")
+    with pytest.raises(_ACPRPCError) as ei:
+        await srv._handle_session_set_config_option({"sessionId": "sess_test", "configId": "model", "value": "p9/nope"})
+    assert ei.value.code == -32602
+    assert portal_stub.run.command_calls == []
+
+
+@pytest.mark.asyncio
+async def test_set_config_option_requires_model_command(srv: ACPServer, monkeypatch: Any, llm_cfg: Any):
+    """切换语义只在 /model 扩展里；扩展缺失时**明确报错**，不能让用户以为切成功了。
+
+    断言「压根没尝试执行」而不只是「报错了」：否则与
+    `test_set_config_option_verifies_observable_state_not_output_text` 撞成同一症状
+    （命令跑了、状态没变），这条就杀不掉「缺命令时仍然硬执行」的变异。
+    """
+    portal_stub = _FakePortal(_FakeSessions(), commands={})
+    monkeypatch.setattr(srv_mod, "portal", portal_stub)
+    srv._sessions["sess_test"] = srv_mod._SessionState(sid="sess_test", cwd="/tmp")
+    with pytest.raises(_ACPRPCError) as ei:
+        await srv._handle_session_set_config_option({"sessionId": "sess_test", "configId": "model", "value": "p2/m1"})
+    assert ei.value.code == -32603
+    assert "未安装" in ei.value.message, "要让用户知道是扩展缺失，而不是模型切换失败"
+    assert portal_stub.run.command_calls == [], "未安装时不得凭空调用命令层"
+    assert llm_cfg.LLM_ACTIVE_ID == "p1/m1", "失败路径不得改动激活模型"
+
+
+@pytest.mark.asyncio
+async def test_set_config_option_delegates_to_model_command(srv: ACPServer, monkeypatch: Any, llm_cfg: Any):
+    """切换委托命令层（唯一的真相），响应回**完整** configOptions。"""
+
+    def _on_command(text: str) -> tuple[bool, str]:
+        llm_cfg.LLM_ACTIVE_ID = text.split()[1]
+        return True, "已切换"
+
+    portal_stub = _FakePortal(_FakeSessions(), commands={"model": object()}, on_command=_on_command)
+    monkeypatch.setattr(srv_mod, "portal", portal_stub)
+    srv._sessions["sess_test"] = srv_mod._SessionState(sid="sess_test", cwd="/tmp")
+
+    result = await srv._handle_session_set_config_option({
+        "sessionId": "sess_test",
+        "configId": "model",
+        "value": "p2/m1",
+    })
+    assert portal_stub.run.command_calls == ["/model p2/m1"], "必须走命令层，不得自己实现一份"
+    assert result["configOptions"][0]["currentValue"] == "p2/m1"
+
+
+@pytest.mark.asyncio
+async def test_set_config_option_verifies_observable_state_not_output_text(
+    srv: ACPServer, monkeypatch: Any, llm_cfg: Any
+):
+    """命令「说成功了」但状态没变 → 必须报错。
+
+    守护的是「用可观测状态验收，而不是解析命令输出的文案」：文案会随扩展漂移，
+    而 config 内存态是唯一真源。
+    """
+    portal_stub = _FakePortal(
+        _FakeSessions(),
+        commands={"model": object()},
+        on_command=lambda _text: (True, "✅ 已切换到 p2/m1"),  # 只改文案，不改状态
+    )
+    monkeypatch.setattr(srv_mod, "portal", portal_stub)
+    srv._sessions["sess_test"] = srv_mod._SessionState(sid="sess_test", cwd="/tmp")
+
+    with pytest.raises(_ACPRPCError) as ei:
+        await srv._handle_session_set_config_option({"sessionId": "sess_test", "configId": "model", "value": "p2/m1"})
+    assert ei.value.code == -32603
+    assert "p1/m1" in ei.value.message, "报错要带出真实的当前模型，否则用户无从判断"
+
+
+@pytest.mark.asyncio
+async def test_set_config_option_same_value_skips_command(srv: ACPServer, monkeypatch: Any, llm_cfg: Any):
+    """选中的就是当前模型 → 不执行命令（无谓的 client 重建会打断正在跑的东西）。"""
+    portal_stub = _FakePortal(_FakeSessions(), commands={"model": object()})
+    monkeypatch.setattr(srv_mod, "portal", portal_stub)
+    srv._sessions["sess_test"] = srv_mod._SessionState(sid="sess_test", cwd="/tmp")
+
+    result = await srv._handle_session_set_config_option({
+        "sessionId": "sess_test",
+        "configId": "model",
+        "value": "p1/m1",
+    })
+    assert portal_stub.run.command_calls == []
+    assert result["configOptions"][0]["currentValue"] == "p1/m1"
+
+
+@pytest.mark.asyncio
+async def test_set_config_option_broadcasts_to_all_sessions(srv: ACPServer, monkeypatch: Any, llm_cfg: Any):
+    """模型是**进程级单例**：所有已登记会话的下拉框都要跟着更新，否则别的 thread 显示旧值。"""
+
+    def _on_command(text: str) -> tuple[bool, str]:
+        llm_cfg.LLM_ACTIVE_ID = text.split()[1]
+        return True, ""
+
+    portal_stub = _FakePortal(_FakeSessions(), commands={"model": object()}, on_command=_on_command)
+    monkeypatch.setattr(srv_mod, "portal", portal_stub)
+    srv._sessions.clear()
+    for sid in ("sess_a", "sess_b"):
+        srv._sessions[sid] = srv_mod._SessionState(sid=sid, cwd="/tmp")
+    srv._session_id = "sess_a"
+
+    await srv._handle_session_set_config_option({"sessionId": "sess_a", "configId": "model", "value": "p2/m1"})
+    pushes = [
+        (m["params"]["sessionId"], m["params"]["update"]) for m in _messages(srv) if m.get("method") == "session/update"
+    ]
+    targets = {sid for sid, upd in pushes if upd["sessionUpdate"] == "config_option_update"}
+    assert targets == {"sess_a", "sess_b"}, f"广播漏了会话: {targets}"
+    for _sid, upd in pushes:
+        assert upd["configOptions"], "config_option_update 必须带完整选项（客户端就地替换）"
+
+
+@pytest.mark.asyncio
+async def test_set_config_option_requires_known_session(srv: ACPServer, monkeypatch: Any, llm_cfg: Any):
+    """会话 id 地址无效 → -32602（不能默默改一个不属于任何 thread 的进程级设置）。"""
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(_FakeSessions()))
+    with pytest.raises(_ACPRPCError) as ei:
+        await srv._handle_session_set_config_option({"configId": "model", "value": "p1/m1"})
+    assert ei.value.code == -32602
+
+
+@pytest.mark.asyncio
+async def test_set_config_option_reachable_via_dispatch(srv: ACPServer, monkeypatch: Any, llm_cfg: Any):
+    """必须真的挂进 dispatch 表：漏一行 handler 就是死代码，客户端一调 -32601。"""
+
+    def _on_command(text: str) -> tuple[bool, str]:
+        llm_cfg.LLM_ACTIVE_ID = text.split()[1]
+        return True, ""
+
+    monkeypatch.setattr(
+        srv_mod, "portal", _FakePortal(_FakeSessions(), commands={"model": object()}, on_command=_on_command)
+    )
+    srv._sessions["sess_test"] = srv_mod._SessionState(sid="sess_test", cwd="/tmp")
+    await srv._dispatch({
+        "jsonrpc": "2.0",
+        "id": 21,
+        "method": "session/set_config_option",
+        "params": {"sessionId": "sess_test", "configId": "model", "value": "p2/m1"},
+    })
+    (msg,) = [m for m in _messages(srv) if m.get("id") == 21]
+    assert "error" not in msg, f"未接线 → {msg.get('error')}"
+    assert msg["result"]["configOptions"][0]["currentValue"] == "p2/m1"
+
+
+# ── session/resume（只挂不重放）+ session/delete（连盘一起删）──
+
+
+@pytest.mark.asyncio
+async def test_resume_and_delete_advertised(srv: ACPServer, monkeypatch: Any):
+    """声明了才允许客户端调用：sessionCapabilities.resume / delete。"""
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(_FakeSessions()))
+    monkeypatch.setattr(srv, "_send_available_commands", lambda: None)
+    caps = await srv._handle_initialize({"protocolVersion": 1})
+    sess_caps = caps["agentCapabilities"]["sessionCapabilities"]
+    assert {"resume", "delete"} <= set(sess_caps)
+
+
+@pytest.mark.asyncio
+async def test_session_resume_does_not_replay_history(srv: ACPServer, monkeypatch: Any, tmp_path: Any):
+    """resume 与 load 的唯一差别就是**不回放**（schema 原文）—— 大历史切 thread 靠它。"""
+    history = [{"role": "user", "content": "你好"}, {"role": "assistant", "content": "在的"}]
+    fake = _FakeSessions(history=history, list_result={"sess_old": {"cwd": str(tmp_path)}})
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(fake))
+
+    result = await srv._handle_session_resume({"sessionId": "sess_old", "cwd": str(tmp_path)})
+    assert result["sessionId"] == "sess_old"
+    assert _updates(srv) == [], "resume 不得回放历史（那是 session/load 的职责）"
+
+
+@pytest.mark.asyncio
+async def test_session_resume_rejects_unknown_session(srv: ACPServer, monkeypatch: Any, tmp_path: Any):
+    """「快」不能以「不校验」为代价：未知会话 → -32602，而不是静默新建空会话。"""
+    fake = _FakeSessions(history=None)  # 盘上无此会话
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(fake))
+    with pytest.raises(_ACPRPCError) as ei:
+        await srv._handle_session_resume({"sessionId": "ghost", "cwd": str(tmp_path)})
+    assert ei.value.code == -32602
+
+
+def test_adopt_session_refuses_unprovable_session(srv: ACPServer, monkeypatch: Any):
+    """**三条证明都不成立**时不收养（否则会给一个陌生 sid 凭空造会话）。
+
+    这条走的是 `_adopt_session` 自己的兜底分支：load/resume 总会带 cwd（协议必填），
+    所以它只有 `start()` / reload 恢复那条路径会走到 —— 那里 cwd 是未知的，
+    只认「本次连接登记过 / 盘上有历史 / 就是 core 当前会话」。
+    """
+    fake = _FakeSessions(history=None, list_result={})
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(fake))
+
+    assert srv._adopt_session("ghost") is None
+    assert "ghost" not in srv._sessions, "陌生 sid 不得被写进会话表"
+
+    # 反向控制：core 当前会话属于第三条证明，必须能收养
+    st = srv._adopt_session("sess_test")
+    assert st is not None and st.sid == "sess_test"
+
+
+@pytest.mark.asyncio
+async def test_session_resume_makes_session_addressable(srv: ACPServer, monkeypatch: Any, tmp_path: Any):
+    """挂上之后必须能按 sid 路由，否则下一次 prompt 还是 -32602。
+
+    同时断言「只登记、不切 core」：core 当前会话仍是原来那条（否则 load/resume A
+    会把正在输出的 B 顶掉）。
+    """
+    fake = _FakeSessions(history=[], list_result={"sess_old": {"cwd": str(tmp_path)}})
+    portal_stub = _FakePortal(fake)
+    monkeypatch.setattr(srv_mod, "portal", portal_stub)
+
+    await srv._handle_session_resume({"sessionId": "sess_old", "cwd": str(tmp_path)})
+
+    assert "sess_old" in srv._sessions
+    assert srv._session_id == "sess_old"
+    assert srv._resolve_session({"sessionId": "sess_old"}, "session/prompt").cwd == str(tmp_path)
+    assert portal_stub.run.status.session_id == "sess_test", "resume 不得改写 core 当前会话"
+
+
+@pytest.mark.asyncio
+async def test_session_resume_returns_config_options(srv: ACPServer, monkeypatch: Any, llm_cfg: Any, tmp_path: Any):
+    """resume 也是「建立会话」，同样要带 configOptions（否则切回来的 thread 没有下拉框）。"""
+    fake = _FakeSessions(history=[], list_result={"sess_old": {"cwd": str(tmp_path)}})
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(fake))
+    result = await srv._handle_session_resume({"sessionId": "sess_old", "cwd": str(tmp_path)})
+    assert result["configOptions"][0]["currentValue"] == "p1/m1"
+
+
+@pytest.mark.asyncio
+async def test_session_resume_reachable_via_dispatch(srv: ACPServer, monkeypatch: Any, tmp_path: Any):
+    fake = _FakeSessions(history=[], list_result={"sess_old": {"cwd": str(tmp_path)}})
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(fake))
+    await srv._dispatch({
+        "jsonrpc": "2.0",
+        "id": 22,
+        "method": "session/resume",
+        "params": {"sessionId": "sess_old", "cwd": str(tmp_path)},
+    })
+    (msg,) = [m for m in _messages(srv) if m.get("id") == 22]
+    assert "error" not in msg, f"未接线 → {msg.get('error')}"
+    assert msg["result"]["sessionId"] == "sess_old"
+
+
+@pytest.mark.asyncio
+async def test_session_delete_removes_disk_and_connection_state(srv: ACPServer, monkeypatch: Any):
+    """delete = 连磁盘历史一起删（与 close 的分界线），且不能留下吃资源的子进程。"""
+    plug = _FakeMcpPlugin()
+    fake = _FakeSessions()
+    fake.deletable.add("sess_old")
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(fake, _FakePlugins({"mcp": plug})))
+    srv._sessions["sess_old"] = srv_mod._SessionState(sid="sess_old", cwd="/tmp")
+
+    assert await srv._handle_session_delete({"sessionId": "sess_old"}) == {}
+    assert fake.deleted == ["sess_old"], "delete 必须删磁盘历史"
+    assert "sess_old" not in srv._sessions
+    assert plug.dropped == ["sess_old"], "删掉的会话不能继续占着 MCP 子进程"
+
+
+@pytest.mark.asyncio
+async def test_session_delete_refuses_current_open_session(srv: ACPServer, monkeypatch: Any):
+    """删当前打开的会话 → core 仍持有它，下次保存会把文件写回来（thread「复活」）。
+
+    用户看到「删了又回来了」比报错更困惑，所以必须明确拒绝。
+    """
+    fake = _FakeSessions()
+    fake.deletable.add("sess_test")
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(fake))
+    with pytest.raises(_ACPRPCError) as ei:
+        await srv._handle_session_delete({"sessionId": "sess_test"})
+    assert ei.value.code == -32600
+    assert fake.deleted == [], "先删再报错等于数据已毁"
+
+
+@pytest.mark.asyncio
+async def test_session_delete_unknown_is_idempotent(srv: ACPServer, monkeypatch: Any):
+    """删一个本就不存在的会话不报错（客户端重试/多路删除都合法）。"""
+    fake = _FakeSessions()  # deletable 为空 → delete() 返回 False
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(fake))
+    assert await srv._handle_session_delete({"sessionId": "ghost"}) == {}
+    assert fake.deleted == ["ghost"]
+
+
+@pytest.mark.asyncio
+async def test_session_delete_requires_session_id(srv: ACPServer, monkeypatch: Any):
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(_FakeSessions()))
+    for params in ({}, {"sessionId": ""}, {"sessionId": 123}):
+        with pytest.raises(_ACPRPCError) as ei:
+            await srv._handle_session_delete(params)
+        assert ei.value.code == -32602
+
+
+@pytest.mark.asyncio
+async def test_session_delete_reachable_via_dispatch(srv: ACPServer, monkeypatch: Any):
+    fake = _FakeSessions()
+    fake.deletable.add("sess_old")
+    monkeypatch.setattr(srv_mod, "portal", _FakePortal(fake))
+    await srv._dispatch({
+        "jsonrpc": "2.0",
+        "id": 23,
+        "method": "session/delete",
+        "params": {"sessionId": "sess_old"},
+    })
+    (msg,) = [m for m in _messages(srv) if m.get("id") == 23]
+    assert "error" not in msg, f"未接线 → {msg.get('error')}"
+    assert fake.deleted == ["sess_old"]
+
+
+# ── usage_update：上下文占用 ──────────────────────────
+#
+# UsageUpdate = {used: u64, size: u64, cost?: {amount, currency}}
+# used/size 的单位由协议约定为 token。
+
+
+@pytest.mark.asyncio
+async def test_usage_update_shape(srv: ACPServer, llm_cfg: Any):
+    srv._usage_update(1234, session_id="sess_test")
+    (upd,) = _updates(srv)
+    assert upd["sessionUpdate"] == "usage_update"
+    assert upd["used"] == 1234
+    assert upd["size"] == 8000, "size 用 fp 的压缩阈值（MAX_CONTEXT_TOKENS），不是模型真实窗口"
+    assert "cost" not in upd, "fp 没有价格表，编一个数比不发更糟"
+
+
+@pytest.mark.asyncio
+async def test_usage_update_size_never_below_used(srv: ACPServer, llm_cfg: Any):
+    """上下文已超预算（即将压缩）时 size 必须 >= used，否则客户端进度条 >100%。"""
+    srv._usage_update(99999, session_id="sess_test")
+    (upd,) = _updates(srv)
+    assert upd["size"] >= upd["used"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tokens", [0, -1])
+async def test_usage_update_skipped_without_measurement(srv: ACPServer, llm_cfg: Any, tokens: int):
+    """没有测量值不发：used=0 在客户端是「上下文空着」，是假话。"""
+    srv._usage_update(tokens, session_id="sess_test")
+    assert _updates(srv) == []
+
+
+@pytest.mark.asyncio
+async def test_llm_usage_recorded_only_inside_turn(srv: ACPServer):
+    """turn 之外的隐性调用（标题派生 / subagent）不属于任何一轮，不能挂到 thread 上。"""
+    srv._active = None
+    await srv._on_llm_usage(None, usage={"prompt_tokens": 500})
+    assert srv._usage_used == {}
+
+    srv._active = srv_mod._SessionState(sid="sess_t", cwd="/tmp")
+    await srv._on_llm_usage(None, usage={"prompt_tokens": 500})
+    assert srv._usage_used == {"sess_t": 500}
+
+
+@pytest.mark.asyncio
+async def test_llm_usage_ignores_missing_or_zero_usage(srv: ACPServer):
+    """后端不回 usage → 不记录（不能拿 0 或别的会话的值顶上）。"""
+    srv._active = srv_mod._SessionState(sid="sess_t", cwd="/tmp")
+    await srv._on_llm_usage(None)
+    await srv._on_llm_usage(None, usage=None)
+    await srv._on_llm_usage(None, usage={"prompt_tokens": 0})
+    await srv._on_llm_usage(None, usage={"prompt_tokens": "123"})
+    assert srv._usage_used == {}
+
+
+def _turn_stub(
+    srv: ACPServer,
+    fake: _FakeSessions,
+    *,
+    on_send: Any,
+) -> _FakePortal:
+    """构造一拍即合的 run.send 桩（按需在「轮内」触发用量钩子）。"""
+    portal_stub = _FakePortal(fake)
+    portal_stub.run.reset_cancelled = lambda: None  # type: ignore[attr-defined]
+
+    async def _send(prompt: str, io: Any = None) -> Any:
+        return await on_send()
+
+    portal_stub.run.send = _send  # type: ignore[attr-defined]
+    st = srv_mod._SessionState(sid="sess_t", cwd=os.getcwd())
+    srv._sessions[st.sid] = st
+    srv._active = st
+    return portal_stub
+
+
+@pytest.mark.asyncio
+async def test_run_turn_emits_usage_after_reply(srv: ACPServer, monkeypatch: Any, llm_cfg: Any):
+    """一轮跑完必须报用量（钩子记账 → turn 末尾统一推送）。"""
+
+    async def _on_send() -> Any:
+        await srv._on_llm_usage(None, usage={"prompt_tokens": 3210})
+
+        class _Resp:
+            content = "答"
+
+        return _Resp()
+
+    monkeypatch.setattr(srv_mod, "portal", _turn_stub(srv, _FakeSessions(), on_send=_on_send))
+    st = srv._sessions["sess_t"]
+    await srv._run_turn(st, "hi")
+
+    usage = [u for u in _updates(srv) if u.get("sessionUpdate") == "usage_update"]
+    assert len(usage) == 1
+    assert usage[0]["used"] == 3210
+    assert usage[0]["size"] >= 3210
+
+
+@pytest.mark.asyncio
+async def test_run_turn_clears_stale_usage_between_turns(srv: ACPServer, monkeypatch: Any, llm_cfg: Any):
+    """纯命令轮次没调 LLM → **不发**用量（上一轮的数字不能冒充本轮）。"""
+
+    class _Resp:
+        content = ""
+
+    async def _on_send() -> Any:
+        return _Resp()
+
+    srv._usage_used["sess_t"] = 9999  # 上一轮残留
+    monkeypatch.setattr(srv_mod, "portal", _turn_stub(srv, _FakeSessions(), on_send=_on_send))
+    st = srv._sessions["sess_t"]
+    await srv._run_turn(st, "/compact")
+
+    assert [u for u in _updates(srv) if u.get("sessionUpdate") == "usage_update"] == []
+
+
+@pytest.mark.asyncio
+async def test_run_turn_emits_usage_on_cancel(srv: ACPServer, monkeypatch: Any, llm_cfg: Any):
+    """用户中断时上下文已经涨了，占用数字得跟上（cancelled 分支也要报）。"""
+
+    async def _on_send() -> Any:
+        await srv._on_llm_usage(None, usage={"prompt_tokens": 2048})
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(srv_mod, "portal", _turn_stub(srv, _FakeSessions(), on_send=_on_send))
+    st = srv._sessions["sess_t"]
+    result = await srv._run_turn(st, "hi")
+
+    assert result["stopReason"] == "cancelled"
+    usage = [u for u in _updates(srv) if u.get("sessionUpdate") == "usage_update"]
+    assert [u["used"] for u in usage] == [2048]
+
+
+# ── notice：结构化告警（门控 clientCapabilities.session.notices）──
+#
+# Notice = {severity: info|warning|error, title, description?}
+
+
+@pytest.mark.asyncio
+async def test_notice_sent_when_client_declares(srv: ACPServer):
+    srv._client_notices = True
+    srv._send_notice("warning", "MCP server 未启用", "未加载 mcp 插件")
+    (upd,) = _updates(srv)
+    assert upd["sessionUpdate"] == "notice"
+    assert upd["severity"] == "warning"
+    assert upd["title"] == "MCP server 未启用"
+    assert upd["description"] == "未加载 mcp 插件"
+
+
+@pytest.mark.asyncio
+async def test_notice_downgraded_to_message_without_capability(srv: ACPServer):
+    """未声明 session.notices 时 MUST NOT 发 notice，但也**不能静默吞掉**。
+
+    规范允许用普通输出代替；静默是本项目反复踩过的失败模式（用户永远不知道
+    「MCP server 没起来」）。
+    """
+    srv._client_notices = False
+    srv._send_notice("error", "MCP server 登记失败", "TimeoutError: 30s")
+    ups = _updates(srv)
+    assert all(u["sessionUpdate"] != "notice" for u in ups)
+    text = "".join(u["content"]["text"] for u in ups if u["sessionUpdate"] == "agent_message_chunk")
+    assert "MCP server 登记失败" in text and "TimeoutError" in text
+
+
+def test_notices_capability_requires_object(srv: ACPServer):
+    """session.notices 是 Option<结构体>：只有「值是对象」才算声明。"""
+    srv._apply_client_capabilities({"session": {"notices": {}}})
+    assert srv._client_notices is True
+    for noise in (None, True, False, "yes", [], 1):
+        srv._apply_client_capabilities({"session": {"notices": noise}})
+        assert srv._client_notices is False, f"{noise!r} 不是结构体，不得当成已声明"

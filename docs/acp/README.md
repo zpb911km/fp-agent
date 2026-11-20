@@ -72,14 +72,22 @@ v2 目前是 Draft，客户端请求 v2 时按协商规则回退到 v1（客户�
 | `compaction_update` | 门控于 `clientCapabilities.session.compaction`（**必须是对象**）；`in_progress` → `completed`/`failed`/`cancelled`，开态与终态**同 id**（每轮新 id，不复用）；不发 `compaction_summary_chunk` |
 | 压缩判定（指纹） | 「是否真压缩」按**上下文指纹**（条数 + 内容哈希）判定，不靠文本也不只靠条数：`handled` 但内容未变 → `cancelled`（不伪造 `completed`）；条数相同而内容被改写 → `completed` |
 | `session_info_update` | 标题（`meta.summary`）在一轮结束时**真变了**才推，`updatedAt` 带时区 ISO 8601；读标题走 `sessions.meta_of(sid)`（任意会话、只读、不 switch、不写盘） |
+| `ToolCall.locations` 的 `line` | Follow-along 精确到行：`read_file` 用 `offset+1`，`edit_file` 用新内容落点，均 1-based。超大文件/无定位信息时**只发 `path` 不发 `line`**（宁可跳到文件头，也不编一个行号） |
+| `locations` 补丁语义 | `tool_call_update` 里 `locations` **省略=保持不变**、`null`/`[]`=清空集合、非空=全量替换。按 schema 的字段补丁规则实现，不做「省略即清空」的猜测 |
+| `agent_thought_chunk` | core 的 `thinking_content` 接进 ACP：独立 `messageId` + 独立缓冲（不与正文共用），`thinking_stop` 时冲刷。Zed 因此能显示推理过程（此前思考流在 ACP 侧被整段丢弃） |
+| `configOptions`(model) + `session/set_config_option` | `session/new`/`load`/`resume` 响应均带 `configOptions`：唯一一项 `category=model`，`currentValue` 为 `provider/model`。切换走进程级单例并**广播** `config_option_update` 给所有已登记会话（模型是进程状态，不是会话状态——不广播会让其它 thread 显示过期值）。**不报 mode / thought_level**：fp 无此可调面，报了就是假能力 |
+| `session/resume` | 只挂不重放（客户端手里已有历史），响应同样带 `configOptions`；能力位 `sessionCapabilities.resume` |
+| `session/delete` | 删会话并连带删除磁盘历史（与 `session/close` 的区别）；能力位 `sessionCapabilities.delete`；未知 sid 幂等 |
+| `usage_update` | 一轮结束时发一次：`used` = **最近一次** LLM 调用的 `prompt_tokens`（真实上下文长度，不是累计用量），`size` = `MAX_CONTEXT_TOKENS`（fp 自己的压缩阈值，比模型窗口小是常态）。一轮里多次工具循环只报最后一次；turn 外的隐性调用（摘要/标题/subagent）不计数 |
+| `notice` | 门控于 `clientCapabilities.session.notices`（**必须是对象**才算出声明）；未声明时 MUST NOT 发，回落为一条 agent message（规范允许的等价表达） |
 
-**未实现（已知缺口，二期）**：
+**未实现（已知缺口）**：
 
-- `session/request_permission`：IDE 的「危险命令确认」UI 不生效。
-- `usage_update`（上下文用量/费用）、`session/set_config_option`、`session/delete|resume`、
-  `elicitation` 之外的 `logout`、`configOptions`（**Zed 里因此选不了模型**：fp 没有 mode/
-  thought-level 这类可调面，只报 Model 一项才是诚实的上限，而这一项尚未做）。
-- `ToolCall.locations` 只发 `path`、不发 `line`（Follow 能打开文件，跳不到行）。
+- `session/request_permission`：IDE 的「危险命令确认」UI 不生效。这是**章程决定**，不是缺口
+  （见 `docs/architecture/no_dangerous_command_concept`）：fp 没有危险指令概念，不得引入执行前审批门。
+- `logout`（`elicitation` 之外的认证面）：fp 本地无登录，`authMethods: []`。
+- 客户端侧 `fs/*`、`terminal/*`：fp 用自己的工具，故 Zed 的文件树/集成终端看不到 fp 的动作
+  （纯 UX 取舍：接进去能换来 IDE 侧可见性与权限弹窗，代价是放弃自己的终端管理）。
 - **执行不并发**：跨会话是排队而非并行（`_turn_lock` 串行占用 core 唯一执行槽）。
   真并发（每会话一个 Agent / 或进程级隔离）未做；cwd 已改用 contextvar 按 Task 承载，
   是放开并发的前置条件，但不等于已支持并发。

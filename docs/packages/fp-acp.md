@@ -41,10 +41,13 @@ camelCase（`sessionId` / `agentCapabilities` / `agentInfo`），`protocolVersio
 | 方法 | 类型 | 必需参数 | 返回 `result` |
 |---|---|---|---|
 | `initialize` | 请求 | `protocolVersion`（可选 `clientInfo` `clientCapabilities`） | `protocolVersion` `agentCapabilities` `agentInfo` `authMethods` |
-| `session/new` | 请求 | `cwd`（可选 `mcpServers`） | `sessionId` |
-| `session/load` | 请求 | `sessionId` `cwd`（可选 `mcpServers`） | `sessionId`（**响应前**回放全量历史） |
+| `session/new` | 请求 | `cwd`（可选 `mcpServers`） | `sessionId` `configOptions` |
+| `session/load` | 请求 | `sessionId` `cwd`（可选 `mcpServers`） | `sessionId` `configOptions`（**响应前**回放全量历史） |
+| `session/resume` | 请求 | `sessionId` `cwd`（可选 `mcpServers`） | `sessionId` `configOptions`（**不回放**历史） |
+| `session/delete` | 请求 | `sessionId` | `{}`（**连磁盘历史一起删**，幂等） |
 | `session/list` | 请求 | `cwd` | `sessions[]` |
 | `session/close` | 请求 | `sessionId` | `{}`（释放本连接侧状态，**不删磁盘历史**） |
+| `session/set_config_option` | 请求 | `configId` `value` | `configOptions`（并广播 `config_option_update`） |
 | `session/prompt` | 请求 | `sessionId` `prompt[]`（兼容 `messages[]`） | `stopReason` |
 | `session/commands` | 请求 | — | `commands[]`（`name` 不含 `/` 前缀） |
 | `session/ping` | 请求 | — | `pong: true` |
@@ -53,9 +56,10 @@ camelCase（`sessionId` / `agentCapabilities` / `agentInfo`），`protocolVersio
 
 Agent → 客户端的推送与请求（同一条 `stdout` 上反向流动）：
 
-- `session/update` 通知：`sessionUpdate` 取 `agent_message_chunk` / `tool_call` /
-  `tool_call_update` / `plan` / `available_commands_update` / `compaction_update` /
-  `session_info_update`（后两者见下文「上下文改写与标题通知」，均按客户端能力门控）；
+- `session/update` 通知：`sessionUpdate` 取 `agent_message_chunk` / `agent_thought_chunk` /
+  `tool_call` / `tool_call_update`（含 `locations` = Zed 的 follow-along 通道，带 `line`）/
+  `plan` / `available_commands_update` / `compaction_update` / `session_info_update` /
+  `config_option_update` / `usage_update` / `notice`（门控项见下文「上下文改写与标题通知」）；
 - `elicitation/create` 请求：仅当客户端在 `initialize` 中声明了
   `clientCapabilities.elicitation.form` 时才发起（`ask_user` 的带内问答）。
 
@@ -67,7 +71,7 @@ Agent → 客户端的推送与请求（同一条 `stdout` 上反向流动）：
 ```json
 {"protocolVersion": 1,
  "agentCapabilities": {"loadSession": true,
-   "sessionCapabilities": {"list": {}, "close": {}},
+   "sessionCapabilities": {"list": {}, "close": {}, "resume": {}, "delete": {}},
    "promptCapabilities": {"image": false, "audio": false, "embeddedContext": true},
    "mcpCapabilities": {"http": false, "sse": false}},
  "agentInfo": {"name": "fp", "title": "FP", "version": "<包元数据>"},
@@ -110,6 +114,22 @@ Agent → 客户端的推送与请求（同一条 `stdout` 上反向流动）：
   （之后仍可 `session/load` 打开），且**幂等**。会话表另有上限 `_MAX_SESSIONS`（64），
   超出时淘汰最久未用者（跳过当前聚焦与正在输出的会话，一并回收其私有 server）——
   防长连接跑几十个 thread 时登记只增不减。
+- **`session/resume` vs `session/load`**：前者**只挂不重放**（客户端手里已有历史，切 thread 不必
+  等回放），后者按规范 MUST 先回放。两者都返回 `configOptions`；未知 `sessionId` → `-32602`。
+- **`session/delete` 与 `session/close` 的分工**：`delete` 连磁盘历史一起删（编辑器里「删除
+  thread」），`close` 只释放本连接侧状态且不删历史。两者对未知 `sessionId` 均幂等。
+- **`configOptions` 只有 model 一项**：`session/new` / `load` / `resume` 的响应都带
+  `[{"id":"model","category":"model","currentValue":"provider/model",...}]`；切换走
+  `session/set_config_option`，由命令层（`/model`）真正生效，再**广播** `config_option_update`
+  给**所有已登记会话**——模型是进程级单例，不广播会让其它 thread 的下拉框显示过期值。
+  **不报 mode / thought_level**：fp 没有这两个可调面，假选项比没有更糟（客户端会照单渲染）。
+- **思考流**：core 的 `thinking_content` 走 `agent_thought_chunk`，用**独立** `messageId` 与独立
+  缓冲（与正文共用会让思考与正文在时间线上互串），`thinking_stop` 时冲刷。
+- **`usage_update`**：一轮结束时发一次，`used` = **最近一次** LLM 调用的 `prompt_tokens`（真实
+  上下文长度），`size` = fp 自己的 `MAX_CONTEXT_TOKENS`（压缩阈值，比模型窗口小是常态）。累计用量
+  （`TokenTracker`）不能拿来当这个分母，会越用越离谱；turn 外的隐性调用（摘要/标题/subagent）不计数。
+- **`notice`**：门控于 `clientCapabilities.session.notices`（**必须是对象**）；未声明时不发，
+  回落成一条 agent message（规范允许的等价表达）。
 - **上下文改写与标题通知**：客户端在 `initialize` 声明 `clientCapabilities.session.compaction`
   （**必须是对象**，`true`/字符串等噪声一律视为未声明）时，`/compact` 会推
   `compaction_update`（`in_progress` → `completed`|`failed`|`cancelled`，开态与终态**同
@@ -132,8 +152,8 @@ Agent → 客户端的推送与请求（同一条 `stdout` 上反向流动）：
 ```jsonc
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientInfo":{"name":"zed","version":"0.170.0"},"clientCapabilities":{"elicitation":{"form":{}}}}}
 {"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/me/proj"}}
-$ {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"list":{}},"promptCapabilities":{"image":false,"audio":false,"embeddedContext":true},"mcpCapabilities":{"http":false,"sse":false}},"agentInfo":{"name":"fp","title":"FP","version":"0.2.0"},"authMethods":[]}}
-$ {"jsonrpc":"2.0","id":2,"result":{"sessionId":"s_261111_153012123456"}}
+$ {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"list":{},"close":{},"resume":{},"delete":{}},"promptCapabilities":{"image":false,"audio":false,"embeddedContext":true},"mcpCapabilities":{"http":false,"sse":false}},"agentInfo":{"name":"fp","title":"FP","version":"0.2.0"},"authMethods":[]}}
+$ {"jsonrpc":"2.0","id":2,"result":{"sessionId":"s_261111_153012123456","configOptions":[{"id":"model","name":"Model","description":"LLM 供应点（provider/model）","category":"model","type":"select","currentValue":"deepseek/deepseek-chat","options":[{"value":"deepseek/deepseek-chat","name":"deepseek-chat","description":"deepseek"}]}]}}
 $ {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s_261111_153012123456","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"help","description":"显示此帮助"}]}}}
 {"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s_261111_153012123456","prompt":[{"type":"text","text":"列出当前目录的 .py 文件"}]}}
 $ {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s_261111_153012123456","update":{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"🖥️ bash ls","kind":"execute","status":"in_progress","rawInput":{"cmd":"ls *.py"},"content":[{"type":"content","content":{"type":"text","text":"运行 ls"}}]}}}
